@@ -1,0 +1,8 @@
+:80 {
+	handle_path /visualizer/* {
+		reverse_proxy visualizer:3001
+	}
+	handle {
+		reverse_proxy kafka-ui:8080
+	}
+}

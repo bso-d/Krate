@@ -1,0 +1,9 @@
+# credentials — never commit
+.env
+zk/.env
+kraft/.env
+
+# built bundles and saved docker images
+dist/
+images/
+docker-offline/

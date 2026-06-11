@@ -1,0 +1,669 @@
+#!/usr/bin/env bash
+# kafka — Kafka cluster management CLI
+# Usage: kafka <command> [options]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+ENV_FILE="$SCRIPT_DIR/.env"
+ENV_TEMPLATE="$SCRIPT_DIR/.env.template"
+IMAGES_DIR="$SCRIPT_DIR/images"
+DOCKER_OFFLINE_DIR="$SCRIPT_DIR/docker-offline"
+
+# ─── Output helpers ───────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+  BLUE='\033[0;34m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; BLUE=''; BOLD=''; DIM=''; RESET=''
+fi
+
+info()  { echo -e "${BLUE}==>${RESET} $*"; }
+ok()    { echo -e "${GREEN}  ✓${RESET} $*"; }
+warn()  { echo -e "${YELLOW}  !${RESET} $*"; }
+err()   { echo -e "${RED}  ✗${RESET} $*" >&2; }
+die()   { err "$*"; exit 1; }
+step()  { echo -e "${BOLD}--- $* ---${RESET}"; }
+sep()   { echo -e "${DIM}────────────────────────────────────────${RESET}"; }
+
+# ─── Prerequisites ────────────────────────────────────────────────────────────
+require_docker() {
+  if ! command -v docker &>/dev/null; then
+    die "Docker not found. Run: kafka docker-install"
+  fi
+  if ! docker info &>/dev/null 2>&1; then
+    die "Docker daemon is not running or not accessible.
+    Try: sudo systemctl start docker
+    Or:  newgrp docker  (if you were just added to the docker group)"
+  fi
+}
+
+require_compose() {
+  require_docker
+  if ! docker compose version &>/dev/null 2>&1; then
+    die "Docker Compose v2 not found. Run: kafka docker-install"
+  fi
+}
+
+require_compose_file() {
+  [[ -f "$COMPOSE_FILE" ]] || die "docker-compose.yml not found in $SCRIPT_DIR"
+}
+
+require_env() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    if [[ -f "$ENV_TEMPLATE" ]]; then
+      warn ".env not found — copying from template..."
+      cp "$ENV_TEMPLATE" "$ENV_FILE"
+      echo ""
+      warn "Review credentials in $ENV_FILE before starting:"
+      echo "    nano $ENV_FILE"
+      echo ""
+      die "Edit .env, then run: kafka install"
+    else
+      die ".env not found and no .env.template available. Create $ENV_FILE with KAFKA_UI_USER and KAFKA_UI_PASSWORD."
+    fi
+  fi
+}
+
+# Wrapper so all compose calls use the right files
+compose_cmd() {
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+# Returns the name of the first running broker container
+find_broker() {
+  local services=("kafka-92" "kafka-93" "kafka-94" "kafka-95")
+  for svc in "${services[@]}"; do
+    local cid
+    cid=$(compose_cmd ps -q "$svc" 2>/dev/null || true)
+    if [[ -n "$cid" ]]; then
+      local status
+      status=$(docker inspect --format='{{.State.Status}}' "$cid" 2>/dev/null || echo "")
+      if [[ "$status" == "running" ]]; then
+        docker inspect --format='{{.Name}}' "$cid" | sed 's|^/||'
+        return 0
+      fi
+    fi
+  done
+  die "No running broker found. Run: kafka start"
+}
+
+BOOTSTRAP="kafka-92:9092,kafka-93:9093,kafka-94:9094,kafka-95:9095"
+
+# ─── install ──────────────────────────────────────────────────────────────────
+cmd_install() {
+  step "Kafka Cluster Install"
+  echo ""
+
+  # 1. Docker
+  info "Checking Docker..."
+  require_compose
+  require_compose_file
+  ok "Docker $(docker --version | awk '{print $3}' | tr -d ',')"
+  ok "Compose $(docker compose version --short)"
+  echo ""
+
+  # 2. Credentials
+  info "Checking credentials..."
+  if [[ -f "$ENV_FILE" ]]; then
+    ok ".env found"
+  else
+    [[ -f "$ENV_TEMPLATE" ]] || die ".env.template not found in $SCRIPT_DIR"
+    cp "$ENV_TEMPLATE" "$ENV_FILE"
+    warn "Created .env from template with default credentials."
+    warn "To change them: kafka config set KAFKA_UI_USER=youruser"
+    warn "                kafka config set KAFKA_UI_PASSWORD=yourpass"
+  fi
+  echo ""
+
+  # 3. Load images
+  cmd_load_images
+  echo ""
+
+  # 4. Start
+  info "Starting cluster..."
+  compose_cmd up -d
+  echo ""
+
+  ok "Cluster started."
+  sep
+  cmd_ui
+  echo ""
+  echo -e "  ${DIM}kafka status     — check running services"
+  echo -e "  kafka health     — wait for all services to be healthy"
+  echo -e "  kafka logs -f    — follow all logs${RESET}"
+  echo ""
+}
+
+# ─── load-images ──────────────────────────────────────────────────────────────
+cmd_load_images() {
+  require_docker
+  [[ -d "$IMAGES_DIR" ]] || die "images/ directory not found in $SCRIPT_DIR"
+
+  shopt -s nullglob
+  local tars=("$IMAGES_DIR"/*.tar)
+  shopt -u nullglob
+
+  [[ ${#tars[@]} -gt 0 ]] || die "No .tar files found in $IMAGES_DIR"
+
+  info "Loading ${#tars[@]} image(s) into Docker..."
+  for tar in "${tars[@]}"; do
+    local name
+    name="$(basename "$tar")"
+    echo -n "    $name ... "
+    docker load -i "$tar" 2>&1 | grep -oP '(?<=Loaded image: ).*' || echo ""
+  done
+  ok "All images loaded"
+}
+
+# ─── start ────────────────────────────────────────────────────────────────────
+cmd_start() {
+  require_compose; require_compose_file; require_env
+  info "Starting cluster..."
+  compose_cmd up -d
+  ok "Done. Run: kafka status"
+}
+
+# ─── stop ─────────────────────────────────────────────────────────────────────
+cmd_stop() {
+  require_compose; require_compose_file
+  info "Stopping cluster (containers paused, data preserved)..."
+  compose_cmd stop
+  ok "Stopped"
+}
+
+# ─── restart ──────────────────────────────────────────────────────────────────
+cmd_restart() {
+  require_compose; require_compose_file; require_env
+  local svc="${1:-}"
+  if [[ -n "$svc" ]]; then
+    info "Restarting $svc..."
+    compose_cmd restart "$svc"
+  else
+    info "Restarting all services..."
+    compose_cmd restart
+  fi
+  ok "Done"
+}
+
+# ─── down ─────────────────────────────────────────────────────────────────────
+cmd_down() {
+  require_compose; require_compose_file
+  info "Removing containers (named volumes preserved)..."
+  compose_cmd down
+  ok "Containers removed. Run: kafka start"
+}
+
+# ─── status ───────────────────────────────────────────────────────────────────
+cmd_status() {
+  require_compose; require_compose_file
+  compose_cmd ps
+}
+
+# ─── logs ─────────────────────────────────────────────────────────────────────
+cmd_logs() {
+  require_compose; require_compose_file
+  local follow=false
+  local args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--follow) follow=true; shift ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+
+  if $follow; then
+    compose_cmd logs -f --tail=50 "${args[@]}"
+  else
+    compose_cmd logs --tail=100 "${args[@]}"
+  fi
+}
+
+# ─── health ───────────────────────────────────────────────────────────────────
+cmd_health() {
+  require_compose; require_compose_file
+  sep
+  echo -e "${BOLD}  Service Health${RESET}"
+  sep
+  echo ""
+
+  local container_ids
+  container_ids=$(compose_cmd ps -q 2>/dev/null || true)
+
+  if [[ -z "$container_ids" ]]; then
+    warn "No containers running. Run: kafka start"
+    return 1
+  fi
+
+  local all_ok=true
+
+  while IFS= read -r cid; do
+    [[ -z "$cid" ]] && continue
+    local name status health
+    name=$(docker inspect --format='{{.Name}}' "$cid" | sed 's|^/||')
+    status=$(docker inspect --format='{{.State.Status}}' "$cid")
+    health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")
+
+    local label
+    if [[ "$health" == "healthy" ]]; then
+      label="${GREEN}healthy${RESET}"
+    elif [[ "$health" == "none" && "$status" == "running" ]]; then
+      label="${GREEN}running${RESET}"
+    elif [[ "$health" == "starting" ]]; then
+      label="${YELLOW}starting${RESET}"
+      all_ok=false
+    else
+      label="${RED}${health:-$status}${RESET}"
+      all_ok=false
+    fi
+
+    printf "  %-35s %b\n" "$name" "$label"
+  done <<< "$container_ids"
+
+  echo ""
+  if $all_ok; then
+    ok "All services healthy"
+  else
+    warn "Some services not ready. Run: kafka logs <service>"
+    return 1
+  fi
+}
+
+# ─── ui ───────────────────────────────────────────────────────────────────────
+cmd_ui() {
+  local user="" pass=""
+  if [[ -f "$ENV_FILE" ]]; then
+    user=$(grep -E '^KAFKA_UI_USER=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
+    pass=$(grep -E '^KAFKA_UI_PASSWORD=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
+  fi
+
+  sep
+  echo -e "${BOLD}  Kafbat UI${RESET}"
+  sep
+  echo "  URL       http://localhost:8080"
+  [[ -n "$user" ]] && echo "  Username  $user"
+  [[ -n "$pass" ]] && echo "  Password  $pass"
+  sep
+}
+
+# ─── config ───────────────────────────────────────────────────────────────────
+cmd_config() {
+  local action="${1:-show}"
+  shift || true
+
+  case "$action" in
+    show)
+      if [[ -f "$ENV_FILE" ]]; then
+        sep
+        echo -e "${BOLD}  $ENV_FILE${RESET}"
+        sep
+        cat "$ENV_FILE"
+        sep
+      else
+        warn ".env not found. Template:"
+        cat "$ENV_TEMPLATE"
+      fi
+      ;;
+    set)
+      local kv="${1:-}"
+      [[ -z "$kv" ]] && die "Usage: kafka config set KEY=VALUE"
+      local key="${kv%%=*}"
+      local val="${kv#*=}"
+      [[ -f "$ENV_FILE" ]] || cp "$ENV_TEMPLATE" "$ENV_FILE"
+      if grep -qE "^${key}=" "$ENV_FILE"; then
+        # Use a temp file for portability (avoids sed -i differences)
+        local tmp
+        tmp=$(mktemp)
+        sed "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
+      else
+        echo "${key}=${val}" >> "$ENV_FILE"
+      fi
+      ok "Set ${key}"
+      ;;
+    *)
+      die "Usage: kafka config [show | set KEY=VALUE]"
+      ;;
+  esac
+}
+
+# ─── uninstall ────────────────────────────────────────────────────────────────
+cmd_uninstall() {
+  require_compose; require_compose_file
+
+  local purge=false
+  [[ "${1:-}" == "--purge" ]] && purge=true
+
+  if $purge; then
+    echo ""
+    warn "WARNING: --purge will delete all Kafka data (broker logs, ZK state, offsets)."
+    warn "This is irreversible."
+    echo ""
+    read -rp "Type 'yes' to confirm purge: " confirm
+    [[ "$confirm" == "yes" ]] || die "Aborted."
+    info "Removing containers and volumes..."
+    compose_cmd down -v
+  else
+    info "Removing containers (volumes preserved)..."
+    compose_cmd down
+  fi
+  ok "Done"
+}
+
+# ─── docker-check ─────────────────────────────────────────────────────────────
+cmd_docker_check() {
+  sep
+  echo -e "${BOLD}  Docker Environment Check${RESET}"
+  sep
+  echo ""
+
+  local all_ok=true
+
+  if command -v docker &>/dev/null; then
+    ok "docker found at $(command -v docker)"
+    ok "$(docker --version)"
+  else
+    err "docker not found in PATH"
+    all_ok=false
+  fi
+
+  if docker info &>/dev/null 2>&1; then
+    ok "Docker daemon is running"
+  else
+    err "Docker daemon is not running or not accessible"
+    warn "  sudo systemctl start docker"
+    warn "  newgrp docker  (if recently added to docker group)"
+    all_ok=false
+  fi
+
+  if docker compose version &>/dev/null 2>&1; then
+    ok "$(docker compose version)"
+  else
+    err "Docker Compose v2 not available"
+    all_ok=false
+  fi
+
+  echo ""
+  if $all_ok; then
+    ok "Docker is ready"
+  else
+    warn "Issues found. Run: kafka docker-install"
+    return 1
+  fi
+}
+
+# ─── docker-install ───────────────────────────────────────────────────────────
+cmd_docker_install() {
+  [[ -d "$DOCKER_OFFLINE_DIR" ]] || die "docker-offline/ not found in $SCRIPT_DIR
+This bundle was not packaged with Docker. Run make-bundle.sh --include-docker to rebuild it."
+
+  shopt -s nullglob
+  local debs=("$DOCKER_OFFLINE_DIR"/*.deb)
+  shopt -u nullglob
+
+  [[ ${#debs[@]} -gt 0 ]] || die "No .deb files in $DOCKER_OFFLINE_DIR"
+
+  info "Installing Docker CE from ${#debs[@]} bundled packages..."
+  echo ""
+
+  local order=(containerd.io docker-ce-cli docker-ce docker-compose-plugin)
+  for pkg in "${order[@]}"; do
+    local deb=""
+    for f in "${debs[@]}"; do
+      if [[ "$(basename "$f")" == "${pkg}_"* ]]; then
+        deb="$f"; break
+      fi
+    done
+    if [[ -n "$deb" ]]; then
+      echo "  Installing $(basename "$deb")..."
+      sudo dpkg -i "$deb" || true
+    else
+      warn "Package not found in bundle: $pkg"
+    fi
+  done
+
+  echo ""
+  info "Resolving any remaining dependencies..."
+  sudo apt-get install -f -y 2>/dev/null || true
+
+  sudo systemctl enable docker
+  sudo systemctl start docker
+
+  if ! groups "$USER" 2>/dev/null | grep -q '\bdocker\b'; then
+    sudo usermod -aG docker "$USER"
+    warn "Added $USER to docker group."
+    warn "Run 'newgrp docker' or log out and back in before using Docker without sudo."
+  fi
+
+  echo ""
+  ok "$(docker --version)"
+  ok "$(docker compose version)"
+  ok "Docker installed successfully."
+}
+
+# ─── lag ──────────────────────────────────────────────────────────────────────
+cmd_lag() {
+  require_compose; require_compose_file
+
+  local group=""
+  local topic=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --group|-g) group="$2"; shift 2 ;;
+      --topic|-t) topic="$2"; shift 2 ;;
+      -*)         die "Unknown option: $1. Usage: kafka lag [group] [--topic <topic>]" ;;
+      *)          group="$1"; shift ;;
+    esac
+  done
+
+  local broker
+  broker=$(find_broker)
+
+  if [[ -n "$group" ]]; then
+    # ── Detailed view: one group, per-partition breakdown ─────────────────────
+    sep
+    printf "${BOLD}  Consumer Group: %s${RESET}\n" "$group"
+    [[ -n "$topic" ]] && printf "  Topic filter:   %s\n" "$topic"
+    sep
+    echo ""
+
+    local raw
+    raw=$(docker exec "$broker" kafka-consumer-groups.sh \
+      --bootstrap-server "$BOOTSTRAP" \
+      --describe --group "$group" 2>&1) || die "Failed to describe group '$group'"
+
+    if echo "$raw" | grep -qiE "does not exist|group .* not found"; then
+      die "Consumer group '$group' does not exist."
+    fi
+
+    [[ -n "$topic" ]] && raw=$(echo "$raw" | awk -v t="$topic" 'NR==1 || $2==t')
+
+    printf "  ${BOLD}%-32s %-9s %-15s %-15s %-10s %-22s${RESET}\n" \
+      "TOPIC" "PARTITION" "CURRENT-OFFSET" "LOG-END-OFFSET" "LAG" "CONSUMER-ID"
+    sep
+
+    local total_lag=0 partition_count=0
+
+    while IFS= read -r line; do
+      [[ "$line" =~ ^GROUP ]] && continue
+      [[ -z "$(echo "$line" | tr -d '[:space:]')" ]] && continue
+
+      local grp t part cur_off log_end lag consumer_id
+      grp=$(         echo "$line" | awk '{print $1}')
+      t=$(           echo "$line" | awk '{print $2}')
+      part=$(        echo "$line" | awk '{print $3}')
+      cur_off=$(     echo "$line" | awk '{print $4}')
+      log_end=$(     echo "$line" | awk '{print $5}')
+      lag=$(         echo "$line" | awk '{print $6}')
+      consumer_id=$( echo "$line" | awk '{print $7}')
+
+      # Truncate consumer-id for readability
+      local short_cid="${consumer_id:0:20}"
+      [[ "${#consumer_id}" -gt 20 ]] && short_cid="${short_cid}…"
+
+      local lag_col
+      if [[ "$lag" =~ ^[0-9]+$ ]]; then
+        if   [[ "$lag" -eq 0 ]];    then lag_col="${GREEN}${lag}${RESET}"
+        elif [[ "$lag" -lt 1000 ]]; then lag_col="${YELLOW}${lag}${RESET}"
+        else                             lag_col="${RED}${lag}${RESET}"
+        fi
+        total_lag=$((total_lag + lag))
+        ((partition_count += 1)) || true
+      else
+        lag_col="${DIM}${lag:-—}${RESET}"
+      fi
+
+      printf "  %-32s %-9s %-15s %-15s %-10b %-22s\n" \
+        "$t" "$part" "$cur_off" "$log_end" "$lag_col" "$short_cid"
+
+    done <<< "$raw"
+
+    sep
+    printf "  Partitions: %-6s  Total lag: " "$partition_count"
+    if   [[ "$total_lag" -eq 0 ]];    then echo -e "${GREEN}${total_lag}${RESET}  (caught up)"
+    elif [[ "$total_lag" -lt 1000 ]]; then echo -e "${YELLOW}${total_lag}${RESET}"
+    else                                   echo -e "${RED}${total_lag}${RESET}  — consumer is behind"
+    fi
+    echo ""
+
+  else
+    # ── Summary view: all groups ──────────────────────────────────────────────
+    sep
+    printf "${BOLD}  Consumer Group Lag Summary"
+    [[ -n "$topic" ]] && printf "  (topic: %s)" "$topic"
+    printf "${RESET}\n"
+    sep
+    echo ""
+
+    local groups
+    groups=$(docker exec "$broker" kafka-consumer-groups.sh \
+      --bootstrap-server "$BOOTSTRAP" \
+      --list 2>/dev/null | grep -v "^$" | sort) || die "Failed to list consumer groups"
+
+    if [[ -z "$groups" ]]; then
+      warn "No consumer groups found."
+      return
+    fi
+
+    printf "  ${BOLD}%-42s %-12s %-12s %s${RESET}\n" "GROUP" "PARTITIONS" "TOTAL LAG" "STATUS"
+    sep
+
+    local group_count=0 lagging_count=0
+
+    while IFS= read -r grp; do
+      [[ -z "$grp" ]] && continue
+
+      local raw_desc
+      raw_desc=$(docker exec "$broker" kafka-consumer-groups.sh \
+        --bootstrap-server "$BOOTSTRAP" \
+        --describe --group "$grp" 2>/dev/null || true)
+
+      [[ -n "$topic" ]] && raw_desc=$(echo "$raw_desc" | awk -v t="$topic" 'NR==1 || $2==t')
+
+      local total_lag=0 part_count=0
+      while IFS= read -r line; do
+        [[ "$line" =~ ^GROUP ]] && continue
+        [[ -z "$(echo "$line" | tr -d '[:space:]')" ]] && continue
+        local lag
+        lag=$(echo "$line" | awk '{print $6}')
+        if [[ "$lag" =~ ^[0-9]+$ ]]; then
+          total_lag=$((total_lag + lag))
+          ((part_count += 1)) || true
+        fi
+      done <<< "$raw_desc"
+
+      # Skip groups with no matching partitions when filtering by topic
+      [[ "$part_count" -eq 0 && -n "$topic" ]] && continue
+
+      local status_col
+      if   [[ "$total_lag" -eq 0 ]];    then status_col="${GREEN}caught up${RESET}"
+      elif [[ "$total_lag" -lt 1000 ]]; then status_col="${YELLOW}lagging${RESET}";  ((lagging_count += 1)) || true
+      else                                   status_col="${RED}behind${RESET}";    ((lagging_count += 1)) || true
+      fi
+
+      printf "  %-42s %-12s %-12s %b\n" "$grp" "$part_count" "$total_lag" "$status_col"
+      ((group_count += 1)) || true
+
+    done <<< "$groups"
+
+    echo ""
+    sep
+    printf "  %s group(s)   %s with lag > 0\n" "$group_count" "$lagging_count"
+    echo ""
+    echo -e "  ${DIM}Drill down:  kafka lag <group-name>"
+    echo -e "  Topic only:  kafka lag --topic <topic-name>${RESET}"
+    echo ""
+  fi
+}
+
+# ─── help ─────────────────────────────────────────────────────────────────────
+cmd_help() {
+  echo ""
+  echo -e "${BOLD}kafka${RESET} — Kafka cluster management CLI"
+  echo ""
+  echo -e "${BOLD}USAGE${RESET}"
+  echo "  kafka <command> [options]"
+  echo ""
+  echo -e "${BOLD}COMMANDS${RESET}"
+  printf "  %-30s %s\n" "install"              "First-time setup: load images, configure, start"
+  printf "  %-30s %s\n" "start"                "Start all services"
+  printf "  %-30s %s\n" "stop"                 "Stop all services (data preserved)"
+  printf "  %-30s %s\n" "restart [service]"    "Restart all or a specific service"
+  printf "  %-30s %s\n" "down"                 "Remove containers (volumes preserved)"
+  printf "  %-30s %s\n" "status"               "Show running service state"
+  printf "  %-30s %s\n" "logs [-f] [service]"  "Show logs; -f to follow"
+  printf "  %-30s %s\n" "health"               "Detailed health check of all services"
+  printf "  %-30s %s\n" "lag"                  "Summary of all consumer group lag"
+  printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
+  printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
+  printf "  %-30s %s\n" "ui"                   "Show Kafbat UI URL and credentials"
+  printf "  %-30s %s\n" "config"               "Show current .env config"
+  printf "  %-30s %s\n" "config set KEY=VAL"   "Set a config value in .env"
+  printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
+  printf "  %-30s %s\n" "uninstall"            "Remove containers (volumes kept)"
+  printf "  %-30s %s\n" "uninstall --purge"    "Remove containers AND delete all data"
+  printf "  %-30s %s\n" "docker-check"         "Verify Docker installation"
+  printf "  %-30s %s\n" "docker-install"       "Install Docker from bundled .deb packages"
+  echo ""
+  echo -e "${BOLD}EXAMPLES${RESET}"
+  echo "  kafka install                         # full first-time setup"
+  echo "  kafka logs -f kafka-92                # tail broker 92 logs"
+  echo "  kafka restart kafka-ui                # restart Kafbat UI"
+  echo "  kafka config set KAFKA_UI_USER=admin"
+  echo "  kafka health                          # check all service health"
+  echo "  kafka lag                             # all consumer groups + lag"
+  echo "  kafka lag my-app-consumer             # per-partition detail"
+  echo "  kafka lag --topic orders              # all groups on 'orders' topic"
+  echo "  kafka lag my-group --topic payments   # specific group + topic"
+  echo "  kafka uninstall --purge               # full teardown + data wipe"
+  echo ""
+  echo -e "${BOLD}SERVICES${RESET}"
+  echo "  zookeeper   kafka-92   kafka-93   kafka-94   kafka-95   kafka-ui"
+  echo ""
+}
+
+# ─── dispatch ─────────────────────────────────────────────────────────────────
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  install)        cmd_install "$@" ;;
+  load-images)    cmd_load_images ;;
+  start)          cmd_start ;;
+  stop)           cmd_stop ;;
+  restart)        cmd_restart "$@" ;;
+  down)           cmd_down ;;
+  status)         cmd_status ;;
+  logs)           cmd_logs "$@" ;;
+  health)         cmd_health ;;
+  lag)            cmd_lag "$@" ;;
+  ui)             cmd_ui ;;
+  config)         cmd_config "$@" ;;
+  uninstall)      cmd_uninstall "$@" ;;
+  docker-check)   cmd_docker_check ;;
+  docker-install) cmd_docker_install ;;
+  help|--help|-h) cmd_help ;;
+  *)              err "Unknown command: $CMD"; cmd_help; exit 1 ;;
+esac

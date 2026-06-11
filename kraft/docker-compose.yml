@@ -1,0 +1,227 @@
+services:
+  # ─── Brokers (KRaft combined mode: each node is broker + controller) ──────────
+  #
+  # CLUSTER_ID is a fixed base64-encoded UUID. All brokers in the same cluster
+  # must share the same value. Do not change it after first startup — it is
+  # embedded in on-disk storage. Regenerate only when starting fresh.
+  #
+  # Controller listener (290xx) is internal-only; not exposed to the host.
+  # Quorum voters reference each node's controller port inside the docker network.
+  #
+  kafka-92:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka-92
+    container_name: kraft-broker-92
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+    environment:
+      CLUSTER_ID: "4GThRKJoQF2BmLyqAl4JlQ"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 92
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "92@kafka-92:29092,93@kafka-93:29093,94@kafka-94:29094,95@kafka-95:29095"
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-92:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: 24
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    volumes:
+      - kafka-92-data:/var/lib/kafka/data
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD", "cub", "kafka-ready", "1", "10", "-b", "localhost:9092"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  kafka-93:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka-93
+    container_name: kraft-broker-93
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    ports:
+      - "9093:9093"
+      - "19093:19093"
+    environment:
+      CLUSTER_ID: "4GThRKJoQF2BmLyqAl4JlQ"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 93
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "92@kafka-92:29092,93@kafka-93:29093,94@kafka-94:29094,95@kafka-95:29095"
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9093,EXTERNAL://0.0.0.0:19093,CONTROLLER://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-93:9093,EXTERNAL://localhost:19093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: 24
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    volumes:
+      - kafka-93-data:/var/lib/kafka/data
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD", "cub", "kafka-ready", "1", "10", "-b", "localhost:9093"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  kafka-94:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka-94
+    container_name: kraft-broker-94
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    ports:
+      - "9094:9094"
+      - "19094:19094"
+    environment:
+      CLUSTER_ID: "4GThRKJoQF2BmLyqAl4JlQ"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 94
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "92@kafka-92:29092,93@kafka-93:29093,94@kafka-94:29094,95@kafka-95:29095"
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9094,EXTERNAL://0.0.0.0:19094,CONTROLLER://0.0.0.0:29094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-94:9094,EXTERNAL://localhost:19094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: 24
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    volumes:
+      - kafka-94-data:/var/lib/kafka/data
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD", "cub", "kafka-ready", "1", "10", "-b", "localhost:9094"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  kafka-95:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka-95
+    container_name: kraft-broker-95
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    ports:
+      - "9095:9095"
+      - "19095:19095"
+    environment:
+      CLUSTER_ID: "4GThRKJoQF2BmLyqAl4JlQ"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 95
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "92@kafka-92:29092,93@kafka-93:29093,94@kafka-94:29094,95@kafka-95:29095"
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9095,EXTERNAL://0.0.0.0:19095,CONTROLLER://0.0.0.0:29095
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-95:9095,EXTERNAL://localhost:19095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: 24
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    volumes:
+      - kafka-95-data:/var/lib/kafka/data
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD", "cub", "kafka-ready", "1", "10", "-b", "localhost:9095"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  # ─── Kafbat UI ───────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: kafbat/kafka-ui:latest
+    hostname: kafka-ui
+    container_name: kraft-kafbat
+    restart: unless-stopped
+    depends_on:
+      kafka-92:
+        condition: service_healthy
+      kafka-93:
+        condition: service_healthy
+      kafka-94:
+        condition: service_healthy
+      kafka-95:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    ports:
+      - "8080:8080"
+    environment:
+      AUTH_TYPE: "LOGIN_FORM"
+      SPRING_SECURITY_USER_NAME: ${KAFKA_UI_USER}
+      SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD}
+      KAFKA_CLUSTERS_0_NAME: cluster-1-kraft
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka-92:9092,kafka-93:9093,kafka-94:9094,kafka-95:9095"
+      KAFKA_CLUSTERS_0_READONLY: "false"
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+# ─── Named Volumes ─────────────────────────────────────────────────────────────
+volumes:
+  kafka-92-data:
+  kafka-93-data:
+  kafka-94-data:
+  kafka-95-data:
+
+# ─── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  kafka-network:
+    driver: bridge
