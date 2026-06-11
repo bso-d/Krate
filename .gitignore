@@ -3,6 +3,9 @@
 zk/.env
 kraft/.env
 
+# reference files not needed in repo
+docker-compose-ref.yml
+
 # built bundles and saved docker images
 dist/
 images/
