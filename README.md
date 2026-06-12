@@ -66,27 +66,29 @@ Pre-built bundles are available on the [Releases](https://github.com/bso-d/kafka
 
 **Step 1 — Download the bundle (on the VM or transfer manually)**
 
+Use the `--include-docker` bundles (`20260612`) — they contain Docker CE 29.5.3 + Compose Plugin 5.1.4 for Ubuntu 24.04 noble ARM64 so the cluster is fully self-contained.
+
 ```bash
 # ZooKeeper variant
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-bundle-20260611.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-bundle-20260611.tar.gz.sha256
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-bundle-20260612.tar.gz
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-bundle-20260612.tar.gz.sha256
 
 # KRaft variant
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-bundle-20260611.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-bundle-20260611.tar.gz.sha256
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-bundle-20260612.tar.gz
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-bundle-20260612.tar.gz.sha256
 ```
 
 **Step 2 — Verify integrity**
 
 ```bash
-sha256sum -c kafka-zk-bundle-20260611.tar.gz.sha256
+sha256sum -c kafka-zk-bundle-20260612.tar.gz.sha256
 ```
 
 **Step 3 — Extract**
 
 ```bash
-tar -xzf kafka-zk-bundle-20260611.tar.gz
-cd kafka-zk-bundle-20260611
+tar -xzf kafka-zk-bundle-20260612.tar.gz
+cd kafka-zk-bundle-20260612
 ```
 
 **Step 4 — Install**
@@ -204,10 +206,9 @@ If Docker is not installed or not working on the VM, build a bundle that include
 
 ```bash
 # On the connected machine (downloads ARM64 .deb packages via Docker)
-./download-docker-debs.sh                        # default: Ubuntu 22.04 (jammy)
-./download-docker-debs.sh --ubuntu-version noble # Ubuntu 24.04
+./download-docker-debs.sh --ubuntu-version noble   # Ubuntu 24.04 (target)
 
-./make-bundle.sh --include-docker
+./make-bundle.sh --no-pull --include-docker
 ```
 
 On the VM:
