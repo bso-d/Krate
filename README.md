@@ -212,3 +212,7 @@ On the VM:
 ├── download-docker-debs.sh   Downloads Docker ARM64 .deb packages
 └── docker-compose.yml        Original multi-cluster reference setup
 ```
+
+---
+
+Built with [Claude](https://claude.ai) by Anthropic.
