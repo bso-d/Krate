@@ -301,16 +301,19 @@ cmd_health() {
 
 # ─── ui ───────────────────────────────────────────────────────────────────────
 cmd_ui() {
-  local user="" pass=""
+  local user="" pass="" port="8080"
   if [[ -f "$ENV_FILE" ]]; then
-    user=$(grep -E '^KAFKA_UI_USER=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
+    user=$(grep -E '^KAFKA_UI_USER='     "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
     pass=$(grep -E '^KAFKA_UI_PASSWORD=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
+    local p
+    p=$(grep -E '^KAFKA_UI_PORT=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
+    [[ -n "$p" ]] && port="$p"
   fi
 
   sep
   echo -e "${BOLD}  Kafbat UI${RESET}"
   sep
-  echo "  URL       http://localhost:8080"
+  echo "  URL       http://localhost:${port}"
   [[ -n "$user" ]] && echo "  Username  $user"
   [[ -n "$pass" ]] && echo "  Password  $pass"
   sep
