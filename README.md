@@ -34,31 +34,31 @@ Run on any machine with Docker and internet access.
 
 ```bash
 # Build both bundles
-./make-bundle.sh
+./make-bundle.sh --version v2
 
 # Build one variant
-./make-bundle.sh --mode zk
-./make-bundle.sh --mode kraft
+./make-bundle.sh --version v2 --mode zk
+./make-bundle.sh --version v2 --mode kraft
 
 # Skip re-pulling if images are already local
-./make-bundle.sh --no-pull
+./make-bundle.sh --version v2 --no-pull
 
 # Include Docker CE .deb packages for fully offline VM installs
-./download-docker-debs.sh
-./make-bundle.sh --include-docker
+./download-docker-debs.sh --ubuntu-version noble
+./make-bundle.sh --version v2 --no-pull --include-docker
 ```
 
 Output lands in `dist/`:
 
 ```
 dist/
-├── kafka-zk-bundle-YYYYMMDD.tar.gz
-├── kafka-zk-bundle-YYYYMMDD.tar.gz.sha256
-├── kafka-kraft-bundle-YYYYMMDD.tar.gz
-└── kafka-kraft-bundle-YYYYMMDD.tar.gz.sha256
+├── kafka-zk-v2.tar.gz
+├── kafka-zk-v2.tar.gz.sha256
+├── kafka-kraft-v2.tar.gz
+└── kafka-kraft-v2.tar.gz.sha256
 ```
 
-> KRaft bundle (~650 MB) is smaller than ZK (~1 GB) since it doesn't need the ZooKeeper image.
+> KRaft bundle (~700 MB) is smaller than ZK (~1.1 GB) since it doesn't need the ZooKeeper image.
 
 ---
 
@@ -68,29 +68,27 @@ Pre-built bundles are available on the [Releases](https://github.com/bso-d/kafka
 
 **Step 1 — Download the bundle (on the VM or transfer manually)**
 
-Use the `--include-docker` bundles (`20260612`) — they contain Docker CE 29.5.3 + Compose Plugin 5.1.4 for Ubuntu 24.04 noble ARM64 so the cluster is fully self-contained.
-
 ```bash
 # ZooKeeper variant
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-bundle-20260612.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-bundle-20260612.tar.gz.sha256
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v2.tar.gz
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v2.tar.gz.sha256
 
 # KRaft variant
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-bundle-20260612.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-bundle-20260612.tar.gz.sha256
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-v2.tar.gz
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-v2.tar.gz.sha256
 ```
 
 **Step 2 — Verify integrity**
 
 ```bash
-sha256sum -c kafka-zk-bundle-20260612.tar.gz.sha256
+sha256sum -c kafka-zk-v2.tar.gz.sha256
 ```
 
 **Step 3 — Extract**
 
 ```bash
-tar -xzf kafka-zk-bundle-20260612.tar.gz
-cd kafka-zk-bundle-20260612
+tar -xzf kafka-zk-v2.tar.gz
+cd kafka-zk-v2
 ```
 
 **Step 4 — Install**

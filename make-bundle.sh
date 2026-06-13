@@ -2,11 +2,11 @@
 # make-bundle.sh — Build portable offline install bundles for Kafka
 #
 # Usage:
-#   ./make-bundle.sh [--mode zk|kraft|both] [--no-pull] [--include-docker]
+#   ./make-bundle.sh --version v2 [--mode zk|kraft|both] [--no-pull] [--include-docker]
 #
 # Output:
-#   dist/kafka-zk-YYYYMMDD.tar.gz
-#   dist/kafka-kraft-YYYYMMDD.tar.gz
+#   dist/kafka-zk-v2.tar.gz
+#   dist/kafka-kraft-v2.tar.gz
 #
 # Prerequisites:
 #   - Docker running on this machine
@@ -17,7 +17,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="$SCRIPT_DIR/dist"
-DATE="$(date +%Y%m%d)"
+VERSION=""
 MODE="both"
 INCLUDE_DOCKER=false
 NO_PULL=false
@@ -25,6 +25,9 @@ NO_PULL=false
 # ─── Parse args ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --version)
+      [[ "${2:-}" =~ ^v[0-9]+$ ]] || { echo "--version must be in the form vN (e.g. v2)"; exit 1; }
+      VERSION="$2"; shift 2 ;;
     --mode)
       [[ "${2:-}" =~ ^(zk|kraft|both)$ ]] || { echo "--mode must be: zk, kraft, or both"; exit 1; }
       MODE="$2"; shift 2 ;;
@@ -33,12 +36,14 @@ while [[ $# -gt 0 ]]; do
     --no-pull)
       NO_PULL=true; shift ;;
     -h|--help)
-      echo "Usage: $0 [--mode zk|kraft|both] [--no-pull] [--include-docker]"
+      echo "Usage: $0 --version vN [--mode zk|kraft|both] [--no-pull] [--include-docker]"
       exit 0 ;;
     *)
       echo "Unknown option: $1"; exit 1 ;;
   esac
 done
+
+[[ -n "$VERSION" ]] || { echo "Error: --version is required (e.g. --version v2)"; exit 1; }
 
 # ─── Image lists ──────────────────────────────────────────────────────────────
 ZK_IMAGES=(
@@ -69,7 +74,7 @@ image_filename() {
 # ─── Build one bundle ─────────────────────────────────────────────────────────
 build_bundle() {
   local mode="$1"        # zk or kraft
-  local bundle_name="kafka-${mode}-bundle-${DATE}"
+  local bundle_name="kafka-${mode}-${VERSION}"
   local bundle_dir="$DIST_DIR/staging/$bundle_name"
   local out_file="$DIST_DIR/${bundle_name}.tar.gz"
 
@@ -185,8 +190,8 @@ rm -rf "$DIST_DIR/staging"
 echo ""
 echo "Transfer bundle(s) to the VM, then:"
 echo ""
-echo "  tar -xzf kafka-<mode>-bundle-${DATE}.tar.gz"
-echo "  cd kafka-<mode>-bundle-${DATE}"
+echo "  tar -xzf kafka-<mode>-${VERSION}.tar.gz"
+echo "  cd kafka-<mode>-${VERSION}"
 echo "  ./kafka docker-check          # verify Docker is ready"
 echo "  ./kafka docker-install        # only if Docker isn't working"
 echo "  ./kafka install               # load images + start cluster"
