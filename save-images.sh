@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Run this ONCE on a machine with internet access.
-# Pulls all required Docker images, builds the custom visualizer image,
-# and saves everything to ./images/ as .tar files.
+# Pulls all required Docker images and saves them to ./images/ as .tar files.
 # Then transfer the whole folder (including images/) to the offline machine.
 
 set -euo pipefail
@@ -23,9 +22,6 @@ for img in "${EXTERNAL_IMAGES[@]}"; do
   docker pull "$img"
 done
 
-echo "==> Building visualizer image..."
-docker build -t shoji-stream-visualizer ./visualizer
-
 echo "==> Saving images to $IMAGES_DIR ..."
 for img in "${EXTERNAL_IMAGES[@]}"; do
   # turn slashes and colons into underscores for the filename
@@ -34,9 +30,6 @@ for img in "${EXTERNAL_IMAGES[@]}"; do
   echo "  Saving $img -> images/$filename"
   docker save "$img" -o "$IMAGES_DIR/$filename"
 done
-
-echo "  Saving shoji-stream-visualizer -> images/shoji-stream-visualizer.tar"
-docker save shoji-stream-visualizer -o "$IMAGES_DIR/shoji-stream-visualizer.tar"
 
 echo ""
 echo "Done. Transfer this entire folder (including images/) to the offline machine"
