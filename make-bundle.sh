@@ -159,10 +159,13 @@ build_bundle() {
   rm -rf "$bundle_dir"
 
   # ── Checksum ──
+  # Generate the checksum with a bare filename (no path) so `sha256sum -c`
+  # works on the VM regardless of where the bundle is downloaded to. Running
+  # the hash tool from inside DIST_DIR keeps only "<hash>  <bundle>.tar.gz".
   if command -v sha256sum &>/dev/null; then
-    sha256sum "$out_file" > "${out_file}.sha256"
+    ( cd "$DIST_DIR" && sha256sum "${bundle_name}.tar.gz" ) > "${out_file}.sha256"
   elif command -v shasum &>/dev/null; then
-    shasum -a 256 "$out_file" > "${out_file}.sha256"
+    ( cd "$DIST_DIR" && shasum -a 256 "${bundle_name}.tar.gz" ) > "${out_file}.sha256"
   fi
 
   local size
