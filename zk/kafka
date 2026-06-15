@@ -119,17 +119,50 @@ find_broker() {
 
 BOOTSTRAP="kafka-92:9092,kafka-93:9093,kafka-94:9094,kafka-95:9095"
 
+# ─── Preflight helpers ────────────────────────────────────────────────────────
+# Host ports this compose file will try to bind, resolved from the file itself
+# so the zk and kraft variants each report their own set. Env-var mappings
+# (e.g. ${KAFKA_UI_PORT:-8080}) are resolved from .env, defaulting to 8080.
+get_published_ports() {
+  local ui_port="8080"
+  if [[ -f "$ENV_FILE" ]]; then
+    local v
+    v="$(grep -E '^KAFKA_UI_PORT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
+    [[ -n "$v" ]] && ui_port="$v"
+  fi
+  grep -oE '"[^"]+:[0-9]+"' "$COMPOSE_FILE" 2>/dev/null | tr -d '"' | while IFS= read -r map; do
+    local host="${map%:*}"   # strip the container port (everything after the last colon)
+    if [[ "$host" == *KAFKA_UI_PORT* ]]; then
+      echo "$ui_port"
+    elif [[ "$host" =~ ^[0-9]+$ ]]; then
+      echo "$host"
+    fi
+  done | sort -un
+}
+
+# Returns 0 if a TCP listener already holds the given port on this host.
+port_in_use() {
+  local port="$1"
+  if command -v ss &>/dev/null; then
+    ss -Hltn 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx "$port"
+  elif command -v netstat &>/dev/null; then
+    netstat -ltn 2>/dev/null | awk 'NR>2{print $4}' | sed 's/.*://' | grep -qx "$port"
+  else
+    ( exec 3<>"/dev/tcp/127.0.0.1/${port}" ) 2>/dev/null && { exec 3>&- 3<&-; return 0; } || return 1
+  fi
+}
+
 # ─── install ──────────────────────────────────────────────────────────────────
 cmd_install() {
   step "Kafka Cluster Install"
   echo ""
 
-  # 1. Docker
-  info "Checking Docker..."
-  require_compose
+  # 1. Preflight — fail safe with guidance instead of half-applying
+  if ! cmd_doctor; then
+    echo ""
+    die "Preflight checks failed — fix the issues above, then re-run: kafka install"
+  fi
   require_compose_file
-  ok "Docker $(docker --version | awk '{print $3}' | tr -d ',')"
-  ok "Compose $(get_compose_version) (${COMPOSE_BIN[*]})"
   echo ""
 
   # 2. Credentials
@@ -380,6 +413,117 @@ cmd_uninstall() {
     compose_cmd down
   fi
   ok "Done"
+}
+
+# ─── doctor (preflight) ───────────────────────────────────────────────────────
+# Read-only checks run before touching the host. Catches the things that bite
+# a shared box: busy host ports, a firewalld/Docker NAT zone conflict, and a
+# missing/old Docker or Compose. Returns non-zero if a blocking issue is found.
+cmd_doctor() {
+  sep
+  echo -e "${BOLD}  Preflight Check${RESET}"
+  sep
+  echo ""
+
+  local problems=0
+
+  # ── Docker engine + daemon ──
+  info "Docker engine"
+  if command -v docker &>/dev/null; then
+    local dv
+    dv=$(docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if version_gte "$dv" "25.0.3"; then
+      ok "Docker $dv"
+    else
+      warn "Docker $dv — minimum required: 25.0.3"
+      problems=$((problems + 1))
+    fi
+    if docker info &>/dev/null 2>&1; then
+      ok "daemon is running"
+    else
+      err "daemon not running or not accessible — try: sudo systemctl start docker"
+      problems=$((problems + 1))
+    fi
+  else
+    err "docker not found — run: kafka docker-install"
+    problems=$((problems + 1))
+  fi
+  echo ""
+
+  # ── Compose ──
+  info "Docker Compose"
+  if [[ ${#COMPOSE_BIN[@]} -gt 0 ]]; then
+    local cv
+    cv=$(get_compose_version)
+    if version_gte "$cv" "1.29.2"; then
+      ok "${COMPOSE_BIN[*]} $cv"
+    else
+      warn "${COMPOSE_BIN[*]} $cv — minimum required: 1.29.2"
+      problems=$((problems + 1))
+    fi
+  else
+    err "Docker Compose not found — run: kafka docker-install"
+    problems=$((problems + 1))
+  fi
+  echo ""
+
+  # ── Bundle files ──
+  info "Bundle files"
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    ok "docker-compose.yml"
+  else
+    err "docker-compose.yml missing in $SCRIPT_DIR"
+    problems=$((problems + 1))
+  fi
+  if [[ -f "$ENV_FILE" ]]; then
+    ok ".env present"
+  else
+    warn ".env missing — it will be created from template on 'kafka install'"
+  fi
+  echo ""
+
+  # ── Host port availability ──
+  info "Host port availability"
+  local busy=0 ports
+  ports="$(get_published_ports)"
+  for p in $ports; do
+    if port_in_use "$p"; then
+      warn "port $p is already in use"
+      busy=$((busy + 1))
+    else
+      ok "port $p free"
+    fi
+  done
+  if (( busy > 0 )); then
+    warn "If this cluster is already running, in-use ports are expected (it's us)."
+    warn "Otherwise free them or change the external ports in .env before installing."
+  fi
+  echo ""
+
+  # ── Firewall / Docker NAT compatibility ──
+  info "Firewall (Docker NAT compatibility)"
+  if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+    if firewall-cmd --get-zones 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      ok "firewalld active, 'docker' zone present"
+    else
+      warn "firewalld is active but has no 'docker' zone."
+      warn "Docker can abort with: Failed to program NAT chain: INVALID_ZONE: docker"
+      warn "Fix: firewall-cmd --permanent --new-zone=docker && firewall-cmd --reload && systemctl restart docker"
+      problems=$((problems + 1))
+    fi
+  else
+    ok "firewalld not active — no NAT-zone conflict expected"
+  fi
+  echo ""
+
+  sep
+  if (( problems == 0 )); then
+    ok "All preflight checks passed."
+    return 0
+  else
+    warn "$problems blocking issue(s) found — resolve them before 'kafka install'."
+    return 1
+  fi
 }
 
 # ─── docker-check ─────────────────────────────────────────────────────────────
@@ -672,10 +816,12 @@ cmd_help() {
   printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
   printf "  %-30s %s\n" "uninstall"            "Remove containers (volumes kept)"
   printf "  %-30s %s\n" "uninstall --purge"    "Remove containers AND delete all data"
+  printf "  %-30s %s\n" "doctor"               "Preflight checks (ports, firewalld, Docker) before install"
   printf "  %-30s %s\n" "docker-check"         "Verify Docker installation"
   printf "  %-30s %s\n" "docker-install"       "Install Docker from bundled .deb packages"
   echo ""
   echo -e "${BOLD}EXAMPLES${RESET}"
+  echo "  kafka doctor                          # preflight checks before installing"
   echo "  kafka install                         # full first-time setup"
   echo "  kafka logs -f kafka-92                # tail broker 92 logs"
   echo "  kafka restart kafka-ui                # restart Kafbat UI"
@@ -710,6 +856,7 @@ case "$CMD" in
   ui)             cmd_ui ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
+  doctor)         cmd_doctor ;;
   docker-check)   cmd_docker_check ;;
   docker-install) cmd_docker_install ;;
   help|--help|-h) cmd_help ;;
