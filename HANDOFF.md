@@ -1,8 +1,8 @@
 # Kafka Offline Install Package — Handoff Document
 
 **Repo:** https://github.com/bso-d/kafka-offline-install-package  
-**Current release:** v1.0.0 — bundles `kafka-zk-v4.tar.gz` and `kafka-kraft-v4.tar.gz`  
-**Target VM:** ARM64 Ubuntu 24.04 (noble)
+**Current release:** v1.0.0 — arch-suffixed bundles `kafka-{zk,kraft}-v4-{amd64,arm64}.tar.gz`  
+**Target VM:** Ubuntu 24.04 (noble), x86_64 or ARM64 — pick the matching bundle
 
 ---
 
@@ -14,8 +14,8 @@ Two variants are maintained in parallel under `zk/` and `kraft/`:
 
 | Variant | Coordination | Bundle |
 |---|---|---|
-| `zk` | Apache ZooKeeper (Confluent 7.6.1) | `kafka-zk-v4.tar.gz` |
-| `kraft` | KRaft combined mode, no ZooKeeper | `kafka-kraft-v4.tar.gz` |
+| `zk` | Apache ZooKeeper (Confluent 7.6.1) | `kafka-zk-v4-<arch>.tar.gz` |
+| `kraft` | KRaft combined mode, no ZooKeeper | `kafka-kraft-v4-<arch>.tar.gz` |
 
 Both ship 4 brokers (IDs 92–95), 24 partitions per topic, replication factor 3, and Kafbat UI behind an nginx reverse proxy.
 
@@ -35,7 +35,7 @@ Both ship 4 brokers (IDs 92–95), 24 partitions per topic, replication factor 3
 │   ├── .env.template           Credential + port template
 │   └── kafka                   CLI tool (identical logic to zk/kafka)
 ├── make-bundle.sh              Builds tar.gz bundles
-├── download-docker-debs.sh     Downloads Docker ARM64 .deb packages offline
+├── download-docker-debs.sh     Downloads Docker .deb packages offline (--arch amd64|arm64)
 ├── security-reports/           SAST/DAST scan outputs + HTML report
 │   └── generate-report.py      Combines scan JSONs into one HTML report
 └── README.md
@@ -195,28 +195,35 @@ nginx also handles WebSocket upgrade headers (`Upgrade`, `Connection`) required 
 
 ### Steps
 
-```bash
-# 1. Download Docker CE ARM64 .deb packages (one-time or when Docker version changes)
-./download-docker-debs.sh --ubuntu-version noble
+Bundles are **per-architecture** (`amd64` / `arm64`). Build one set per target CPU.
 
-# 2. Build both bundles
-./make-bundle.sh --version v4 --no-pull --include-docker
+```bash
+# 1. Download Docker CE .deb packages for the target arch (one-time per arch)
+./download-docker-debs.sh --ubuntu-version noble --arch amd64
+./download-docker-debs.sh --ubuntu-version noble --arch arm64
+
+# 2. Build both variants for each arch
+./make-bundle.sh --version v4 --arch arm64 --no-pull --include-docker   # arm64 host: local images
+./make-bundle.sh --version v4 --arch amd64 --include-docker             # pulls amd64 images
 
 # Output:
-# dist/kafka-zk-v4.tar.gz       ~1.1 GB
-# dist/kafka-zk-v4.tar.gz.sha256
-# dist/kafka-kraft-v4.tar.gz    ~730 MB
-# dist/kafka-kraft-v4.tar.gz.sha256
+# dist/kafka-zk-v4-amd64.tar.gz     ~1.1 GB   (+ .sha256)
+# dist/kafka-kraft-v4-amd64.tar.gz  ~730 MB   (+ .sha256)
+# dist/kafka-zk-v4-arm64.tar.gz     ~1.1 GB   (+ .sha256)
+# dist/kafka-kraft-v4-arm64.tar.gz  ~720 MB   (+ .sha256)
 ```
 
-`--no-pull` skips re-pulling images (use when images are already local).  
-`--include-docker` bundles Docker CE 29.5.3 + Compose plugin 5.1.4 `.deb` files.  
+`--arch amd64|arm64` selects the target CPU (defaults to the build host's arch).  
+`--no-pull` skips re-pulling images — only valid when local images already match `--arch`.  
+`--include-docker` bundles arch-matched Docker CE 29.5.3 + Compose plugin 5.1.4 `.deb` files from `docker-offline/<arch>/`.  
 `--version` is required — use the next vN after the last released bundle.
+
+> **Build note (containerd image store):** `make-bundle.sh` passes `docker save --platform` so multi-platform tags export exactly the requested arch. Without it, a plain `docker save` on Docker's containerd store exports the *host* arch — which silently produced a wrong-arch bundle (an amd64-named bundle full of arm64 images that died on the VM with `exec format error`). The bundled `.bundle-arch` marker + `kafka doctor`'s architecture check now catch any mismatch before install.
 
 ### What goes into each bundle
 
 ```
-kafka-zk-v4/
+kafka-zk-v4-<arch>/
 ├── docker-compose.yml
 ├── nginx.conf
 ├── .env.template
@@ -226,23 +233,27 @@ kafka-zk-v4/
 │   ├── confluentinc__cp-kafka_7.6.1.tar
 │   ├── kafbat__kafka-ui_latest.tar
 │   └── nginx_1.27-alpine.tar
-└── docker-offline/              (only with --include-docker)
-    ├── containerd.io_*_arm64.deb
-    ├── docker-ce_*_arm64.deb
-    ├── docker-ce-cli_*_arm64.deb
-    ├── docker-compose-plugin_*_arm64.deb
+├── .bundle-arch                 amd64 | arm64 (checked by `kafka doctor`)
+└── docker-offline/              (only with --include-docker; arch-matched)
+    ├── containerd.io_*_<arch>.deb
+    ├── docker-ce_*_<arch>.deb
+    ├── docker-ce-cli_*_<arch>.deb
+    ├── docker-compose-plugin_*_<arch>.deb
     └── install-docker.sh
 ```
 
 ### Uploading to GitHub Release
 
 ```bash
+# Upload all four arch-suffixed bundles (+ sidecars)
 gh release upload v1.0.0 \
-  dist/kafka-zk-v4.tar.gz dist/kafka-zk-v4.tar.gz.sha256 \
-  dist/kafka-kraft-v4.tar.gz dist/kafka-kraft-v4.tar.gz.sha256 \
+  dist/kafka-zk-v4-amd64.tar.gz    dist/kafka-zk-v4-amd64.tar.gz.sha256 \
+  dist/kafka-kraft-v4-amd64.tar.gz dist/kafka-kraft-v4-amd64.tar.gz.sha256 \
+  dist/kafka-zk-v4-arm64.tar.gz    dist/kafka-zk-v4-arm64.tar.gz.sha256 \
+  dist/kafka-kraft-v4-arm64.tar.gz dist/kafka-kraft-v4-arm64.tar.gz.sha256 \
   --clobber
 
-# Remove previous version assets
+# Remove previous (unsuffixed / older vN) assets
 for a in kafka-zk-v4.tar.gz kafka-zk-v4.tar.gz.sha256 \
           kafka-kraft-v4.tar.gz kafka-kraft-v4.tar.gz.sha256; do
   gh release delete-asset v1.0.0 "$a" --yes
@@ -254,12 +265,13 @@ done
 ## Installing on the VM
 
 ```bash
-# Download (or SCP the file manually)
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4.tar.gz.sha256
+# Pick the bundle for the VM's CPU: `uname -m` → x86_64 = amd64, aarch64 = arm64.
+# Example uses the amd64 ZooKeeper bundle.
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4-amd64.tar.gz
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4-amd64.tar.gz.sha256
 
 # Verify
-sha256sum -c kafka-zk-v4.tar.gz.sha256
+sha256sum -c kafka-zk-v4-amd64.tar.gz.sha256
 ```
 
 `sha256sum -c` works as-is from v4 onward — the sidecar now carries a bare
@@ -268,8 +280,11 @@ Known Issues #1 for the fix history.)
 
 ```bash
 # Extract (macOS xattrs warning is harmless on Linux)
-tar -xzf kafka-zk-v4.tar.gz
-cd kafka-zk-v4
+tar -xzf kafka-zk-v4-amd64.tar.gz
+cd kafka-zk-v4-amd64
+
+# Preflight (also catches an arch mismatch before install)
+./kafka doctor
 
 # Check Docker
 ./kafka docker-check
@@ -364,7 +379,7 @@ Credentials (`KAFKA_UI_USER`, `KAFKA_UI_PASSWORD`) are login-form auth enforced 
 | `kafbat/kafka-ui` | latest | ~300 MB |
 | `nginx` | 1.27-alpine | ~15 MB |
 
-Bundled Docker CE (noble ARM64):
+Bundled Docker CE (noble, amd64 and arm64 sets):
 - `containerd.io` 2.2.4
 - `docker-ce` 29.5.3
 - `docker-ce-cli` 29.5.3
@@ -379,7 +394,7 @@ Bundled Docker CE (noble ARM64):
 | Docker Engine | 25.0.3 | 25.0.3, 29.5.3 |
 | Docker Compose | 1.29.2 | 1.29.2 (v1), 5.1.4 (v2 plugin) |
 | Ubuntu | 22.04 (jammy) | 24.04 noble |
-| Architecture | ARM64 | ARM64 |
+| Architecture | amd64 or arm64 | amd64 (Xeon), arm64 |
 
 The `kafka` CLI auto-detects `docker compose` (v2) or `docker-compose` (v1) at startup.
 

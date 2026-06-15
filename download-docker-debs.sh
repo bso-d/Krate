@@ -21,14 +21,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_DIR="$SCRIPT_DIR/docker-offline"
 UBUNTU_VERSION="jammy"
+ARCH="arm64"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ubuntu-version) UBUNTU_VERSION="$2"; shift 2 ;;
+    --arch)           ARCH="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--ubuntu-version jammy|noble]"
+      echo "Usage: $0 [--ubuntu-version jammy|noble] [--arch amd64|arm64]"
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -38,17 +39,24 @@ done
   echo "Unsupported Ubuntu version: $UBUNTU_VERSION (use: jammy or noble)"
   exit 1
 }
+[[ "$ARCH" =~ ^(amd64|arm64)$ ]] || {
+  echo "Unsupported arch: $ARCH (use: amd64 or arm64)"
+  exit 1
+}
 
+# Packages are kept per-arch so a bundle includes only the set it needs.
+OUTPUT_DIR="$SCRIPT_DIR/docker-offline/$ARCH"
 mkdir -p "$OUTPUT_DIR"
 
-echo "==> Downloading Docker CE ARM64 packages"
+echo "==> Downloading Docker CE $ARCH packages"
 echo "    Ubuntu : $UBUNTU_VERSION"
+echo "    Arch   : $ARCH"
 echo "    Output : $OUTPUT_DIR"
 echo ""
 
-# Run an ARM64 Ubuntu container to download the deb packages.
-# This ensures we get the correct architecture regardless of the host machine.
-docker run --rm --platform linux/arm64 \
+# Run a matching-arch Ubuntu container to download the deb packages, so we get
+# the right architecture regardless of the host machine (emulated if needed).
+docker run --rm --platform "linux/$ARCH" \
   -v "$OUTPUT_DIR:/output" \
   "ubuntu:${UBUNTU_VERSION}" bash -c "
     set -euo pipefail
@@ -62,7 +70,7 @@ docker run --rm --platform linux/arm64 \
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
     chmod a+r /etc/apt/keyrings/docker.asc
-    echo \"deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${UBUNTU_VERSION} stable\" \
+    echo \"deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${UBUNTU_VERSION} stable\" \
       > /etc/apt/sources.list.d/docker.list
     apt-get update -qq
 
@@ -86,7 +94,7 @@ echo ""
 # Write the standalone install script that will be included in the bundle
 cat > "$OUTPUT_DIR/install-docker.sh" << 'INSTALL_SCRIPT'
 #!/usr/bin/env bash
-# Install Docker CE from bundled .deb packages (ARM64 Ubuntu)
+# Install Docker CE from bundled .deb packages (Ubuntu).
 # Run this on the VM if Docker is not installed or not working.
 
 set -euo pipefail
@@ -140,5 +148,5 @@ chmod +x "$OUTPUT_DIR/install-docker.sh"
 echo "==> Created install-docker.sh"
 echo ""
 echo "Next step:"
-echo "  ./make-bundle.sh --include-docker"
+echo "  ./make-bundle.sh --version vN --arch $ARCH --include-docker"
 echo ""

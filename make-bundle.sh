@@ -2,16 +2,17 @@
 # make-bundle.sh — Build portable offline install bundles for Kafka
 #
 # Usage:
-#   ./make-bundle.sh --version v2 [--mode zk|kraft|both] [--no-pull] [--include-docker]
+#   ./make-bundle.sh --version v2 [--mode zk|kraft|both] [--arch amd64|arm64] [--no-pull] [--include-docker]
 #
 # Output:
-#   dist/kafka-zk-v2.tar.gz
-#   dist/kafka-kraft-v2.tar.gz
+#   dist/kafka-zk-v2-<arch>.tar.gz
+#   dist/kafka-kraft-v2-<arch>.tar.gz
 #
 # Prerequisites:
 #   - Docker running on this machine
 #   - Internet access (pulls images during build), or use --no-pull if already local
-#   - For --include-docker: run download-docker-debs.sh first
+#     (with --no-pull the local image's architecture must match --arch)
+#   - For --include-docker: run download-docker-debs.sh --arch <arch> first
 
 set -euo pipefail
 
@@ -22,6 +23,13 @@ MODE="both"
 INCLUDE_DOCKER=false
 NO_PULL=false
 
+# Default to the build host's architecture (x86_64 → amd64, aarch64 → arm64).
+case "$(uname -m)" in
+  x86_64|amd64)   ARCH="amd64" ;;
+  aarch64|arm64)  ARCH="arm64" ;;
+  *)              ARCH="" ;;
+esac
+
 # ─── Parse args ───────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,12 +39,15 @@ while [[ $# -gt 0 ]]; do
     --mode)
       [[ "${2:-}" =~ ^(zk|kraft|both)$ ]] || { echo "--mode must be: zk, kraft, or both"; exit 1; }
       MODE="$2"; shift 2 ;;
+    --arch)
+      [[ "${2:-}" =~ ^(amd64|arm64)$ ]] || { echo "--arch must be: amd64 or arm64"; exit 1; }
+      ARCH="$2"; shift 2 ;;
     --include-docker)
       INCLUDE_DOCKER=true; shift ;;
     --no-pull)
       NO_PULL=true; shift ;;
     -h|--help)
-      echo "Usage: $0 --version vN [--mode zk|kraft|both] [--no-pull] [--include-docker]"
+      echo "Usage: $0 --version vN [--mode zk|kraft|both] [--arch amd64|arm64] [--no-pull] [--include-docker]"
       exit 0 ;;
     *)
       echo "Unknown option: $1"; exit 1 ;;
@@ -44,6 +55,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$VERSION" ]] || { echo "Error: --version is required (e.g. --version v2)"; exit 1; }
+[[ -n "$ARCH" ]] || { echo "Error: could not detect host arch; pass --arch amd64|arm64"; exit 1; }
+
+# Use `docker save --platform` when available so multi-platform tags (containerd
+# image store) export exactly the requested arch instead of the host's.
+SAVE_PLATFORM=()
+if docker save --help 2>&1 | grep -q -- '--platform'; then
+  SAVE_PLATFORM=(--platform "linux/$ARCH")
+fi
 
 # ─── Image lists ──────────────────────────────────────────────────────────────
 ZK_IMAGES=(
@@ -74,7 +93,7 @@ image_filename() {
 # ─── Build one bundle ─────────────────────────────────────────────────────────
 build_bundle() {
   local mode="$1"        # zk or kraft
-  local bundle_name="kafka-${mode}-${VERSION}"
+  local bundle_name="kafka-${mode}-${VERSION}-${ARCH}"
   local bundle_dir="$DIST_DIR/staging/$bundle_name"
   local out_file="$DIST_DIR/${bundle_name}.tar.gz"
 
@@ -95,30 +114,37 @@ build_bundle() {
 
   # ── Pull images (skip if --no-pull) ──
   if $NO_PULL; then
-    info "Skipping pull (--no-pull) — verifying images exist locally..."
+    info "Skipping pull (--no-pull) — verifying local images match $ARCH..."
     for img in "${images[@]}"; do
-      if docker image inspect "$img" &>/dev/null; then
-        ok "$img"
-      else
+      local img_arch
+      img_arch="$(docker image inspect "$img" --format '{{.Architecture}}' 2>/dev/null || true)"
+      if [[ -z "$img_arch" ]]; then
         die "Image not found locally: $img  (remove --no-pull to fetch it)"
+      elif [[ "$img_arch" != "$ARCH" ]]; then
+        die "Local $img is $img_arch but --arch is $ARCH. Remove --no-pull to fetch the $ARCH image."
       fi
+      ok "$img ($img_arch)"
     done
   else
-    info "Pulling images..."
+    info "Pulling $ARCH images..."
     for img in "${images[@]}"; do
       echo "    $img"
-      docker pull "$img"
+      docker pull --platform "linux/$ARCH" "$img"
     done
   fi
   echo ""
 
   # ── Save images ──
-  info "Saving images to images/..."
+  # Pass --platform so we export exactly $ARCH. On Docker's containerd image
+  # store a tag can hold multiple platforms, and a plain `docker save` exports
+  # the host's arch — which silently produced wrong-arch bundles. (SAVE_PLATFORM
+  # is empty on older Docker that lacks the flag, where the tag is single-arch.)
+  info "Saving $ARCH images to images/..."
   for img in "${images[@]}"; do
     local fname
     fname="$(image_filename "$img")"
     echo "    $img  →  images/$fname"
-    docker save "$img" -o "$bundle_dir/images/$fname"
+    docker save "${SAVE_PLATFORM[@]}" "$img" -o "$bundle_dir/images/$fname"
   done
   echo ""
 
@@ -139,15 +165,19 @@ build_bundle() {
   cp "$src_dir/.env.template" "$bundle_dir/.env.template"
   ok ".env.template"
 
-  # ── Optionally include Docker offline packages ──
+  # Record the bundle's architecture so `kafka doctor` can flag an arch mismatch.
+  echo "$ARCH" > "$bundle_dir/.bundle-arch"
+  ok ".bundle-arch ($ARCH)"
+
+  # ── Optionally include Docker offline packages (per-arch) ──
   if $INCLUDE_DOCKER; then
-    local deb_dir="$SCRIPT_DIR/docker-offline"
+    local deb_dir="$SCRIPT_DIR/docker-offline/$ARCH"
     if [[ -d "$deb_dir" ]] && find "$deb_dir" -name "*.deb" -maxdepth 1 | grep -q .; then
       cp -r "$deb_dir" "$bundle_dir/docker-offline"
-      ok "docker-offline/ ($(find "$deb_dir" -name "*.deb" -maxdepth 1 | wc -l | xargs) packages)"
+      ok "docker-offline/ ($(find "$deb_dir" -name "*.deb" -maxdepth 1 | wc -l | xargs) $ARCH packages)"
     else
-      warn "docker-offline/ has no .deb files — skipping Docker packages."
-      warn "Run ./download-docker-debs.sh first, then rebuild with --include-docker."
+      warn "docker-offline/$ARCH has no .deb files — skipping Docker packages."
+      warn "Run ./download-docker-debs.sh --arch $ARCH first, then rebuild with --include-docker."
     fi
   fi
 
@@ -193,8 +223,8 @@ rm -rf "$DIST_DIR/staging"
 echo ""
 echo "Transfer bundle(s) to the VM, then:"
 echo ""
-echo "  tar -xzf kafka-<mode>-${VERSION}.tar.gz"
-echo "  cd kafka-<mode>-${VERSION}"
+echo "  tar -xzf kafka-<mode>-${VERSION}-${ARCH}.tar.gz"
+echo "  cd kafka-<mode>-${VERSION}-${ARCH}"
 echo "  ./kafka docker-check          # verify Docker is ready"
 echo "  ./kafka docker-install        # only if Docker isn't working"
 echo "  ./kafka install               # load images + start cluster"

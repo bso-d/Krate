@@ -482,6 +482,28 @@ cmd_doctor() {
   fi
   echo ""
 
+  # ── Architecture match ──
+  # The bundled images are arch-specific; running them on a mismatched host
+  # fails at container start with "exec format error". Catch it here instead.
+  info "Architecture"
+  if [[ -f "$SCRIPT_DIR/.bundle-arch" ]]; then
+    local bundle_arch host_arch
+    bundle_arch="$(tr -d '[:space:]' < "$SCRIPT_DIR/.bundle-arch")"
+    host_arch="$(docker version --format '{{.Server.Arch}}' 2>/dev/null || true)"
+    if [[ -z "$host_arch" ]]; then
+      warn "bundle is $bundle_arch; could not determine host arch to compare"
+    elif [[ "$bundle_arch" == "$host_arch" ]]; then
+      ok "bundle $bundle_arch matches host $host_arch"
+    else
+      err "bundle is $bundle_arch but this host is $host_arch — images will not run (exec format error)."
+      err "Use the $host_arch bundle instead (kafka-<mode>-<ver>-$host_arch.tar.gz)."
+      problems=$((problems + 1))
+    fi
+  else
+    warn "no .bundle-arch marker — cannot verify architecture (older bundle?)"
+  fi
+  echo ""
+
   # ── Host port availability ──
   info "Host port availability"
   local busy=0 ports

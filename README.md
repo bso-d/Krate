@@ -1,6 +1,6 @@
 # kafka-offline-install-package
 
-Portable, offline-ready Kafka cluster packages for ARM64 Ubuntu VMs. Pick up a bundle on a connected machine, drop it on a VM, and have a running cluster in one command.
+Portable, offline-ready Kafka cluster packages for **x86_64 and ARM64** Ubuntu VMs. Pick up the bundle matching your VM's CPU on a connected machine, drop it on a VM, and have a running cluster in one command.
 
 Two variants — choose based on your coordination layer preference:
 
@@ -30,35 +30,36 @@ Kafbat UI → `http://localhost:8080`
 
 ## Building Offline Bundles
 
-Run on any machine with Docker and internet access.
+Run on any machine with Docker and internet access. Bundles are **architecture-specific** — build one per target CPU (`amd64` for x86_64 VMs, `arm64` for ARM). `--arch` defaults to the build host's architecture.
 
 ```bash
-# Build both bundles
-./make-bundle.sh --version v2
+# Build both variants for a given arch
+./make-bundle.sh --version v2 --arch amd64
+./make-bundle.sh --version v2 --arch arm64
 
 # Build one variant
-./make-bundle.sh --version v2 --mode zk
-./make-bundle.sh --version v2 --mode kraft
+./make-bundle.sh --version v2 --arch amd64 --mode zk
 
-# Skip re-pulling if images are already local
-./make-bundle.sh --version v2 --no-pull
+# Skip re-pulling if images are already local (must match --arch)
+./make-bundle.sh --version v2 --arch arm64 --no-pull
 
-# Include Docker CE .deb packages for fully offline VM installs
-./download-docker-debs.sh --ubuntu-version noble
-./make-bundle.sh --version v2 --no-pull --include-docker
+# Include Docker CE .deb packages for fully offline VM installs (per-arch)
+./download-docker-debs.sh --ubuntu-version noble --arch amd64
+./make-bundle.sh --version v2 --arch amd64 --include-docker
 ```
 
-Output lands in `dist/`:
+Output lands in `dist/` (one set per arch):
 
 ```
 dist/
-├── kafka-zk-v4.tar.gz
-├── kafka-zk-v4.tar.gz.sha256
-├── kafka-kraft-v4.tar.gz
-└── kafka-kraft-v4.tar.gz.sha256
+├── kafka-zk-v4-amd64.tar.gz       (+ .sha256)
+├── kafka-kraft-v4-amd64.tar.gz    (+ .sha256)
+├── kafka-zk-v4-arm64.tar.gz       (+ .sha256)
+└── kafka-kraft-v4-arm64.tar.gz    (+ .sha256)
 ```
 
-> KRaft bundle (~700 MB) is smaller than ZK (~1.1 GB) since it doesn't need the ZooKeeper image.
+> KRaft bundle (~720 MB) is smaller than ZK (~1.2 GB) since it doesn't need the ZooKeeper image.
+> Pick the bundle matching the VM's CPU — `kafka doctor` will flag an arch mismatch before install.
 
 ---
 
@@ -66,28 +67,28 @@ dist/
 
 Pre-built bundles are available on the [Releases](https://github.com/bso-d/kafka-offline-install-package/releases/latest) page.
 
-**Step 1 — Download the bundle (on the VM or transfer manually)**
+**Step 1 — Pick the bundle for your VM's CPU** (`uname -m`: `x86_64` → `amd64`, `aarch64` → `arm64`), then download (on the VM or transfer manually). Examples use the `amd64` ZooKeeper bundle:
 
 ```bash
-# ZooKeeper variant
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4.tar.gz.sha256
+# ZooKeeper variant (amd64 — use -arm64 for ARM hosts)
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4-amd64.tar.gz
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4-amd64.tar.gz.sha256
 
 # KRaft variant
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-v4.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-v4.tar.gz.sha256
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-v4-amd64.tar.gz
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-kraft-v4-amd64.tar.gz.sha256
 ```
 
 **Step 2 — Verify integrity**
 
 ```bash
-sha256sum -c kafka-zk-v4.tar.gz.sha256
+sha256sum -c kafka-zk-v4-amd64.tar.gz.sha256
 ```
 
 **Step 3 — Extract**
 
 ```bash
-tar -xzf kafka-zk-v4.tar.gz
+tar -xzf kafka-zk-v4-amd64.tar.gz
 cd kafka-zk-v4
 ```
 
@@ -206,10 +207,10 @@ kafka config set KAFKA_UI_PASSWORD=yourpassword
 If Docker is not installed or not working on the VM, build a bundle that includes Docker CE packages (installs Docker Engine 29.5.3 + Compose plugin 5.1.4):
 
 ```bash
-# On the connected machine (downloads ARM64 .deb packages via Docker)
-./download-docker-debs.sh --ubuntu-version noble   # Ubuntu 24.04
+# On the connected machine (downloads .deb packages for the target arch via Docker)
+./download-docker-debs.sh --ubuntu-version noble --arch amd64   # or --arch arm64
 
-./make-bundle.sh --no-pull --include-docker
+./make-bundle.sh --version v4 --arch amd64 --include-docker
 ```
 
 On the VM:
@@ -235,7 +236,7 @@ If Docker ≥25.0.3 is already installed with the legacy `docker-compose` (v1 �
 │   ├── .env.template
 │   └── kafka                 CLI tool
 ├── make-bundle.sh            Builds tar.gz install bundles
-├── download-docker-debs.sh   Downloads Docker ARM64 .deb packages
+├── download-docker-debs.sh   Downloads Docker .deb packages (amd64/arm64)
 └── docker-compose.yml        Original multi-cluster reference setup
 ```
 
