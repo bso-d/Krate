@@ -1,7 +1,7 @@
 # Kafka Offline Install Package — Handoff Document
 
 **Repo:** https://github.com/bso-d/kafka-offline-install-package  
-**Current release:** v1.0.0 — bundles `kafka-zk-v3.tar.gz` and `kafka-kraft-v3.tar.gz`  
+**Current release:** v1.0.0 — bundles `kafka-zk-v4.tar.gz` and `kafka-kraft-v4.tar.gz`  
 **Target VM:** ARM64 Ubuntu 24.04 (noble)
 
 ---
@@ -14,8 +14,8 @@ Two variants are maintained in parallel under `zk/` and `kraft/`:
 
 | Variant | Coordination | Bundle |
 |---|---|---|
-| `zk` | Apache ZooKeeper (Confluent 7.6.1) | `kafka-zk-v3.tar.gz` |
-| `kraft` | KRaft combined mode, no ZooKeeper | `kafka-kraft-v3.tar.gz` |
+| `zk` | Apache ZooKeeper (Confluent 7.6.1) | `kafka-zk-v4.tar.gz` |
+| `kraft` | KRaft combined mode, no ZooKeeper | `kafka-kraft-v4.tar.gz` |
 
 Both ship 4 brokers (IDs 92–95), 24 partitions per topic, replication factor 3, and Kafbat UI behind an nginx reverse proxy.
 
@@ -160,6 +160,7 @@ Minimum versions enforced by `kafka docker-check`:
 | `kafka load-images` | Load .tar images without starting |
 | `kafka uninstall` | Remove containers (volumes kept) |
 | `kafka uninstall --purge` | Remove containers + delete all named volumes |
+| `kafka doctor` | Preflight: Docker/Compose versions, host port availability, firewalld `docker` zone. Runs automatically at the top of `kafka install` |
 | `kafka docker-check` | Validate Docker version + daemon + compose |
 | `kafka docker-install` | `dpkg -i` all .deb files from `docker-offline/` |
 
@@ -215,7 +216,7 @@ nginx also handles WebSocket upgrade headers (`Upgrade`, `Connection`) required 
 ### What goes into each bundle
 
 ```
-kafka-zk-v3/
+kafka-zk-v4/
 ├── docker-compose.yml
 ├── nginx.conf
 ├── .env.template
@@ -242,8 +243,8 @@ gh release upload v1.0.0 \
   --clobber
 
 # Remove previous version assets
-for a in kafka-zk-v3.tar.gz kafka-zk-v3.tar.gz.sha256 \
-          kafka-kraft-v3.tar.gz kafka-kraft-v3.tar.gz.sha256; do
+for a in kafka-zk-v4.tar.gz kafka-zk-v4.tar.gz.sha256 \
+          kafka-kraft-v4.tar.gz kafka-kraft-v4.tar.gz.sha256; do
   gh release delete-asset v1.0.0 "$a" --yes
 done
 ```
@@ -254,26 +255,21 @@ done
 
 ```bash
 # Download (or SCP the file manually)
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v3.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v3.tar.gz.sha256
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4.tar.gz
+wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v4.tar.gz.sha256
 
 # Verify
-sha256sum -c kafka-zk-v3.tar.gz.sha256
+sha256sum -c kafka-zk-v4.tar.gz.sha256
 ```
 
-> **Known sha256sum issue:** The `.sha256` file contains an absolute path from the build machine
-> (e.g. `/Users/shoji/.../dist/kafka-zk-v3.tar.gz`). On the VM, run:
-> ```bash
-> sha256sum kafka-zk-v3.tar.gz | awk '{print $1}' > actual.sum
-> grep -oE '[a-f0-9]{64}' kafka-zk-v3.tar.gz.sha256 > expected.sum
-> diff actual.sum expected.sum && echo "OK" || echo "MISMATCH"
-> ```
-> **This needs to be fixed** in `make-bundle.sh` — see Known Issues below.
+`sha256sum -c` works as-is from v4 onward — the sidecar now carries a bare
+filename. (Older v3 bundles embedded the build machine's absolute path; see
+Known Issues #1 for the fix history.)
 
 ```bash
 # Extract (macOS xattrs warning is harmless on Linux)
-tar -xzf kafka-zk-v3.tar.gz
-cd kafka-zk-v3
+tar -xzf kafka-zk-v4.tar.gz
+cd kafka-zk-v4
 
 # Check Docker
 ./kafka docker-check
@@ -289,24 +285,15 @@ cd kafka-zk-v3
 
 ## Known Issues & Next Actions
 
-### 1. sha256sum path bug (HIGH — breaks verification on VM)
+### 1. sha256sum path bug — ✅ RESOLVED in v4 (PR #2)
 
-The `.sha256` file stores the full absolute path from the build machine:
-```
-abc123...  /Users/shoji/projects/.../dist/kafka-zk-v3.tar.gz
-```
-On the VM `sha256sum -c` fails because that path doesn't exist.
-
-**Fix needed in `make-bundle.sh`:** Change the checksum generation to use a relative or bare filename:
+The v3 `.sha256` files stored the build machine's absolute path, so
+`sha256sum -c` failed on the VM. Fixed in `make-bundle.sh` by generating the
+hash from inside `DIST_DIR` so the sidecar holds only `<hash>  <bundle>.tar.gz`:
 ```bash
-# Current (broken on VM):
-sha256sum "$out_file" > "${out_file}.sha256"
-
-# Fixed:
 (cd "$DIST_DIR" && sha256sum "${bundle_name}.tar.gz") > "${out_file}.sha256"
-# or:
-sha256sum "$out_file" | sed "s|.*/||" > "${out_file}.sha256"
 ```
+The v4 release assets were re-cut with the fix; the old v3 assets were removed.
 
 ### 2. NAT chain error on install (`INVALID_ZONE: docker`)
 
@@ -314,7 +301,7 @@ Observed on the target VM:
 ```
 ERROR: Failed to program NAT chain: INVALID_ZONE: docker
 ```
-This is a firewalld/iptables conflict. Docker 25.0.3 with Compose v1 tries to create a bridge network, and firewalld blocks iptables manipulation.
+This is a firewalld/iptables conflict. Docker 25.0.3 with Compose v1 tries to create a bridge network, and firewalld blocks iptables manipulation. As of v4, `kafka doctor` (and `kafka install`) detects this up front — firewalld active without a `docker` zone — and prints the fix instead of letting the install abort mid-way.
 
 **Fix options (on VM):**
 ```bash
