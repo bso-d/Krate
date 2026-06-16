@@ -10,6 +10,9 @@ ENV_FILE="$SCRIPT_DIR/.env"
 ENV_TEMPLATE="$SCRIPT_DIR/.env.template"
 IMAGES_DIR="$SCRIPT_DIR/images"
 DOCKER_OFFLINE_DIR="$SCRIPT_DIR/docker-offline"
+CERTS_DIR="$SCRIPT_DIR/certs"
+CERT_CRT="$CERTS_DIR/server.crt"
+CERT_KEY="$CERTS_DIR/server.key"
 
 # ─── Compose binary detection (v2 plugin or v1 standalone) ───────────────────
 if docker compose version &>/dev/null 2>&1; then
@@ -120,24 +123,62 @@ find_broker() {
 BOOTSTRAP="kafka-92:9092,kafka-93:9093,kafka-94:9094,kafka-95:9095"
 
 # ─── Preflight helpers ────────────────────────────────────────────────────────
+# Resolve a single env var from .env, echoing its value (empty if unset).
+env_value() {
+  [[ -f "$ENV_FILE" ]] || return 0
+  grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true
+}
+
 # Host ports this compose file will try to bind, resolved from the file itself
-# so the zk and kraft variants each report their own set. Env-var mappings
-# (e.g. ${KAFKA_UI_PORT:-8080}) are resolved from .env, defaulting to 8080.
+# so each variant reports its own set. Numeric mappings are taken as-is;
+# ${VAR:-NNN} mappings are resolved from .env, falling back to the NNN default.
 get_published_ports() {
-  local ui_port="8080"
-  if [[ -f "$ENV_FILE" ]]; then
-    local v
-    v="$(grep -E '^KAFKA_UI_PORT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')"
-    [[ -n "$v" ]] && ui_port="$v"
-  fi
   grep -oE '"[^"]+:[0-9]+"' "$COMPOSE_FILE" 2>/dev/null | tr -d '"' | while IFS= read -r map; do
     local host="${map%:*}"   # strip the container port (everything after the last colon)
-    if [[ "$host" == *KAFKA_UI_PORT* ]]; then
-      echo "$ui_port"
-    elif [[ "$host" =~ ^[0-9]+$ ]]; then
+    if [[ "$host" =~ ^[0-9]+$ ]]; then
       echo "$host"
+    elif [[ "$host" == *'${'*':-'*'}'* ]]; then   # ${VAR:-DEFAULT}
+      local inner="${host#*\$\{}"; inner="${inner%\}}"   # VAR:-DEFAULT
+      local var="${inner%%:-*}" def="${inner#*:-}" val
+      val="$(env_value "$var")"
+      echo "${val:-$def}"
     fi
   done | sort -un
+}
+
+# ─── TLS certificate ──────────────────────────────────────────────────────────
+# FQDN clients use to reach the UI: KAFKA_UI_FQDN from .env, else the host FQDN.
+get_fqdn() {
+  local f
+  f="$(env_value KAFKA_UI_FQDN)"
+  [[ -n "$f" ]] || f="$(hostname -f 2>/dev/null || hostname)"
+  echo "$f"
+}
+
+# Generate a self-signed TLS cert (CN/SAN = FQDN, plus the host IP) for nginx.
+cmd_gen_cert() {
+  command -v openssl &>/dev/null || die "openssl not found — needed to generate the TLS certificate."
+  mkdir -p "$CERTS_DIR"
+  local fqdn ip san
+  fqdn="$(get_fqdn)"
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  san="DNS:${fqdn}"; [[ -n "$ip" ]] && san="${san},IP:${ip}"
+  info "Generating self-signed TLS certificate (CN=${fqdn}${ip:+, IP $ip})..."
+  openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+    -keyout "$CERT_KEY" -out "$CERT_CRT" \
+    -subj "/CN=${fqdn}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \
+    || die "openssl failed to generate the certificate."
+  chmod 600 "$CERT_KEY"
+  ok "Certificate written to certs/server.crt (replace with an org-CA cert anytime)"
+}
+
+# Ensure a cert exists before the proxy starts; generate one if missing.
+ensure_cert() {
+  if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
+    return 0
+  fi
+  warn "No TLS certificate found — generating a self-signed one."
+  cmd_gen_cert
 }
 
 # Returns 0 if a TCP listener already holds the given port on this host.
@@ -182,7 +223,12 @@ cmd_install() {
   cmd_load_images
   echo ""
 
-  # 4. Start
+  # 4. TLS certificate for the UI proxy
+  info "Checking TLS certificate..."
+  ensure_cert
+  echo ""
+
+  # 5. Start
   info "Starting cluster..."
   compose_cmd up -d
   echo ""
@@ -221,6 +267,7 @@ cmd_load_images() {
 # ─── start ────────────────────────────────────────────────────────────────────
 cmd_start() {
   require_compose; require_compose_file; require_env
+  ensure_cert
   info "Starting cluster..."
   compose_cmd up -d
   ok "Done. Run: kafka status"
@@ -334,21 +381,20 @@ cmd_health() {
 
 # ─── ui ───────────────────────────────────────────────────────────────────────
 cmd_ui() {
-  local user="" pass="" port="8080"
-  if [[ -f "$ENV_FILE" ]]; then
-    user=$(grep -E '^KAFKA_UI_USER='     "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
-    pass=$(grep -E '^KAFKA_UI_PASSWORD=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
-    local p
-    p=$(grep -E '^KAFKA_UI_PORT=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
-    [[ -n "$p" ]] && port="$p"
-  fi
+  local user pass fqdn hp port_suffix=""
+  user="$(env_value KAFKA_UI_USER)"
+  pass="$(env_value KAFKA_UI_PASSWORD)"
+  fqdn="$(get_fqdn)"
+  hp="$(env_value KAFKA_UI_HTTPS_PORT)"; hp="${hp:-443}"
+  [[ "$hp" != "443" ]] && port_suffix=":${hp}"
 
   sep
   echo -e "${BOLD}  Kafbat UI${RESET}"
   sep
-  echo "  URL       http://localhost:${port}"
+  echo "  URL       https://${fqdn}${port_suffix}/"
   [[ -n "$user" ]] && echo "  Username  $user"
   [[ -n "$pass" ]] && echo "  Password  $pass"
+  echo -e "  ${DIM}TLS is a self-signed cert — trust certs/server.crt or proceed past the browser warning.${RESET}"
   sep
 }
 
@@ -526,7 +572,15 @@ cmd_doctor() {
   info "Firewall (Docker NAT compatibility)"
   if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
     if firewall-cmd --get-zones 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-      ok "firewalld active, 'docker' zone present"
+      local tgt
+      tgt="$(firewall-cmd --info-zone=docker 2>/dev/null | awk -F': ' '/target:/{print $2}' | tr -d '[:space:]')"
+      if [[ "$tgt" == "ACCEPT" ]]; then
+        ok "firewalld active, 'docker' zone present (target ACCEPT)"
+      else
+        warn "firewalld 'docker' zone target is '${tgt:-unknown}', not ACCEPT — containers may not reach each other."
+        warn "Fix: firewall-cmd --permanent --zone=docker --set-target=ACCEPT && firewall-cmd --reload && systemctl restart docker"
+        problems=$((problems + 1))
+      fi
     else
       warn "firewalld is active but has no 'docker' zone."
       warn "Docker can abort with: Failed to program NAT chain: INVALID_ZONE: docker"
@@ -535,6 +589,25 @@ cmd_doctor() {
     fi
   else
     ok "firewalld not active — no NAT-zone conflict expected"
+  fi
+  echo ""
+
+  # ── iptables backend consistency ──
+  # If Docker's FORWARD rules end up in BOTH iptables-legacy and iptables-nft,
+  # one stale layer's default-drop silently blocks container-to-container traffic.
+  info "iptables backend"
+  local legacy_docker=false nft_docker=false
+  if iptables-legacy -S FORWARD 2>/dev/null | grep -q 'DOCKER'; then legacy_docker=true; fi
+  if iptables-nft     -S FORWARD 2>/dev/null | grep -q 'DOCKER'; then nft_docker=true; fi
+  if $legacy_docker && $nft_docker; then
+    err "Docker FORWARD rules exist in BOTH iptables-legacy and iptables-nft (split-brain)."
+    err "Container networking can break. Align on one backend, e.g.:"
+    err "  update-alternatives --set iptables /usr/sbin/iptables-nft && systemctl restart docker"
+    problems=$((problems + 1))
+  else
+    local be
+    be="$(iptables -V 2>/dev/null | grep -oE 'legacy|nf_tables' || echo 'unknown')"
+    ok "single iptables backend in use ($be)"
   fi
   echo ""
 
@@ -839,6 +912,7 @@ cmd_help() {
   printf "  %-30s %s\n" "uninstall"            "Remove containers (volumes kept)"
   printf "  %-30s %s\n" "uninstall --purge"    "Remove containers AND delete all data"
   printf "  %-30s %s\n" "doctor"               "Preflight checks (ports, firewalld, Docker) before install"
+  printf "  %-30s %s\n" "gen-cert"             "(Re)generate the self-signed TLS cert for the UI"
   printf "  %-30s %s\n" "docker-check"         "Verify Docker installation"
   printf "  %-30s %s\n" "docker-install"       "Install Docker from bundled .deb packages"
   echo ""
@@ -879,6 +953,7 @@ case "$CMD" in
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
   doctor)         cmd_doctor ;;
+  gen-cert)       cmd_gen_cert ;;
   docker-check)   cmd_docker_check ;;
   docker-install) cmd_docker_install ;;
   help|--help|-h) cmd_help ;;

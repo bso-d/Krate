@@ -62,7 +62,7 @@ Host port   Container name    Role
 9094/19094  zk-broker-94      Broker 2
 9095/19095  zk-broker-95      Broker 3
 (internal)  zk-kafbat         Kafbat UI (port 8080 inside network only)
-8080*       zk-proxy          nginx reverse proxy → Kafbat
+443/80*     zk-proxy          nginx TLS proxy → Kafbat (80 redirects to 443)
 ```
 
 Brokers use `/cluster1` ZooKeeper chroot so the ZK node can be shared.
@@ -77,13 +77,13 @@ Host port   Container name      Role
 9094/19094  kraft-broker-94     Broker+Controller (node ID 94)
 9095/19095  kraft-broker-95     Broker+Controller (node ID 95)
 (internal)  kraft-kafbat        Kafbat UI
-8080*       kraft-proxy         nginx reverse proxy → Kafbat
+443/80*     kraft-proxy         nginx TLS proxy → Kafbat (80 redirects to 443)
 ```
 
 Controller quorum uses internal ports 29092–29095 (not exposed to host).  
 `CLUSTER_ID: 4GThRKJoQF2BmLyqAl4JlQ` — fixed, embedded in on-disk storage on first boot. **Do not change after first `kafka install`.**
 
-`*` Port 8080 is the default — configurable via `KAFKA_UI_PORT` in `.env`.
+`*` 443/80 are the defaults — configurable via `KAFKA_UI_HTTPS_PORT` / `KAFKA_UI_HTTP_PORT` in `.env`.
 
 ### Listener model (both variants)
 
@@ -108,16 +108,18 @@ Controller quorum uses internal ports 29092–29095 (not exposed to host).
 
 ## The `.env` File
 
-Copied from `.env.template` on first install. Controls three things:
+Copied from `.env.template` on first install:
 
 ```bash
 KAFKA_UI_USER=admin          # Kafbat UI login username
 KAFKA_UI_PASSWORD=changeme   # Kafbat UI login password
-KAFKA_UI_PORT=8080           # Host port for the nginx proxy
+KAFKA_UI_FQDN=               # FQDN for the UI / TLS cert CN+SAN (blank → host FQDN)
+KAFKA_UI_HTTPS_PORT=443      # Host port for HTTPS
+KAFKA_UI_HTTP_PORT=80        # Host port for HTTP (redirects to HTTPS)
 ```
 
-Set via CLI: `kafka config set KAFKA_UI_PORT=9090`  
-Takes effect on next `kafka start` or `kafka restart proxy`.
+Set via CLI: `kafka config set KAFKA_UI_FQDN=kafka.internal.example`  
+Takes effect on next `kafka start` or `kafka restart proxy`. Changing `KAFKA_UI_FQDN`? Re-run `kafka gen-cert` so the cert matches.
 
 ---
 
@@ -160,7 +162,8 @@ Minimum versions enforced by `kafka docker-check`:
 | `kafka load-images` | Load .tar images without starting |
 | `kafka uninstall` | Remove containers (volumes kept) |
 | `kafka uninstall --purge` | Remove containers + delete all named volumes |
-| `kafka doctor` | Preflight: Docker/Compose versions, host port availability, firewalld `docker` zone. Runs automatically at the top of `kafka install` |
+| `kafka doctor` | Preflight: Docker/Compose versions, host port availability, architecture match, firewalld `docker` zone (presence + ACCEPT target), and iptables legacy↔nft split-brain. Runs automatically at the top of `kafka install` |
+| `kafka gen-cert` | (Re)generate the self-signed TLS cert (`certs/server.crt`+`.key`) for the UI proxy, using `KAFKA_UI_FQDN` |
 | `kafka docker-check` | Validate Docker version + daemon + compose |
 | `kafka docker-install` | `dpkg -i` all .deb files from `docker-offline/` |
 
@@ -170,11 +173,13 @@ Runs `kafka-consumer-groups.sh` inside the first running broker container via `d
 
 ---
 
-## nginx Proxy
+## nginx Proxy (TLS termination)
 
-Both variants put Kafbat UI behind nginx (`nginx:1.27-alpine`). nginx is the only container with a host port for the UI. Kafbat has no host port.
+Both variants put Kafbat UI behind nginx (`nginx:1.27-alpine`). nginx is the only container with host ports — it serves the UI over **HTTPS on :443** and redirects **:80 → :443**. Kafbat itself has no host port.
 
-**Why:** DAST scan (OWASP ZAP) found missing security headers on the raw Kafbat endpoint. nginx injects them:
+**TLS:** nginx terminates TLS with a **self-signed** cert at `certs/server.crt` + `certs/server.key`, mounted read-only into the container at `/etc/nginx/certs/`. `kafka install`/`kafka start` auto-generate it (via `ensure_cert` → `openssl`) if missing, using `KAFKA_UI_FQDN` (or the host FQDN) as CN/SAN plus the host's primary IP. Regenerate with `kafka gen-cert`; swap in an org-CA cert by replacing the two files and `kafka restart proxy`. The `certs/` dir is git-ignored and not shipped in the bundle — it's created on the VM at install time.
+
+**Why nginx at all:** a DAST scan (OWASP ZAP) found missing security headers on the raw Kafbat endpoint. nginx injects them (and now adds HSTS):
 
 - `Content-Security-Policy`
 - `Permissions-Policy`

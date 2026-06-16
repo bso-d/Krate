@@ -21,10 +21,11 @@ Both include 4 brokers, 24 partitions per topic, and [Kafbat UI](https://github.
 # Test locally — no bundling needed
 cd zk                        # or: cd kraft
 cp .env.template .env
+./kafka gen-cert             # generate the self-signed TLS cert the proxy needs
 docker compose up -d
 ```
 
-Kafbat UI → `http://localhost:8080`
+Kafbat UI → `https://<hostname>/` (TLS-terminated by nginx; self-signed cert, so accept the browser warning). Set `KAFKA_UI_FQDN` in `.env` to control the cert's name.
 
 ---
 
@@ -90,7 +91,7 @@ cd kafka-zk-v4-amd64
 ./kafka install            # load images → configure → start cluster
 ```
 
-Then open Kafbat UI at `http://<vm-host>:8080` (credentials from `.env`; change them with `kafka config set`).
+Then open Kafbat UI at **`https://<fqdn>/`** (TLS-terminated by nginx; `kafka install` auto-generates a self-signed cert for `KAFKA_UI_FQDN`, so accept the browser warning or trust `certs/server.crt`). Credentials are in `.env` — change them with `kafka config set`. Run `kafka ui` to print the exact URL.
 
 > `kafka doctor` runs automatically at the start of `kafka install`, so a port conflict, a firewalld `docker`-zone issue, or an architecture mismatch is caught before anything starts.
 
@@ -131,6 +132,7 @@ kafka load-images               Load Docker images without starting
 kafka uninstall                 Remove containers (volumes kept)
 kafka uninstall --purge         Remove containers AND delete all data
 kafka doctor                    Preflight checks (ports, firewalld, Docker) before install
+kafka gen-cert                  (Re)generate the self-signed TLS cert for the UI
 kafka docker-check              Verify Docker installation
 kafka docker-install            Install Docker from bundled .deb packages
 ```
@@ -173,7 +175,8 @@ zk-broker-92   :9092  :19092
 zk-broker-93   :9093  :19093
 zk-broker-94   :9094  :19094
 zk-broker-95   :9095  :19095
-zk-kafbat      :8080
+zk-kafbat      (internal only — fronted by zk-proxy)
+zk-proxy       :443 (HTTPS UI)  :80 (→ redirects to 443)
 ```
 
 ### KRaft variant
@@ -185,18 +188,19 @@ kraft-broker-92   :9092  :19092
 kraft-broker-93   :9093  :19093
 kraft-broker-94   :9094  :19094
 kraft-broker-95   :9095  :19095
-kraft-kafbat      :8080
+kraft-kafbat      (internal only — fronted by kraft-proxy)
+kraft-proxy       :443 (HTTPS UI)  :80 (→ redirects to 443)
 ```
 
 ---
 
-## Credentials
+## Credentials & TLS
 
-Kafbat UI login is configured via `.env` (not committed). Copy the template and edit before starting:
+Kafbat UI login and the UI's hostname are configured via `.env` (not committed). Copy the template and edit before starting:
 
 ```bash
 cp .env.template .env
-# edit KAFKA_UI_USER and KAFKA_UI_PASSWORD
+# edit KAFKA_UI_USER, KAFKA_UI_PASSWORD, and KAFKA_UI_FQDN
 ```
 
 Or use the CLI:
@@ -204,7 +208,10 @@ Or use the CLI:
 ```bash
 kafka config set KAFKA_UI_USER=admin
 kafka config set KAFKA_UI_PASSWORD=yourpassword
+kafka config set KAFKA_UI_FQDN=kafka.internal.example
 ```
+
+The UI is served over **HTTPS** by the nginx proxy (HTTP on :80 redirects to :443). `kafka install` auto-generates a **self-signed** cert with `KAFKA_UI_FQDN` (falling back to the host's FQDN) as the CN/SAN. To use your own cert instead, drop it in as `certs/server.crt` + `certs/server.key` and `kafka restart proxy`. Regenerate the self-signed one anytime with `kafka gen-cert`.
 
 ---
 

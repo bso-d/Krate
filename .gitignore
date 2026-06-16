@@ -12,3 +12,8 @@ images/
 docker-offline/
 security-reports/
 .DS_Store
+
+# Generated TLS certs (created at install time)
+zk/certs/
+kraft/certs/
+certs/
