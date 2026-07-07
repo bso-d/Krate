@@ -137,7 +137,7 @@ get_published_ports() {
     local host="${map%:*}"   # strip the container port (everything after the last colon)
     if [[ "$host" =~ ^[0-9]+$ ]]; then
       echo "$host"
-    elif [[ "$host" == *'${'*':-'*'}'* ]]; then   # ${VAR:-DEFAULT}
+    elif [[ "$host" =~ \$\{[^}]+:-[^}]+\} ]]; then   # ${VAR:-DEFAULT}
       local inner="${host#*\$\{}"; inner="${inner%\}}"   # VAR:-DEFAULT
       local var="${inner%%:-*}" def="${inner#*:-}" val
       val="$(env_value "$var")"
@@ -708,7 +708,9 @@ cmd_docker_check() {
 # ─── docker-install ───────────────────────────────────────────────────────────
 cmd_docker_install() {
   [[ -d "$DOCKER_OFFLINE_DIR" ]] || die "docker-offline/ not found in $SCRIPT_DIR
-This bundle was not packaged with Docker. Run make-bundle.sh --include-docker to rebuild it."
+This bundle was not packaged with Docker. Rebuild it with:
+  make docker-debs ARCH=<arch>
+  make bundle VERSION=vN ARCH=<arch> INCLUDE_DOCKER=1"
 
   shopt -s nullglob
   local debs=("$DOCKER_OFFLINE_DIR"/*.deb)
