@@ -214,9 +214,22 @@ docker-debs:
 >sudo apt-get install -f -y 2>/dev/null || true
 >sudo systemctl enable --now docker
 >
->if ! groups "$$USER" 2>/dev/null | grep -q '\bdocker\b'; then
->  sudo usermod -aG docker "$$USER"
->  echo "Added $$USER to the docker group. Run 'newgrp docker' or log out and back in."
+>target_user="$${SUDO_USER:-}"
+>if [[ -z "$$target_user" || "$$target_user" == "root" ]]; then
+>  target_user="$${USER:-}"
+>fi
+>if [[ -z "$$target_user" || "$$target_user" == "root" ]]; then
+>  target_user="$$(id -un 2>/dev/null || true)"
+>fi
+>
+>if [[ -n "$$target_user" && "$$target_user" != "root" ]] && id "$$target_user" >/dev/null 2>&1; then
+>  if ! id -nG "$$target_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+>    sudo usermod -aG docker "$$target_user"
+>    echo "Added $$target_user to the docker group. Run 'newgrp docker' or log out and back in."
+>  fi
+>else
+>  echo "No non-root local user detected for docker group membership; add one manually if needed:"
+>  echo "  sudo usermod -aG docker <username>"
 >fi
 >
 >docker --version
