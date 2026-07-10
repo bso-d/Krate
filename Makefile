@@ -36,7 +36,7 @@ help:
 >  make bundle VERSION=v5 MODE=zk ARCH=arm64      Build one bundle variant
 >  make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
 >  make docker-debs UBUNTU_VERSION=noble ARCH=amd64
->  make save-images                               Pull/save reference images to images/
+>  make save-images ARCH=amd64                    Pull/save reference images for one architecture
 >  make load-images                               Load images/*.tar into local Docker
 >  make clean                                     Remove bundle staging only
 >  make dist-clean                                Remove dist/, images/, and docker-offline/
@@ -239,12 +239,19 @@ docker-debs:
 >find "$$output_dir" -maxdepth 1 -name '*.deb' -exec du -h {} \;
 
 save-images:
+>[[ "$(ARCH)" =~ ^(amd64|arm64)$$ ]] || { echo "ARCH must be amd64 or arm64" >&2; exit 1; }
 >mkdir -p "$(IMAGE_DIR)"
+>save_platform=()
+>if docker save --help 2>&1 | grep -q -- '--platform'; then
+>  save_platform=(--platform "linux/$(ARCH)")
+>fi
 >for image in $(REFERENCE_IMAGES); do
->  docker pull "$$image"
+>  docker pull --platform "linux/$(ARCH)" "$$image"
+>  image_arch="$$(docker image inspect "$$image" --format '{{.Architecture}}')"
+>  [[ "$$image_arch" == "$(ARCH)" ]] || { echo "$$image is $$image_arch, expected $(ARCH)" >&2; exit 1; }
 >  name="$${image//\//__}"
 >  filename="$${name//:/_}.tar"
->  docker save "$$image" -o "$(IMAGE_DIR)/$$filename"
+>  docker save "$${save_platform[@]}" "$$image" -o "$(IMAGE_DIR)/$$filename"
 >done
 
 load-images:
