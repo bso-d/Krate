@@ -709,7 +709,7 @@ cmd_docker_check() {
 cmd_docker_install() {
   [[ -d "$DOCKER_OFFLINE_DIR" ]] || die "docker-offline/ not found in $SCRIPT_DIR
 This bundle was not packaged with Docker. On an internet-connected build machine, rebuild it with:
-  make docker-debs ARCH=<arch>
+  make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=<arch>
   make bundle VERSION=vN ARCH=<arch> INCLUDE_DOCKER=1
 Then transfer the rebuilt bundle to this offline VM."
 

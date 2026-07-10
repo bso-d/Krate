@@ -45,6 +45,8 @@ help:
 >  VERSION=vN              Required for bundle targets
 >  MODE=zk|kraft|both      Default: both
 >  ARCH=amd64|arm64        Default: detected host architecture
+>  UBUNTU_VERSION=jammy|noble
+>                          Target Ubuntu release for docker-debs; default: noble
 >  NO_PULL=1               Reuse local Docker images; they must match ARCH
 >  INCLUDE_DOCKER=1        Copy docker-offline/ARCH into the bundle
 >EOF
@@ -167,6 +169,7 @@ docker-debs:
 >[[ "$(UBUNTU_VERSION)" =~ ^(jammy|noble)$$ ]] || { echo "UBUNTU_VERSION must be jammy or noble" >&2; exit 1; }
 >[[ "$(ARCH)" =~ ^(amd64|arm64)$$ ]] || { echo "ARCH must be amd64 or arm64" >&2; exit 1; }
 >output_dir="$(DOCKER_OFFLINE_DIR)/$(ARCH)"
+>rm -rf "$$output_dir"
 >mkdir -p "$$output_dir"
 >echo "==> Downloading Docker CE packages"
 >echo "    Ubuntu : $(UBUNTU_VERSION)"
@@ -198,12 +201,18 @@ docker-debs:
 >
 >install_pkg() {
 >  local pkg="$$1"
->  local deb
->  deb=$$(find "$$SCRIPT_DIR" -maxdepth 1 -name "$${pkg}_*.deb" -print -quit)
->  if [[ -n "$$deb" ]]; then
->    sudo dpkg -i "$$deb" || true
->  else
+>  local -a matches
+>  shopt -s nullglob
+>  matches=("$$SCRIPT_DIR/$${pkg}_"*.deb)
+>  shopt -u nullglob
+>  if [[ $${#matches[@]} -eq 1 ]]; then
+>    sudo dpkg -i "$${matches[0]}" || true
+>  elif [[ $${#matches[@]} -eq 0 ]]; then
 >    echo "WARNING: $$pkg not found in bundle; skipping"
+>  else
+>    echo "ERROR: multiple packages found for $$pkg" >&2
+>    printf '  %s\n' "$${matches[@]}" >&2
+>    return 1
 >  fi
 >}
 >
