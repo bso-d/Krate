@@ -709,32 +709,40 @@ cmd_docker_check() {
 cmd_docker_install() {
   [[ -d "$DOCKER_OFFLINE_DIR" ]] || die "docker-offline/ not found in $SCRIPT_DIR
 This bundle was not packaged with Docker. On an internet-connected build machine, rebuild it with:
-  make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=<arch>
-  make bundle VERSION=vN ARCH=<arch> INCLUDE_DOCKER=1
+  make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=<amd64|arm64>
+  make bundle VERSION=vN ARCH=<amd64|arm64> INCLUDE_DOCKER=1
 Then transfer the rebuilt bundle to this offline VM."
 
   shopt -s nullglob
   local debs=("$DOCKER_OFFLINE_DIR"/*.deb)
   shopt -u nullglob
 
-  [[ ${#debs[@]} -gt 0 ]] || die "No .deb files in $DOCKER_OFFLINE_DIR"
+  [[ ${#debs[@]} -gt 0 ]] || die "No .deb files in $DOCKER_OFFLINE_DIR
+On an internet-connected build machine, rebuild the bundle with:
+  make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=<amd64|arm64>
+  make bundle VERSION=vN ARCH=<amd64|arm64> INCLUDE_DOCKER=1
+Then transfer the rebuilt bundle to this offline VM."
 
   info "Installing Docker CE from ${#debs[@]} bundled packages..."
   echo ""
 
   local order=(containerd.io docker-ce-cli docker-ce docker-compose-plugin)
+  local -a matches
   for pkg in "${order[@]}"; do
-    local deb=""
+    matches=()
     for f in "${debs[@]}"; do
       if [[ "$(basename "$f")" == "${pkg}_"* ]]; then
-        deb="$f"; break
+        matches+=("$f")
       fi
     done
-    if [[ -n "$deb" ]]; then
-      echo "  Installing $(basename "$deb")..."
-      sudo dpkg -i "$deb" || true
-    else
+    if [[ ${#matches[@]} -eq 1 ]]; then
+      echo "  Installing $(basename "${matches[0]}")..."
+      sudo dpkg -i "${matches[0]}" || true
+    elif [[ ${#matches[@]} -eq 0 ]]; then
       warn "Package not found in bundle: $pkg"
+    else
+      die "Multiple packages found for $pkg; refusing to choose one:
+$(printf '  %s\n' "${matches[@]}")"
     fi
   done
 

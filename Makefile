@@ -48,7 +48,7 @@ help:
 >  UBUNTU_VERSION=jammy|noble
 >                          Target Ubuntu release for docker-debs; default: noble
 >  NO_PULL=1               Reuse local Docker images; they must match ARCH
->  INCLUDE_DOCKER=1        Copy docker-offline/ARCH into the bundle
+>  INCLUDE_DOCKER=1        Copy Docker packages prepared for the target Ubuntu/ARCH
 >EOF
 
 check: syntax lint compose-check
@@ -138,7 +138,7 @@ bundle:
 >    if [[ -d "$$deb_dir" ]] && find "$$deb_dir" -maxdepth 1 -name '*.deb' -print -quit | grep -q .; then
 >      cp -r "$$deb_dir" "$$bundle_dir/docker-offline"
 >    else
->      echo "docker-offline/$(ARCH) has no .deb files; run make docker-debs ARCH=$(ARCH) first" >&2
+>      echo "docker-offline/$(ARCH) has no .deb files; run make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=$(ARCH) first" >&2
 >      exit 1
 >    fi
 >  fi

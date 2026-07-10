@@ -164,7 +164,7 @@ Minimum versions enforced by `kafka docker-check`:
 | `kafka doctor` | Preflight: Docker/Compose versions, host port availability, architecture match, firewalld `docker` zone (presence + ACCEPT target), and iptables legacy↔nft split-brain. Runs automatically at the top of `kafka install` |
 | `kafka gen-cert` | (Re)generate the self-signed TLS cert (`certs/server.crt`+`.key`) for the UI proxy, using `KAFKA_UI_FQDN` |
 | `kafka docker-check` | Validate Docker version + daemon + compose |
-| `kafka docker-install` | `dpkg -i` all .deb files from `docker-offline/` |
+| `kafka docker-install` | Install the bundled containerd, Docker CE, CLI, and Compose plugin `.deb` files |
 
 ### `kafka lag` internals
 
@@ -202,7 +202,7 @@ nginx also handles WebSocket upgrade headers (`Upgrade`, `Connection`) required 
 Bundles are **per-architecture** (`amd64` / `arm64`). Build one set per target CPU.
 
 ```bash
-# 1. Download Docker CE .deb packages for the target arch (one-time per arch)
+# 1. Download Docker CE .deb packages for each target Ubuntu release and arch
 make docker-debs UBUNTU_VERSION=noble ARCH=amd64
 make docker-debs UBUNTU_VERSION=noble ARCH=arm64
 
@@ -217,10 +217,11 @@ make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1             # pulls amd64 ima
 # dist/kafka-kraft-v5-arm64.tar.gz  ~720 MB   (+ .sha256)
 ```
 
-`ARCH=amd64|arm64` selects the target CPU (defaults to the build host's arch).  
-`NO_PULL=1` skips re-pulling images — only valid when local images already match `ARCH`.  
-`INCLUDE_DOCKER=1` bundles arch-matched Docker CE 29.5.3 + Compose plugin 5.1.4 `.deb` files from `docker-offline/<arch>/`.  
-`VERSION=vN` is required — use the next vN after the last released bundle.
+- `ARCH=amd64|arm64` selects the target CPU (defaults to the build host's arch).
+- `UBUNTU_VERSION=jammy|noble` selects the target Ubuntu release for `docker-debs` (defaults to `noble`). Preparing another release for the same architecture replaces that architecture's existing package directory.
+- `NO_PULL=1` skips re-pulling images — only valid when local images already match `ARCH`.
+- `INCLUDE_DOCKER=1` bundles the Docker CE `.deb` files from `docker-offline/<arch>/`. Package versions are not pinned; `docker-debs` downloads the current candidates from Docker's APT repository for the selected `UBUNTU_VERSION` and `ARCH`.
+- `VERSION=vN` is required — use the next vN after the last released bundle.
 
 > **Build note (containerd image store):** the `bundle` target passes `docker save --platform` so multi-platform tags export exactly the requested arch. Without it, a plain `docker save` on Docker's containerd store exports the *host* arch — which silently produced a wrong-arch bundle (an amd64-named bundle full of arm64 images that died on the VM with `exec format error`). The bundled `.bundle-arch` marker + `kafka doctor`'s architecture check now catch any mismatch before install.
 
@@ -374,22 +375,18 @@ Credentials (`KAFKA_UI_USER`, `KAFKA_UI_PASSWORD`) are login-form auth enforced 
 | `kafbat/kafka-ui` | latest | ~300 MB |
 | `nginx` | 1.27-alpine | ~15 MB |
 
-Bundled Docker CE (noble, amd64 and arm64 sets):
-- `containerd.io` 2.2.4
-- `docker-ce` 29.5.3
-- `docker-ce-cli` 29.5.3
-- `docker-compose-plugin` 5.1.4
+Optional offline Docker packages are selected from Docker's APT repository when `make docker-debs` runs. Their exact versions therefore depend on the repository state at build time; inspect the generated `.deb` filenames in `docker-offline/<arch>/` to record the versions included in a bundle.
 
 ---
 
 ## Environment Compatibility
 
-| Component | Minimum | Tested |
+| Component | Minimum or accepted value | Notes |
 |---|---|---|
-| Docker Engine | 25.0.3 | 25.0.3, 29.5.3 |
-| Docker Compose | 1.29.2 | 1.29.2 (v1), 5.1.4 (v2 plugin) |
-| Ubuntu | 22.04 (jammy) | 24.04 noble |
-| Architecture | amd64 or arm64 | amd64 (Xeon), arm64 |
+| Docker Engine | 25.0.3 | Docker CE packages or an existing installation |
+| Docker Compose | 1.29.2 | Standalone v1 or the v2 plugin |
+| Ubuntu | 22.04 (jammy) | 24.04 (noble) is also supported |
+| Architecture | amd64 or arm64 | Build a separate bundle for each architecture |
 
 The `kafka` CLI auto-detects `docker compose` (v2) or `docker-compose` (v1) at startup.
 

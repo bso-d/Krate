@@ -49,6 +49,8 @@ make docker-debs UBUNTU_VERSION=noble ARCH=amd64
 make bundle VERSION=v2 ARCH=amd64 INCLUDE_DOCKER=1
 ```
 
+Set `UBUNTU_VERSION=jammy` for Ubuntu 22.04 targets or `UBUNTU_VERSION=noble` for Ubuntu 24.04 targets. The command replaces any existing Docker packages under `docker-offline/<arch>/`, so run the matching `bundle` command before preparing the same architecture for a different Ubuntu release.
+
 Output lands in `dist/` (one set per arch):
 
 ```
@@ -102,6 +104,7 @@ The KRaft variant and arm64 builds aren't published in the current release, but 
 ```bash
 make docker-debs UBUNTU_VERSION=noble ARCH=arm64
 make bundle VERSION=v5 ARCH=arm64 INCLUDE_DOCKER=1        # arm64 ZK + KRaft
+make docker-debs UBUNTU_VERSION=noble ARCH=amd64
 make bundle VERSION=v5 ARCH=amd64 MODE=kraft INCLUDE_DOCKER=1
 ```
 
@@ -217,10 +220,10 @@ The UI is served over **HTTPS** by the nginx proxy (HTTP on :80 redirects to :44
 
 ## Offline Docker Install
 
-If Docker is not installed or not working on the VM, build a bundle that includes Docker CE packages (installs Docker Engine 29.5.3 + Compose plugin 5.1.4):
+If Docker is not installed or not working on the VM, build a bundle that includes Docker CE packages. Choose the `UBUNTU_VERSION` and `ARCH` that match the target VM. Package versions are not pinned: `docker-debs` downloads the current candidate versions from Docker's APT repository at build time.
 
 ```bash
-# On the connected machine (downloads .deb packages for the target arch via Docker)
+# On the connected machine (downloads current candidates for the target Ubuntu release and arch)
 make docker-debs UBUNTU_VERSION=noble ARCH=amd64   # or ARCH=arm64
 
 make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
