@@ -31,7 +31,7 @@ Kafbat UI → `https://<hostname>/` (TLS-terminated by nginx; self-signed cert, 
 
 ## Building Offline Bundles
 
-Run on any machine with Docker, GNU Make, and internet access. Bundles are **architecture-specific** — build one per target CPU (`amd64` for x86_64 VMs, `arm64` for ARM). `ARCH` defaults to the build host's architecture.
+Run on any machine with Docker, GNU Make 4.0 or newer, and internet access. Bundles are **architecture-specific** — build one per target CPU (`amd64` for x86_64 VMs, `arm64` for ARM). `ARCH` defaults to the build host's architecture.
 
 ```bash
 # Build both variants for a given arch

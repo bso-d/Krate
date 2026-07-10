@@ -195,7 +195,7 @@ nginx also handles WebSocket upgrade headers (`Upgrade`, `Connection`) required 
 
 ### Requirements (build machine)
 - Docker running with internet access
-- GNU Make
+- GNU Make 4.0 or newer
 
 ### Steps
 
