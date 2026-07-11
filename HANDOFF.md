@@ -34,8 +34,7 @@ Both ship 4 brokers (IDs 92–95), 24 partitions per topic, replication factor 3
 │   ├── nginx.conf              Security headers proxy config (identical to zk/)
 │   ├── .env.template           Credential + port template
 │   └── kafka                   CLI tool (identical logic to zk/kafka)
-├── make-bundle.sh              Builds tar.gz bundles
-├── download-docker-debs.sh     Downloads Docker .deb packages offline (--arch amd64|arm64)
+├── Makefile                    Build, validation, Docker package, and image-transfer workflow
 ├── security-reports/           SAST/DAST scan outputs + HTML report
 │   └── generate-report.py      Combines scan JSONs into one HTML report
 └── README.md
@@ -165,7 +164,7 @@ Minimum versions enforced by `kafka docker-check`:
 | `kafka doctor` | Preflight: Docker/Compose versions, host port availability, architecture match, firewalld `docker` zone (presence + ACCEPT target), and iptables legacy↔nft split-brain. Runs automatically at the top of `kafka install` |
 | `kafka gen-cert` | (Re)generate the self-signed TLS cert (`certs/server.crt`+`.key`) for the UI proxy, using `KAFKA_UI_FQDN` |
 | `kafka docker-check` | Validate Docker version + daemon + compose |
-| `kafka docker-install` | `dpkg -i` all .deb files from `docker-offline/` |
+| `kafka docker-install` | Install the bundled containerd, Docker CE, CLI, and Compose plugin `.deb` files |
 
 ### `kafka lag` internals
 
@@ -196,20 +195,20 @@ nginx also handles WebSocket upgrade headers (`Upgrade`, `Connection`) required 
 
 ### Requirements (build machine)
 - Docker running with internet access
-- `make-bundle.sh` and `download-docker-debs.sh` in repo root
+- GNU Make 4.0 or newer
 
 ### Steps
 
 Bundles are **per-architecture** (`amd64` / `arm64`). Build one set per target CPU.
 
 ```bash
-# 1. Download Docker CE .deb packages for the target arch (one-time per arch)
-./download-docker-debs.sh --ubuntu-version noble --arch amd64
-./download-docker-debs.sh --ubuntu-version noble --arch arm64
+# 1. Download Docker CE .deb packages for each target Ubuntu release and arch
+make docker-debs UBUNTU_VERSION=noble ARCH=amd64
+make docker-debs UBUNTU_VERSION=noble ARCH=arm64
 
 # 2. Build both variants for each arch
-./make-bundle.sh --version v5 --arch arm64 --no-pull --include-docker   # arm64 host: local images
-./make-bundle.sh --version v5 --arch amd64 --include-docker             # pulls amd64 images
+make bundle VERSION=v5 ARCH=arm64 NO_PULL=1 INCLUDE_DOCKER=1   # arm64 host: local images
+make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1             # pulls amd64 images
 
 # Output:
 # dist/kafka-zk-v5-amd64.tar.gz     ~1.1 GB   (+ .sha256)
@@ -218,12 +217,13 @@ Bundles are **per-architecture** (`amd64` / `arm64`). Build one set per target C
 # dist/kafka-kraft-v5-arm64.tar.gz  ~720 MB   (+ .sha256)
 ```
 
-`--arch amd64|arm64` selects the target CPU (defaults to the build host's arch).  
-`--no-pull` skips re-pulling images — only valid when local images already match `--arch`.  
-`--include-docker` bundles arch-matched Docker CE 29.5.3 + Compose plugin 5.1.4 `.deb` files from `docker-offline/<arch>/`.  
-`--version` is required — use the next vN after the last released bundle.
+- `ARCH=amd64|arm64` selects the target CPU (defaults to the build host's arch).
+- `UBUNTU_VERSION=jammy|noble` selects the target Ubuntu release for `docker-debs` (defaults to `noble`). Preparing another release for the same architecture replaces that architecture's existing package directory.
+- `NO_PULL=1` skips re-pulling images — only valid when local images already match `ARCH`.
+- `INCLUDE_DOCKER=1` bundles the Docker CE `.deb` files from `docker-offline/<arch>/`. Package versions are not pinned; `docker-debs` downloads the current candidates from Docker's APT repository for the selected `UBUNTU_VERSION` and `ARCH`.
+- `VERSION=vN` is required — use the next vN after the last released bundle.
 
-> **Build note (containerd image store):** `make-bundle.sh` passes `docker save --platform` so multi-platform tags export exactly the requested arch. Without it, a plain `docker save` on Docker's containerd store exports the *host* arch — which silently produced a wrong-arch bundle (an amd64-named bundle full of arm64 images that died on the VM with `exec format error`). The bundled `.bundle-arch` marker + `kafka doctor`'s architecture check now catch any mismatch before install.
+> **Build note (containerd image store):** the `bundle` target passes `docker save --platform` so multi-platform tags export exactly the requested arch. Without it, a plain `docker save` on Docker's containerd store exports the *host* arch — which silently produced a wrong-arch bundle (an amd64-named bundle full of arm64 images that died on the VM with `exec format error`). The bundled `.bundle-arch` marker + `kafka doctor`'s architecture check now catch any mismatch before install.
 
 ### What goes into each bundle
 
@@ -239,7 +239,7 @@ kafka-zk-v5-<arch>/
 │   ├── kafbat__kafka-ui_latest.tar
 │   └── nginx_1.27-alpine.tar
 ├── .bundle-arch                 amd64 | arm64 (checked by `kafka doctor`)
-└── docker-offline/              (only with --include-docker; arch-matched)
+└── docker-offline/              (only with INCLUDE_DOCKER=1; arch-matched)
     ├── containerd.io_*_<arch>.deb
     ├── docker-ce_*_<arch>.deb
     ├── docker-ce-cli_*_<arch>.deb
@@ -294,7 +294,7 @@ cd kafka-zk-v5-amd64
 # Check Docker
 ./kafka docker-check
 
-# Install Docker if needed (--include-docker bundle only)
+# Install Docker if needed (INCLUDE_DOCKER=1 bundle only)
 ./kafka docker-install
 
 # Start cluster
@@ -308,7 +308,7 @@ cd kafka-zk-v5-amd64
 ### 1. sha256sum path bug — ✅ RESOLVED in v4 (PR #2)
 
 The v3 `.sha256` files stored the build machine's absolute path, so
-`sha256sum -c` failed on the VM. Fixed in `make-bundle.sh` by generating the
+`sha256sum -c` failed on the VM. The Makefile `bundle` target generates the
 hash from inside `DIST_DIR` so the sidecar holds only `<hash>  <bundle>.tar.gz`:
 ```bash
 (cd "$DIST_DIR" && sha256sum "${bundle_name}.tar.gz") > "${out_file}.sha256"
@@ -346,16 +346,7 @@ sudo systemctl restart docker
 ```
 tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
 ```
-These come from macOS's tar adding Apple extended attributes. They are harmless — extraction completes correctly. No action needed, but can be eliminated by building bundles in a Linux environment or using `COPYFILE_DISABLE=1 tar ...` in `make-bundle.sh`.
-
-Fix in `make-bundle.sh`:
-```bash
-# Current:
-tar -czf "$out_file" -C "$DIST_DIR/staging" "$bundle_name"
-
-# Fixed (suppresses macOS xattr metadata):
-COPYFILE_DISABLE=1 tar -czf "$out_file" -C "$DIST_DIR/staging" "$bundle_name"
-```
+These come from macOS's tar adding Apple extended attributes. They are harmless — extraction completes correctly. The Makefile `bundle` target sets `COPYFILE_DISABLE=1` when creating tarballs to suppress this metadata when available.
 
 ---
 
@@ -384,22 +375,18 @@ Credentials (`KAFKA_UI_USER`, `KAFKA_UI_PASSWORD`) are login-form auth enforced 
 | `kafbat/kafka-ui` | latest | ~300 MB |
 | `nginx` | 1.27-alpine | ~15 MB |
 
-Bundled Docker CE (noble, amd64 and arm64 sets):
-- `containerd.io` 2.2.4
-- `docker-ce` 29.5.3
-- `docker-ce-cli` 29.5.3
-- `docker-compose-plugin` 5.1.4
+Optional offline Docker packages are selected from Docker's APT repository when `make docker-debs` runs. Their exact versions therefore depend on the repository state at build time; inspect the generated `.deb` filenames in `docker-offline/<arch>/` to record the versions included in a bundle.
 
 ---
 
 ## Environment Compatibility
 
-| Component | Minimum | Tested |
+| Component | Minimum or accepted value | Notes |
 |---|---|---|
-| Docker Engine | 25.0.3 | 25.0.3, 29.5.3 |
-| Docker Compose | 1.29.2 | 1.29.2 (v1), 5.1.4 (v2 plugin) |
-| Ubuntu | 22.04 (jammy) | 24.04 noble |
-| Architecture | amd64 or arm64 | amd64 (Xeon), arm64 |
+| Docker Engine | 25.0.3 | Docker CE packages or an existing installation |
+| Docker Compose | 1.29.2 | Standalone v1 or the v2 plugin |
+| Ubuntu | 22.04 (jammy) | 24.04 (noble) is also supported |
+| Architecture | amd64 or arm64 | Build a separate bundle for each architecture |
 
 The `kafka` CLI auto-detects `docker compose` (v2) or `docker-compose` (v1) at startup.
 

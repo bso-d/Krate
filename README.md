@@ -31,23 +31,25 @@ Kafbat UI → `https://<hostname>/` (TLS-terminated by nginx; self-signed cert, 
 
 ## Building Offline Bundles
 
-Run on any machine with Docker and internet access. Bundles are **architecture-specific** — build one per target CPU (`amd64` for x86_64 VMs, `arm64` for ARM). `--arch` defaults to the build host's architecture.
+Run on any machine with Docker, GNU Make 4.0 or newer, and internet access. Bundles are **architecture-specific** — build one per target CPU (`amd64` for x86_64 VMs, `arm64` for ARM). `ARCH` defaults to the build host's architecture.
 
 ```bash
 # Build both variants for a given arch
-./make-bundle.sh --version v2 --arch amd64
-./make-bundle.sh --version v2 --arch arm64
+make bundle VERSION=v2 ARCH=amd64
+make bundle VERSION=v2 ARCH=arm64
 
 # Build one variant
-./make-bundle.sh --version v2 --arch amd64 --mode zk
+make bundle VERSION=v2 ARCH=amd64 MODE=zk
 
-# Skip re-pulling if images are already local (must match --arch)
-./make-bundle.sh --version v2 --arch arm64 --no-pull
+# Skip re-pulling if images are already local (must match ARCH)
+make bundle VERSION=v2 ARCH=arm64 NO_PULL=1
 
 # Include Docker CE .deb packages for fully offline VM installs (per-arch)
-./download-docker-debs.sh --ubuntu-version noble --arch amd64
-./make-bundle.sh --version v2 --arch amd64 --include-docker
+make docker-debs UBUNTU_VERSION=noble ARCH=amd64
+make bundle VERSION=v2 ARCH=amd64 INCLUDE_DOCKER=1
 ```
+
+Set `UBUNTU_VERSION=jammy` for Ubuntu 22.04 targets or `UBUNTU_VERSION=noble` for Ubuntu 24.04 targets. The command replaces any existing Docker packages under `docker-offline/<arch>/`, so run the matching `bundle` command before preparing the same architecture for a different Ubuntu release.
 
 Output lands in `dist/` (one set per arch):
 
@@ -100,9 +102,10 @@ Then open Kafbat UI at **`https://<fqdn>/`** (TLS-terminated by nginx; `kafka in
 The KRaft variant and arm64 builds aren't published in the current release, but build from source on a machine with Docker + internet:
 
 ```bash
-./download-docker-debs.sh --ubuntu-version noble --arch arm64
-./make-bundle.sh --version v5 --arch arm64 --include-docker        # arm64 ZK + KRaft
-./make-bundle.sh --version v5 --arch amd64 --mode kraft --include-docker
+make docker-debs UBUNTU_VERSION=noble ARCH=arm64
+make bundle VERSION=v5 ARCH=arm64 INCLUDE_DOCKER=1        # arm64 ZK + KRaft
+make docker-debs UBUNTU_VERSION=noble ARCH=amd64
+make bundle VERSION=v5 ARCH=amd64 MODE=kraft INCLUDE_DOCKER=1
 ```
 
 See [Building Offline Bundles](#building-offline-bundles) for details.
@@ -217,13 +220,13 @@ The UI is served over **HTTPS** by the nginx proxy (HTTP on :80 redirects to :44
 
 ## Offline Docker Install
 
-If Docker is not installed or not working on the VM, build a bundle that includes Docker CE packages (installs Docker Engine 29.5.3 + Compose plugin 5.1.4):
+If Docker is not installed or not working on the VM, build a bundle that includes Docker CE packages. Choose the `UBUNTU_VERSION` and `ARCH` that match the target VM. Package versions are not pinned: `docker-debs` downloads the current candidate versions from Docker's APT repository at build time.
 
 ```bash
-# On the connected machine (downloads .deb packages for the target arch via Docker)
-./download-docker-debs.sh --ubuntu-version noble --arch amd64   # or --arch arm64
+# On the connected machine (downloads current candidates for the target Ubuntu release and arch)
+make docker-debs UBUNTU_VERSION=noble ARCH=amd64   # or ARCH=arm64
 
-./make-bundle.sh --version v5 --arch amd64 --include-docker
+make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
 ```
 
 On the VM:
@@ -248,8 +251,7 @@ If Docker ≥25.0.3 is already installed with the legacy `docker-compose` (v1 �
 │   ├── docker-compose.yml    KRaft + Kafka + Kafbat
 │   ├── .env.template
 │   └── kafka                 CLI tool
-├── make-bundle.sh            Builds tar.gz install bundles
-├── download-docker-debs.sh   Downloads Docker .deb packages (amd64/arm64)
+├── Makefile                  Build, validation, and image-transfer workflow
 └── docker-compose.yml        Original multi-cluster reference setup
 ```
 
