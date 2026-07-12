@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: zk-kafka
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # kafka-exporter — cluster/topic/consumer metrics for the ZK cluster
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+        labels:
+          cluster: zk-cluster-1
+
+  # Prometheus self-monitoring
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

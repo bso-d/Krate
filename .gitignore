@@ -2,6 +2,7 @@
 .env
 zk/.env
 kraft/.env
+zk/monitoring/.env
 
 # reference files not needed in repo
 docker-compose-ref.yml
