@@ -6,6 +6,68 @@
 
 ---
 
+## Session Log — 2026-07-13
+
+One session on `shoji-dev`. The GitHub repo has been **renamed to `Krate`** (the
+old name redirects). ZK observability was split into its own branch `zk-freeze`
+→ **PR #10**.
+
+### 1. Repo cleanup — reclaimed 3.35 GB
+- Deleted `dist/` (3.3 GB build output), `.DS_Store`, and `docker-compose-ref.yml`
+  — all gitignored / regenerable.
+- **Not done (optional):** `.git/lfs/objects` still holds **1.8 GB of orphaned
+  Git LFS cache** — old `dist` bundles committed via LFS (`e918425`) then removed
+  in favour of GitHub Releases (`56a69d5`); nothing in the tree references them.
+  Reclaim any time with `git lfs prune`.
+
+### 2. ZK cluster run + two bugs fixed (in BOTH `zk/` and `kraft/`)
+Brought the `zk/` cluster up and tested produce/consume, replication, and ISR.
+Two real bugs surfaced and were fixed in both variants:
+
+| Bug | Fix |
+|---|---|
+| `kafka lag` called `kafka-consumer-groups.sh`, absent from `cp-kafka:7.6.1` (only `kafka-consumer-groups` is on PATH) — `lag` failed every time | use `kafka-consumer-groups` |
+| Proxy / Kafbat healthchecks probed `localhost` (resolves to IPv6 `::1`) while services bind IPv4 `0.0.0.0` — containers marked unhealthy while serving fine | probe `127.0.0.1` |
+
+Local-dev notes: on macOS the UI proxy was remapped to `8080/8443` (host port 80
+busy), and `make check` needs **GNU Make 4.x (`gmake`)** — the system `make`
+(3.81) can't parse `.RECIPEPREFIX`.
+
+### 3. ZK observability built + frozen (v5)
+The ZooKeeper edition is now **feature-complete and frozen** — ZK is being removed
+from modern Kafka, so no new features land here (bug/security fixes only). Added a
+self-contained observability stack (details in `docs/zk-v5-freeze-release-notes.md`):
+- `zk/monitoring/` — **kafka-exporter → Prometheus (15d TSDB + dynamic alert
+  rules) → Grafana** (provisioned datasource + Overview and Consumer-Groups
+  dashboards). Exporter reads metrics as a Kafka client; no JMX agent, no broker
+  restart.
+- `kafka monitor {up,down,status,logs,ui}` subcommand in `zk/kafka`.
+- `Makefile` ships the monitoring images/config in the `zk` bundle
+  (`make bundle VERSION=v5 MODE=zk`).
+- Verified end-to-end: targets UP, `kafka_brokers=4`, under-replicated `=0`,
+  injected consumer lag `=150` visible through exporter → Prometheus → Grafana,
+  4 alert rules `health=ok`, both dashboards provisioned.
+- Overview page: `docs/zk-observability.html`
+  (published https://claude.ai/code/artifact/d5b92794-d920-4596-b0dd-7a2817f461c9).
+
+> This supersedes the "Monitoring — No Prometheus/Grafana" note under
+> *What Is Not In The Bundle* **for the `zk/` variant**.
+
+### 4. Branch / PR state
+- **`zk-freeze`** (commit `983e1fa`) — strictly ZK; **PR #10 → `main`**, reviewer
+  `fwnh67-20`: https://github.com/bso-d/Krate/pull/10
+- **Still uncommitted on `shoji-dev`:** the KRaft mirror of the two fixes
+  (`kraft/kafka`, `kraft/docker-compose.yml`). They need their own branch/PR.
+
+### 5. Open items
+- [ ] Commit the KRaft mirror fixes on their own branch → PR.
+- [ ] (optional) `git lfs prune` to reclaim ~1.8 GB from `.git/lfs`.
+- [ ] Log aggregation (Loki/promtail) not shipped — promtail's container-log mount
+      is unreliable on Docker Desktop for macOS, so it wasn't verified. Clean to
+      add on a Linux host.
+
+---
+
 ## What This Is
 
 A portable, offline-installable Kafka cluster packaged as a self-contained tar.gz. You build the bundle on a machine with internet access, SCP it to an air-gapped or restricted VM, and run one command to start the cluster.
