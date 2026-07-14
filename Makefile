@@ -29,9 +29,9 @@ help:
 >Kafka offline bundle workflow
 >
 >Targets:
->  make check                                      Run syntax, ShellCheck, and Compose validation
->  make test                                       Alias for make check
->  make validate                                   Alias for make check
+>  make check                                     Run syntax, ShellCheck, and Compose validation
+>  make test                                      Alias for make check
+>  make validate                                  Alias for make check
 >  make bundle VERSION=v5 ARCH=amd64              Build both zk and kraft bundles
 >  make bundle VERSION=v5 MODE=zk ARCH=arm64      Build one bundle variant
 >  make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
