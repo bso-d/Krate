@@ -793,7 +793,7 @@ cmd_lag() {
     echo ""
 
     local raw
-    raw=$(docker exec "$broker" kafka-consumer-groups.sh \
+    raw=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
       --bootstrap-server "$BOOTSTRAP" \
       --describe --group "$group" 2>&1) || die "Failed to describe group '$group'"
 
@@ -860,7 +860,7 @@ cmd_lag() {
     echo ""
 
     local groups
-    groups=$(docker exec "$broker" kafka-consumer-groups.sh \
+    groups=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
       --bootstrap-server "$BOOTSTRAP" \
       --list 2>/dev/null | grep -v "^$" | sort) || die "Failed to list consumer groups"
 
@@ -878,7 +878,7 @@ cmd_lag() {
       [[ -z "$grp" ]] && continue
 
       local raw_desc
-      raw_desc=$(docker exec "$broker" kafka-consumer-groups.sh \
+      raw_desc=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
         --bootstrap-server "$BOOTSTRAP" \
         --describe --group "$grp" 2>/dev/null || true)
 
