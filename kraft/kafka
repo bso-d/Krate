@@ -237,17 +237,17 @@ cmd_install() {
   ensure_cert
   echo ""
 
-  # 5. Start
+  # 5. Start and wait for the cluster to become healthy
   info "Starting cluster..."
   compose_cmd up -d
   echo ""
+  cmd_health || true      # wait for the cluster to settle, then show final health
+  echo ""
 
-  ok "Cluster started."
   sep
   cmd_ui
   echo ""
   echo -e "  ${DIM}kafka status     — check running services"
-  echo -e "  kafka health     — wait for all services to be healthy"
   echo -e "  kafka logs -f    — follow all logs${RESET}"
   echo ""
 }
@@ -279,7 +279,8 @@ cmd_start() {
   ensure_cert
   info "Starting cluster..."
   compose_cmd up -d
-  ok "Done. Run: kafka status"
+  echo ""
+  cmd_health || true      # wait for the cluster to settle, then show final health
 }
 
 # ─── stop ─────────────────────────────────────────────────────────────────────
@@ -340,12 +341,35 @@ cmd_logs() {
 }
 
 # ─── health ───────────────────────────────────────────────────────────────────
+# Count containers still in Docker's transient "starting" state — i.e. inside
+# their healthcheck start_period, not yet settled either way.
+health_pending_count() {
+  local cid n=0 h
+  while IFS= read -r cid; do
+    [[ -z "$cid" ]] && continue
+    h=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo none)
+    [[ "$h" == "starting" ]] && n=$((n + 1))
+  done <<< "$1"
+  echo "$n"
+}
+
 cmd_health() {
   require_compose; require_compose_file
-  sep
-  echo -e "${BOLD}  Service Health${RESET}"
-  sep
-  echo ""
+
+  # A service reports "starting" until its start_period elapses, so a one-shot
+  # check straight after `kafka start` is a false negative (the proxy is the
+  # usual victim — it only starts once the UI, and thus every broker, is up).
+  # Wait for the cluster to settle by default; an already-settled cluster
+  # returns immediately, so this costs nothing once things are steady.
+  local wait=true timeout=120
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-wait) wait=false; shift ;;
+      --timeout) timeout="${2:?--timeout needs a value in seconds}"; shift 2 ;;
+      *)         die "Unknown option: $1 (usage: kafka health [--no-wait] [--timeout N])" ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+$ ]] || die "--timeout must be a whole number of seconds"
 
   local container_ids
   container_ids=$(compose_cmd ps -q 2>/dev/null || true)
@@ -354,6 +378,29 @@ cmd_health() {
     warn "No containers running. Run: kafka start"
     return 1
   fi
+
+  if $wait; then
+    local waited=0 interval=3 pending
+    pending=$(health_pending_count "$container_ids")
+    while (( pending > 0 )) && (( waited < timeout )); do
+      if [[ -t 1 ]]; then
+        printf "\r  ${DIM}waiting for %d service(s) to settle... %ds/%ds${RESET}" \
+          "$pending" "$waited" "$timeout"
+      fi
+      sleep "$interval"
+      waited=$(( waited + interval ))
+      container_ids=$(compose_cmd ps -q 2>/dev/null || true)
+      pending=$(health_pending_count "$container_ids")
+    done
+    if [[ -t 1 ]]; then
+      printf "\r\033[K"
+    fi
+  fi
+
+  sep
+  echo -e "${BOLD}  Service Health${RESET}"
+  sep
+  echo ""
 
   local all_ok=true
 
@@ -384,7 +431,12 @@ cmd_health() {
   if $all_ok; then
     ok "All services healthy"
   else
-    warn "Some services not ready. Run: kafka logs <service>"
+    if $wait && (( $(health_pending_count "$container_ids") > 0 )); then
+      warn "Still starting after ${timeout}s — the cluster may just need longer."
+      warn "Retry with a longer wait: kafka health --timeout $(( timeout * 2 ))"
+    else
+      warn "Some services not ready. Run: kafka logs <service>"
+    fi
     return 1
   fi
 }
@@ -936,7 +988,9 @@ cmd_help() {
   printf "  %-30s %s\n" "down"                 "Remove containers (volumes preserved)"
   printf "  %-30s %s\n" "status"               "Show running service state"
   printf "  %-30s %s\n" "logs [-f] [service]"  "Show logs; -f to follow"
-  printf "  %-30s %s\n" "health"               "Detailed health check of all services"
+  printf "  %-30s %s\n" "health"               "Health of all services; waits for any still starting"
+  printf "  %-30s %s\n" "health --no-wait"     "Health as an instant snapshot, without waiting"
+  printf "  %-30s %s\n" "health --timeout N"   "Wait up to N seconds to settle (default 120)"
   printf "  %-30s %s\n" "lag"                  "Summary of all consumer group lag"
   printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
   printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
@@ -982,7 +1036,7 @@ case "$CMD" in
   down)           cmd_down ;;
   status)         cmd_status ;;
   logs)           cmd_logs "$@" ;;
-  health)         cmd_health ;;
+  health)         cmd_health "$@" ;;
   lag)            cmd_lag "$@" ;;
   ui)             cmd_ui ;;
   config)         cmd_config "$@" ;;
