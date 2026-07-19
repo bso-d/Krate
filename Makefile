@@ -12,16 +12,17 @@ INCLUDE_DOCKER ?= 0
 NO_PULL ?= 0
 
 DIST_DIR := dist
-IMAGE_DIR := images
 DOCKER_OFFLINE_DIR := docker-offline
 CLI_FILES := zk/kafka kraft/kafka
 
 ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:latest nginx:1.27-alpine
-KRAFT_IMAGES := confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:latest nginx:1.27-alpine
-REFERENCE_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 confluentinc/cp-schema-registry:7.6.1 kafbat/kafka-ui:latest nginx:1.27-alpine
+# KRaft images are derived from kraft/.env.template — the single source of truth
+# shared with kraft/docker-compose.yml — so the bundle can never ship images that
+# differ from what the cluster actually runs.
+KRAFT_IMAGES := $(shell . ./kraft/.env.template >/dev/null 2>&1; echo "$$KAFKA_IMAGE $$KAFKA_UI_IMAGE $$NGINX_IMAGE")
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 
-.PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft docker-debs save-images load-images clean dist-clean
+.PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft docker-debs clean dist-clean
 .SILENT: help
 
 help:
@@ -29,17 +30,15 @@ help:
 >Kafka offline bundle workflow
 >
 >Targets:
->  make check                                      Run syntax, ShellCheck, and Compose validation
->  make test                                       Alias for make check
->  make validate                                   Alias for make check
+>  make check                                     Run syntax, ShellCheck, and Compose validation
+>  make test                                      Alias for make check
+>  make validate                                  Alias for make check
 >  make bundle VERSION=v5 ARCH=amd64              Build both zk and kraft bundles
 >  make bundle VERSION=v5 MODE=zk ARCH=arm64      Build one bundle variant
 >  make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
 >  make docker-debs UBUNTU_VERSION=noble ARCH=amd64
->  make save-images ARCH=amd64                    Pull/save reference images for one architecture
->  make load-images                               Load images/*.tar into local Docker
 >  make clean                                     Remove bundle staging only
->  make dist-clean                                Remove dist/, images/, and docker-offline/
+>  make dist-clean                                Remove dist/ and docker-offline/
 >
 >Variables:
 >  VERSION=vN              Required for bundle targets
@@ -247,34 +246,8 @@ docker-debs:
 >chmod +x "$$output_dir/install-docker.sh"
 >find "$$output_dir" -maxdepth 1 -name '*.deb' -exec du -h {} \;
 
-save-images:
->[[ "$(ARCH)" =~ ^(amd64|arm64)$$ ]] || { echo "ARCH must be amd64 or arm64" >&2; exit 1; }
->mkdir -p "$(IMAGE_DIR)"
->save_platform=()
->if docker save --help 2>&1 | grep -q -- '--platform'; then
->  save_platform=(--platform "linux/$(ARCH)")
->fi
->for image in $(REFERENCE_IMAGES); do
->  docker pull --platform "linux/$(ARCH)" "$$image"
->  image_arch="$$(docker image inspect "$$image" --format '{{.Architecture}}')"
->  [[ "$$image_arch" == "$(ARCH)" ]] || { echo "$$image is $$image_arch, expected $(ARCH)" >&2; exit 1; }
->  name="$${image//\//__}"
->  filename="$${name//:/_}.tar"
->  docker save "$${save_platform[@]}" "$$image" -o "$(IMAGE_DIR)/$$filename"
->done
-
-load-images:
->[[ -d "$(IMAGE_DIR)" ]] || { echo "$(IMAGE_DIR)/ directory not found" >&2; exit 1; }
->shopt -s nullglob
->tars=($(IMAGE_DIR)/*.tar)
->shopt -u nullglob
->[[ $${#tars[@]} -gt 0 ]] || { echo "No .tar files found in $(IMAGE_DIR)" >&2; exit 1; }
->for tarball in "$${tars[@]}"; do
->  docker load -i "$$tarball"
->done
-
 clean:
 >rm -rf "$(DIST_DIR)/staging"
 
 dist-clean:
->rm -rf "$(DIST_DIR)" "$(IMAGE_DIR)" "$(DOCKER_OFFLINE_DIR)"
+>rm -rf "$(DIST_DIR)" "$(DOCKER_OFFLINE_DIR)"

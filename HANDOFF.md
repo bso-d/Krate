@@ -6,6 +6,140 @@
 
 ---
 
+## Session Log — 2026-07-14
+
+Planning + docs session on `shoji-dev`. No runtime code changed. Reconciled the
+handoff against git, authored the forward roadmap, and produced an architecture
+reference.
+
+### 1. State reconciliation (handoff vs. git)
+The prior handoff's "Branch/PR state" / "Open items" were inaccurate:
+- The KRaft mirror fixes are **not** uncommitted on `shoji-dev` (tree clean; both
+  `kraft/kafka` and `kraft/docker-compose.yml` still carry the buggy `.sh` /
+  `localhost` forms — `zk/` on `shoji-dev` is buggy too). The fixes live once,
+  inside an **unpushed local WIP `d4a8e21`** on the local `zk-freeze` head, mixed
+  with a root `monitoring/` scaffold. `origin/zk-freeze` = `983e1fa`, so PR #10 is
+  unaffected. Decision: leave `zk-freeze`/PR #10 frozen; all forward KRaft work on
+  `shoji-dev`.
+- Nuance for the image refactor: on `apache/kafka` the CLI scripts keep the `.sh`
+  suffix, so `kraft/kafka`'s current `kafka-consumer-groups.sh` is **correct** for
+  Apache — the Confluent-era "fix" reverses under Phase 1.
+
+### 2. Development roadmap agreed
+No written roadmap existed before this session (verified across disk/all
+refs/reflog/stashes). One was laid out for KRaft: 4 guiding principles (Makefile-driven, KRaft-only,
+offline-first, single source of truth) + 5 phases — (1) Confluent→`apache/kafka`
+image refactor [also the licensing prerequisite: `cp-kafka` is Confluent Community
+License, `apache/kafka` is Apache-2.0], (2) KRaft observability + email alerting
+(metrics + logs + Grafana Alerting; phone/Twilio dropped), (3) cluster configurator
+(sizes every README "Cluster Configuration" field, front door to the build) +
+benchmarking, (4) Apache-2.0 licensing (Grafana/Loki are AGPLv3 — aggregation
+only), (5) Kubernetes (last). New capabilities ship as standalone scripts + Make
+targets.
+
+### 3. Architecture reference — `docs/architecture.html`
+Self-contained, theme-aware HTML with two SVG diagrams (linked from `README.md`):
+- **Runtime microarchitecture** — producer → P0 leader (`broker-92`) →
+  replicate to ISR followers (`broker-93/94`, RF 3, min ISR 2) over INTERNAL
+  :9092–9095; consumer group reads from the leader; all 4 nodes are
+  broker+controller and vote in the KRaft Raft quorum (`__cluster_metadata`,
+  :29092–29095); host clients bootstrap via EXTERNAL :19092–19095.
+- **Operational & build planes** — configurator → `.env` (single source of truth)
+  → Makefile/CLI → cluster; benchmark drives + recalibrates; kafka-exporter +
+  promtail → Prometheus/Loki → Grafana → email; Docker/VM today, K8s planned.
+  Solid = today, dashed = planned phase.
+
+#### Prompt / thinking / response (per request, for the record)
+- **Prompt:** "Based on the current state & future intended phases, draw a detailed
+  microarchitecture diagram depicting the internals of this system including
+  producer & consumer." (then: HTML reference in `docs/`, link from README, log
+  this in the handoff.)
+- **Thinking:** the system is layered, so one dense 680px-wide diagram would
+  overcrowd — split into (a) the runtime data path/internals and (b) the
+  surrounding operational/build planes, with prose between. Encode data plane
+  (solid blue), KRaft metadata (amber dashed), telemetry (green dashed),
+  alert/email (red), build/control (grey); solid vs dashed borders = built vs
+  planned. Ground every element in the real compose/Makefile (ports, node IDs,
+  quorum, listeners) rather than a generic Kafka picture.
+- **Response / caveats surfaced:** delivered both diagrams + the HTML page. Flagged
+  honestly: (i) combined mode (all 4 vote) matches today's compose, but raising
+  broker count in Phase 3 should split into dedicated controllers (3/5) + brokers,
+  changing the quorum row; (ii) two Phase 2 alerts (consumer rebalancing, producer
+  connection break) may lack a backing `kafka-exporter` metric — pipeline shown,
+  metric-availability still to be verified — planned as part of the
+  observability work.
+
+### 4. Open items (carried forward)
+- [ ] Reconcile this file's older 2026-07-13 "Branch/PR state" / "Open items" with
+      the corrections above (kept for history for now).
+- [ ] Begin Phase 1 (`apache/kafka` refactor) when ready — first executable gate is
+      `make compose-check`.
+- [ ] (optional) `git lfs prune` (~1.8 GB orphaned LFS).
+
+---
+
+## Session Log — 2026-07-13
+
+One session on `shoji-dev`. The GitHub repo has been **renamed to `Krate`** (the
+old name redirects). ZK observability was split into its own branch `zk-freeze`
+→ **PR #10**.
+
+### 1. Repo cleanup — reclaimed 3.35 GB
+- Deleted `dist/` (3.3 GB build output), `.DS_Store`, and `docker-compose-ref.yml`
+  — all gitignored / regenerable.
+- **Not done (optional):** `.git/lfs/objects` still holds **1.8 GB of orphaned
+  Git LFS cache** — old `dist` bundles committed via LFS (`e918425`) then removed
+  in favour of GitHub Releases (`56a69d5`); nothing in the tree references them.
+  Reclaim any time with `git lfs prune`.
+
+### 2. ZK cluster run + two bugs fixed (in BOTH `zk/` and `kraft/`)
+Brought the `zk/` cluster up and tested produce/consume, replication, and ISR.
+Two real bugs surfaced and were fixed in both variants:
+
+| Bug | Fix |
+|---|---|
+| `kafka lag` called `kafka-consumer-groups.sh`, absent from `cp-kafka:7.6.1` (only `kafka-consumer-groups` is on PATH) — `lag` failed every time | use `kafka-consumer-groups` |
+| Proxy / Kafbat healthchecks probed `localhost` (resolves to IPv6 `::1`) while services bind IPv4 `0.0.0.0` — containers marked unhealthy while serving fine | probe `127.0.0.1` |
+
+Local-dev notes: on macOS the UI proxy was remapped to `8080/8443` (host port 80
+busy), and `make check` needs **GNU Make 4.x (`gmake`)** — the system `make`
+(3.81) can't parse `.RECIPEPREFIX`.
+
+### 3. ZK observability built + frozen (v5)
+The ZooKeeper edition is now **feature-complete and frozen** — ZK is being removed
+from modern Kafka, so no new features land here (bug/security fixes only). Added a
+self-contained observability stack (details in `docs/zk-v5-freeze-release-notes.md`):
+- `zk/monitoring/` — **kafka-exporter → Prometheus (15d TSDB + dynamic alert
+  rules) → Grafana** (provisioned datasource + Overview and Consumer-Groups
+  dashboards). Exporter reads metrics as a Kafka client; no JMX agent, no broker
+  restart.
+- `kafka monitor {up,down,status,logs,ui}` subcommand in `zk/kafka`.
+- `Makefile` ships the monitoring images/config in the `zk` bundle
+  (`make bundle VERSION=v5 MODE=zk`).
+- Verified end-to-end: targets UP, `kafka_brokers=4`, under-replicated `=0`,
+  injected consumer lag `=150` visible through exporter → Prometheus → Grafana,
+  4 alert rules `health=ok`, both dashboards provisioned.
+- Overview page: `docs/zk-observability.html`
+  (published https://claude.ai/code/artifact/d5b92794-d920-4596-b0dd-7a2817f461c9).
+
+> This supersedes the "Monitoring — No Prometheus/Grafana" note under
+> *What Is Not In The Bundle* **for the `zk/` variant**.
+
+### 4. Branch / PR state
+- **`zk-freeze`** (commit `983e1fa`) — strictly ZK; **PR #10 → `main`**, reviewer
+  `fwnh67-20`: https://github.com/bso-d/Krate/pull/10
+- **Still uncommitted on `shoji-dev`:** the KRaft mirror of the two fixes
+  (`kraft/kafka`, `kraft/docker-compose.yml`). They need their own branch/PR.
+
+### 5. Open items
+- [ ] Commit the KRaft mirror fixes on their own branch → PR.
+- [ ] (optional) `git lfs prune` to reclaim ~1.8 GB from `.git/lfs`.
+- [ ] Log aggregation (Loki/promtail) not shipped — promtail's container-log mount
+      is unreliable on Docker Desktop for macOS, so it wasn't verified. Clean to
+      add on a Linux host.
+
+---
+
 ## What This Is
 
 A portable, offline-installable Kafka cluster packaged as a self-contained tar.gz. You build the bundle on a machine with internet access, SCP it to an air-gapped or restricted VM, and run one command to start the cluster.

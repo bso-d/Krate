@@ -17,3 +17,7 @@ security-reports/
 zk/certs/
 kraft/certs/
 certs/
+
+# local working docs — not part of the repo
+PLAN.md
+docs/architecture.html
