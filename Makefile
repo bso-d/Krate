@@ -18,6 +18,7 @@ CLI_FILES := zk/kafka kraft/kafka
 
 ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:latest nginx:1.27-alpine
 KRAFT_IMAGES := confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:latest nginx:1.27-alpine
+MONITOR_IMAGES := danielqsj/kafka-exporter:latest prom/prometheus:latest grafana/grafana:latest
 REFERENCE_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 confluentinc/cp-schema-registry:7.6.1 kafbat/kafka-ui:latest nginx:1.27-alpine
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 
@@ -29,9 +30,9 @@ help:
 >Kafka offline bundle workflow
 >
 >Targets:
->  make check                                      Run syntax, ShellCheck, and Compose validation
->  make test                                       Alias for make check
->  make validate                                   Alias for make check
+>  make check                                     Run syntax, ShellCheck, and Compose validation
+>  make test                                      Alias for make check
+>  make validate                                  Alias for make check
 >  make bundle VERSION=v5 ARCH=amd64              Build both zk and kraft bundles
 >  make bundle VERSION=v5 MODE=zk ARCH=arm64      Build one bundle variant
 >  make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
@@ -64,6 +65,7 @@ lint:
 compose-check:
 >docker compose --env-file zk/.env.template -f zk/docker-compose.yml config --quiet
 >docker compose --env-file kraft/.env.template -f kraft/docker-compose.yml config --quiet
+>docker compose --env-file zk/monitoring/.env.template -f zk/monitoring/docker-compose.yml config --quiet
 
 bundle-zk:
 >$(MAKE) bundle MODE=zk VERSION="$(VERSION)" ARCH="$(ARCH)" INCLUDE_DOCKER="$(INCLUDE_DOCKER)" NO_PULL="$(NO_PULL)"
@@ -96,7 +98,7 @@ bundle:
 >  local -a images
 >
 >  if [[ "$$mode" == "zk" ]]; then
->    images=($(ZK_IMAGES))
+>    images=($(ZK_IMAGES) $(MONITOR_IMAGES))
 >  else
 >    images=($(KRAFT_IMAGES))
 >  fi
@@ -132,6 +134,12 @@ bundle:
 >  chmod +x "$$bundle_dir/kafka"
 >  cp "$$src_dir/.env.template" "$$bundle_dir/.env.template"
 >  printf '%s\n' "$(ARCH)" > "$$bundle_dir/.bundle-arch"
+>
+>  # zk bundles ship the observability stack (kafka monitor up)
+>  if [[ "$$mode" == "zk" && -d "$$src_dir/monitoring" ]]; then
+>    cp -r "$$src_dir/monitoring" "$$bundle_dir/monitoring"
+>    rm -f "$$bundle_dir/monitoring/.env"
+>  fi
 >
 >  if enabled "$(INCLUDE_DOCKER)"; then
 >    deb_dir="$(DOCKER_OFFLINE_DIR)/$(ARCH)"

@@ -13,6 +13,11 @@ DOCKER_OFFLINE_DIR="$SCRIPT_DIR/docker-offline"
 CERTS_DIR="$SCRIPT_DIR/certs"
 CERT_CRT="$CERTS_DIR/server.crt"
 CERT_KEY="$CERTS_DIR/server.key"
+MON_DIR="$SCRIPT_DIR/monitoring"
+MON_COMPOSE="$MON_DIR/docker-compose.yml"
+MON_ENV="$MON_DIR/.env"
+MON_ENV_TEMPLATE="$MON_DIR/.env.template"
+CLUSTER_NETWORK="zk_kafka-network"
 
 # ─── Compose binary detection (v2 plugin or v1 standalone) ───────────────────
 if docker compose version &>/dev/null 2>&1; then
@@ -100,6 +105,23 @@ require_env() {
 # Wrapper so all compose calls use the right files and detected binary
 compose_cmd() {
   "${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+# ─── Monitoring helpers ───────────────────────────────────────────────────────
+ensure_mon_env() {
+  [[ -f "$MON_ENV" ]] && return 0
+  [[ -f "$MON_ENV_TEMPLATE" ]] || die "monitoring/.env.template not found in $MON_DIR"
+  cp "$MON_ENV_TEMPLATE" "$MON_ENV"
+}
+
+monitor_compose() {
+  "${COMPOSE_BIN[@]}" --env-file "$MON_ENV" -f "$MON_COMPOSE" "$@"
+}
+
+# Resolve a single var from the monitoring .env (empty if unset).
+mon_env_value() {
+  [[ -f "$MON_ENV" ]] || return 0
+  grep -E "^${1}=" "$MON_ENV" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true
 }
 
 # Returns the name of the first running broker container
@@ -793,7 +815,7 @@ cmd_lag() {
     echo ""
 
     local raw
-    raw=$(docker exec "$broker" kafka-consumer-groups.sh \
+    raw=$(docker exec "$broker" kafka-consumer-groups \
       --bootstrap-server "$BOOTSTRAP" \
       --describe --group "$group" 2>&1) || die "Failed to describe group '$group'"
 
@@ -860,7 +882,7 @@ cmd_lag() {
     echo ""
 
     local groups
-    groups=$(docker exec "$broker" kafka-consumer-groups.sh \
+    groups=$(docker exec "$broker" kafka-consumer-groups \
       --bootstrap-server "$BOOTSTRAP" \
       --list 2>/dev/null | grep -v "^$" | sort) || die "Failed to list consumer groups"
 
@@ -878,7 +900,7 @@ cmd_lag() {
       [[ -z "$grp" ]] && continue
 
       local raw_desc
-      raw_desc=$(docker exec "$broker" kafka-consumer-groups.sh \
+      raw_desc=$(docker exec "$broker" kafka-consumer-groups \
         --bootstrap-server "$BOOTSTRAP" \
         --describe --group "$grp" 2>/dev/null || true)
 
@@ -920,6 +942,66 @@ cmd_lag() {
   fi
 }
 
+# ─── monitor (observability stack) ────────────────────────────────────────────
+cmd_monitor_ui() {
+  ensure_mon_env
+  local guser gpass gport pport
+  guser="$(mon_env_value GRAFANA_USER)";     guser="${guser:-admin}"
+  gpass="$(mon_env_value GRAFANA_PASSWORD)";  gpass="${gpass:-changeme}"
+  gport="$(mon_env_value GRAFANA_PORT)";      gport="${gport:-3000}"
+  pport="$(mon_env_value PROM_PORT)";         pport="${pport:-9090}"
+  sep
+  echo -e "${BOLD}  Observability${RESET}"
+  sep
+  echo "  Grafana     http://localhost:${gport}/   (user $guser / $gpass)"
+  echo "  Prometheus  http://localhost:${pport}/"
+  echo -e "  ${DIM}Dashboards: 'Kafka (ZK)' folder — Overview & Consumer Groups${RESET}"
+  sep
+}
+
+cmd_monitor() {
+  local action="${1:-status}"
+  shift || true
+  require_compose
+  [[ -f "$MON_COMPOSE" ]] || die "monitoring/docker-compose.yml not found in $MON_DIR"
+
+  case "$action" in
+    up)
+      # The exporter attaches to the cluster's compose network, so the cluster
+      # must be running before the monitoring stack can join it.
+      if ! docker network inspect "$CLUSTER_NETWORK" &>/dev/null; then
+        die "Cluster network '$CLUSTER_NETWORK' not found — start the cluster first: kafka start"
+      fi
+      ensure_mon_env
+      info "Starting observability stack (kafka-exporter, Prometheus, Grafana)..."
+      monitor_compose up -d
+      echo ""
+      ok "Monitoring started."
+      cmd_monitor_ui
+      ;;
+    down)
+      ensure_mon_env
+      info "Stopping observability stack (metrics history preserved in volumes)..."
+      monitor_compose down
+      ok "Monitoring stopped."
+      ;;
+    status)
+      ensure_mon_env
+      monitor_compose ps
+      ;;
+    logs)
+      ensure_mon_env
+      monitor_compose logs --tail=100 "$@"
+      ;;
+    ui)
+      cmd_monitor_ui
+      ;;
+    *)
+      die "Usage: kafka monitor [up | down | status | logs | ui]"
+      ;;
+  esac
+}
+
 # ─── help ─────────────────────────────────────────────────────────────────────
 cmd_help() {
   echo ""
@@ -940,6 +1022,10 @@ cmd_help() {
   printf "  %-30s %s\n" "lag"                  "Summary of all consumer group lag"
   printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
   printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
+  printf "  %-30s %s\n" "monitor up"           "Start observability stack (Prometheus + Grafana)"
+  printf "  %-30s %s\n" "monitor down"         "Stop observability stack (metrics history kept)"
+  printf "  %-30s %s\n" "monitor status"       "Show observability container state"
+  printf "  %-30s %s\n" "monitor ui"           "Show Grafana / Prometheus URLs"
   printf "  %-30s %s\n" "ui"                   "Show Kafbat UI URL and credentials"
   printf "  %-30s %s\n" "config"               "Show current .env config"
   printf "  %-30s %s\n" "config set KEY=VAL"   "Set a config value in .env"
@@ -962,10 +1048,12 @@ cmd_help() {
   echo "  kafka lag my-app-consumer             # per-partition detail"
   echo "  kafka lag --topic orders              # all groups on 'orders' topic"
   echo "  kafka lag my-group --topic payments   # specific group + topic"
+  echo "  kafka monitor up                      # start Prometheus + Grafana observability"
   echo "  kafka uninstall --purge               # full teardown + data wipe"
   echo ""
   echo -e "${BOLD}SERVICES${RESET}"
   echo "  zookeeper   kafka-92   kafka-93   kafka-94   kafka-95   kafka-ui"
+  echo -e "  ${DIM}observability (kafka monitor): kafka-exporter   prometheus   grafana${RESET}"
   echo ""
 }
 
@@ -984,6 +1072,7 @@ case "$CMD" in
   logs)           cmd_logs "$@" ;;
   health)         cmd_health ;;
   lag)            cmd_lag "$@" ;;
+  monitor)        cmd_monitor "$@" ;;
   ui)             cmd_ui ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
