@@ -15,7 +15,7 @@ DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
 CLI_FILES := zk/kafka kraft/kafka
 
-ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:latest nginx:1.27-alpine
+ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:v1.5.0 nginx:1.27-alpine
 # KRaft images are derived from kraft/.env.template — the single source of truth
 # shared with kraft/docker-compose.yml — so the bundle can never ship images that
 # differ from what the cluster actually runs.
