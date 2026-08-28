@@ -1,0 +1,1138 @@
+#!/usr/bin/env bash
+# kafka — Kafka cluster management CLI
+# Usage: kafka <command> [options]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+ENV_FILE="$SCRIPT_DIR/.env"
+ENV_TEMPLATE="$SCRIPT_DIR/.env.template"
+IMAGES_DIR="$SCRIPT_DIR/images"
+DOCKER_OFFLINE_DIR="$SCRIPT_DIR/docker-offline"
+CERTS_DIR="$SCRIPT_DIR/certs"
+CERT_CRT="$CERTS_DIR/server.crt"
+CERT_KEY="$CERTS_DIR/server.key"
+
+# ─── Compose binary detection (v2 plugin or v1 standalone) ───────────────────
+if docker compose version &>/dev/null 2>&1; then
+  COMPOSE_BIN=(docker compose)
+elif command -v docker-compose &>/dev/null 2>&1; then
+  COMPOSE_BIN=(docker-compose)
+else
+  COMPOSE_BIN=()
+fi
+
+# ─── Output helpers ───────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+  BLUE='\033[0;34m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; BLUE=''; BOLD=''; DIM=''; RESET=''
+fi
+
+info()  { echo -e "${BLUE}==>${RESET} $*"; }
+ok()    { echo -e "${GREEN}  ✓${RESET} $*"; }
+warn()  { echo -e "${YELLOW}  !${RESET} $*"; }
+err()   { echo -e "${RED}  ✗${RESET} $*" >&2; }
+die()   { err "$*"; exit 1; }
+step()  { echo -e "${BOLD}--- $* ---${RESET}"; }
+sep()   { echo -e "${DIM}────────────────────────────────────────${RESET}"; }
+
+# ─── Version helpers ──────────────────────────────────────────────────────────
+# Returns 0 (true) if semver $1 >= $2
+version_gte() {
+  local a b
+  IFS='.' read -ra a <<< "${1//[^0-9.]/}"
+  IFS='.' read -ra b <<< "${2//[^0-9.]/}"
+  for i in 0 1 2; do
+    local x="${a[$i]:-0}" y="${b[$i]:-0}"
+    (( 10#$x > 10#$y )) && return 0
+    (( 10#$x < 10#$y )) && return 1
+  done
+  return 0
+}
+
+get_compose_version() {
+  "${COMPOSE_BIN[@]}" version --short 2>/dev/null | tr -d 'v'
+}
+
+# ─── Prerequisites ────────────────────────────────────────────────────────────
+require_docker() {
+  if ! command -v docker &>/dev/null; then
+    die "Docker not found. Run: kafka docker-install"
+  fi
+  if ! docker info &>/dev/null 2>&1; then
+    die "Docker daemon is not running or not accessible.
+    Try: sudo systemctl start docker
+    Or:  newgrp docker  (if you were just added to the docker group)"
+  fi
+}
+
+require_compose() {
+  require_docker
+  if [[ ${#COMPOSE_BIN[@]} -eq 0 ]]; then
+    die "Docker Compose not found. Need 'docker compose' plugin or 'docker-compose' ≥1.29.2.
+Run: kafka docker-install"
+  fi
+}
+
+require_compose_file() {
+  [[ -f "$COMPOSE_FILE" ]] || die "docker-compose.yml not found in $SCRIPT_DIR"
+}
+
+require_env() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    if [[ -f "$ENV_TEMPLATE" ]]; then
+      warn ".env not found — copying from template..."
+      cp "$ENV_TEMPLATE" "$ENV_FILE"
+      echo ""
+      warn "Review credentials in $ENV_FILE before starting:"
+      echo "    nano $ENV_FILE"
+      echo ""
+      die "Edit .env, then run: kafka install"
+    else
+      die ".env not found and no .env.template available. Create $ENV_FILE with KAFKA_UI_USER and KAFKA_UI_PASSWORD."
+    fi
+  fi
+}
+
+# Wrapper so all compose calls use the right files and detected binary
+compose_cmd() {
+  "${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+# Returns the name of the first running broker container
+find_broker() {
+  local services=("kafka-92" "kafka-93")
+  for svc in "${services[@]}"; do
+    local cid
+    cid=$(compose_cmd ps -q "$svc" 2>/dev/null || true)
+    if [[ -n "$cid" ]]; then
+      local status
+      status=$(docker inspect --format='{{.State.Status}}' "$cid" 2>/dev/null || echo "")
+      if [[ "$status" == "running" ]]; then
+        docker inspect --format='{{.Name}}' "$cid" | sed 's|^/||'
+        return 0
+      fi
+    fi
+  done
+  die "No running broker found. Run: kafka start"
+}
+
+# Internal listener — reachable from inside the compose network only.
+BOOTSTRAP="kafka-92:19092,kafka-93:19093"
+
+# ─── Preflight helpers ────────────────────────────────────────────────────────
+# Resolve a single env var from .env, echoing its value (empty if unset).
+env_value() {
+  [[ -f "$ENV_FILE" ]] || return 0
+  grep -E "^${1}=" "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true
+}
+
+# Host ports this compose file will try to bind, resolved from the file itself
+# so each variant reports its own set. Numeric mappings are taken as-is;
+# ${VAR:-NNN} mappings are resolved from .env, falling back to the NNN default.
+get_published_ports() {
+  grep -oE '"[^"]+:[0-9]+"' "$COMPOSE_FILE" 2>/dev/null | tr -d '"' | while IFS= read -r map; do
+    local host="${map%:*}"   # strip the container port (everything after the last colon)
+    if [[ "$host" =~ ^[0-9]+$ ]]; then
+      echo "$host"
+    elif [[ "$host" =~ \$\{[^}]+:-[^}]+\} ]]; then   # ${VAR:-DEFAULT}
+      local inner="${host#*\$\{}"; inner="${inner%\}}"   # VAR:-DEFAULT
+      local var="${inner%%:-*}" def="${inner#*:-}" val
+      val="$(env_value "$var")"
+      echo "${val:-$def}"
+    fi
+  done | sort -un
+}
+
+# ─── TLS certificate ──────────────────────────────────────────────────────────
+# FQDN clients use to reach the UI: KAFKA_UI_FQDN from .env, else the host FQDN.
+get_fqdn() {
+  local f
+  f="$(env_value KAFKA_UI_FQDN)"
+  if [[ -z "$f" ]]; then
+    # `hostname -f` does a resolver lookup that can hang on air-gapped hosts;
+    # cap it and fall back to the short hostname.
+    if command -v timeout &>/dev/null; then
+      f="$(timeout 2 hostname -f 2>/dev/null || true)"
+    else
+      f="$(hostname -f 2>/dev/null || true)"
+    fi
+    [[ -n "$f" ]] || f="$(hostname 2>/dev/null || true)"
+  fi
+  echo "$f"
+}
+
+# Generate a self-signed TLS cert (CN/SAN = FQDN, plus the host IP) for nginx.
+cmd_gen_cert() {
+  command -v openssl &>/dev/null || die "openssl not found — needed to generate the TLS certificate."
+  mkdir -p "$CERTS_DIR"
+  local fqdn ip san
+  fqdn="$(get_fqdn)"
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  san="DNS:${fqdn}"; [[ -n "$ip" ]] && san="${san},IP:${ip}"
+  info "Generating self-signed TLS certificate (CN=${fqdn}${ip:+, IP $ip})..."
+  openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+    -keyout "$CERT_KEY" -out "$CERT_CRT" \
+    -subj "/CN=${fqdn}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \
+    || die "openssl failed to generate the certificate."
+  chmod 600 "$CERT_KEY"
+  ok "Certificate written to certs/server.crt (replace with an org-CA cert anytime)"
+}
+
+# Ensure a cert exists before the proxy starts; generate one if missing.
+ensure_cert() {
+  if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
+    return 0
+  fi
+  warn "No TLS certificate found — generating a self-signed one."
+  cmd_gen_cert
+}
+
+# ─── Broker data directories ──────────────────────────────────────────────────
+# Broker logs are bind-mounted from KAFKA_DATA_DIR (the /data disk), not a docker
+# named volume. A bind mount keeps the HOST directory's ownership, so each dir
+# must exist and already be owned by the uid the apache/kafka image runs as —
+# otherwise the broker exits at startup unable to write its log dir.
+ensure_data_dirs() {
+  local base uid gid d owner
+  base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
+  uid="$(env_value KAFKA_UID)"; uid="${uid:-1000}"
+  gid="$(env_value KAFKA_GID)"; gid="${gid:-1000}"
+
+  local -a sudo_cmd=()
+  if [[ "$(id -u)" -ne 0 ]] && command -v sudo &>/dev/null; then
+    sudo_cmd=(sudo)
+  fi
+
+  [[ -d "$base" ]] || die "Data disk $base does not exist.
+Mount it (or set a different path) before installing:
+  kafka config set KAFKA_DATA_DIR=/path/to/disk"
+
+  for node in 92 93; do
+    d="$base/krate/broker-$node"
+    if [[ ! -d "$d" ]]; then
+      info "Creating broker data directory $d"
+      "${sudo_cmd[@]}" mkdir -p "$d" || die "Could not create $d — create it manually and re-run."
+    fi
+    owner="$(stat -c '%u:%g' "$d" 2>/dev/null || true)"
+    if [[ "$owner" != "$uid:$gid" ]]; then
+      info "Setting owner of $d to $uid:$gid (the uid apache/kafka runs as)"
+      "${sudo_cmd[@]}" chown "$uid:$gid" "$d" || die "Could not chown $d
+Run this, then re-run the install:
+  sudo chown -R $uid:$gid $base/krate"
+    fi
+  done
+  ok "Broker data directories ready under $base/krate"
+}
+
+# Returns 0 if a TCP listener already holds the given port on this host.
+port_in_use() {
+  local port="$1"
+  if command -v ss &>/dev/null; then
+    ss -Hltn 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx "$port"
+  elif command -v netstat &>/dev/null; then
+    netstat -ltn 2>/dev/null | awk 'NR>2{print $4}' | sed 's/.*://' | grep -qx "$port"
+  else
+    ( exec 3<>"/dev/tcp/127.0.0.1/${port}" ) 2>/dev/null && { exec 3>&- 3<&-; return 0; } || return 1
+  fi
+}
+
+# ─── install ──────────────────────────────────────────────────────────────────
+cmd_install() {
+  step "Kafka Cluster Install"
+  echo ""
+
+  # 1. Preflight — fail safe with guidance instead of half-applying
+  if ! cmd_doctor; then
+    echo ""
+    die "Preflight checks failed — fix the issues above, then re-run: kafka install"
+  fi
+  require_compose_file
+  echo ""
+
+  # 2. Credentials
+  info "Checking credentials..."
+  if [[ -f "$ENV_FILE" ]]; then
+    ok ".env found"
+  else
+    [[ -f "$ENV_TEMPLATE" ]] || die ".env.template not found in $SCRIPT_DIR"
+    cp "$ENV_TEMPLATE" "$ENV_FILE"
+    warn "Created .env from template with default credentials."
+    warn "To change them: kafka config set KAFKA_UI_USER=youruser"
+    warn "                kafka config set KAFKA_UI_PASSWORD=yourpass"
+  fi
+  echo ""
+
+  # 3. Load images
+  cmd_load_images
+  echo ""
+
+  # 4. Broker data directories on the /data disk
+  info "Checking broker data directories..."
+  ensure_data_dirs
+  echo ""
+
+  # 5. TLS certificate for the UI proxy
+  info "Checking TLS certificate..."
+  ensure_cert
+  echo ""
+
+  # 6. Start and wait for the cluster to become healthy
+  info "Starting cluster..."
+  compose_cmd up -d
+  echo ""
+  cmd_health || true      # wait for the cluster to settle, then show final health
+  echo ""
+
+  sep
+  cmd_ui
+  echo ""
+  echo -e "  ${DIM}kafka status     — check running services"
+  echo -e "  kafka logs -f    — follow all logs${RESET}"
+  echo ""
+}
+
+# ─── load-images ──────────────────────────────────────────────────────────────
+cmd_load_images() {
+  require_docker
+  [[ -d "$IMAGES_DIR" ]] || die "images/ directory not found in $SCRIPT_DIR"
+
+  shopt -s nullglob
+  local tars=("$IMAGES_DIR"/*.tar)
+  shopt -u nullglob
+
+  [[ ${#tars[@]} -gt 0 ]] || die "No .tar files found in $IMAGES_DIR"
+
+  info "Loading ${#tars[@]} image(s) into Docker..."
+  for tar in "${tars[@]}"; do
+    local name
+    name="$(basename "$tar")"
+    echo -n "    $name ... "
+    docker load -i "$tar" 2>&1 | grep -oP '(?<=Loaded image: ).*' || echo ""
+  done
+  ok "All images loaded"
+}
+
+# ─── start ────────────────────────────────────────────────────────────────────
+cmd_start() {
+  require_compose; require_compose_file; require_env
+  ensure_data_dirs
+  ensure_cert
+  info "Starting cluster..."
+  compose_cmd up -d
+  echo ""
+  cmd_health || true      # wait for the cluster to settle, then show final health
+}
+
+# ─── stop ─────────────────────────────────────────────────────────────────────
+cmd_stop() {
+  require_compose; require_compose_file
+  info "Stopping cluster (containers paused, data preserved)..."
+  compose_cmd stop
+  ok "Stopped"
+}
+
+# ─── restart ──────────────────────────────────────────────────────────────────
+cmd_restart() {
+  require_compose; require_compose_file; require_env
+  ensure_cert   # proxy won't start without a TLS cert (e.g. after a cert swap)
+  local svc="${1:-}"
+  if [[ -n "$svc" ]]; then
+    info "Restarting $svc..."
+    compose_cmd restart "$svc"
+  else
+    info "Restarting all services..."
+    compose_cmd restart
+  fi
+  ok "Done"
+}
+
+# ─── down ─────────────────────────────────────────────────────────────────────
+cmd_down() {
+  require_compose; require_compose_file
+  info "Removing containers (named volumes preserved)..."
+  compose_cmd down
+  ok "Containers removed. Run: kafka start"
+}
+
+# ─── status ───────────────────────────────────────────────────────────────────
+cmd_status() {
+  require_compose; require_compose_file
+  compose_cmd ps
+}
+
+# ─── logs ─────────────────────────────────────────────────────────────────────
+cmd_logs() {
+  require_compose; require_compose_file
+  local follow=false
+  local args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--follow) follow=true; shift ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+
+  if $follow; then
+    compose_cmd logs -f --tail=50 "${args[@]}"
+  else
+    compose_cmd logs --tail=100 "${args[@]}"
+  fi
+}
+
+# ─── health ───────────────────────────────────────────────────────────────────
+# Count containers still in Docker's transient "starting" state — i.e. inside
+# their healthcheck start_period, not yet settled either way.
+health_pending_count() {
+  local cid n=0 h
+  while IFS= read -r cid; do
+    [[ -z "$cid" ]] && continue
+    h=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo none)
+    [[ "$h" == "starting" ]] && n=$((n + 1))
+  done <<< "$1"
+  echo "$n"
+}
+
+cmd_health() {
+  require_compose; require_compose_file
+
+  # A service reports "starting" until its start_period elapses, so a one-shot
+  # check straight after `kafka start` is a false negative (the proxy is the
+  # usual victim — it only starts once the UI, and thus every broker, is up).
+  # Wait for the cluster to settle by default; an already-settled cluster
+  # returns immediately, so this costs nothing once things are steady.
+  local wait=true timeout=120
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-wait) wait=false; shift ;;
+      --timeout) timeout="${2:?--timeout needs a value in seconds}"; shift 2 ;;
+      *)         die "Unknown option: $1 (usage: kafka health [--no-wait] [--timeout N])" ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+$ ]] || die "--timeout must be a whole number of seconds"
+
+  local container_ids
+  container_ids=$(compose_cmd ps -q 2>/dev/null || true)
+
+  if [[ -z "$container_ids" ]]; then
+    warn "No containers running. Run: kafka start"
+    return 1
+  fi
+
+  if $wait; then
+    local waited=0 interval=3 pending
+    pending=$(health_pending_count "$container_ids")
+    while (( pending > 0 )) && (( waited < timeout )); do
+      if [[ -t 1 ]]; then
+        printf "\r  ${DIM}waiting for %d service(s) to settle... %ds/%ds${RESET}" \
+          "$pending" "$waited" "$timeout"
+      fi
+      sleep "$interval"
+      waited=$(( waited + interval ))
+      container_ids=$(compose_cmd ps -q 2>/dev/null || true)
+      pending=$(health_pending_count "$container_ids")
+    done
+    if [[ -t 1 ]]; then
+      printf "\r\033[K"
+    fi
+  fi
+
+  sep
+  echo -e "${BOLD}  Service Health${RESET}"
+  sep
+  echo ""
+
+  local all_ok=true
+
+  while IFS= read -r cid; do
+    [[ -z "$cid" ]] && continue
+    local name status health
+    name=$(docker inspect --format='{{.Name}}' "$cid" | sed 's|^/||')
+    status=$(docker inspect --format='{{.State.Status}}' "$cid")
+    health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")
+
+    local label
+    if [[ "$health" == "healthy" ]]; then
+      label="${GREEN}healthy${RESET}"
+    elif [[ "$health" == "none" && "$status" == "running" ]]; then
+      label="${GREEN}running${RESET}"
+    elif [[ "$health" == "starting" ]]; then
+      label="${YELLOW}starting${RESET}"
+      all_ok=false
+    else
+      label="${RED}${health:-$status}${RESET}"
+      all_ok=false
+    fi
+
+    printf "  %-35s %b\n" "$name" "$label"
+  done <<< "$container_ids"
+
+  echo ""
+  if $all_ok; then
+    ok "All services healthy"
+  else
+    if $wait && (( $(health_pending_count "$container_ids") > 0 )); then
+      warn "Still starting after ${timeout}s — the cluster may just need longer."
+      warn "Retry with a longer wait: kafka health --timeout $(( timeout * 2 ))"
+    else
+      warn "Some services not ready. Run: kafka logs <service>"
+    fi
+    return 1
+  fi
+}
+
+# ─── ui ───────────────────────────────────────────────────────────────────────
+cmd_ui() {
+  local user pass fqdn hp port_suffix=""
+  user="$(env_value KAFKA_UI_USER)"
+  pass="$(env_value KAFKA_UI_PASSWORD)"
+  fqdn="$(get_fqdn)"
+  hp="$(env_value KAFKA_UI_HTTPS_PORT)"; hp="${hp:-443}"
+  [[ "$hp" != "443" ]] && port_suffix=":${hp}"
+
+  sep
+  echo -e "${BOLD}  Kafbat UI${RESET}"
+  sep
+  echo "  URL       https://${fqdn}${port_suffix}/"
+  [[ -n "$user" ]] && echo "  Username  $user"
+  [[ -n "$pass" ]] && echo "  Password  $pass"
+  echo -e "  ${DIM}TLS is a self-signed cert — trust certs/server.crt or proceed past the browser warning.${RESET}"
+  sep
+}
+
+# ─── config ───────────────────────────────────────────────────────────────────
+cmd_config() {
+  local action="${1:-show}"
+  shift || true
+
+  case "$action" in
+    show)
+      if [[ -f "$ENV_FILE" ]]; then
+        sep
+        echo -e "${BOLD}  $ENV_FILE${RESET}"
+        sep
+        cat "$ENV_FILE"
+        sep
+      else
+        warn ".env not found. Template:"
+        cat "$ENV_TEMPLATE"
+      fi
+      ;;
+    set)
+      local kv="${1:-}"
+      [[ -z "$kv" ]] && die "Usage: kafka config set KEY=VALUE"
+      local key="${kv%%=*}"
+      local val="${kv#*=}"
+      [[ -f "$ENV_FILE" ]] || cp "$ENV_TEMPLATE" "$ENV_FILE"
+      if grep -qE "^${key}=" "$ENV_FILE"; then
+        # Use a temp file for portability (avoids sed -i differences)
+        local tmp
+        tmp=$(mktemp)
+        sed "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
+      else
+        echo "${key}=${val}" >> "$ENV_FILE"
+      fi
+      ok "Set ${key}"
+      ;;
+    *)
+      die "Usage: kafka config [show | set KEY=VALUE]"
+      ;;
+  esac
+}
+
+# ─── uninstall ────────────────────────────────────────────────────────────────
+cmd_uninstall() {
+  require_compose; require_compose_file
+
+  local purge=false
+  [[ "${1:-}" == "--purge" ]] && purge=true
+
+  if $purge; then
+    echo ""
+    warn "WARNING: --purge will delete all Kafka data (broker logs, ZK state, offsets)."
+    warn "This is irreversible."
+    echo ""
+    read -rp "Type 'yes' to confirm purge: " confirm
+    [[ "$confirm" == "yes" ]] || die "Aborted."
+    info "Removing containers and volumes..."
+    compose_cmd down -v
+  else
+    info "Removing containers (volumes preserved)..."
+    compose_cmd down
+  fi
+  ok "Done"
+}
+
+# ─── doctor (preflight) ───────────────────────────────────────────────────────
+# Read-only checks run before touching the host. Catches the things that bite
+# a shared box: busy host ports, a firewalld/Docker NAT zone conflict, and a
+# missing/old Docker or Compose. Returns non-zero if a blocking issue is found.
+cmd_doctor() {
+  sep
+  echo -e "${BOLD}  Preflight Check${RESET}"
+  sep
+  echo ""
+
+  local problems=0
+
+  # ── Docker engine + daemon ──
+  info "Docker engine"
+  if command -v docker &>/dev/null; then
+    local dv
+    dv=$(docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if version_gte "$dv" "25.0.3"; then
+      ok "Docker $dv"
+    else
+      warn "Docker $dv — minimum required: 25.0.3"
+      problems=$((problems + 1))
+    fi
+    if docker info &>/dev/null 2>&1; then
+      ok "daemon is running"
+    else
+      err "daemon not running or not accessible — try: sudo systemctl start docker"
+      problems=$((problems + 1))
+    fi
+  else
+    err "docker not found — run: kafka docker-install"
+    problems=$((problems + 1))
+  fi
+  echo ""
+
+  # ── Compose ──
+  info "Docker Compose"
+  if [[ ${#COMPOSE_BIN[@]} -gt 0 ]]; then
+    local cv
+    cv=$(get_compose_version)
+    if version_gte "$cv" "1.29.2"; then
+      ok "${COMPOSE_BIN[*]} $cv"
+    else
+      warn "${COMPOSE_BIN[*]} $cv — minimum required: 1.29.2"
+      problems=$((problems + 1))
+    fi
+  else
+    err "Docker Compose not found — run: kafka docker-install"
+    problems=$((problems + 1))
+  fi
+  echo ""
+
+  # ── Bundle files ──
+  info "Bundle files"
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    ok "docker-compose.yml"
+  else
+    err "docker-compose.yml missing in $SCRIPT_DIR"
+    problems=$((problems + 1))
+  fi
+  if [[ -f "$ENV_FILE" ]]; then
+    ok ".env present"
+  else
+    warn ".env missing — it will be created from template on 'kafka install'"
+  fi
+  if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
+    ok "TLS certificate present"
+  elif command -v openssl &>/dev/null; then
+    ok "no TLS cert yet — will be generated with openssl on install"
+  else
+    err "no TLS cert and openssl not found — install/start will fail to generate one"
+    warn "Install openssl (e.g. apt-get install -y openssl) or drop a cert in certs/server.{crt,key}"
+    problems=$((problems + 1))
+  fi
+  echo ""
+
+  # ── Architecture match ──
+  # The bundled images are arch-specific; running them on a mismatched host
+  # fails at container start with "exec format error". Catch it here instead.
+  info "Architecture"
+  if [[ -f "$SCRIPT_DIR/.bundle-arch" ]]; then
+    local bundle_arch host_arch
+    bundle_arch="$(tr -d '[:space:]' < "$SCRIPT_DIR/.bundle-arch")"
+    host_arch="$(docker version --format '{{.Server.Arch}}' 2>/dev/null || true)"
+    if [[ -z "$host_arch" ]]; then
+      warn "bundle is $bundle_arch; could not determine host arch to compare"
+    elif [[ "$bundle_arch" == "$host_arch" ]]; then
+      ok "bundle $bundle_arch matches host $host_arch"
+    else
+      err "bundle is $bundle_arch but this host is $host_arch — images will not run (exec format error)."
+      err "Use the $host_arch bundle instead (kafka-<mode>-<ver>-$host_arch.tar.gz)."
+      problems=$((problems + 1))
+    fi
+  else
+    warn "no .bundle-arch marker — cannot verify architecture (older bundle?)"
+  fi
+  echo ""
+
+  # ── Host port availability ──
+  info "Host port availability"
+  local busy=0 ports
+  ports="$(get_published_ports)"
+  for p in $ports; do
+    if port_in_use "$p"; then
+      warn "port $p is already in use"
+      busy=$((busy + 1))
+    else
+      ok "port $p free"
+    fi
+  done
+  if (( busy > 0 )); then
+    warn "If this cluster is already running, in-use ports are expected (it's us)."
+    warn "Otherwise free them or change the external ports in .env before installing."
+  fi
+  echo ""
+
+  # ── Firewall / Docker NAT compatibility ──
+  info "Firewall (Docker NAT compatibility)"
+  if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+    if firewall-cmd --get-zones 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      local tgt
+      tgt="$(firewall-cmd --info-zone=docker 2>/dev/null | awk -F': ' '/target:/{print $2}' | tr -d '[:space:]')"
+      if [[ "$tgt" == "ACCEPT" ]]; then
+        ok "firewalld active, 'docker' zone present (target ACCEPT)"
+      else
+        warn "firewalld 'docker' zone target is '${tgt:-unknown}', not ACCEPT — containers may not reach each other."
+        warn "Fix: firewall-cmd --permanent --zone=docker --set-target=ACCEPT && firewall-cmd --reload && systemctl restart docker"
+        problems=$((problems + 1))
+      fi
+    else
+      warn "firewalld is active but has no 'docker' zone."
+      warn "Docker can abort with: Failed to program NAT chain: INVALID_ZONE: docker"
+      warn "Fix: firewall-cmd --permanent --new-zone=docker && firewall-cmd --permanent --zone=docker --set-target=ACCEPT && firewall-cmd --reload && systemctl restart docker"
+      problems=$((problems + 1))
+    fi
+  else
+    ok "firewalld not active — no NAT-zone conflict expected"
+  fi
+  echo ""
+
+  # ── iptables backend consistency ──
+  # If Docker's FORWARD rules end up in BOTH iptables-legacy and iptables-nft,
+  # one stale layer's default-drop silently blocks container-to-container traffic.
+  # Listing iptables rules needs root, so report honestly when we can't inspect.
+  info "iptables backend"
+  if [[ "$(id -u)" != "0" ]]; then
+    warn "not root — skipped the legacy/nft split-brain check (re-run as root to verify)"
+  else
+    local legacy_docker=false nft_docker=false
+    if iptables-legacy -S FORWARD 2>/dev/null | grep -q 'DOCKER'; then legacy_docker=true; fi
+    if iptables-nft     -S FORWARD 2>/dev/null | grep -q 'DOCKER'; then nft_docker=true; fi
+    if $legacy_docker && $nft_docker; then
+      err "Docker FORWARD rules exist in BOTH iptables-legacy and iptables-nft (split-brain)."
+      err "Container networking can break. Align on one backend, e.g.:"
+      err "  update-alternatives --set iptables /usr/sbin/iptables-nft && systemctl restart docker"
+      problems=$((problems + 1))
+    elif $legacy_docker || $nft_docker; then
+      ok "single iptables backend ($($legacy_docker && echo legacy || echo nf_tables))"
+    else
+      warn "no Docker FORWARD rules found in either backend — is Docker running? (couldn't verify)"
+    fi
+  fi
+  echo ""
+
+  sep
+  if (( problems == 0 )); then
+    ok "All preflight checks passed."
+    return 0
+  else
+    warn "$problems blocking issue(s) found — resolve them before 'kafka install'."
+    return 1
+  fi
+}
+
+# ─── docker-check ─────────────────────────────────────────────────────────────
+cmd_docker_check() {
+  sep
+  echo -e "${BOLD}  Docker Environment Check${RESET}"
+  sep
+  echo ""
+
+  local all_ok=true
+
+  # ── Docker binary + min version ──
+  if command -v docker &>/dev/null; then
+    local dv
+    dv=$(docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    ok "docker found at $(command -v docker)"
+    if version_gte "$dv" "25.0.3"; then
+      ok "Docker Engine $dv"
+    else
+      warn "Docker Engine $dv — minimum required: 25.0.3"
+      all_ok=false
+    fi
+  else
+    err "docker not found in PATH"
+    all_ok=false
+  fi
+
+  # ── Docker daemon ──
+  if docker info &>/dev/null 2>&1; then
+    ok "Docker daemon is running"
+  else
+    err "Docker daemon is not running or not accessible"
+    warn "  sudo systemctl start docker"
+    warn "  newgrp docker  (if recently added to docker group)"
+    all_ok=false
+  fi
+
+  # ── Compose binary + min version ──
+  if [[ ${#COMPOSE_BIN[@]} -gt 0 ]]; then
+    local cv
+    cv=$(get_compose_version)
+    if version_gte "$cv" "1.29.2"; then
+      ok "${COMPOSE_BIN[*]} ($cv)"
+    else
+      warn "${COMPOSE_BIN[*]} $cv — minimum required: 1.29.2"
+      all_ok=false
+    fi
+  else
+    err "Docker Compose not found"
+    warn "  Need: 'docker compose' plugin (v2) OR 'docker-compose' ≥1.29.2"
+    all_ok=false
+  fi
+
+  echo ""
+  if $all_ok; then
+    ok "Docker is ready"
+  else
+    warn "Issues found. Run: kafka docker-install"
+    return 1
+  fi
+}
+
+# ─── docker-install ───────────────────────────────────────────────────────────
+cmd_docker_install() {
+  local rebuild_hint="On an internet-connected build machine, rebuild the bundle with:
+  make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=<amd64|arm64>   # Debian/Ubuntu
+  make docker-rpms RHEL_VERSION=9 ARCH=<amd64|arm64>                 # RHEL/Rocky/Alma
+  make bundle VERSION=vN MODE=epc ARCH=<amd64|arm64> INCLUDE_DOCKER=1
+Then transfer the rebuilt bundle to this offline VM."
+
+  [[ -d "$DOCKER_OFFLINE_DIR" ]] || die "docker-offline/ not found in $SCRIPT_DIR
+This bundle was not packaged with Docker. $rebuild_hint"
+
+  shopt -s nullglob
+  local debs=("$DOCKER_OFFLINE_DIR"/*.deb)
+  local rpms=("$DOCKER_OFFLINE_DIR"/*.rpm)
+  shopt -u nullglob
+
+  # The bundle carries one package family, matched to the target OS at build
+  # time. Pick the installer that matches what is actually here.
+  if [[ ${#rpms[@]} -gt 0 && ${#debs[@]} -gt 0 ]]; then
+    die "$DOCKER_OFFLINE_DIR holds both .rpm and .deb packages; refusing to guess.
+Rebuild the bundle for a single target OS."
+  elif [[ ${#rpms[@]} -gt 0 ]]; then
+    docker_install_rpm "${rpms[@]}"
+  elif [[ ${#debs[@]} -gt 0 ]]; then
+    docker_install_deb "${debs[@]}"
+  else
+    die "No .deb or .rpm files in $DOCKER_OFFLINE_DIR
+$rebuild_hint"
+  fi
+
+  sudo systemctl enable docker
+  sudo systemctl start docker
+
+  if ! groups "$USER" 2>/dev/null | grep -q '\bdocker\b'; then
+    sudo usermod -aG docker "$USER"
+    warn "Added $USER to docker group."
+    warn "Run 'newgrp docker' or log out and back in before using Docker without sudo."
+  fi
+
+  echo ""
+  ok "$(docker --version)"
+  ok "$(docker compose version 2>/dev/null || docker-compose version 2>/dev/null)"
+  ok "Docker installed successfully."
+}
+
+# RHEL family. dnf resolves install order and inter-package deps itself, so the
+# whole set goes in one transaction. --disablerepo='*' keeps it strictly offline:
+# every dependency must already be on the box or in the bundle, and we fail
+# loudly rather than silently reaching for a network repo that isn't there.
+docker_install_rpm() {
+  local -a rpms=("$@")
+  info "Installing Docker CE from ${#rpms[@]} bundled RPM packages..."
+  echo ""
+  printf '  %s\n' "${rpms[@]##*/}"
+  echo ""
+
+  local installer=""
+  if command -v dnf &>/dev/null; then installer=dnf
+  elif command -v yum &>/dev/null; then installer=yum
+  else
+    die "Neither dnf nor yum found — cannot install RPM packages on this host."
+  fi
+
+  if ! sudo "$installer" install -y --disablerepo='*' "${rpms[@]}"; then
+    die "$installer could not install the bundled packages offline.
+This usually means a dependency (commonly container-selinux) is missing from
+both the host and the bundle. Either install it from your RHEL media/Satellite:
+  sudo $installer install -y container-selinux
+or rebuild the bundle so the dependency is included."
+  fi
+}
+
+# Debian/Ubuntu. dpkg does not resolve dependencies, so install in dependency
+# order and let 'apt-get install -f' repair anything left over.
+docker_install_deb() {
+  local -a debs=("$@")
+  info "Installing Docker CE from ${#debs[@]} bundled packages..."
+  echo ""
+
+  local order=(containerd.io docker-ce-cli docker-ce docker-compose-plugin)
+  local -a matches
+  for pkg in "${order[@]}"; do
+    matches=()
+    for f in "${debs[@]}"; do
+      if [[ "$(basename "$f")" == "${pkg}_"* ]]; then
+        matches+=("$f")
+      fi
+    done
+    if [[ ${#matches[@]} -eq 1 ]]; then
+      echo "  Installing $(basename "${matches[0]}")..."
+      sudo dpkg -i "${matches[0]}" || true
+    elif [[ ${#matches[@]} -eq 0 ]]; then
+      warn "Package not found in bundle: $pkg"
+    else
+      die "Multiple packages found for $pkg; refusing to choose one:
+$(printf '  %s\n' "${matches[@]}")"
+    fi
+  done
+
+  echo ""
+  info "Resolving any remaining dependencies..."
+  sudo apt-get install -f -y 2>/dev/null || true
+}
+
+# ─── lag ──────────────────────────────────────────────────────────────────────
+cmd_lag() {
+  require_compose; require_compose_file
+
+  local group=""
+  local topic=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --group|-g) group="$2"; shift 2 ;;
+      --topic|-t) topic="$2"; shift 2 ;;
+      -*)         die "Unknown option: $1. Usage: kafka lag [group] [--topic <topic>]" ;;
+      *)          group="$1"; shift ;;
+    esac
+  done
+
+  local broker
+  broker=$(find_broker)
+
+  if [[ -n "$group" ]]; then
+    # ── Detailed view: one group, per-partition breakdown ─────────────────────
+    sep
+    printf "${BOLD}  Consumer Group: %s${RESET}\n" "$group"
+    [[ -n "$topic" ]] && printf "  Topic filter:   %s\n" "$topic"
+    sep
+    echo ""
+
+    local raw
+    raw=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+      --bootstrap-server "$BOOTSTRAP" \
+      --describe --group "$group" 2>&1) || die "Failed to describe group '$group'"
+
+    if echo "$raw" | grep -qiE "does not exist|group .* not found"; then
+      die "Consumer group '$group' does not exist."
+    fi
+
+    [[ -n "$topic" ]] && raw=$(echo "$raw" | awk -v t="$topic" 'NR==1 || $2==t')
+
+    printf "  ${BOLD}%-32s %-9s %-15s %-15s %-10s %-22s${RESET}\n" \
+      "TOPIC" "PARTITION" "CURRENT-OFFSET" "LOG-END-OFFSET" "LAG" "CONSUMER-ID"
+    sep
+
+    local total_lag=0 partition_count=0
+
+    while IFS= read -r line; do
+      [[ "$line" =~ ^GROUP ]] && continue
+      [[ -z "$(echo "$line" | tr -d '[:space:]')" ]] && continue
+
+      local grp t part cur_off log_end lag consumer_id
+      grp=$(         echo "$line" | awk '{print $1}')
+      t=$(           echo "$line" | awk '{print $2}')
+      part=$(        echo "$line" | awk '{print $3}')
+      cur_off=$(     echo "$line" | awk '{print $4}')
+      log_end=$(     echo "$line" | awk '{print $5}')
+      lag=$(         echo "$line" | awk '{print $6}')
+      consumer_id=$( echo "$line" | awk '{print $7}')
+
+      # Truncate consumer-id for readability
+      local short_cid="${consumer_id:0:20}"
+      [[ "${#consumer_id}" -gt 20 ]] && short_cid="${short_cid}…"
+
+      local lag_col
+      if [[ "$lag" =~ ^[0-9]+$ ]]; then
+        if   [[ "$lag" -eq 0 ]];    then lag_col="${GREEN}${lag}${RESET}"
+        elif [[ "$lag" -lt 1000 ]]; then lag_col="${YELLOW}${lag}${RESET}"
+        else                             lag_col="${RED}${lag}${RESET}"
+        fi
+        total_lag=$((total_lag + lag))
+        ((partition_count += 1)) || true
+      else
+        lag_col="${DIM}${lag:-—}${RESET}"
+      fi
+
+      printf "  %-32s %-9s %-15s %-15s %-10b %-22s\n" \
+        "$t" "$part" "$cur_off" "$log_end" "$lag_col" "$short_cid"
+
+    done <<< "$raw"
+
+    sep
+    printf "  Partitions: %-6s  Total lag: " "$partition_count"
+    if   [[ "$total_lag" -eq 0 ]];    then echo -e "${GREEN}${total_lag}${RESET}  (caught up)"
+    elif [[ "$total_lag" -lt 1000 ]]; then echo -e "${YELLOW}${total_lag}${RESET}"
+    else                                   echo -e "${RED}${total_lag}${RESET}  — consumer is behind"
+    fi
+    echo ""
+
+  else
+    # ── Summary view: all groups ──────────────────────────────────────────────
+    sep
+    echo -e "${BOLD}  Consumer Group Lag Summary${RESET}"
+    [[ -n "$topic" ]] && echo -e "  Topic filter: ${topic}"
+    sep
+    echo ""
+
+    local groups
+    groups=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+      --bootstrap-server "$BOOTSTRAP" \
+      --list 2>/dev/null | grep -v "^$" | sort) || die "Failed to list consumer groups"
+
+    if [[ -z "$groups" ]]; then
+      warn "No consumer groups found."
+      return
+    fi
+
+    printf "  ${BOLD}%-42s %-12s %-12s %s${RESET}\n" "GROUP" "PARTITIONS" "TOTAL LAG" "STATUS"
+    sep
+
+    local group_count=0 lagging_count=0
+
+    while IFS= read -r grp; do
+      [[ -z "$grp" ]] && continue
+
+      local raw_desc
+      raw_desc=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+        --bootstrap-server "$BOOTSTRAP" \
+        --describe --group "$grp" 2>/dev/null || true)
+
+      [[ -n "$topic" ]] && raw_desc=$(echo "$raw_desc" | awk -v t="$topic" 'NR==1 || $2==t')
+
+      local total_lag=0 part_count=0
+      while IFS= read -r line; do
+        [[ "$line" =~ ^GROUP ]] && continue
+        [[ -z "$(echo "$line" | tr -d '[:space:]')" ]] && continue
+        local lag
+        lag=$(echo "$line" | awk '{print $6}')
+        if [[ "$lag" =~ ^[0-9]+$ ]]; then
+          total_lag=$((total_lag + lag))
+          ((part_count += 1)) || true
+        fi
+      done <<< "$raw_desc"
+
+      # Skip groups with no matching partitions when filtering by topic
+      [[ "$part_count" -eq 0 && -n "$topic" ]] && continue
+
+      local status_col
+      if   [[ "$total_lag" -eq 0 ]];    then status_col="${GREEN}caught up${RESET}"
+      elif [[ "$total_lag" -lt 1000 ]]; then status_col="${YELLOW}lagging${RESET}";  ((lagging_count += 1)) || true
+      else                                   status_col="${RED}behind${RESET}";    ((lagging_count += 1)) || true
+      fi
+
+      printf "  %-42s %-12s %-12s %b\n" "$grp" "$part_count" "$total_lag" "$status_col"
+      ((group_count += 1)) || true
+
+    done <<< "$groups"
+
+    echo ""
+    sep
+    printf "  %s group(s)   %s with lag > 0\n" "$group_count" "$lagging_count"
+    echo ""
+    echo -e "  ${DIM}Drill down:  kafka lag <group-name>"
+    echo -e "  Topic only:  kafka lag --topic <topic-name>${RESET}"
+    echo ""
+  fi
+}
+
+# ─── help ─────────────────────────────────────────────────────────────────────
+cmd_help() {
+  echo ""
+  echo -e "${BOLD}kafka${RESET} — Kafka cluster management CLI"
+  echo ""
+  echo -e "${BOLD}USAGE${RESET}"
+  echo "  kafka <command> [options]"
+  echo ""
+  echo -e "${BOLD}COMMANDS${RESET}"
+  printf "  %-30s %s\n" "install"              "First-time setup: load images, configure, start"
+  printf "  %-30s %s\n" "start"                "Start all services"
+  printf "  %-30s %s\n" "stop"                 "Stop all services (data preserved)"
+  printf "  %-30s %s\n" "restart [service]"    "Restart all or a specific service"
+  printf "  %-30s %s\n" "down"                 "Remove containers (volumes preserved)"
+  printf "  %-30s %s\n" "status"               "Show running service state"
+  printf "  %-30s %s\n" "logs [-f] [service]"  "Show logs; -f to follow"
+  printf "  %-30s %s\n" "health"               "Health of all services; waits for any still starting"
+  printf "  %-30s %s\n" "health --no-wait"     "Health as an instant snapshot, without waiting"
+  printf "  %-30s %s\n" "health --timeout N"   "Wait up to N seconds to settle (default 120)"
+  printf "  %-30s %s\n" "lag"                  "Summary of all consumer group lag"
+  printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
+  printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
+  printf "  %-30s %s\n" "ui"                   "Show Kafbat UI URL and credentials"
+  printf "  %-30s %s\n" "config"               "Show current .env config"
+  printf "  %-30s %s\n" "config set KEY=VAL"   "Set a config value in .env"
+  printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
+  printf "  %-30s %s\n" "uninstall"            "Remove containers (volumes kept)"
+  printf "  %-30s %s\n" "uninstall --purge"    "Remove containers AND delete all data"
+  printf "  %-30s %s\n" "doctor"               "Preflight checks (ports, firewalld, Docker) before install"
+  printf "  %-30s %s\n" "gen-cert"             "(Re)generate the self-signed TLS cert for the UI"
+  printf "  %-30s %s\n" "docker-check"         "Verify Docker installation"
+  printf "  %-30s %s\n" "docker-install"       "Install Docker from bundled .deb/.rpm packages"
+  echo ""
+  echo -e "${BOLD}EXAMPLES${RESET}"
+  echo "  kafka doctor                          # preflight checks before installing"
+  echo "  kafka install                         # full first-time setup"
+  echo "  kafka logs -f kafka-92                # tail broker 92 logs"
+  echo "  kafka restart kafka-ui                # restart Kafbat UI"
+  echo "  kafka config set KAFKA_UI_USER=admin"
+  echo "  kafka health                          # check all service health"
+  echo "  kafka lag                             # all consumer groups + lag"
+  echo "  kafka lag my-app-consumer             # per-partition detail"
+  echo "  kafka lag --topic orders              # all groups on 'orders' topic"
+  echo "  kafka lag my-group --topic payments   # specific group + topic"
+  echo "  kafka uninstall --purge               # full teardown + data wipe"
+  echo ""
+  echo -e "${BOLD}SERVICES${RESET}"
+  echo "  kafka-92   kafka-93   kafka-ui   proxy"
+  echo ""
+}
+
+# ─── dispatch ─────────────────────────────────────────────────────────────────
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  install)        cmd_install "$@" ;;
+  load-images)    cmd_load_images ;;
+  start)          cmd_start ;;
+  stop)           cmd_stop ;;
+  restart)        cmd_restart "$@" ;;
+  down)           cmd_down ;;
+  status)         cmd_status ;;
+  logs)           cmd_logs "$@" ;;
+  health)         cmd_health "$@" ;;
+  lag)            cmd_lag "$@" ;;
+  ui)             cmd_ui ;;
+  config)         cmd_config "$@" ;;
+  uninstall)      cmd_uninstall "$@" ;;
+  doctor)         cmd_doctor ;;
+  gen-cert)       cmd_gen_cert ;;
+  docker-check)   cmd_docker_check ;;
+  docker-install) cmd_docker_install ;;
+  help|--help|-h) cmd_help ;;
+  *)              err "Unknown command: $CMD"; cmd_help; exit 1 ;;
+esac
