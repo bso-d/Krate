@@ -50,6 +50,10 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: ${KAFKA_LOG_RETENTION_HOURS:-168}
+      # Per-partition-replica size cap. Whichever limit is hit first — time or
+      # bytes — triggers deletion. Without this, retention is time-only and a
+      # traffic spike can fill /data before the 168h window ever elapses.
+      KAFKA_LOG_RETENTION_BYTES: ${KAFKA_LOG_RETENTION_BYTES:-2147483648}
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
       KAFKA_LOG_SEGMENT_BYTES: ${KAFKA_LOG_SEGMENT_BYTES:-1073741824}
     volumes:
@@ -106,6 +110,10 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: ${KAFKA_LOG_RETENTION_HOURS:-168}
+      # Per-partition-replica size cap. Whichever limit is hit first — time or
+      # bytes — triggers deletion. Without this, retention is time-only and a
+      # traffic spike can fill /data before the 168h window ever elapses.
+      KAFKA_LOG_RETENTION_BYTES: ${KAFKA_LOG_RETENTION_BYTES:-2147483648}
       KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
       KAFKA_LOG_SEGMENT_BYTES: ${KAFKA_LOG_SEGMENT_BYTES:-1073741824}
     volumes:

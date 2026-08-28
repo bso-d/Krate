@@ -191,6 +191,88 @@ ensure_cert() {
   cmd_gen_cert
 }
 
+# Human-readable size from a kilobyte count.
+fmt_kb() {
+  awk -v k="${1:-0}" 'BEGIN{
+    if (k >= 1048576)      printf "%.1f GB", k/1048576;
+    else if (k >= 1024)    printf "%.0f MB", k/1024;
+    else                   printf "%d KB", k;
+  }'
+}
+
+# ─── disk (data-disk usage vs the budget) ─────────────────────────────────────
+# Kafka has no global disk quota. log.retention.bytes caps a single partition
+# replica, so the real ceiling is topics x partitions x RF x that cap, and every
+# new topic raises it. This reports what is on disk now and what the current
+# settings allow it to become.
+cmd_disk() {
+  local base pct parts cap_bytes
+  base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
+  pct="$(env_value KAFKA_DATA_BUDGET_PCT)"; pct="${pct:-60}"
+  parts="$(env_value KAFKA_NUM_PARTITIONS)"; parts="${parts:-24}"
+  cap_bytes="$(env_value KAFKA_LOG_RETENTION_BYTES)"; cap_bytes="${cap_bytes:-2147483648}"
+
+  [[ -d "$base" ]] || die "Data disk $base not found."
+
+  step "Data disk — $base"
+  echo ""
+
+  local total_kb avail_kb used_kb
+  read -r total_kb used_kb avail_kb < <(df -Pk "$base" | awk 'NR==2{print $2, $3, $4}')
+
+  local kafka_kb=0 d sub
+  for node in 92 93; do
+    d="$base/krate/broker-$node"
+    sub="$(du -sk "$d" 2>/dev/null | awk '{print $1}')"
+    sub="${sub:-0}"
+    kafka_kb=$((kafka_kb + sub))
+    printf "  %-28s %s\n" "broker-$node" "$(fmt_kb "$sub")"
+  done
+
+  echo ""
+  printf "  %-28s %s\n" "kafka total"     "$(fmt_kb "$kafka_kb")"
+  printf "  %-28s %s\n" "disk used (all)" "$(fmt_kb "$used_kb")"
+  printf "  %-28s %s\n" "disk free"       "$(fmt_kb "$avail_kb")"
+  printf "  %-28s %s\n" "disk size"       "$(fmt_kb "$total_kb")"
+  echo ""
+
+  # Budget check — kafka's own footprint against the configured share.
+  local budget_kb
+  budget_kb=$(awk -v t="$total_kb" -v p="$pct" 'BEGIN{printf "%d", t*p/100}')
+  local pct_now
+  pct_now=$(awk -v k="$kafka_kb" -v t="$total_kb" 'BEGIN{printf "%.1f", (t>0)? k*100/t : 0}')
+  if (( kafka_kb > budget_kb )); then
+    warn "Kafka is using ${pct_now}% of $base — over the ${pct}% budget."
+    warn "Lower KAFKA_LOG_RETENTION_BYTES or KAFKA_LOG_RETENTION_HOURS, or delete unused topics."
+  else
+    ok "Kafka is using ${pct_now}% of $base (budget ${pct}%)."
+  fi
+
+  # Ceiling implied by the current settings, per topic.
+  echo ""
+  info "Ceiling from current settings"
+  local per_topic_gb
+  per_topic_gb=$(awk -v p="$parts" -v c="$cap_bytes" 'BEGIN{printf "%.0f", p*2*c/1073741824}')
+  echo "  $parts partitions x RF 2 x $(awk -v c="$cap_bytes" 'BEGIN{printf "%.0f", c/1073741824}') GiB = ~${per_topic_gb} GB of $base per topic"
+  local max_topics
+  max_topics=$(awk -v b="$budget_kb" -v g="$per_topic_gb" 'BEGIN{printf "%d", (g>0)? b/1048576/g : 0}')
+  echo "  the ${pct}% budget covers about $max_topics such topic(s)"
+  echo ""
+  note_auto_create
+}
+
+# Auto-created topics count against the same disk, without an admin in the loop.
+note_auto_create() {
+  local ac
+  ac="$(env_value KAFKA_AUTO_CREATE_TOPICS_ENABLE)"
+  if [[ -z "$ac" && -f "$COMPOSE_FILE" ]]; then
+    ac="$(grep -m1 'KAFKA_AUTO_CREATE_TOPICS_ENABLE' "$COMPOSE_FILE" | tr -d '"' | awk -F': *' '{print $2}')"
+  fi
+  if [[ "$ac" != "false" ]]; then
+    warn "auto.create.topics.enable is on — clients can add topics, and disk, on their own."
+  fi
+}
+
 # ─── Broker data directories ──────────────────────────────────────────────────
 # Broker logs are bind-mounted from KAFKA_DATA_DIR (the /data disk), not a docker
 # named volume. A bind mount keeps the HOST directory's ownership, so each dir
@@ -225,6 +307,11 @@ Run this, then re-run the install:
   sudo chown -R $uid:$gid $base/krate"
     fi
   done
+  local avail_gb
+  avail_gb="$(df -Pk "$base" 2>/dev/null | awk 'NR==2{printf "%.0f", $4/1048576}')"
+  if [[ -n "$avail_gb" ]] && (( avail_gb < 50 )); then
+    warn "Only ${avail_gb} GB free on $base — check ./kafka disk before loading traffic."
+  fi
   ok "Broker data directories ready under $base/krate"
 }
 
@@ -1088,6 +1175,7 @@ cmd_help() {
   printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
   printf "  %-30s %s\n" "uninstall"            "Remove containers (volumes kept)"
   printf "  %-30s %s\n" "uninstall --purge"    "Remove containers AND delete all data"
+  printf "  %-30s %s\n" "disk"                 "Data-disk usage vs the configured budget"
   printf "  %-30s %s\n" "doctor"               "Preflight checks (ports, firewalld, Docker) before install"
   printf "  %-30s %s\n" "gen-cert"             "(Re)generate the self-signed TLS cert for the UI"
   printf "  %-30s %s\n" "docker-check"         "Verify Docker installation"
@@ -1129,6 +1217,7 @@ case "$CMD" in
   ui)             cmd_ui ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
+  disk)           cmd_disk ;;
   doctor)         cmd_doctor ;;
   gen-cert)       cmd_gen_cert ;;
   docker-check)   cmd_docker_check ;;

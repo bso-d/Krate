@@ -80,13 +80,33 @@ domain. Splitting out 3 dedicated controllers is the fix if that changes.
   manifest does not match `TARGET_OS`/`ARCH`. Prevents a noble deb set landing in
   a RHEL bundle and failing on the VM long after the build.
 
-### 5. Not done yet
+### 5. Disk ceiling on /data (1000 GB, both VMs)
+`/data` is 1000 GB on each VM and must not be run to the limit. Two facts drive
+the sizing: both brokers write to the **same** disk, and RF=2 means every record
+is stored twice — so `/data` holds **2x the logical data**. Time-based retention
+alone cannot bound that; a traffic spike fills the disk long before 168 h elapses.
+
+- Added `KAFKA_LOG_RETENTION_BYTES` (default **2 GiB**, per partition replica) so
+  whichever limit is hit first — time or bytes — triggers deletion.
+- The real ceiling is `topics x partitions x RF x cap`. At 24 partitions and the
+  2 GiB default that is **~96 GB of /data per topic**, so a 60 % budget
+  (600 GB) covers about **6 topics**. The table is in `epc/.env.template`.
+- `KAFKA_DATA_BUDGET_PCT` (default 60) plus a new **`./kafka disk`** command
+  reports actual per-broker usage, the share of the disk used, and how many
+  topics the current settings still allow. `ensure_data_dirs` warns below 50 GB
+  free.
+- **Open risk:** `auto.create.topics.enable` is `true` (inherited from `kraft/`),
+  so clients can create topics — and consume disk — with no admin in the loop.
+  `./kafka disk` warns about it; turning it off was not done, as it would change
+  producer behaviour that has not been agreed.
+
+### 6. Not done yet
 - [ ] Nothing has been **built or booted**. Docker is not running on the build
       machine, so no `docker-rpms` run and no bundle exists. `make check` passes
       (bash -n, shellcheck, compose config for zk/kraft/epc).
-- [ ] Second VM not surveyed — assumed RHEL 9.6/x86_64 like `-03`, unverified.
-- [ ] `/data` capacity unknown on both VMs; retention (168 h default) has not
-      been sized against it. `/var/lib` only had 15.1 GB free.
+- [x] `/data` sized — 1000 GB on both VMs; byte cap and budget added (see 5).
+- [ ] VM2 confirmed **RHEL 9.6 / x86_64**, same as `-03`, so one
+      `rhel9/amd64` bundle serves both. Neither has been surveyed post-change.
 - [ ] EPC release version/tag not chosen; `README` still documents zk/kraft only.
 - [ ] A throwaway VM survey script lives at repo root (`vm-survey.sh`,
       `vm-survey.mk`) — interim tooling, deliberately untracked.
