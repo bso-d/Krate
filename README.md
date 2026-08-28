@@ -13,6 +13,8 @@ Both include 4 brokers, 24 partitions per topic, and [Kafbat UI](https://github.
 
 **Requirements:** Docker Engine ≥25.0.3 and Docker Compose ≥1.29.2 (`docker compose` plugin or standalone `docker-compose`)
 
+**Architecture:** see [`docs/architecture.html`](docs/architecture.html) for the KRaft microarchitecture (producer, consumer, brokers, replication, quorum) and the operational/build planes.
+
 ---
 
 ## Quick Start (online machine)
@@ -252,9 +254,7 @@ If Docker ≥25.0.3 is already installed with the legacy `docker-compose` (v1 �
 │   ├── .env.template
 │   └── kafka                 CLI tool
 ├── Makefile                  Build, validation, and image-transfer workflow
-└── docker-compose.yml        Original multi-cluster reference setup
+└── docs/
+    └── architecture.html     Microarchitecture + operational/build diagrams
 ```
 
----
-
-Built with [Claude](https://claude.ai) by Anthropic.
