@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# kafka — Kafka cluster management CLI
-# Usage: kafka <command> [options]
+# krate — Krate (Kafka) cluster management CLI
+# Usage: krate <command> [options]
 
 set -euo pipefail
 
@@ -60,7 +60,7 @@ get_compose_version() {
 # ─── Prerequisites ────────────────────────────────────────────────────────────
 require_docker() {
   if ! command -v docker &>/dev/null; then
-    die "Docker not found. Run: kafka docker-install"
+    die "Docker not found. Run: krate docker-install"
   fi
   if ! docker info &>/dev/null 2>&1; then
     die "Docker daemon is not running or not accessible.
@@ -73,7 +73,7 @@ require_compose() {
   require_docker
   if [[ ${#COMPOSE_BIN[@]} -eq 0 ]]; then
     die "Docker Compose not found. Need 'docker compose' plugin or 'docker-compose' ≥1.29.2.
-Run: kafka docker-install"
+Run: krate docker-install"
   fi
 }
 
@@ -90,7 +90,7 @@ require_env() {
       warn "Review credentials in $ENV_FILE before starting:"
       echo "    nano $ENV_FILE"
       echo ""
-      die "Edit .env, then run: kafka install"
+      die "Edit .env, then run: krate install"
     else
       die ".env not found and no .env.template available. Create $ENV_FILE with KAFKA_UI_USER and KAFKA_UI_PASSWORD."
     fi
@@ -117,7 +117,7 @@ find_broker() {
       fi
     fi
   done
-  die "No running broker found. Run: kafka start"
+  die "No running broker found. Run: krate start"
 }
 
 # Internal listener — reachable from inside the compose network only.
@@ -265,11 +265,13 @@ cmd_disk() {
 note_auto_create() {
   local ac
   ac="$(env_value KAFKA_AUTO_CREATE_TOPICS_ENABLE)"
-  if [[ -z "$ac" && -f "$COMPOSE_FILE" ]]; then
-    ac="$(grep -m1 'KAFKA_AUTO_CREATE_TOPICS_ENABLE' "$COMPOSE_FILE" | tr -d '"' | awk -F': *' '{print $2}')"
-  fi
-  if [[ "$ac" != "false" ]]; then
-    warn "auto.create.topics.enable is on — clients can add topics, and disk, on their own."
+  # Only "true" is on; anything else (unset, false, an unresolved compose
+  # default) leaves creation in the hands of an admin or the UI.
+  if [[ "$ac" == "true" ]]; then
+    warn "auto.create.topics.enable is ON — clients can add topics, and disk, on their own."
+    warn "The per-topic ceiling above is then a floor, not a limit."
+  else
+    ok "auto.create.topics.enable is off — topics are created explicitly (UI / AdminClient)."
   fi
 }
 
@@ -291,7 +293,7 @@ ensure_data_dirs() {
 
   [[ -d "$base" ]] || die "Data disk $base does not exist.
 Mount it (or set a different path) before installing:
-  kafka config set KAFKA_DATA_DIR=/path/to/disk"
+  krate config set KAFKA_DATA_DIR=/path/to/disk"
 
   for node in 92 93; do
     d="$base/krate/broker-$node"
@@ -310,7 +312,7 @@ Run this, then re-run the install:
   local avail_gb
   avail_gb="$(df -Pk "$base" 2>/dev/null | awk 'NR==2{printf "%.0f", $4/1048576}')"
   if [[ -n "$avail_gb" ]] && (( avail_gb < 50 )); then
-    warn "Only ${avail_gb} GB free on $base — check ./kafka disk before loading traffic."
+    warn "Only ${avail_gb} GB free on $base — check ./krate disk before loading traffic."
   fi
   ok "Broker data directories ready under $base/krate"
 }
@@ -335,7 +337,7 @@ cmd_install() {
   # 1. Preflight — fail safe with guidance instead of half-applying
   if ! cmd_doctor; then
     echo ""
-    die "Preflight checks failed — fix the issues above, then re-run: kafka install"
+    die "Preflight checks failed — fix the issues above, then re-run: krate install"
   fi
   require_compose_file
   echo ""
@@ -348,8 +350,8 @@ cmd_install() {
     [[ -f "$ENV_TEMPLATE" ]] || die ".env.template not found in $SCRIPT_DIR"
     cp "$ENV_TEMPLATE" "$ENV_FILE"
     warn "Created .env from template with default credentials."
-    warn "To change them: kafka config set KAFKA_UI_USER=youruser"
-    warn "                kafka config set KAFKA_UI_PASSWORD=yourpass"
+    warn "To change them: krate config set KAFKA_UI_USER=youruser"
+    warn "                krate config set KAFKA_UI_PASSWORD=yourpass"
   fi
   echo ""
 
@@ -377,8 +379,8 @@ cmd_install() {
   sep
   cmd_ui
   echo ""
-  echo -e "  ${DIM}kafka status     — check running services"
-  echo -e "  kafka logs -f    — follow all logs${RESET}"
+  echo -e "  ${DIM}krate status     — check running services"
+  echo -e "  krate logs -f    — follow all logs${RESET}"
   echo ""
 }
 
@@ -442,7 +444,7 @@ cmd_down() {
   require_compose; require_compose_file
   info "Removing containers (named volumes preserved)..."
   compose_cmd down
-  ok "Containers removed. Run: kafka start"
+  ok "Containers removed. Run: krate start"
 }
 
 # ─── status ───────────────────────────────────────────────────────────────────
@@ -488,7 +490,7 @@ cmd_health() {
   require_compose; require_compose_file
 
   # A service reports "starting" until its start_period elapses, so a one-shot
-  # check straight after `kafka start` is a false negative (the proxy is the
+  # check straight after `krate start` is a false negative (the proxy is the
   # usual victim — it only starts once the UI, and thus every broker, is up).
   # Wait for the cluster to settle by default; an already-settled cluster
   # returns immediately, so this costs nothing once things are steady.
@@ -497,7 +499,7 @@ cmd_health() {
     case "$1" in
       --no-wait) wait=false; shift ;;
       --timeout) timeout="${2:?--timeout needs a value in seconds}"; shift 2 ;;
-      *)         die "Unknown option: $1 (usage: kafka health [--no-wait] [--timeout N])" ;;
+      *)         die "Unknown option: $1 (usage: krate health [--no-wait] [--timeout N])" ;;
     esac
   done
   [[ "$timeout" =~ ^[0-9]+$ ]] || die "--timeout must be a whole number of seconds"
@@ -506,7 +508,7 @@ cmd_health() {
   container_ids=$(compose_cmd ps -q 2>/dev/null || true)
 
   if [[ -z "$container_ids" ]]; then
-    warn "No containers running. Run: kafka start"
+    warn "No containers running. Run: krate start"
     return 1
   fi
 
@@ -564,9 +566,9 @@ cmd_health() {
   else
     if $wait && (( $(health_pending_count "$container_ids") > 0 )); then
       warn "Still starting after ${timeout}s — the cluster may just need longer."
-      warn "Retry with a longer wait: kafka health --timeout $(( timeout * 2 ))"
+      warn "Retry with a longer wait: krate health --timeout $(( timeout * 2 ))"
     else
-      warn "Some services not ready. Run: kafka logs <service>"
+      warn "Some services not ready. Run: krate logs <service>"
     fi
     return 1
   fi
@@ -611,7 +613,7 @@ cmd_config() {
       ;;
     set)
       local kv="${1:-}"
-      [[ -z "$kv" ]] && die "Usage: kafka config set KEY=VALUE"
+      [[ -z "$kv" ]] && die "Usage: krate config set KEY=VALUE"
       local key="${kv%%=*}"
       local val="${kv#*=}"
       [[ -f "$ENV_FILE" ]] || cp "$ENV_TEMPLATE" "$ENV_FILE"
@@ -626,7 +628,7 @@ cmd_config() {
       ok "Set ${key}"
       ;;
     *)
-      die "Usage: kafka config [show | set KEY=VALUE]"
+      die "Usage: krate config [show | set KEY=VALUE]"
       ;;
   esac
 }
@@ -684,7 +686,7 @@ cmd_doctor() {
       problems=$((problems + 1))
     fi
   else
-    err "docker not found — run: kafka docker-install"
+    err "docker not found — run: krate docker-install"
     problems=$((problems + 1))
   fi
   echo ""
@@ -701,7 +703,7 @@ cmd_doctor() {
       problems=$((problems + 1))
     fi
   else
-    err "Docker Compose not found — run: kafka docker-install"
+    err "Docker Compose not found — run: krate docker-install"
     problems=$((problems + 1))
   fi
   echo ""
@@ -717,7 +719,7 @@ cmd_doctor() {
   if [[ -f "$ENV_FILE" ]]; then
     ok ".env present"
   else
-    warn ".env missing — it will be created from template on 'kafka install'"
+    warn ".env missing — it will be created from template on 'krate install'"
   fi
   if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
     ok "TLS certificate present"
@@ -823,7 +825,7 @@ cmd_doctor() {
     ok "All preflight checks passed."
     return 0
   else
-    warn "$problems blocking issue(s) found — resolve them before 'kafka install'."
+    warn "$problems blocking issue(s) found — resolve them before 'krate install'."
     return 1
   fi
 }
@@ -883,7 +885,7 @@ cmd_docker_check() {
   if $all_ok; then
     ok "Docker is ready"
   else
-    warn "Issues found. Run: kafka docker-install"
+    warn "Issues found. Run: krate docker-install"
     return 1
   fi
 }
@@ -1003,7 +1005,7 @@ cmd_lag() {
     case "$1" in
       --group|-g) group="$2"; shift 2 ;;
       --topic|-t) topic="$2"; shift 2 ;;
-      -*)         die "Unknown option: $1. Usage: kafka lag [group] [--topic <topic>]" ;;
+      -*)         die "Unknown option: $1. Usage: krate lag [group] [--topic <topic>]" ;;
       *)          group="$1"; shift ;;
     esac
   done
@@ -1141,8 +1143,8 @@ cmd_lag() {
     sep
     printf "  %s group(s)   %s with lag > 0\n" "$group_count" "$lagging_count"
     echo ""
-    echo -e "  ${DIM}Drill down:  kafka lag <group-name>"
-    echo -e "  Topic only:  kafka lag --topic <topic-name>${RESET}"
+    echo -e "  ${DIM}Drill down:  krate lag <group-name>"
+    echo -e "  Topic only:  krate lag --topic <topic-name>${RESET}"
     echo ""
   fi
 }
@@ -1182,17 +1184,17 @@ cmd_help() {
   printf "  %-30s %s\n" "docker-install"       "Install Docker from bundled .deb/.rpm packages"
   echo ""
   echo -e "${BOLD}EXAMPLES${RESET}"
-  echo "  kafka doctor                          # preflight checks before installing"
-  echo "  kafka install                         # full first-time setup"
-  echo "  kafka logs -f kafka-92                # tail broker 92 logs"
-  echo "  kafka restart kafka-ui                # restart Kafbat UI"
-  echo "  kafka config set KAFKA_UI_USER=admin"
-  echo "  kafka health                          # check all service health"
-  echo "  kafka lag                             # all consumer groups + lag"
-  echo "  kafka lag my-app-consumer             # per-partition detail"
-  echo "  kafka lag --topic orders              # all groups on 'orders' topic"
-  echo "  kafka lag my-group --topic payments   # specific group + topic"
-  echo "  kafka uninstall --purge               # full teardown + data wipe"
+  echo "  krate doctor                          # preflight checks before installing"
+  echo "  krate install                         # full first-time setup"
+  echo "  krate logs -f kafka-92                # tail broker 92 logs"
+  echo "  krate restart kafka-ui                # restart Kafbat UI"
+  echo "  krate config set KAFKA_UI_USER=admin"
+  echo "  krate health                          # check all service health"
+  echo "  krate lag                             # all consumer groups + lag"
+  echo "  krate lag my-app-consumer             # per-partition detail"
+  echo "  krate lag --topic orders              # all groups on 'orders' topic"
+  echo "  krate lag my-group --topic payments   # specific group + topic"
+  echo "  krate uninstall --purge               # full teardown + data wipe"
   echo ""
   echo -e "${BOLD}SERVICES${RESET}"
   echo "  kafka-92   kafka-93   kafka-ui   proxy"

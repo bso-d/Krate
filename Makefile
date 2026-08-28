@@ -19,7 +19,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/kafka epc/kafka
+CLI_FILES := zk/kafka kraft/kafka epc/krate
 
 ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:v1.5.0 nginx:1.27-alpine
 # KRaft images are derived from kraft/.env.template — the single source of truth
@@ -145,8 +145,13 @@ bundle:
 >
 >  cp "$$src_dir/docker-compose.yml" "$$bundle_dir/docker-compose.yml"
 >  cp "$$src_dir/nginx.conf" "$$bundle_dir/nginx.conf"
->  cp "$$src_dir/kafka" "$$bundle_dir/kafka"
->  chmod +x "$$bundle_dir/kafka"
+>  # The EPC variant ships its CLI as ./krate; zk and kraft still use ./kafka.
+>  local cli_name="kafka"
+>  if [[ "$$mode" == "epc" ]]; then
+>    cli_name="krate"
+>  fi
+>  cp "$$src_dir/$$cli_name" "$$bundle_dir/$$cli_name"
+>  chmod +x "$$bundle_dir/$$cli_name"
 >  cp "$$src_dir/.env.template" "$$bundle_dir/.env.template"
 >  printf '%s\n' "$(ARCH)" > "$$bundle_dir/.bundle-arch"
 >

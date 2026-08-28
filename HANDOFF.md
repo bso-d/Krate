@@ -95,19 +95,31 @@ alone cannot bound that; a traffic spike fills the disk long before 168 h elapse
   reports actual per-broker usage, the share of the disk used, and how many
   topics the current settings still allow. `ensure_data_dirs` warns below 50 GB
   free.
-- **Open risk:** `auto.create.topics.enable` is `true` (inherited from `kraft/`),
-  so clients can create topics — and consume disk — with no admin in the loop.
-  `./kafka disk` warns about it; turning it off was not done, as it would change
-  producer behaviour that has not been agreed.
+- `auto.create.topics.enable` is now a knob, **default `false`**, so the ceiling
+  above actually holds — clients cannot silently add topics and disk. Explicit
+  creation is unaffected: the Kafbat UI, `kafka-topics.sh` and any AdminClient
+  use the CreateTopics API, which this setting does not govern, and Kafka's
+  internal topics (`__consumer_offsets`, `__transaction_state`) are created
+  regardless. Set `KAFKA_AUTO_CREATE_TOPICS_ENABLE=true` if a producer needs to
+  write to a topic that does not exist yet. **Unverified at runtime** — the UI
+  create path has not been exercised, since nothing has been booted.
 
-### 6. Not done yet
+### 6. CLI renamed to `krate` (EPC only)
+The EPC bundle ships its CLI as **`./krate`** (`./krate status`, `./krate disk`,
+…) rather than `./kafka`. `epc/kafka` → `epc/krate`, all self-referential usage
+strings updated, and `bundle` picks the CLI filename per mode. `zk/` and
+`kraft/` still ship `./kafka` — zk is frozen, and renaming kraft would churn the
+just-merged Phase 1 docs. Worth unifying if the kraft edition is ever released.
+
+### 7. Not done yet
 - [ ] Nothing has been **built or booted**. Docker is not running on the build
       machine, so no `docker-rpms` run and no bundle exists. `make check` passes
       (bash -n, shellcheck, compose config for zk/kraft/epc).
 - [x] `/data` sized — 1000 GB on both VMs; byte cap and budget added (see 5).
 - [ ] VM2 confirmed **RHEL 9.6 / x86_64**, same as `-03`, so one
       `rhel9/amd64` bundle serves both. Neither has been surveyed post-change.
-- [ ] EPC release version/tag not chosen; `README` still documents zk/kraft only.
+- [ ] EPC release version/tag not chosen; `README` still documents zk/kraft only
+      and does not mention `./krate` or the `epc` mode.
 - [ ] A throwaway VM survey script lives at repo root (`vm-survey.sh`,
       `vm-survey.mk`) — interim tooling, deliberately untracked.
 
