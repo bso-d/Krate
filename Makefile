@@ -189,7 +189,23 @@ bundle:
 >  fi
 >
 >  mkdir -p "$(DIST_DIR)"
->  COPYFILE_DISABLE=1 tar -czf "$$out_file" -C "$(DIST_DIR)/staging" "$$bundle_name"
+>
+>  # Strip macOS/Docker-Desktop extended attributes before archiving. Files copied
+>  # on macOS carry com.apple.provenance, and anything a builder container wrote
+>  # through a bind mount carries com.docker.grpcfuse.ownership. bsdtar stores
+>  # those as LIBARCHIVE.xattr.* PAX headers, which GNU tar on the target VM then
+>  # reports as "Ignoring unknown extended header keyword" for every file.
+>  # COPYFILE_DISABLE only suppresses AppleDouble ._* files, not xattrs.
+>  if command -v xattr >/dev/null 2>&1; then
+>    xattr -cr "$$bundle_dir" 2>/dev/null || true
+>  fi
+>  tar_opts=()
+>  for opt in --no-xattrs --no-mac-metadata; do
+>    if tar "$$opt" -cf /dev/null -T /dev/null >/dev/null 2>&1; then
+>      tar_opts+=("$$opt")
+>    fi
+>  done
+>  COPYFILE_DISABLE=1 tar "$${tar_opts[@]}" -czf "$$out_file" -C "$(DIST_DIR)/staging" "$$bundle_name"
 >  rm -rf "$$bundle_dir"
 >
 >  if command -v sha256sum >/dev/null 2>&1; then
