@@ -174,7 +174,25 @@ without it.
 
 Runbook: `docs/epc-install-runbook.md`.
 
-### 9. Not done yet
+### 9. Bundle carried macOS xattrs — fixed
+Extraction on the VM printed 27 `tar: Ignoring unknown extended header keyword`
+warnings: `LIBARCHIVE.xattr.com.apple.provenance` on files copied under macOS,
+and `LIBARCHIVE.xattr.com.docker.grpcfuse.ownership` on the RPMs the builder
+container wrote through Docker Desktop's bind mount. bsdtar stores xattrs as PAX
+headers and GNU tar on RHEL does not recognise them. `COPYFILE_DISABLE=1`, which
+the bundle target already set, only suppresses AppleDouble `._*` files — not
+xattrs.
+
+Fixed at both ends in `bundle`: `xattr -cr` on the staging directory (when
+`xattr` exists), plus `--no-xattrs` / `--no-mac-metadata` passed to tar, each
+probed for support first so the target stays portable to GNU tar. Verified by
+extracting the rebuilt bundle with GNU tar inside UBI 9: **0 warnings, exit 0**,
+all files including dotfiles and `docker-offline/optional/` intact.
+
+The `epc-v1` release asset and its sha256 were re-uploaded, so the checksum
+changed. Anyone holding the first download should re-fetch both.
+
+### 10. Not done yet
 - [x] Bundle **built** (see 7). Still **never booted** — the cluster has not run
       anywhere, so first boot on a VM is the real gate: KRaft quorum forming with
       2 voters, the `/data` bind mounts under SELinux, the offline
