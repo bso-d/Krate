@@ -326,6 +326,12 @@ docker-rpms:
 >    set -euo pipefail
 >    printf "[docker-ce-stable]\nname=Docker CE Stable\nbaseurl=%s\nenabled=1\ngpgcheck=1\ngpgkey=https://download.docker.com/linux/rhel/gpg\n" "$$BASEURL" > /etc/yum.repos.d/docker-ce.repo
 >    dnf install -y -q dnf-plugins-core
+>    # Make the builder resemble a real RHEL host before resolving. The builder
+>    # image is minimal, so without this dnf treats base OS packages as missing
+>    # and downloads AlmaLinux builds of selinux-policy, policycoreutils,
+>    # iptables and friends — which would replace Red Hat'"'"'s own packages on the
+>    # target VM, at a different minor version. A RHEL host already has these.
+>    dnf install -y -q policycoreutils selinux-policy-targeted iptables-nft nftables diffutils
 >    dnf download --resolve --destdir /output $$PKGS
 >    chmod 0644 /output/*.rpm
 >  '
@@ -334,7 +340,7 @@ docker-rpms:
 >#!/usr/bin/env bash
 ># Install Docker CE from the bundled RPM packages (RHEL family).
 >set -euo pipefail
->SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+>SCRIPT_DIR="$$(cd "$$(dirname "$${BASH_SOURCE[0]}")" && pwd)"
 >
 >installer=dnf
 >command -v dnf >/dev/null 2>&1 || installer=yum
@@ -343,16 +349,16 @@ docker-rpms:
 ># --disablerepo='*' keeps this strictly offline: every dependency must be on
 ># the host already or in this directory. It fails loudly rather than silently
 ># reaching for a network repo that an air-gapped VM does not have.
->sudo "$installer" install -y --disablerepo='*' "$SCRIPT_DIR"/*.rpm
+>sudo "$$installer" install -y --disablerepo='*' "$$SCRIPT_DIR"/*.rpm
 >
 >echo "==> Enabling Docker service..."
 >sudo systemctl enable --now docker
 >
->target_user="${SUDO_USER:-${USER:-$(id -un)}}"
->if [[ -n "$target_user" && "$target_user" != "root" ]]; then
->  if ! id -nG "$target_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
->    sudo usermod -aG docker "$target_user"
->    echo "Added $target_user to the docker group. Run 'newgrp docker' or log out and back in."
+>target_user="$${SUDO_USER:-$${USER:-$$(id -un)}}"
+>if [[ -n "$$target_user" && "$$target_user" != "root" ]]; then
+>  if ! id -nG "$$target_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+>    sudo usermod -aG docker "$$target_user"
+>    echo "Added $$target_user to the docker group. Run 'newgrp docker' or log out and back in."
 >  fi
 >fi
 >

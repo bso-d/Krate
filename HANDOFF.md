@@ -111,10 +111,48 @@ strings updated, and `bundle` picks the CLI filename per mode. `zk/` and
 `kraft/` still ship `./kafka` — zk is frozen, and renaming kraft would churn the
 just-merged Phase 1 docs. Worth unifying if the kraft edition is ever released.
 
-### 7. Not done yet
-- [ ] Nothing has been **built or booted**. Docker is not running on the build
-      machine, so no `docker-rpms` run and no bundle exists. `make check` passes
-      (bash -n, shellcheck, compose config for zk/kraft/epc).
+### 7. First EPC bundle built — `dist/kafka-epc-v1-amd64.tar.gz` (528 MB)
+Docker came up on the build machine, so the RHEL path was exercised end to end.
+
+- **`make docker-rpms RHEL_VERSION=9 ARCH=amd64`** — ships `docker-ce 29.7.2`,
+  `docker-ce-cli`, `docker-ce-rootless-extras`, `containerd.io 2.3.4`,
+  `docker-compose-plugin 5.5.0`, `docker-buildx-plugin 0.36.1` (all from
+  download.docker.com) plus `container-selinux 2.245.0`. 106 MB.
+- **`make bundle VERSION=v1 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1`**
+  → 528 MB, sha256 sidecar verifies.
+
+Two problems found and fixed during the build:
+
+1. **AlmaLinux base packages leaked into the RPM set.** The first `docker-rpms`
+   run resolved dependencies inside a minimal `almalinux:9` builder, so dnf
+   treated base OS packages as missing and downloaded AlmaLinux builds of
+   `selinux-policy`/`selinux-policy-targeted` (at **el9_8**, against a 9.6
+   target), `policycoreutils`, `nftables`, `iptables-nft` and their libs.
+   Installing that on the VMs would have replaced Red Hat's own SELinux policy
+   during a Docker install. Fixed by pre-installing those base packages in the
+   builder so `--resolve` only fetches what a real RHEL host genuinely lacks.
+2. **The generated RPM `install-docker.sh` was mangled by Make.** It was written
+   with single `$` inside a quoted heredoc, so Make expanded the variables before
+   bash saw them (`$installer` → `$i` + `nstaller`; `$SCRIPT_DIR` → `CRIPT_DIR`).
+   `docker-debs`' heredoc had always used `$$`. Now escaped; the regenerated
+   script is shellcheck-clean. Note `make check` does **not** cover generated
+   artifacts — only the three CLIs — so this class of bug needs a bundle-level
+   check to catch automatically.
+
+Bundle verified after rebuild: sha256 OK; all three images are genuinely
+**amd64/linux** inside the tarball (`docker save --platform` did its job on an
+arm64 build host — `docker image inspect` still reports arm64 for a
+multi-platform tag, so **`NO_PULL=1` must not be used** for cross-arch builds);
+CLI ships as `./krate`; `.bundle-arch` = amd64; and `./krate doctor` correctly
+refused to run on the arm64 build machine with "bundle is amd64 but this host is
+arm64", proving the arch guard works.
+
+### 8. Not done yet
+- [x] Bundle **built** (see 7). Still **never booted** — the cluster has not run
+      anywhere, so first boot on a VM is the real gate: KRaft quorum forming with
+      2 voters, the `/data` bind mounts under SELinux, the offline
+      `krate docker-install`, and creating a topic from the UI with
+      auto-creation off.
 - [x] `/data` sized — 1000 GB on both VMs; byte cap and budget added (see 5).
 - [ ] VM2 confirmed **RHEL 9.6 / x86_64**, same as `-03`, so one
       `rhel9/amd64` bundle serves both. Neither has been surveyed post-change.
