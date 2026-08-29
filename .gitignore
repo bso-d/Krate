@@ -2,6 +2,7 @@
 .env
 zk/.env
 kraft/.env
+epc/.env
 
 # reference files not needed in repo
 docker-compose-ref.yml
@@ -16,6 +17,7 @@ security-reports/
 # Generated TLS certs (created at install time)
 zk/certs/
 kraft/certs/
+epc/certs/
 certs/
 
 # local working docs — not part of the repo

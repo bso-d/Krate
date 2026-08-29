@@ -1,0 +1,195 @@
+services:
+  # ─── Brokers (KRaft combined mode: each node is broker + controller) ──────────
+  #
+  # EPC variant: 2 nodes, host-facing on 9092/9093.
+  #
+  # CLUSTER_ID is shared by every node and is embedded in on-disk storage. Do not
+  # change it after first startup.
+  #
+  # Quorum note: with 2 combined nodes the controller quorum is 2, so a majority
+  # is both of them. Losing either node stops the cluster regardless of the RF=2 /
+  # minISR=1 topic settings. That is accepted here — both nodes share one VM, so
+  # they share a failure domain anyway.
+  #
+  kafka-92:
+    image: ${KAFKA_IMAGE}
+    hostname: kafka-92
+    container_name: epc-broker-92
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    ports:
+      # Host-facing broker port. EPC clients connect here directly — there is no
+      # separate 190xx range in this variant.
+      - "${KAFKA_BROKER_92_PORT:-9092}:9092"
+    environment:
+      CLUSTER_ID: "${CLUSTER_ID}"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 92
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "92@kafka-92:29092,93@kafka-93:29093"
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:19092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29092
+      # EXTERNAL must advertise a name the CLIENT can resolve. Left as localhost
+      # it only works for clients on this VM — set KAFKA_ADVERTISED_HOST in .env
+      # to this host's FQDN or IP before any off-box client connects.
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-92:19092,EXTERNAL://${KAFKA_ADVERTISED_HOST:-localhost}:${KAFKA_BROKER_92_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
+      # 2-broker cluster: RF=2 with min ISR 1, so a single broker outage does not
+      # stop producers. The internal topics must be lowered from their default of
+      # 3 as well, or __consumer_offsets/__transaction_state cannot be created.
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "${KAFKA_AUTO_CREATE_TOPICS_ENABLE:-false}"
+      KAFKA_LOG_RETENTION_HOURS: ${KAFKA_LOG_RETENTION_HOURS:-168}
+      # Per-partition-replica size cap. Whichever limit is hit first — time or
+      # bytes — triggers deletion. Without this, retention is time-only and a
+      # traffic spike can fill /data before the 168h window ever elapses.
+      KAFKA_LOG_RETENTION_BYTES: ${KAFKA_LOG_RETENTION_BYTES:-2147483648}
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: ${KAFKA_LOG_SEGMENT_BYTES:-1073741824}
+    volumes:
+      # Bind mount onto the /data disk (not a docker named volume under
+      # /var/lib/docker). ':Z' applies a private SELinux label — required on
+      # RHEL, ignored where SELinux is not enforcing. The directory must exist
+      # and be owned by the image's uid before start; './kafka' handles that.
+      - ${KAFKA_DATA_DIR:-/data}/krate/broker-92:/var/lib/kafka/data:Z
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9092 || exit 1"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  kafka-93:
+    image: ${KAFKA_IMAGE}
+    hostname: kafka-93
+    container_name: epc-broker-93
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    ports:
+      # Host-facing broker port. EPC clients connect here directly — there is no
+      # separate 190xx range in this variant.
+      - "${KAFKA_BROKER_93_PORT:-9093}:9093"
+    environment:
+      CLUSTER_ID: "${CLUSTER_ID}"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 93
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "92@kafka-92:29092,93@kafka-93:29093"
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:19093,EXTERNAL://0.0.0.0:9093,CONTROLLER://0.0.0.0:29093
+      # EXTERNAL must advertise a name the CLIENT can resolve. Left as localhost
+      # it only works for clients on this VM — set KAFKA_ADVERTISED_HOST in .env
+      # to this host's FQDN or IP before any off-box client connects.
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-93:19093,EXTERNAL://${KAFKA_ADVERTISED_HOST:-localhost}:${KAFKA_BROKER_93_PORT:-9093}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
+      # 2-broker cluster: RF=2 with min ISR 1, so a single broker outage does not
+      # stop producers. The internal topics must be lowered from their default of
+      # 3 as well, or __consumer_offsets/__transaction_state cannot be created.
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "${KAFKA_AUTO_CREATE_TOPICS_ENABLE:-false}"
+      KAFKA_LOG_RETENTION_HOURS: ${KAFKA_LOG_RETENTION_HOURS:-168}
+      # Per-partition-replica size cap. Whichever limit is hit first — time or
+      # bytes — triggers deletion. Without this, retention is time-only and a
+      # traffic spike can fill /data before the 168h window ever elapses.
+      KAFKA_LOG_RETENTION_BYTES: ${KAFKA_LOG_RETENTION_BYTES:-2147483648}
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_SEGMENT_BYTES: ${KAFKA_LOG_SEGMENT_BYTES:-1073741824}
+    volumes:
+      # Bind mount onto the /data disk (not a docker named volume under
+      # /var/lib/docker). ':Z' applies a private SELinux label — required on
+      # RHEL, ignored where SELinux is not enforcing. The directory must exist
+      # and be owned by the image's uid before start; './kafka' handles that.
+      - ${KAFKA_DATA_DIR:-/data}/krate/broker-93:/var/lib/kafka/data:Z
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9093 || exit 1"]
+      interval: 10s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  # ─── Kafbat UI (internal only — access via nginx proxy) ──────────────────────
+  kafka-ui:
+    image: ${KAFKA_UI_IMAGE}
+    hostname: kafka-ui
+    container_name: epc-kafbat
+    restart: unless-stopped
+    depends_on:
+      kafka-92:
+        condition: service_healthy
+      kafka-93:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    environment:
+      AUTH_TYPE: "LOGIN_FORM"
+      SERVER_FORWARDHEADERSSTRATEGY: "framework"
+      SPRING_SECURITY_USER_NAME: ${KAFKA_UI_USER}
+      SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD}
+      KAFKA_CLUSTERS_0_NAME: cluster-epc
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka-92:19092,kafka-93:19093"
+      KAFKA_CLUSTERS_0_READONLY: "false"
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ─── Nginx TLS proxy (terminates HTTPS on :443, redirects :80 → :443) ───
+  proxy:
+    image: ${NGINX_IMAGE}
+    container_name: epc-proxy
+    restart: unless-stopped
+    depends_on:
+      kafka-ui:
+        condition: service_healthy
+    ports:
+      - "${KAFKA_UI_HTTP_PORT:-80}:80"
+      - "${KAFKA_UI_HTTPS_PORT:-443}:443"
+    volumes:
+      # ':z' = shared SELinux label; both files are read-only config.
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro,z
+      - ./certs:/etc/nginx/certs:ro,z
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 443 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# ─── Networks ──────────────────────────────────────────────────────────────────
+# No named volumes: broker data is bind-mounted onto ${KAFKA_DATA_DIR}.
+networks:
+  kafka-network:
+    driver: bridge

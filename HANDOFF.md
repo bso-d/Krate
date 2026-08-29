@@ -6,6 +6,190 @@
 
 ---
 
+## Session Log — 2026-08-29
+
+Phase 1 merged; target VMs turned out to be RHEL, which forced a new variant and
+RHEL packaging support. Work is on `epc-rhel-2broker`.
+
+### 1. Phase 1 landed
+PR #11 squash-merged as `05ddd5c`. Last blocker before merge was a floating
+`kafbat/kafka-ui:latest` in the ZooKeeper edition (`zk/docker-compose.yml` and
+the Makefile's `ZK_IMAGES`); pinned to `v1.5.0` to match KRaft. ZK stays frozen —
+this counted as a reproducibility/security fix, not a feature.
+
+### 2. Target VM survey — the VMs are RHEL, not Ubuntu
+Surveyed `epc-appkfk-03` (Hyper-V guest, `10.100.178.54`):
+**RHEL 9.6, x86_64, 8 cores, 62 GB RAM, no Docker installed.** All 10 host ports
+free, no firewalld/ufw, passwordless sudo, openssl present.
+
+That invalidated the packaging half of the plan: the offline Docker path was
+Ubuntu-only end to end — `make docker-debs` (jammy/noble, downloads inside an
+`ubuntu:` container), the `.deb` files, `kafka docker-install` (`dpkg -i` +
+`apt-get install -f`), and the generated `install-docker.sh`. Decision: **option
+B — add RHEL support** rather than install Docker out of band.
+
+Two RHEL-specific risks surfaced:
+- **SELinux** is enforcing on RHEL 9; the proxy's `nginx.conf`/`certs` bind
+  mounts carried no `:z`/`:Z` label and would have failed with permission denied.
+- **Disk is tight** — 15.1 GB free on `/var/lib`, 13.4 GB on `$HOME`, which is
+  why the install was moved to the `/data` disk.
+
+### 3. New `epc/` variant (2 brokers, host ports 9092/9093, /data)
+A third variant alongside `zk/` and `kraft/`, shipped as its own release
+(`MODE=epc`). Requirements came from the EPC install:
+- **2 brokers** (node ids 92/93), one independent cluster per VM.
+- **Host ports 9092/9093** — the 190xx range is gone. EXTERNAL binds container
+  9092/9093 and is published 1:1; INTERNAL moved to 19092/19093 (container-only,
+  inter-broker); CONTROLLER stays 29092/29093.
+- **RF=2, min.insync.replicas=1** so a single broker outage does not stop
+  producers. `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR`,
+  `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR` (both 2) and
+  `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR` (1) had to be set explicitly — their
+  defaults of 3/2 are unsatisfiable on 2 brokers and would have broken
+  `__consumer_offsets` creation. The 4-broker `kraft/` config never set them.
+- **Data on `/data`** — broker logs are bind mounts
+  (`${KAFKA_DATA_DIR:-/data}/krate/broker-{92,93}`) with `:Z`, not named volumes
+  under `/var/lib/docker`. Bind mounts keep host ownership, so `epc/kafka` gained
+  `ensure_data_dirs()` to create them and chown to `KAFKA_UID:KAFKA_GID` (1000)
+  before start — without it the broker exits unable to write its log dir.
+- `KAFKA_ADVERTISED_HOST` added: EXTERNAL advertised `localhost` only works for
+  on-box clients, so it must be set to the FQDN/IP before remote clients connect.
+
+**Caveat recorded deliberately:** with 2 combined nodes the controller quorum is
+2, so a majority is both. Losing either node stops the cluster regardless of
+RF=2/minISR=1. Accepted — both nodes share one VM, so they share a failure
+domain. Splitting out 3 dedicated controllers is the fix if that changes.
+
+### 4. RHEL packaging (`make docker-rpms`)
+- `docker-rpms RHEL_VERSION=9 ARCH=amd64` downloads
+  `containerd.io docker-ce docker-ce-cli docker-compose-plugin docker-buildx-plugin`
+  (+ deps via `dnf download --resolve`) inside an `almalinux:9` builder, from
+  `https://download.docker.com/linux/rhel/9/<rpm_arch>/stable` (verified live,
+  both x86_64 and aarch64). Generates an rpm-flavoured `install-docker.sh` using
+  `dnf install --disablerepo='*'` so it stays strictly offline.
+- `kafka docker-install` now detects `.rpm` vs `.deb` and dispatches to
+  `docker_install_rpm` / `docker_install_deb`; refuses to guess if both are
+  present. The rpm failure message calls out `container-selinux`, the dependency
+  a minimal RHEL host most often lacks.
+- **Package layout changed** to `docker-offline/<target-os>/<arch>/`
+  (`noble/amd64`, `rhel9/amd64`, …) so several targets can be staged at once —
+  previously `docker-debs` wiped the arch dir on every run. Existing noble sets
+  were migrated in place.
+- Every prepared set now carries a `.docker-manifest` (OS_TARGET, OS_FAMILY,
+  ARCH, packages) and `bundle INCLUDE_DOCKER=1` **refuses** to ship a set whose
+  manifest does not match `TARGET_OS`/`ARCH`. Prevents a noble deb set landing in
+  a RHEL bundle and failing on the VM long after the build.
+
+### 5. Disk ceiling on /data (1000 GB, both VMs)
+`/data` is 1000 GB on each VM and must not be run to the limit. Two facts drive
+the sizing: both brokers write to the **same** disk, and RF=2 means every record
+is stored twice — so `/data` holds **2x the logical data**. Time-based retention
+alone cannot bound that; a traffic spike fills the disk long before 168 h elapses.
+
+- Added `KAFKA_LOG_RETENTION_BYTES` (default **2 GiB**, per partition replica) so
+  whichever limit is hit first — time or bytes — triggers deletion.
+- The real ceiling is `topics x partitions x RF x cap`. At 24 partitions and the
+  2 GiB default that is **~96 GB of /data per topic**, so a 60 % budget
+  (600 GB) covers about **6 topics**. The table is in `epc/.env.template`.
+- `KAFKA_DATA_BUDGET_PCT` (default 60) plus a new **`./kafka disk`** command
+  reports actual per-broker usage, the share of the disk used, and how many
+  topics the current settings still allow. `ensure_data_dirs` warns below 50 GB
+  free.
+- `auto.create.topics.enable` is now a knob, **default `false`**, so the ceiling
+  above actually holds — clients cannot silently add topics and disk. Explicit
+  creation is unaffected: the Kafbat UI, `kafka-topics.sh` and any AdminClient
+  use the CreateTopics API, which this setting does not govern, and Kafka's
+  internal topics (`__consumer_offsets`, `__transaction_state`) are created
+  regardless. Set `KAFKA_AUTO_CREATE_TOPICS_ENABLE=true` if a producer needs to
+  write to a topic that does not exist yet. **Unverified at runtime** — the UI
+  create path has not been exercised, since nothing has been booted.
+
+### 6. CLI renamed to `krate` (EPC only)
+The EPC bundle ships its CLI as **`./krate`** (`./krate status`, `./krate disk`,
+…) rather than `./kafka`. `epc/kafka` → `epc/krate`, all self-referential usage
+strings updated, and `bundle` picks the CLI filename per mode. `zk/` and
+`kraft/` still ship `./kafka` — zk is frozen, and renaming kraft would churn the
+just-merged Phase 1 docs. Worth unifying if the kraft edition is ever released.
+
+### 7. First EPC bundle built — `dist/kafka-epc-v1-amd64.tar.gz` (528 MB)
+Docker came up on the build machine, so the RHEL path was exercised end to end.
+
+- **`make docker-rpms RHEL_VERSION=9 ARCH=amd64`** — ships `docker-ce 29.7.2`,
+  `docker-ce-cli`, `docker-ce-rootless-extras`, `containerd.io 2.3.4`,
+  `docker-compose-plugin 5.5.0`, `docker-buildx-plugin 0.36.1` (all from
+  download.docker.com) plus `container-selinux 2.245.0`. 106 MB.
+- **`make bundle VERSION=v1 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1`**
+  → 528 MB, sha256 sidecar verifies.
+
+Two problems found and fixed during the build:
+
+1. **AlmaLinux base packages leaked into the RPM set.** The first `docker-rpms`
+   run resolved dependencies inside a minimal `almalinux:9` builder, so dnf
+   treated base OS packages as missing and downloaded AlmaLinux builds of
+   `selinux-policy`/`selinux-policy-targeted` (at **el9_8**, against a 9.6
+   target), `policycoreutils`, `nftables`, `iptables-nft` and their libs.
+   Installing that on the VMs would have replaced Red Hat's own SELinux policy
+   during a Docker install. Fixed by pre-installing those base packages in the
+   builder so `--resolve` only fetches what a real RHEL host genuinely lacks.
+2. **The generated RPM `install-docker.sh` was mangled by Make.** It was written
+   with single `$` inside a quoted heredoc, so Make expanded the variables before
+   bash saw them (`$installer` → `$i` + `nstaller`; `$SCRIPT_DIR` → `CRIPT_DIR`).
+   `docker-debs`' heredoc had always used `$$`. Now escaped; the regenerated
+   script is shellcheck-clean. Note `make check` does **not** cover generated
+   artifacts — only the three CLIs — so this class of bug needs a bundle-level
+   check to catch automatically.
+
+Bundle verified after rebuild: sha256 OK; all three images are genuinely
+**amd64/linux** inside the tarball (`docker save --platform` did its job on an
+arm64 build host — `docker image inspect` still reports arm64 for a
+multi-platform tag, so **`NO_PULL=1` must not be used** for cross-arch builds);
+CLI ships as `./krate`; `.bundle-arch` = amd64; and `./krate doctor` correctly
+refused to run on the arm64 build machine with "bundle is amd64 but this host is
+arm64", proving the arch guard works.
+
+### 8. RHEL installer hardened against conflicts, tested in UBI 9
+The install path was proven offline inside **Red Hat UBI 9** containers (real
+RHEL 9 userspace) before touching a VM. Three findings, all fixed:
+
+1. **`container-selinux` must not be in the main set.** The newest build
+   (2.245.0) requires `selinux-policy >= 38.1.75-2.el9_8` — newer than RHEL 9.6
+   ships. Installing it unconditionally would **fail on a 9.6 host that was
+   otherwise fine**. It now lives in `docker-offline/optional/` and is used only
+   as a fallback when the host has no `container-selinux` at all. Both branches
+   tested: host-with → docker-only install succeeds; host-without → automatic
+   retry with the bundled copy succeeds.
+2. **`podman-docker` conflicts with `docker-ce-cli`** (it owns `/usr/bin/docker`).
+   This is the standard RHEL 9 failure. The installer detects it, names what it
+   will remove, and uses `--allowerasing`. Verified the removal is minimal:
+   **`podman` and `runc` both survive** — only the CLI alias goes. `runc` did
+   *not* conflict with `containerd.io` 2.3.4.
+3. **No `--resolve` on the main set.** Taking exactly the named Docker packages
+   stops base OS packages built by another distro entering the bundle (see 7).
+
+`krate doctor` gained a RHEL section: SELinux state, `container-selinux`
+presence, and the conflicting-package list. `krate docker-install` and the
+generated `install-docker.sh` share the same conflict + fallback logic; the
+standalone script takes `--yes` and refuses to remove packages non-interactively
+without it.
+
+Runbook: `docs/epc-install-runbook.md`.
+
+### 9. Not done yet
+- [x] Bundle **built** (see 7). Still **never booted** — the cluster has not run
+      anywhere, so first boot on a VM is the real gate: KRaft quorum forming with
+      2 voters, the `/data` bind mounts under SELinux, the offline
+      `krate docker-install`, and creating a topic from the UI with
+      auto-creation off.
+- [x] `/data` sized — 1000 GB on both VMs; byte cap and budget added (see 5).
+- [ ] VM2 confirmed **RHEL 9.6 / x86_64**, same as `-03`, so one
+      `rhel9/amd64` bundle serves both. Neither has been surveyed post-change.
+- [ ] EPC release version/tag not chosen; `README` still documents zk/kraft only
+      and does not mention `./krate` or the `epc` mode.
+- [ ] A throwaway VM survey script lives at repo root (`vm-survey.sh`,
+      `vm-survey.mk`) — interim tooling, deliberately untracked.
+
+---
+
 ## Session Log — 2026-07-14
 
 Planning + docs session on `shoji-dev`. No runtime code changed. Reconciled the
