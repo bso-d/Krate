@@ -147,7 +147,34 @@ CLI ships as `./krate`; `.bundle-arch` = amd64; and `./krate doctor` correctly
 refused to run on the arm64 build machine with "bundle is amd64 but this host is
 arm64", proving the arch guard works.
 
-### 8. Not done yet
+### 8. RHEL installer hardened against conflicts, tested in UBI 9
+The install path was proven offline inside **Red Hat UBI 9** containers (real
+RHEL 9 userspace) before touching a VM. Three findings, all fixed:
+
+1. **`container-selinux` must not be in the main set.** The newest build
+   (2.245.0) requires `selinux-policy >= 38.1.75-2.el9_8` — newer than RHEL 9.6
+   ships. Installing it unconditionally would **fail on a 9.6 host that was
+   otherwise fine**. It now lives in `docker-offline/optional/` and is used only
+   as a fallback when the host has no `container-selinux` at all. Both branches
+   tested: host-with → docker-only install succeeds; host-without → automatic
+   retry with the bundled copy succeeds.
+2. **`podman-docker` conflicts with `docker-ce-cli`** (it owns `/usr/bin/docker`).
+   This is the standard RHEL 9 failure. The installer detects it, names what it
+   will remove, and uses `--allowerasing`. Verified the removal is minimal:
+   **`podman` and `runc` both survive** — only the CLI alias goes. `runc` did
+   *not* conflict with `containerd.io` 2.3.4.
+3. **No `--resolve` on the main set.** Taking exactly the named Docker packages
+   stops base OS packages built by another distro entering the bundle (see 7).
+
+`krate doctor` gained a RHEL section: SELinux state, `container-selinux`
+presence, and the conflicting-package list. `krate docker-install` and the
+generated `install-docker.sh` share the same conflict + fallback logic; the
+standalone script takes `--yes` and refuses to remove packages non-interactively
+without it.
+
+Runbook: `docs/epc-install-runbook.md`.
+
+### 9. Not done yet
 - [x] Bundle **built** (see 7). Still **never booted** — the cluster has not run
       anywhere, so first boot on a VM is the real gate: KRaft quorum forming with
       2 voters, the `/data` bind mounts under SELinux, the offline

@@ -754,6 +754,45 @@ cmd_doctor() {
   fi
   echo ""
 
+  # ── RHEL family: SELinux and package conflicts ──
+  # These are the two things that break a Docker install on RHEL. Surfacing them
+  # in preflight is cheaper than discovering them mid-install.
+  local os_id=""
+  [[ -r /etc/os-release ]] && os_id="$(awk -F= '/^ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)"
+  if [[ "$os_id" =~ ^(rhel|centos|rocky|almalinux|ol)$ ]]; then
+    info "SELinux"
+    local se="unknown"
+    if command -v getenforce &>/dev/null; then
+      se="$(getenforce 2>/dev/null || echo unknown)"
+    elif [[ -r /sys/fs/selinux/enforce ]]; then
+      [[ "$(cat /sys/fs/selinux/enforce)" == "1" ]] && se="Enforcing" || se="Permissive"
+    fi
+    case "$se" in
+      Enforcing)  ok "SELinux is Enforcing — broker data and proxy mounts are labelled (:Z / :z)" ;;
+      Permissive|Disabled) ok "SELinux is $se" ;;
+      *) warn "Could not determine SELinux state" ;;
+    esac
+    if command -v rpm &>/dev/null && ! rpm -q container-selinux &>/dev/null; then
+      warn "container-selinux is not installed — 'krate docker-install' will use the bundled copy."
+    fi
+    echo ""
+
+    info "Package conflicts"
+    local -a found=()
+    local p
+    for p in podman-docker docker docker-engine docker-client docker-common \
+             docker-latest docker-logrotate docker-engine-selinux; do
+      command -v rpm &>/dev/null && rpm -q "$p" &>/dev/null && found+=("$p")
+    done
+    if [[ ${#found[@]} -gt 0 ]]; then
+      warn "Conflicting package(s) installed: ${found[*]}"
+      warn "'krate docker-install' removes them (podman and runc are unaffected)."
+    else
+      ok "no conflicting docker/podman-docker packages installed"
+    fi
+    echo ""
+  fi
+
   # ── Host port availability ──
   info "Host port availability"
   local busy=0 ports
@@ -912,7 +951,7 @@ This bundle was not packaged with Docker. $rebuild_hint"
     die "$DOCKER_OFFLINE_DIR holds both .rpm and .deb packages; refusing to guess.
 Rebuild the bundle for a single target OS."
   elif [[ ${#rpms[@]} -gt 0 ]]; then
-    docker_install_rpm "${rpms[@]}"
+    docker_install_rpm "$DOCKER_OFFLINE_DIR"
   elif [[ ${#debs[@]} -gt 0 ]]; then
     docker_install_deb "${debs[@]}"
   else
@@ -940,25 +979,52 @@ $rebuild_hint"
 # every dependency must already be on the box or in the bundle, and we fail
 # loudly rather than silently reaching for a network repo that isn't there.
 docker_install_rpm() {
-  local -a rpms=("$@")
-  info "Installing Docker CE from ${#rpms[@]} bundled RPM packages..."
-  echo ""
-  printf '  %s\n' "${rpms[@]##*/}"
-  echo ""
+  local pkg_dir="$1"
+  local -a rpms optional
+  shopt -s nullglob
+  rpms=("$pkg_dir"/*.rpm)
+  optional=("$pkg_dir"/optional/*.rpm)
+  shopt -u nullglob
 
   local installer=""
   if command -v dnf &>/dev/null; then installer=dnf
   elif command -v yum &>/dev/null; then installer=yum
-  else
-    die "Neither dnf nor yum found — cannot install RPM packages on this host."
+  else die "Neither dnf nor yum found — cannot install RPM packages on this host."
   fi
 
-  if ! sudo "$installer" install -y --disablerepo='*' "${rpms[@]}"; then
-    die "$installer could not install the bundled packages offline.
-This usually means a dependency (commonly container-selinux) is missing from
-both the host and the bundle. Either install it from your RHEL media/Satellite:
-  sudo $installer install -y container-selinux
-or rebuild the bundle so the dependency is included."
+  # podman-docker ships /usr/bin/docker and conflicts with docker-ce-cli.
+  # Removing it leaves podman and runc untouched — only the CLI alias goes.
+  local -a conflicts=()
+  local p
+  for p in podman-docker docker docker-engine docker-client docker-client-latest \
+           docker-common docker-latest docker-latest-logrotate docker-logrotate \
+           docker-engine-selinux; do
+    rpm -q "$p" &>/dev/null && conflicts+=("$p")
+  done
+  if [[ ${#conflicts[@]} -gt 0 ]]; then
+    warn "These installed packages conflict with Docker CE and will be removed:"
+    printf '    %s\n' "${conflicts[@]}"
+    warn "podman and runc themselves are not affected."
+    echo ""
+  fi
+
+  info "Installing Docker CE from ${#rpms[@]} bundled RPM packages..."
+  echo ""
+  if ! sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}"; then
+    # containerd.io requires container-selinux. A host that has run containers
+    # already has it; a minimal one may not. It is kept out of the main set
+    # because the newest build needs a newer selinux-policy than RHEL 9.6 ships,
+    # so installing it unconditionally would fail on a host that was fine.
+    if [[ ${#optional[@]} -gt 0 ]]; then
+      echo ""
+      info "Retrying with the bundled optional dependencies..."
+      sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" "${optional[@]}" \
+        || die "Offline install failed even with the bundled dependencies.
+A dependency is missing from both this host and the bundle. Install it from your
+RHEL media or Satellite, then re-run: krate docker-install"
+    else
+      die "Offline install failed and no optional/ dependencies are bundled."
+    fi
   fi
 }
 

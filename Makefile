@@ -29,7 +29,13 @@ KRAFT_IMAGES := $(shell . ./kraft/.env.template >/dev/null 2>&1; echo "$$KAFKA_I
 EPC_IMAGES := $(shell . ./epc/.env.template >/dev/null 2>&1; echo "$$KAFKA_IMAGE $$KAFKA_UI_IMAGE $$NGINX_IMAGE")
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 # RHEL needs buildx explicitly; on Debian it arrives as a docker-ce dependency.
-DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-compose-plugin docker-buildx-plugin
+DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-extras docker-compose-plugin docker-buildx-plugin
+# containerd.io requires container-selinux, which every RHEL host running
+# containers already has. It is downloaded to optional/ rather than the main set
+# because the newest build requires selinux-policy >= el9_8 — newer than RHEL 9.6
+# ships — so installing it unconditionally FAILS on a 9.6 host that was fine.
+# The installer falls back to it only when the host has none.
+DOCKER_RPM_OPTIONAL := container-selinux
 
 .PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft bundle-epc docker-debs docker-rpms clean dist-clean
 .SILENT: help
@@ -321,6 +327,7 @@ docker-rpms:
 >docker run --rm --platform "linux/$(ARCH)" \
 >  -e BASEURL="https://download.docker.com/linux/rhel/$(RHEL_VERSION)/$$rpm_arch/stable" \
 >  -e PKGS="$(DOCKER_RPM_PACKAGES)" \
+>  -e OPTIONAL="$(DOCKER_RPM_OPTIONAL)" \
 >  -v "$$(pwd)/$$output_dir:/output" \
 >  "$(RHEL_BUILDER_IMAGE)" bash -c '
 >    set -euo pipefail
@@ -332,38 +339,117 @@ docker-rpms:
 >    # iptables and friends — which would replace Red Hat'"'"'s own packages on the
 >    # target VM, at a different minor version. A RHEL host already has these.
 >    dnf install -y -q policycoreutils selinux-policy-targeted iptables-nft nftables diffutils
->    dnf download --resolve --destdir /output $$PKGS
+>    # No --resolve on the main set: take exactly the named Docker packages, so
+>    # the bundle can never carry a base OS package built by another distro.
+>    dnf download --destdir /output $$PKGS
+>    mkdir -p /output/optional
+>    dnf download --destdir /output/optional $$OPTIONAL
 >    chmod 0644 /output/*.rpm
 >  '
 >
 >cat > "$$output_dir/install-docker.sh" <<'INSTALL_RPM'
 >#!/usr/bin/env bash
 ># Install Docker CE from the bundled RPM packages (RHEL family).
+>#
+># Strictly offline: --disablerepo='*' means every dependency must already be on
+># the host or in this directory. It fails loudly rather than silently reaching
+># for a network repo an air-gapped VM does not have.
+>#
+># Usage: ./install-docker.sh [--yes]
 >set -euo pipefail
+>
 >SCRIPT_DIR="$$(cd "$$(dirname "$${BASH_SOURCE[0]}")" && pwd)"
+>
+>ASSUME_YES=0
+>if [[ "$${1:-}" == "--yes" || "$${1:-}" == "-y" ]]; then
+>  ASSUME_YES=1
+>fi
 >
 >installer=dnf
 >command -v dnf >/dev/null 2>&1 || installer=yum
 >
->echo "==> Installing Docker CE from bundled RPMs..."
-># --disablerepo='*' keeps this strictly offline: every dependency must be on
-># the host already or in this directory. It fails loudly rather than silently
-># reaching for a network repo that an air-gapped VM does not have.
->sudo "$$installer" install -y --disablerepo='*' "$$SCRIPT_DIR"/*.rpm
+>run() {
+>  if [[ "$$(id -u)" -eq 0 ]]; then "$$@"; else sudo "$$@"; fi
+>}
 >
+># ── Conflicts ────────────────────────────────────────────────────────────────
+># podman-docker ships /usr/bin/docker and conflicts with docker-ce-cli. Removing
+># it does NOT remove podman — only the docker CLI alias. The rest are the legacy
+># docker packages Red Hat shipped before RHEL 9.
+>conflicts=()
+>for p in podman-docker docker docker-engine docker-client docker-client-latest \
+>         docker-common docker-latest docker-latest-logrotate docker-logrotate \
+>         docker-engine-selinux runc-docker; do
+>  if rpm -q "$$p" >/dev/null 2>&1; then
+>    conflicts+=("$$p")
+>  fi
+>done
+>
+>if [[ $${#conflicts[@]} -gt 0 ]]; then
+>  echo ""
+>  echo "These installed packages conflict with Docker CE and will be REMOVED:"
+>  printf '  %s\n' "$${conflicts[@]}"
+>  echo ""
+>  echo "podman and runc themselves are not affected."
+>  if [[ "$$ASSUME_YES" -ne 1 ]]; then
+>    if [[ -t 0 ]]; then
+>      read -r -p "Proceed? [y/N] " ans
+>      if [[ ! "$$ans" =~ ^[Yy]$$ ]]; then
+>        echo "Aborted. Re-run with --yes to skip this prompt."
+>        exit 1
+>      fi
+>    else
+>      echo "Not a terminal and --yes was not given; refusing to remove packages."
+>      exit 1
+>    fi
+>  fi
+>fi
+>
+># ── Install ──────────────────────────────────────────────────────────────────
+>shopt -s nullglob
+>pkgs=("$$SCRIPT_DIR"/*.rpm)
+>optional=("$$SCRIPT_DIR"/optional/*.rpm)
+>shopt -u nullglob
+>
+>if [[ $${#pkgs[@]} -eq 0 ]]; then
+>  echo "No .rpm files in $$SCRIPT_DIR" >&2
+>  exit 1
+>fi
+>
+>echo "==> Installing Docker CE from $${#pkgs[@]} bundled packages..."
+>if ! run "$$installer" install -y --allowerasing --disablerepo='*' "$${pkgs[@]}"; then
+>  # containerd.io requires container-selinux. Any RHEL host that has run
+>  # containers already has it; a minimal one may not. Retry with the bundled
+>  # copy, which is kept out of the main set because the newest build wants a
+>  # newer selinux-policy than RHEL 9.6 ships.
+>  if [[ $${#optional[@]} -gt 0 ]]; then
+>    echo ""
+>    echo "==> Retrying with bundled optional dependencies..."
+>    run "$$installer" install -y --allowerasing --disablerepo='*' "$${pkgs[@]}" "$${optional[@]}"
+>  else
+>    echo "Install failed and no optional/ dependencies are bundled." >&2
+>    exit 1
+>  fi
+>fi
+>
+># ── Service + group ──────────────────────────────────────────────────────────
+>echo ""
 >echo "==> Enabling Docker service..."
->sudo systemctl enable --now docker
+>run systemctl enable --now docker
 >
 >target_user="$${SUDO_USER:-$${USER:-$$(id -un)}}"
 >if [[ -n "$$target_user" && "$$target_user" != "root" ]]; then
 >  if ! id -nG "$$target_user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
->    sudo usermod -aG docker "$$target_user"
+>    run usermod -aG docker "$$target_user"
 >    echo "Added $$target_user to the docker group. Run 'newgrp docker' or log out and back in."
 >  fi
 >fi
 >
+>echo ""
 >docker --version
 >docker compose version
+>echo ""
+>echo "Docker installed. Next: ./krate doctor"
 >INSTALL_RPM
 >chmod +x "$$output_dir/install-docker.sh"
 >
@@ -373,6 +459,7 @@ docker-rpms:
 >  echo "ARCH=$(ARCH)"
 >  echo "PREPARED=$$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 >  for pkg in "$$output_dir"/*.rpm; do echo "PACKAGE=$$(basename "$$pkg")"; done
+>  for pkg in "$$output_dir"/optional/*.rpm; do echo "OPTIONAL=$$(basename "$$pkg")"; done
 >} > "$$output_dir/.docker-manifest"
 >echo "==> Prepared Docker CE for rhel$(RHEL_VERSION)/$(ARCH):"
 >sed 's/^/    /' "$$output_dir/.docker-manifest"
