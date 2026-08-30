@@ -37,7 +37,7 @@ DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-
 # The installer falls back to it only when the host has none.
 DOCKER_RPM_OPTIONAL := container-selinux
 
-.PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft bundle-epc docker-debs docker-rpms clean dist-clean
+.PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft bundle-epc docker-debs docker-rpms monitor-up monitor-down monitor-status monitor-logs clean dist-clean
 .SILENT: help
 
 help:
@@ -54,6 +54,8 @@ help:
 >  make bundle VERSION=v1 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
 >  make docker-debs UBUNTU_VERSION=noble ARCH=amd64
 >  make docker-rpms RHEL_VERSION=9 ARCH=amd64
+>  make monitor-up VARIANT=kraft                  Start Grafana/Prometheus/Loki for a variant
+>  make monitor-down VARIANT=epc
 >  make clean                                     Remove bundle staging only
 >  make dist-clean                                Remove dist/ and docker-offline/
 >
@@ -68,6 +70,7 @@ help:
 >                          Which prepared package set INCLUDE_DOCKER=1 ships
 >  NO_PULL=1               Reuse local Docker images; they must match ARCH
 >  INCLUDE_DOCKER=1        Copy Docker packages prepared for the target Ubuntu/ARCH
+>  VARIANT=kraft|epc       Which cluster the monitor-* targets act on
 >EOF
 
 check: syntax lint compose-check
@@ -84,6 +87,7 @@ compose-check:
 >docker compose --env-file zk/.env.template -f zk/docker-compose.yml config --quiet
 >docker compose --env-file kraft/.env.template -f kraft/docker-compose.yml config --quiet
 >docker compose --env-file epc/.env.template -f epc/docker-compose.yml config --quiet
+>docker compose --env-file monitoring/.env.template -f monitoring/docker-compose.yml config --quiet
 
 bundle-zk:
 >$(MAKE) bundle MODE=zk VERSION="$(VERSION)" ARCH="$(ARCH)" INCLUDE_DOCKER="$(INCLUDE_DOCKER)" NO_PULL="$(NO_PULL)"
@@ -164,6 +168,13 @@ bundle:
 >  fi
 >  cp "$$src_dir/$$cli_name" "$$bundle_dir/$$cli_name"
 >  chmod +x "$$bundle_dir/$$cli_name"
+>
+>  # The observability stack is shared, so it is copied in rather than duplicated
+>  # per variant. The frozen ZooKeeper edition carries its own and is skipped.
+>  if [[ "$$mode" != "zk" && -d monitoring ]]; then
+>    cp -r monitoring "$$bundle_dir/monitoring"
+>    rm -f "$$bundle_dir/monitoring/.env"
+>  fi
 >  cp "$$src_dir/.env.template" "$$bundle_dir/.env.template"
 >  printf '%s\n' "$(ARCH)" > "$$bundle_dir/.bundle-arch"
 >
@@ -486,6 +497,10 @@ docker-rpms:
 >echo "==> Prepared Docker CE for rhel$(RHEL_VERSION)/$(ARCH):"
 >sed 's/^/    /' "$$output_dir/.docker-manifest"
 >du -sh "$$output_dir"
+
+monitor-up monitor-down monitor-status monitor-logs:
+>[[ "$(VARIANT)" =~ ^(kraft|epc)$$ ]] || { echo "VARIANT must be kraft or epc" >&2; exit 1; }
+>cd "$(VARIANT)" && ./krate monitor "$(subst monitor-,,$@)"
 
 clean:
 >rm -rf "$(DIST_DIR)/staging"

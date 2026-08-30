@@ -1,0 +1,27 @@
+# Scrape config for the Krate observability stack.
+# CLUSTER_LABEL is substituted by `krate monitor up` so series from different
+# variants (kraft, epc, ...) stay distinguishable in one Grafana.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: krate
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # Cluster/topic/consumer-group metrics.
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+
+  # Host disk/CPU/memory. Kafka metrics say nothing about the volume the log
+  # dirs sit on, so this is what backs the capacity alerts.
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

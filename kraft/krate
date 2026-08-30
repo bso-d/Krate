@@ -10,6 +10,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 ENV_TEMPLATE="$SCRIPT_DIR/.env.template"
 IMAGES_DIR="$SCRIPT_DIR/images"
 DOCKER_OFFLINE_DIR="$SCRIPT_DIR/docker-offline"
+KRATE_VARIANT="kraft"
 CERTS_DIR="$SCRIPT_DIR/certs"
 CERT_CRT="$CERTS_DIR/server.crt"
 CERT_KEY="$CERTS_DIR/server.key"
@@ -523,6 +524,109 @@ cmd_uninstall() {
   ok "Done"
 }
 
+# ─── monitor (observability stack) ───────────────────────────────────────────
+# The stack in monitoring/ is shared by every variant. Rather than hardcode a
+# network name and broker list per variant, discover both from the cluster that
+# is actually running: the compose project name varies with the directory a
+# bundle was extracted into, so a hardcoded external network would break.
+# In a bundle the stack sits beside the CLI; in the repo it lives once at the
+# root and is shared by every variant.
+MONITOR_DIR="$SCRIPT_DIR/monitoring"
+[[ -d "$MONITOR_DIR" ]] || MONITOR_DIR="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)/monitoring"
+
+# The docker network the brokers are attached to.
+monitor_network() {
+  local cid
+  cid="$(compose_cmd ps -q 2>/dev/null | head -1)"
+  [[ -n "$cid" ]] || return 1
+  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" 2>/dev/null \
+    | tr ' ' '\n' | grep -v '^$' | head -1
+}
+
+# One --kafka.server= flag per broker, taken from the internal bootstrap list so
+# the exporter uses the same listener the brokers use for each other.
+monitor_targets() {
+  local out=""
+  local IFS=','
+  for hp in $BOOTSTRAP; do
+    out+="--kafka.server=$hp "
+  done
+  echo "${out% }"
+}
+
+monitor_compose() {
+  [[ -d "$MONITOR_DIR" ]] || die "monitoring/ not found in $SCRIPT_DIR
+This bundle was built without the observability stack."
+  local net
+  net="$(monitor_network)" || die "The cluster is not running — start it first: krate start"
+  [[ -n "$net" ]] || die "Could not determine the cluster's docker network."
+
+  local env_file="$MONITOR_DIR/.env"
+  if [[ ! -f "$env_file" ]]; then
+    cp "$MONITOR_DIR/.env.template" "$env_file"
+    warn "Created monitoring/.env from template (default Grafana credentials)."
+  fi
+
+  KAFKA_NETWORK="$net" \
+  KAFKA_EXPORTER_TARGETS="$(monitor_targets)" \
+  CLUSTER_LABEL="$KRATE_VARIANT" \
+  MONITOR_PROJECT="krate-${KRATE_VARIANT}-monitoring" \
+  "${COMPOSE_BIN[@]}" --env-file "$env_file" -f "$MONITOR_DIR/docker-compose.yml" "$@"
+}
+
+cmd_monitor() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    up)
+      require_compose
+      info "Starting observability stack..."
+      monitor_compose up -d
+      echo ""
+      ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+      ok "Prometheus: http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)"
+      note_smtp
+      ;;
+    down)    require_compose; monitor_compose down "$@" ;;
+    status)  require_compose; monitor_compose ps ;;
+    logs)    require_compose; monitor_compose logs --tail 100 "$@" ;;
+    reload)
+      # Re-read alert rules without restarting Prometheus.
+      require_compose
+      if monitor_compose exec -T prometheus wget -q -O /dev/null --post-data='' http://127.0.0.1:9090/-/reload; then
+        ok "Prometheus reloaded its rules."
+      else
+        die "Reload failed — is the stack up?"
+      fi
+      ;;
+    ui)
+      local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+      echo "Grafana:  http://$(hostname -f 2>/dev/null || hostname):${port}"
+      echo "User:     $(env_value_file "$MONITOR_DIR/.env" GRAFANA_USER admin)"
+      echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
+      ;;
+    *)
+      echo "Usage: krate monitor {up|down|status|logs|reload|ui}"
+      return 1 ;;
+  esac
+}
+
+# Read a key from an arbitrary env file, with a default.
+env_value_file() {
+  local file="$1" key="$2" default="${3:-}" v=""
+  [[ -f "$file" ]] && v="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"'"')"
+  echo "${v:-$default}"
+}
+
+# Alerting works without SMTP; only delivery is off. Say so rather than let an
+# operator assume email is configured.
+note_smtp() {
+  local en; en="$(env_value_file "$MONITOR_DIR/.env" GF_SMTP_ENABLED false)"
+  if [[ "$en" != "true" ]]; then
+    warn "Email delivery is off (GF_SMTP_ENABLED=false). Alerts still fire and show in Grafana."
+    warn "To enable: krate monitor config, or edit monitoring/.env and re-run 'krate monitor up'."
+  fi
+}
+
 # ─── doctor (preflight) ───────────────────────────────────────────────────────
 # Read-only checks run before touching the host. Catches the things that bite
 # a shared box: busy host ports, a firewalld/Docker NAT zone conflict, and a
@@ -1000,6 +1104,7 @@ cmd_help() {
   printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
   printf "  %-30s %s\n" "uninstall"            "Remove containers (volumes kept)"
   printf "  %-30s %s\n" "uninstall --purge"    "Remove containers AND delete all data"
+  printf "  %-30s %s\n" "monitor {up|down|status|logs|reload|ui}" "Observability stack (Grafana, Prometheus, Loki)"
   printf "  %-30s %s\n" "doctor"               "Preflight checks (ports, firewalld, Docker) before install"
   printf "  %-30s %s\n" "gen-cert"             "(Re)generate the self-signed TLS cert for the UI"
   printf "  %-30s %s\n" "docker-check"         "Verify Docker installation"
@@ -1041,6 +1146,7 @@ case "$CMD" in
   ui)             cmd_ui ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
+  monitor)        cmd_monitor "$@" ;;
   doctor)         cmd_doctor ;;
   gen-cert)       cmd_gen_cert ;;
   docker-check)   cmd_docker_check ;;
