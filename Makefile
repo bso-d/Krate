@@ -19,7 +19,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/kafka epc/krate
+CLI_FILES := zk/kafka kraft/krate epc/krate
 
 ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:v1.5.0 nginx:1.27-alpine
 # KRaft images are derived from kraft/.env.template — the single source of truth
@@ -42,7 +42,7 @@ DOCKER_RPM_OPTIONAL := container-selinux
 
 help:
 >cat <<'EOF'
->Kafka offline bundle workflow
+>Krate offline bundle workflow
 >
 >Targets:
 >  make check                                     Run syntax, ShellCheck, and Compose validation
@@ -112,7 +112,12 @@ bundle:
 >
 >build_one() {
 >  local mode="$$1"
->  local bundle_name="kafka-$${mode}-$(VERSION)-$(ARCH)"
+>  # The frozen ZooKeeper edition keeps its published kafka-* naming; everything
+>  # else is Krate.
+>  local bundle_name="krate-$${mode}-$(VERSION)-$(ARCH)"
+>  if [[ "$$mode" == "zk" ]]; then
+>    bundle_name="kafka-zk-$(VERSION)-$(ARCH)"
+>  fi
 >  local bundle_dir="$(DIST_DIR)/staging/$${bundle_name}"
 >  local out_file="$(DIST_DIR)/$${bundle_name}.tar.gz"
 >  local src_dir="$$mode"
@@ -151,10 +156,11 @@ bundle:
 >
 >  cp "$$src_dir/docker-compose.yml" "$$bundle_dir/docker-compose.yml"
 >  cp "$$src_dir/nginx.conf" "$$bundle_dir/nginx.conf"
->  # The EPC variant ships its CLI as ./krate; zk and kraft still use ./kafka.
->  local cli_name="kafka"
->  if [[ "$$mode" == "epc" ]]; then
->    cli_name="krate"
+>  # The CLI ships as ./krate everywhere except the frozen ZooKeeper edition,
+>  # whose published v5 bundle documents ./kafka.
+>  local cli_name="krate"
+>  if [[ "$$mode" == "zk" ]]; then
+>    cli_name="kafka"
 >  fi
 >  cp "$$src_dir/$$cli_name" "$$bundle_dir/$$cli_name"
 >  chmod +x "$$bundle_dir/$$cli_name"

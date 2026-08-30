@@ -1,4 +1,4 @@
-# kafka-offline-install-package
+# Krate
 
 Portable, offline-ready Kafka cluster packages for **x86_64 and ARM64** Ubuntu VMs. Pick up the bundle matching your VM's CPU on a connected machine, drop it on a VM, and have a running cluster in one command.
 
@@ -23,7 +23,7 @@ Both include 4 brokers, 24 partitions per topic, and [Kafbat UI](https://github.
 # Test locally — no bundling needed
 cd zk                        # or: cd kraft
 cp .env.template .env
-./kafka gen-cert             # generate the self-signed TLS cert the proxy needs
+./krate gen-cert             # generate the self-signed TLS cert the proxy needs
 docker compose up -d
 ```
 
@@ -58,13 +58,13 @@ Output lands in `dist/` (one set per arch):
 ```
 dist/
 ├── kafka-zk-v5-amd64.tar.gz       (+ .sha256)
-├── kafka-kraft-v5-amd64.tar.gz    (+ .sha256)
+├── krate-kraft-v5-amd64.tar.gz    (+ .sha256)
 ├── kafka-zk-v5-arm64.tar.gz       (+ .sha256)
-└── kafka-kraft-v5-arm64.tar.gz    (+ .sha256)
+└── krate-kraft-v5-arm64.tar.gz    (+ .sha256)
 ```
 
 > KRaft bundle (~720 MB) is smaller than ZK (~1.2 GB) since it doesn't need the ZooKeeper image.
-> Pick the bundle matching the VM's CPU — `kafka doctor` will flag an arch mismatch before install.
+> Pick the bundle matching the VM's CPU — `krate doctor` will flag an arch mismatch before install.
 
 ---
 
@@ -99,6 +99,27 @@ Then open Kafbat UI at **`https://<fqdn>/`** (TLS-terminated by nginx; `kafka in
 
 > `kafka doctor` runs automatically at the start of `kafka install`, so a port conflict, a firewalld `docker`-zone issue, or an architecture mismatch is caught before anything starts.
 
+### EPC deployment (RHEL 9)
+
+A tailored 2-broker deployment for RHEL 9 / x86_64 hosts, published separately as
+[`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1). It differs from the
+baseline: 2 brokers on host ports **9092/9093**, RF 2 with `min.insync.replicas` 1,
+broker data bind-mounted on **`/data`**, byte-capped retention, and an offline
+Docker CE install from bundled **RPMs** rather than `.deb`s.
+
+```bash
+sha256sum -c kafka-epc-v1-amd64.tar.gz.sha256
+tar -xzf kafka-epc-v1-amd64.tar.gz && cd kafka-epc-v1-amd64
+./krate doctor && ./krate docker-install && ./krate install
+```
+
+Build it with `make bundle VERSION=vN MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1`
+(prepare packages first with `make docker-rpms RHEL_VERSION=9 ARCH=amd64`). Full
+steps in [docs/epc-install-runbook.md](docs/epc-install-runbook.md).
+
+> The published `epc-v1` asset predates the Krate rename, so it is named
+> `kafka-epc-v1-amd64.tar.gz`; bundles built after it are `krate-<mode>-<version>-<arch>.tar.gz`.
+
 ### Other variants & architectures
 
 The KRaft variant and arm64 builds aren't published in the current release, but build from source on a machine with Docker + internet:
@@ -114,45 +135,45 @@ See [Building Offline Bundles](#building-offline-bundles) for details.
 
 ---
 
-## `kafka` CLI
+## `krate` CLI
 
-The `kafka` script in each bundle (and in `zk/` / `kraft/`) is a wrapper over `docker compose` with cluster-aware helpers.
+The `krate` script in each bundle (and in `kraft/` / `epc/`) — the frozen ZooKeeper edition still ships it as `kafka` is a wrapper over `docker compose` with cluster-aware helpers.
 
 ```
-kafka install                   First-time setup: load images, configure, start
-kafka start                     Start all services
-kafka stop                      Stop all services (data preserved)
-kafka restart [service]         Restart all or a specific service
-kafka down                      Remove containers (volumes preserved)
-kafka status                    Show running service state
-kafka logs [-f] [service]       Show logs; -f to follow
-kafka health                    Health check of all services
-kafka lag                       Summary of all consumer group lag
-kafka lag <group>               Per-partition lag for a specific group
-kafka lag --topic <topic>       Lag filtered to a specific topic
-kafka ui                        Show Kafbat UI URL and credentials
-kafka config                    Show current .env config
-kafka config set KEY=VALUE      Set a config value
-kafka load-images               Load Docker images without starting
-kafka uninstall                 Remove containers (volumes kept)
-kafka uninstall --purge         Remove containers AND delete all data
-kafka doctor                    Preflight checks (ports, firewalld, Docker) before install
-kafka gen-cert                  (Re)generate the self-signed TLS cert for the UI
-kafka docker-check              Verify Docker installation
-kafka docker-install            Install Docker from bundled .deb packages
+krate install                   First-time setup: load images, configure, start
+krate start                     Start all services
+krate stop                      Stop all services (data preserved)
+krate restart [service]         Restart all or a specific service
+krate down                      Remove containers (volumes preserved)
+krate status                    Show running service state
+krate logs [-f] [service]       Show logs; -f to follow
+krate health                    Health check of all services
+krate lag                       Summary of all consumer group lag
+krate lag <group>               Per-partition lag for a specific group
+krate lag --topic <topic>       Lag filtered to a specific topic
+krate ui                        Show Kafbat UI URL and credentials
+krate config                    Show current .env config
+krate config set KEY=VALUE      Set a config value
+krate load-images               Load Docker images without starting
+krate uninstall                 Remove containers (volumes kept)
+krate uninstall --purge         Remove containers AND delete all data
+krate doctor                    Preflight checks (ports, firewalld, Docker) before install
+krate gen-cert                  (Re)generate the self-signed TLS cert for the UI
+krate docker-check              Verify Docker installation
+krate docker-install            Install Docker from bundled .deb packages
 ```
 
 ### Examples
 
 ```bash
-kafka install
-kafka logs -f kafka-92
-kafka lag
-kafka lag my-consumer-group
-kafka lag --topic payments
-kafka config set KAFKA_UI_USER=admin
-kafka health
-kafka uninstall --purge
+krate install
+krate logs -f kafka-92
+krate lag
+krate lag my-consumer-group
+krate lag --topic payments
+krate config set KAFKA_UI_USER=admin
+krate health
+krate uninstall --purge
 ```
 
 ---
@@ -189,12 +210,12 @@ zk-proxy       :443 (HTTPS UI)  :80 (→ redirects to 443)
 Each broker runs in combined mode (broker + controller). Controller quorum is internal-only on ports 29092–29095.
 
 ```
-kraft-broker-92   :9092  :19092
-kraft-broker-93   :9093  :19093
-kraft-broker-94   :9094  :19094
-kraft-broker-95   :9095  :19095
-kraft-kafbat      (internal only — fronted by kraft-proxy)
-kraft-proxy       :443 (HTTPS UI)  :80 (→ redirects to 443)
+krate-broker-92   :9092  :19092
+krate-broker-93   :9093  :19093
+krate-broker-94   :9094  :19094
+krate-broker-95   :9095  :19095
+krate-kafbat      (internal only — fronted by krate-proxy)
+krate-proxy       :443 (HTTPS UI)  :80 (→ redirects to 443)
 ```
 
 ---
@@ -211,12 +232,12 @@ cp .env.template .env
 Or use the CLI:
 
 ```bash
-kafka config set KAFKA_UI_USER=admin
-kafka config set KAFKA_UI_PASSWORD=yourpassword
-kafka config set KAFKA_UI_FQDN=kafka.internal.example
+krate config set KAFKA_UI_USER=admin
+krate config set KAFKA_UI_PASSWORD=yourpassword
+krate config set KAFKA_UI_FQDN=kafka.internal.example
 ```
 
-The UI is served over **HTTPS** by the nginx proxy (HTTP on :80 redirects to :443). `kafka install` auto-generates a **self-signed** cert with `KAFKA_UI_FQDN` (falling back to the host's FQDN) as the CN/SAN. To use your own cert instead, drop it in as `certs/server.crt` + `certs/server.key` and `kafka restart proxy`. Regenerate the self-signed one anytime with `kafka gen-cert`.
+The UI is served over **HTTPS** by the nginx proxy (HTTP on :80 redirects to :443). `krate install` auto-generates a **self-signed** cert with `KAFKA_UI_FQDN` (falling back to the host's FQDN) as the CN/SAN. To use your own cert instead, drop it in as `certs/server.crt` + `certs/server.key` and `krate restart proxy`. Regenerate the self-signed one anytime with `krate gen-cert`.
 
 ---
 
@@ -234,11 +255,11 @@ make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
 On the VM:
 
 ```bash
-./kafka docker-install   # installs containerd, docker-ce, docker-compose-plugin
-./kafka install
+./krate docker-install   # installs containerd, docker-ce, docker-compose-plugin
+./krate install
 ```
 
-If Docker ≥25.0.3 is already installed with the legacy `docker-compose` (v1 ≥1.29.2), `kafka install` will use it automatically — no reinstall needed.
+If Docker ≥25.0.3 is already installed with the legacy `docker-compose` (v1 ≥1.29.2), `krate install` will use it automatically — no reinstall needed.
 
 ---
 

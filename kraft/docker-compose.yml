@@ -11,7 +11,7 @@ services:
   kafka-92:
     image: ${KAFKA_IMAGE}
     hostname: kafka-92
-    container_name: kraft-broker-92
+    container_name: krate-broker-92
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -53,7 +53,7 @@ services:
   kafka-93:
     image: ${KAFKA_IMAGE}
     hostname: kafka-93
-    container_name: kraft-broker-93
+    container_name: krate-broker-93
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -95,7 +95,7 @@ services:
   kafka-94:
     image: ${KAFKA_IMAGE}
     hostname: kafka-94
-    container_name: kraft-broker-94
+    container_name: krate-broker-94
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -137,7 +137,7 @@ services:
   kafka-95:
     image: ${KAFKA_IMAGE}
     hostname: kafka-95
-    container_name: kraft-broker-95
+    container_name: krate-broker-95
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -180,7 +180,7 @@ services:
   kafka-ui:
     image: ${KAFKA_UI_IMAGE}
     hostname: kafka-ui
-    container_name: kraft-kafbat
+    container_name: krate-kafbat
     restart: unless-stopped
     depends_on:
       kafka-92:
@@ -218,7 +218,7 @@ services:
   # ─── Nginx TLS proxy (terminates HTTPS on :443, redirects :80 → :443) ───
   proxy:
     image: ${NGINX_IMAGE}
-    container_name: kraft-proxy
+    container_name: krate-proxy
     restart: unless-stopped
     depends_on:
       kafka-ui:

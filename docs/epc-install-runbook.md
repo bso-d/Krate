@@ -3,6 +3,10 @@
 For `epc-appkfk-03` and its twin. Both are RHEL 9.6 / x86_64, so **one bundle
 serves both**: `kafka-epc-v1-amd64.tar.gz`.
 
+> The published `epc-v1` asset predates the Krate rename and is named
+> `kafka-epc-v1-amd64.tar.gz`. Bundles built after it are
+> `krate-epc-<version>-<arch>.tar.gz`; the contents and commands are the same.
+
 What this installs: Docker CE 29.7.2 (offline, from bundled RPMs) and a 2-broker
 KRaft cluster on host ports **9092/9093**, with broker data on **/data** and the
 Kafbat UI behind an nginx TLS proxy.
