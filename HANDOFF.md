@@ -192,7 +192,36 @@ all files including dotfiles and `docker-offline/optional/` intact.
 The `epc-v1` release asset and its sha256 were re-uploaded, so the checksum
 changed. Anyone holding the first download should re-fetch both.
 
-### 10. Not done yet
+### 10. Renamed to Krate; kraft is the baseline, EPC is a tailored deployment
+Model confirmed: **`kraft/` is the baseline**, and EPC is one tailored deployment
+off it — there will be others, some tailored, some plain baseline. The chosen
+scope for now was **rename in place**, not a restructure: `epc/` stays a full
+copy rather than becoming an overlay on the baseline.
+
+- `kraft/kafka` → **`kraft/krate`**; self-referential usage strings follow.
+  Kafka service names (`kafka-92`) and `kafka-consumer-groups.sh` are untouched —
+  the first are network identities baked into advertised listeners and quorum
+  voters, the second is an upstream binary.
+- kraft container names `kraft-*` → **`krate-*`**. Safe: no kraft bundle has ever
+  been published. EPC containers stay `epc-*` — deployment-scoped naming is
+  correct, and `epc-v1` is already deployed against those names.
+- Bundle filenames are now **`krate-<mode>-<version>-<arch>.tar.gz`**, except the
+  frozen ZooKeeper edition which keeps `kafka-zk-*` to match its published v5
+  release.
+- `zk/kafka` keeps its name. The edition is frozen to bug/security fixes, and its
+  published bundle documents `./kafka`.
+- README retitled to **Krate**, CLI reference renamed, and an **EPC deployment**
+  section added — the README had zero mentions of the variant that is actually
+  being deployed. The ZooKeeper install section is deliberately left on
+  `kafka-zk-v5-amd64.tar.gz` / `./kafka`, since it documents the published asset.
+
+**Carried debt (deliberate, not forgotten):** the CLI is triplicated — ~3,300
+lines across `zk/kafka`, `kraft/krate` and `epc/krate`, with the latter two
+~74 % identical. Every fix is a 2–3× edit, and Phase 2 will add `monitor`
+subcommands to each. Consolidating to one CLI plus per-deployment overlays was
+considered and deferred.
+
+### 11. Not done yet
 - [x] Bundle **built** (see 7). Still **never booted** — the cluster has not run
       anywhere, so first boot on a VM is the real gate: KRaft quorum forming with
       2 voters, the `/data` bind mounts under SELinux, the offline
