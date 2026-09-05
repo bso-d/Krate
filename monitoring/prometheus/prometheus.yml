@@ -1,6 +1,5 @@
 # Scrape config for the Krate observability stack.
-# CLUSTER_LABEL is substituted by `krate monitor up` so series from different
-# variants (kraft, epc, ...) stay distinguishable in one Grafana.
+# Each variant runs its own monitoring project and metric store.
 global:
   scrape_interval: 15s
   evaluation_interval: 15s

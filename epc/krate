@@ -691,8 +691,12 @@ monitor_compose() {
   [[ -d "$MONITOR_DIR" ]] || die "monitoring/ not found in $SCRIPT_DIR
 This bundle was built without the observability stack."
   local net
-  net="$(monitor_network)" || die "The cluster is not running — start it first: krate start"
-  [[ -n "$net" ]] || die "Could not determine the cluster's docker network."
+  net="$(monitor_network)" || net=""
+  if [[ "$1" == "up" && -z "$net" ]]; then
+    die "The cluster is not running — start it first: krate start"
+  fi
+  # down/ps/logs must still work after the broker containers are removed.
+  net="${net:-krate-unused-network}"
 
   local env_file="$MONITOR_DIR/.env"
   if [[ ! -f "$env_file" ]]; then
@@ -713,7 +717,9 @@ cmd_monitor() {
     up)
       require_compose
       info "Starting observability stack..."
+      command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
       monitor_compose up -d
+      python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
       echo ""
       ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
       ok "Prometheus: http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)"
@@ -756,7 +762,7 @@ note_smtp() {
   local en; en="$(env_value_file "$MONITOR_DIR/.env" GF_SMTP_ENABLED false)"
   if [[ "$en" != "true" ]]; then
     warn "Email delivery is off (GF_SMTP_ENABLED=false). Alerts still fire and show in Grafana."
-    warn "To enable: krate monitor config, or edit monitoring/.env and re-run 'krate monitor up'."
+    warn "To enable: edit monitoring/.env and re-run 'krate monitor up'."
   fi
 }
 

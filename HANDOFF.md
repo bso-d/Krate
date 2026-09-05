@@ -6,6 +6,40 @@
 
 ---
 
+## Session Log — 2026-09-05 — Phase 2 pre-merge validation
+
+Convention confirmed: each phase is implemented and tested on its own branch,
+then merged into main. Phase 2 lives on `phase-2-observability-stack`.
+
+Pre-merge review corrected gaps in the original implementation:
+- Offline bundles now save all six monitoring images as well as the three
+  cluster images, using pins from `monitoring/.env.template`.
+- Prometheus firing rules now reach Grafana through fourteen API-seeded,
+  editable notification rules and an editable email contact point. Existing
+  operator edits are preserved; Python 3 (standard library only) is required
+  for initialization. No SMTP credentials or external recipients were used
+  in testing: the integration test receives mail locally.
+- Monitoring teardown/status work after cluster containers are removed.
+- Loki TSDB retention is configured under limits_config; Promtail persists
+  positions and filters discovery to Krate/EPC container names.
+- `make test` runs a real isolated integration test, `make test-bundle` verifies
+  a real archive and every image architecture, and a PR workflow runs both.
+  Bash syntax checks now loop over files (a single `bash -n file1 file2` only
+  parses the first file).
+
+Passed locally: static checks; four healthy KRaft brokers; produce 100/consume
+40/lag 60; replication; scrape targets; three dashboards; logs; fourteen
+editable notification rules; firing high-lag alert delivered to a local SMTP
+sink; preservation of operator edits; teardown after cluster removal; real
+ARM64 bundle checksum and all nine image manifests. Target RHEL/SELinux and
+organizational SMTP relay checks remain deployment-specific.
+
+GitHub reported main has no branch protection at inspection time. The workflow
+provides checks; requiring them through repository settings remains an admin
+configuration step. See `docs/phase-2-runbook.md` for the repeatable gate.
+
+---
+
 ## Session Log — 2026-08-29
 
 Phase 1 merged; target VMs turned out to be RHEL, which forced a new variant and

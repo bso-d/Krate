@@ -20,6 +20,8 @@ NO_PULL ?= 0
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
 CLI_FILES := zk/kafka kraft/krate epc/krate
+VARIANT ?= kraft
+MONITOR_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' monitoring/.env.template)
 
 ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 kafbat/kafka-ui:v1.5.0 nginx:1.27-alpine
 # KRaft images are derived from kraft/.env.template — the single source of truth
@@ -46,8 +48,9 @@ help:
 >
 >Targets:
 >  make check                                     Run syntax, ShellCheck, and Compose validation
->  make test                                      Alias for make check
+>  make test                                      Static checks + isolated Phase 2 integration test
 >  make validate                                  Alias for make check
+>  make test-bundle                               Verify a real offline bundle from cached images
 >  make bundle VERSION=v5 ARCH=amd64              Build both zk and kraft bundles
 >  make bundle VERSION=v5 MODE=zk ARCH=arm64      Build one bundle variant
 >  make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
@@ -75,10 +78,19 @@ help:
 
 check: syntax lint compose-check
 
-test validate: check
+validate: check
+
+test: check
+>python3 tests/phase2.py
+
+.PHONY: test-phase2 test-bundle
+test-phase2: test
+
+test-bundle:
+>python3 tests/bundle.py
 
 syntax:
->bash -n $(CLI_FILES)
+>for file in $(CLI_FILES); do bash -n "$$file"; done
 
 lint:
 >shellcheck $(CLI_FILES)
@@ -129,8 +141,8 @@ bundle:
 >
 >  case "$$mode" in
 >    zk)    images=($(ZK_IMAGES)) ;;
->    epc)   images=($(EPC_IMAGES)) ;;
->    *)     images=($(KRAFT_IMAGES)) ;;
+>    epc)   images=($(EPC_IMAGES) $(MONITOR_IMAGES)) ;;
+>    *)     images=($(KRAFT_IMAGES) $(MONITOR_IMAGES)) ;;
 >  esac
 >
 >  echo "==> Building bundle: $$bundle_name"
@@ -170,7 +182,7 @@ bundle:
 >  chmod +x "$$bundle_dir/$$cli_name"
 >
 >  # The observability stack is shared, so it is copied in rather than duplicated
->  # per variant. The frozen ZooKeeper edition carries its own and is skipped.
+>  # per variant. The frozen ZooKeeper edition is skipped.
 >  if [[ "$$mode" != "zk" && -d monitoring ]]; then
 >    cp -r monitoring "$$bundle_dir/monitoring"
 >    rm -f "$$bundle_dir/monitoring/.env"

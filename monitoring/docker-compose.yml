@@ -19,6 +19,7 @@ volumes:
   prometheus_data:
   grafana_data:
   loki_data:
+  promtail_positions:
 
 services:
   # ── kafka-exporter — cluster/topic/consumer-group metrics as a Kafka client ──
@@ -105,9 +106,7 @@ services:
       start_period: 30s
 
   # ── promtail — ships container logs to Loki ─────────────────────────────────
-  # Reads the Docker json-file logs off the host. On Docker Desktop for macOS the
-  # log path is inside the VM and this does not collect anything useful — it is
-  # supported on Linux hosts, which is where the clusters actually run.
+  # Reads json-file logs from the Docker host (the Linux VM on Docker Desktop).
   promtail:
     image: ${PROMTAIL_IMAGE}
     container_name: ${MONITOR_PROJECT:-krate-monitoring}-promtail
@@ -116,7 +115,10 @@ services:
       - ./promtail/promtail-config.yml:/etc/promtail/config.yml:ro,z
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    command: -config.file=/etc/promtail/config.yml
+      - promtail_positions:/positions
+    environment:
+      KRATE_LOG_PATTERN: "(krate|epc)-.*"
+    command: -config.file=/etc/promtail/config.yml -config.expand-env=true
     networks: [monitoring]
     depends_on: [loki]
 
