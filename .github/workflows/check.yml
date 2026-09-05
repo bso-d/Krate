@@ -1,0 +1,22 @@
+name: Phase merge checks
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static merge gate
+        run: make check
+      - name: Prepare pinned test images (connected build step)
+        run: |
+          docker compose --env-file kraft/.env.template -f kraft/docker-compose.yml pull
+          docker compose --env-file monitoring/.env.template -f monitoring/docker-compose.yml pull
+      - name: Offline runtime and email integration
+        run: make test
+      - name: Offline bundle contents and architecture
+        run: make test-bundle

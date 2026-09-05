@@ -6,6 +6,40 @@
 
 ---
 
+## Session Log — 2026-09-05 — Phase 2 pre-merge validation
+
+Convention confirmed: each phase is implemented and tested on its own branch,
+then merged into main. Phase 2 lives on `phase-2-observability-stack`.
+
+Pre-merge review corrected gaps in the original implementation:
+- Offline bundles now save all six monitoring images as well as the three
+  cluster images, using pins from `monitoring/.env.template`.
+- Prometheus firing rules now reach Grafana through fourteen API-seeded,
+  editable notification rules and an editable email contact point. Existing
+  operator edits are preserved; Python 3 (standard library only) is required
+  for initialization. No SMTP credentials or external recipients were used
+  in testing: the integration test receives mail locally.
+- Monitoring teardown/status work after cluster containers are removed.
+- Loki TSDB retention is configured under limits_config; Promtail persists
+  positions and filters discovery to Krate/EPC container names.
+- `make test` runs a real isolated integration test, `make test-bundle` verifies
+  a real archive and every image architecture, and a PR workflow runs both.
+  Bash syntax checks now loop over files (a single `bash -n file1 file2` only
+  parses the first file).
+
+Passed locally: static checks; four healthy KRaft brokers; produce 100/consume
+40/lag 60; replication; scrape targets; three dashboards; logs; fourteen
+editable notification rules; firing high-lag alert delivered to a local SMTP
+sink; preservation of operator edits; teardown after cluster removal; real
+ARM64 bundle checksum and all nine image manifests. Target RHEL/SELinux and
+organizational SMTP relay checks remain deployment-specific.
+
+GitHub reported main has no branch protection at inspection time. The workflow
+provides checks; requiring them through repository settings remains an admin
+configuration step. See `docs/phase-2-runbook.md` for the repeatable gate.
+
+---
+
 ## Session Log — 2026-08-29
 
 Phase 1 merged; target VMs turned out to be RHEL, which forced a new variant and
@@ -221,7 +255,65 @@ lines across `zk/kafka`, `kraft/krate` and `epc/krate`, with the latter two
 subcommands to each. Consolidating to one CLI plus per-deployment overlays was
 considered and deferred.
 
-### 11. Not done yet
+### 11. Phase 2 — observability, built shared and verified on a live cluster
+Built as **one `monitoring/` stack at the repo root**, consumed by every variant,
+rather than a per-variant copy. `krate monitor up` discovers the cluster's docker
+network from a running container and derives the exporter's broker list from the
+CLI's own `BOOTSTRAP` string — a bundle's compose project name depends on the
+directory it was extracted into, so a hardcoded external network would break on
+a VM. `MONITOR_DIR` falls back to `../monitoring` so the same CLI works from the
+repo and from a bundle.
+
+Stack: kafka-exporter, node-exporter, Prometheus, Loki, promtail, Grafana. All
+images **pinned** (the ZK reference used `:latest`). SMTP is opt-in — with it off
+the rules still fire and are visible in Grafana, so the stack stays fully
+offline-capable.
+
+**Metric availability was verified, not assumed** (PLAN required this). A
+throwaway broker plus kafka-exporter v1.8.0 was run and `/metrics` enumerated.
+Of the five originally requested rules:
+- **consumer lag**, **consumer leaving the group** — backed by real metrics
+  (`kafka_consumergroup_lag`, `kafka_consumergroup_members`).
+- **consumer rebalancing** and **producer connection break** — **no server-side
+  metric exists**; both are JMX/client-side signals. Implemented as clearly
+  labelled proxies in a separate `krate-proxy-signals` group
+  (`ConsumerGroupMembershipChurn`, `TopicIngestStalled`), each carrying
+  `signal: proxy` and an annotation stating what it cannot distinguish. Not faked.
+- **consumer link breakage** — proxied by `ConsumerGroupStalled` (no offset
+  progress while lag > 0), which is the observable symptom.
+
+**Added beyond the plan:** node-exporter and three disk rules, including
+`predict_linear` firing when a mount is 4 h from full. No Kafka metric describes
+the volume the logs sit on, and on EPC both brokers share one `/data` with RF=2
+doubling every write.
+
+#### First boot of a Krate cluster, ever
+The kraft variant was started locally to test this: **6/6 healthy**. Then the
+full pipeline was verified live:
+- `promtool check rules` — 14 rules, and Prometheus loaded all 4 groups.
+- All three scrape targets **up**; `kafka_brokers = 4`; node-exporter reporting
+  12 filesystems.
+- Produced 500 / consumed 200 on a RF=3 topic → `kafka_consumergroup_lag = 300`,
+  `under_replicated = 0`.
+- **Alerts fired against that real data**: `ConsumerGroupHasNoMembers` and
+  `ConsumerGroupStalled` both went pending.
+- Logs reached Loki (`{job="containerlogs"}` queryable), 3 dashboards and both
+  datasources provisioned, and the `krate-email` contact point loaded.
+
+Two defects found only by running it:
+1. **node-exporter `/:/host:ro,rslave` aborted the whole stack** — rslave
+   propagation is rejected where `/` is neither shared nor slave. Replaced with
+   separate procfs/sysfs/rootfs mounts, which work on both Docker Desktop and
+   Linux.
+2. **Loki rejected promtail's first batches** — on first start promtail reads
+   existing log files from the beginning, including containers stopped weeks ago,
+   and Loki 400s anything past `reject_old_samples_max_age`. Fixed with a
+   client-side `drop older_than: 168h` stage.
+
+Also worth correcting the record: **promtail does read container logs on Docker
+Desktop for macOS** — PLAN assumed it did not.
+
+### 12. Not done yet
 - [x] Bundle **built** (see 7). Still **never booted** — the cluster has not run
       anywhere, so first boot on a VM is the real gate: KRaft quorum forming with
       2 voters, the `/data` bind mounts under SELinux, the offline
