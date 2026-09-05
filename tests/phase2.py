@@ -80,7 +80,8 @@ def main():
     shutil.copytree(ROOT / 'monitoring', monitoring, ignore=shutil.ignore_patterns('.env', '__pycache__'))
     cli = cluster / 'krate'
     cli.write_text(cli.read_text().replace('KRATE_VARIANT="kraft"', f'KRATE_VARIANT="{identity}"'))
-    shutil.copy(cluster / '.env.template', cluster / '.env')
+    (cluster / '.env').write_text((cluster / '.env.template').read_text().replace(
+        'KAFKA_UI_FQDN=', 'KAFKA_UI_FQDN=krate-test.local'))
     config = json.loads(run('docker', 'compose', '--env-file', str(cluster / '.env'),
                             '-f', str(cluster / 'docker-compose.yml'), 'config', '--format', 'json'))
     config['name'] = 'krate-' + identity
