@@ -280,14 +280,20 @@ If Docker â‰¥25.0.3 is already installed with the legacy `docker-compose` (v1 â‰
 ```
 
 
-## Monitoring and pre-merge tests
+## Monitoring
 
 KRaft and EPC bundles include kafka-exporter, node-exporter, Prometheus, Loki,
 promtail, and Grafana. With Python 3 installed on the host, start the cluster
 and run `./krate monitor up`. SMTP is opt-in; recipients and notification rules
 are editable in Grafana. See the [Phase 2 runbook](docs/phase-2-runbook.md).
 
-Each phase stays on its own branch until `make check`, `make test`, and
-`make test-bundle` pass. The test target now exercises a real disposable cluster
-and local alert-email delivery; it is no longer an alias for static checks.
-Use `gmake` on macOS.
+Each phase is developed and validated on its own branch before merging into
+`main`. Keep integration tests and validation artifacts local; the remote repo
+contains source, release tooling, and documentation. `make check` remains
+available for static source validation; use `gmake check` on macOS.
+
+## Topic and consumer operations
+
+See the [topic, consumer group, and consumer runbook](docs/topic-consumer-runbook.md)
+for safe creation, message-delivery and restart checks, consumer scaling, and
+ordered cleanup on KRaft or EPC.

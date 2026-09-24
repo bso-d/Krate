@@ -6,6 +6,33 @@
 
 ---
 
+## Operations runbook — 2026-09-24
+
+Added `docs/topic-consumer-runbook.md`, covering explicit KRaft/EPC cluster
+selection, topic durability/retention, creating a group through a consumer,
+bounded delivery and restart checks, application consumer rollout, and guarded
+group/topic cleanup. Commands were checked against Kafka 3.9 documentation and
+3.9.1 console-consumer source; Bash examples passed syntax validation. No live
+cluster was modified to produce this document; target-host validation remains
+an operator step. Test tooling remains local and untracked.
+
+---
+
+## Repository convention — 2026-09-05 clarification
+
+Each phase is developed and validated on its own branch before merging into
+main. Test scripts, test workflows, and validation artifacts stay local; the
+remote repository is for source, release tooling, and documentation.
+
+After PR #15 passed and merged, its integration test scripts were retained
+locally under ignored `tests/` and removed from tracking, and the temporary
+`Phase merge checks` workflow was removed. `make check` remains static source
+validation; `make test` is again its alias. The runtime monitoring initializer
+`monitoring/seed-alerting.py` remains shipped source. Prior recorded test results
+remain valid historical evidence, not a promise of a continuing CI test gate.
+
+---
+
 ## Session Log — 2026-09-05 — Phase 2 pre-merge validation
 
 Convention confirmed: each phase is implemented and tested on its own branch,
