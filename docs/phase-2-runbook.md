@@ -6,41 +6,12 @@ always represent the last validated phase.
 
 ## Before merging
 
-Run from the phase branch, with Docker running and GNU Make 4+ (`gmake` on macOS):
-
-```bash
-make check
-# Connected preparation step; integration tests themselves never pull images.
-docker compose --env-file kraft/.env.template -f kraft/docker-compose.yml pull
-docker compose --env-file monitoring/.env.template -f monitoring/docker-compose.yml pull
-make test
-make test-bundle
-```
-
-`make check` is the required static gate: Bash syntax for each CLI, ShellCheck,
-and all four Compose configurations. `make test` also runs the isolated Phase 2
-integration test. It requires Python 3 and Docker, uses unique container/network/
-volume names and temporary ports, and removes only its own resources afterward.
-It verifies:
-
-- Four healthy brokers, 100 produced messages, 40 consumed, committed lag 60,
-  and no under-replicated partitions.
-- Three live scrape targets, three dashboards, and logs in Loki.
-- Fourteen editable Grafana notification rules; a real lag alert delivered to
-  a temporary local SMTP sink. The test lowers the lag threshold and pending
-  period only in its copied configuration; no email leaves the test machine.
-- Operator edits survive alert initialization, and monitoring can be stopped
-  after the Kafka containers are removed.
-
-`make test-bundle` builds a real temporary KRaft bundle from cached images,
-verifies the checksum and all nine image manifests/architectures, checks that
-monitoring configuration is present and credentials are absent, then removes it.
-The same monitoring image set is included in EPC bundles.
-
-The `Phase merge checks` GitHub workflow runs these checks on pull requests and
-on `main`. Repository administrators must make its `check` job a required
-status check in branch protection/rulesets to prevent bypassing it. Adding the
-workflow alone does not enforce this.
+Validate changes locally on the phase branch before merging. Keep test scripts,
+test workflows, and generated validation artifacts out of the remote repository.
+`make check` remains the static source check (Bash syntax, ShellCheck, and the
+four Compose configurations); `make test` is an alias for it. Use `gmake` on
+macOS. Runtime and offline-bundle validation are performed with local tooling.
+Record the outcome and any deployment-specific limitations in the handoff.
 
 ## Operating monitoring
 
@@ -88,7 +59,10 @@ this phase; log-agent upgrades need their own compatibility validation.
 ## Validation recorded for this merge
 
 On 2026-09-05, static checks, the live KRaft integration test including SMTP
-delivery, and the real ARM64 bundle test passed on Docker Desktop. CI repeats
-the tests on Linux/amd64. This does not establish RHEL SELinux compatibility or
+delivery, and the real ARM64 bundle test passed on Docker Desktop. The same
+tests also passed on Linux/amd64 in CI before PR #15 merged.
+The temporary test workflow and scripts were subsequently removed from tracking
+under the source-and-releases repository convention. This does not establish
+RHEL SELinux compatibility or
 delivery through an organization's SMTP relay: those remain deployment checks
 on the target host. Follow the EPC runbook for its two-broker first boot.

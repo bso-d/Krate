@@ -27,3 +27,6 @@ docs/architecture.html
 # interim VM survey tooling — not part of the repo build
 vm-survey.sh
 vm-survey.mk
+
+# local validation tooling — source and releases only in the remote repo
+tests/

@@ -48,9 +48,8 @@ help:
 >
 >Targets:
 >  make check                                     Run syntax, ShellCheck, and Compose validation
->  make test                                      Static checks + isolated Phase 2 integration test
+>  make test                                      Alias for make check
 >  make validate                                  Alias for make check
->  make test-bundle                               Verify a real offline bundle from cached images
 >  make bundle VERSION=v5 ARCH=amd64              Build both zk and kraft bundles
 >  make bundle VERSION=v5 MODE=zk ARCH=arm64      Build one bundle variant
 >  make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
@@ -78,16 +77,7 @@ help:
 
 check: syntax lint compose-check
 
-validate: check
-
-test: check
->python3 tests/phase2.py
-
-.PHONY: test-phase2 test-bundle
-test-phase2: test
-
-test-bundle:
->python3 tests/bundle.py
+test validate: check
 
 syntax:
 >for file in $(CLI_FILES); do bash -n "$$file"; done
