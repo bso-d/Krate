@@ -6,6 +6,7 @@ global:
 
 rule_files:
   - /etc/prometheus/alerts.yml
+  - /tmp/krate-topology.yml
 
 scrape_configs:
   # kafka-exporter — cluster/topic/consumer metrics for the ZK cluster

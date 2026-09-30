@@ -1,0 +1,136 @@
+name: Release broker images
+
+on:
+  push:
+    tags: ['kraft-v*', 'zk-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: broker-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      edition: ${{ steps.release.outputs.edition }}
+      version: ${{ steps.release.outputs.version }}
+      image: ${{ steps.release.outputs.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Validate release tag and source
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^(kraft|zk)-(v[0-9]+(\.[0-9]+){0,2})$ ]] || {
+            echo 'Use kraft-vN[.N[.N]] or zk-vN[.N[.N]]' >&2
+            exit 1
+          }
+          edition="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo 'Release commits must already be merged into main' >&2
+            exit 1
+          }
+          printf 'edition=%s\nversion=%s\nimage=ghcr.io/%s-%s\n' \
+            "$edition" "$version" "${REPOSITORY,,}" "$edition" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: metadata
+    uses: ./.github/workflows/broker-ci.yml
+    with:
+      edition: ${{ needs.metadata.outputs.edition }}
+
+  publish:
+    needs: [metadata, validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [release, debug]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Authenticate to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish versioned image
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/${{ needs.metadata.outputs.edition }}/Dockerfile
+          target: ${{ matrix.flavor }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ needs.metadata.outputs.image }}:${{ needs.metadata.outputs.version }}-${{ matrix.flavor }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - name: Record published digest
+        env:
+          IMAGE: ${{ needs.metadata.outputs.image }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          FLAVOR: ${{ matrix.flavor }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          printf '%s:%s-%s\n%s@%s\n' "$IMAGE" "$VERSION" "$FLAVOR" "$IMAGE" "$DIGEST" > "${FLAVOR}.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-${{ matrix.flavor }}
+          path: ${{ matrix.flavor }}.txt
+          retention-days: 7
+
+  release:
+    needs: [metadata, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download image references
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: image-*
+          merge-multiple: true
+      - name: Create edition release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          EDITION: ${{ needs.metadata.outputs.edition }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'Krate %s broker images %s (linux/amd64 and linux/arm64).\n\n' "$EDITION" "$VERSION"
+            printf 'Release image:\n\n'
+            sed 's/^/    /' release.txt
+            printf '\nDebug image:\n\n'
+            sed 's/^/    /' debug.txt
+            printf '\nDebug adds network and process diagnostic tools; both targets retain upstream broker startup.\n'
+          } > release-notes.md
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release.txt debug.txt --clobber
+            gh release edit "$RELEASE_TAG" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" release.txt debug.txt \
+              --verify-tag --latest=false --title "Krate $EDITION $VERSION" --notes-file release-notes.md
+          fi

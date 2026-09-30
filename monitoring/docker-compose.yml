@@ -72,6 +72,19 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro,z
       - prometheus_data:/prometheus
+    environment:
+      KAFKA_EXPECTED_BROKERS: ${KAFKA_EXPECTED_BROKERS:?Set the configured broker count}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        case "$${KAFKA_EXPECTED_BROKERS}" in
+          ''|*[!0-9]*) echo 'KAFKA_EXPECTED_BROKERS must be a positive integer' >&2; exit 1 ;;
+        esac
+        [ "$${KAFKA_EXPECTED_BROKERS}" -gt 0 ] || { echo 'KAFKA_EXPECTED_BROKERS must be positive' >&2; exit 1; }
+        printf 'groups:\n  - name: krate-topology\n    rules:\n      - record: kafka_expected_brokers\n        expr: vector(%s)\n' "$${KAFKA_EXPECTED_BROKERS}" > /tmp/krate-topology.yml
+        exec /bin/prometheus "$$@"
+      - prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus

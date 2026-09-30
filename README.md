@@ -31,6 +31,12 @@ Kafbat UI → `https://<hostname>/` (TLS-terminated by nginx; self-signed cert, 
 
 ---
 
+## Broker image releases
+
+KRaft and ZooKeeper publish independent release/debug broker images to GHCR for
+amd64 and arm64. See the [container release guide](docs/container-releases.md)
+for CI, version tags, image references, and Compose configuration.
+
 ## Building Offline Bundles
 
 Run on any machine with Docker, GNU Make 4.0 or newer, and internet access. Bundles are **architecture-specific** — build one per target CPU (`amd64` for x86_64 VMs, `arm64` for ARM). `ARCH` defaults to the build host's architecture.

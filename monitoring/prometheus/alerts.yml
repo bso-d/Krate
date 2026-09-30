@@ -30,12 +30,12 @@ groups:
           description: "Prometheus has not scraped kafka-exporter for 2m — cluster metrics are blind."
 
       - alert: KafkaBrokerDisappeared
-        expr: kafka_brokers < max_over_time(kafka_brokers[1h])
+        expr: kafka_brokers < scalar(kafka_expected_brokers)
         for: 2m
         labels: { severity: critical }
         annotations:
           summary: "A Kafka broker disappeared"
-          description: "Live broker count ({{ $value }}) is below the last hour's peak."
+          description: "Live broker count ({{ $value }}) is below the configured expected broker count."
 
       - alert: KafkaUnderReplicatedPartitions
         expr: sum(kafka_topic_partition_under_replicated_partition) > 0

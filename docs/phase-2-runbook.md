@@ -66,3 +66,15 @@ under the source-and-releases repository convention. This does not establish
 RHEL SELinux compatibility or
 delivery through an organization's SMTP relay: those remain deployment checks
 on the target host. Follow the EPC runbook for its two-broker first boot.
+
+### Expected broker topology
+
+`krate monitor up` derives the expected broker count from the cluster Compose
+configuration (four for KRaft, two for EPC), including stopped services. Prometheus
+records this as `kafka_expected_brokers`. `KafkaBrokerDisappeared` fires after two
+minutes below that count and stays active throughout a prolonged outage. The
+exporter-down alert covers loss of scrape availability.
+
+After intentionally changing the broker services in the cluster Compose file,
+run `krate monitor up` again to apply the new expected count. For direct monitoring
+Compose startup, set `KAFKA_EXPECTED_BROKERS` in `monitoring/.env` explicitly.

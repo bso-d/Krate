@@ -1,6 +1,5 @@
 # Alert rules for the ZK cluster.
-# Rules are dynamic — no hardcoded broker count. "Broker disappeared" compares
-# the live count to the recent peak, so it adapts to whatever the cluster size is.
+# Expected broker count is derived from configured Compose services at startup.
 groups:
   - name: kafka-cluster
     rules:
@@ -14,15 +13,15 @@ groups:
           summary: "kafka-exporter is not reachable"
           description: "Prometheus cannot scrape kafka-exporter (job=kafka) for 2m — cluster metrics are unavailable."
 
-      # A broker that was reporting has dropped out (count < recent peak).
+      # Live broker count is below the configured topology.
       - alert: KafkaBrokerDisappeared
-        expr: kafka_brokers < max_over_time(kafka_brokers[1h])
+        expr: kafka_brokers < scalar(kafka_expected_brokers)
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: "A Kafka broker disappeared"
-          description: "Live broker count ({{ $value }}) is below the last hour's peak — a broker has stopped reporting."
+          description: "Live broker count ({{ $value }}) is below the configured expected broker count."
 
       # Any under-replicated partition means a replica is behind or offline.
       - alert: UnderReplicatedPartitions
