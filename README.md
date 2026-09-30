@@ -1,313 +1,348 @@
-# Krate
+<a id="readme-top"></a>
 
-Portable, offline-ready Kafka cluster packages for **x86_64 and ARM64** Ubuntu VMs. Pick up the bundle matching your VM's CPU on a connected machine, drop it on a VM, and have a running cluster in one command.
+<div align="center">
+  <img src="docs/assets/krate-logo.png" alt="Krate logo: a blue and teal crate with connected nodes" width="240">
 
-Two variants — choose based on your coordination layer preference:
+  <h1>Krate</h1>
 
-| Variant | Coordination | Directory |
-|---|---|---|
-| `zk` | ZooKeeper | `zk/` |
-| `kraft` | KRaft (no ZooKeeper) | `kraft/` |
+  <p>Portable Kafka packages for Ubuntu and RHEL virtual machines.</p>
 
-Both include 4 brokers, 24 partitions per topic, and [Kafbat UI](https://github.com/kafbat/kafka-ui) for cluster visibility.
+  <p>
+    <a href="https://github.com/bso-d/Krate/actions/workflows/broker-ci.yml">
+      <img src="https://github.com/bso-d/Krate/actions/workflows/broker-ci.yml/badge.svg?branch=main" alt="Broker images CI">
+    </a>
+    <a href="https://github.com/bso-d/Krate/actions/workflows/codeql.yml">
+      <img src="https://github.com/bso-d/Krate/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL checks">
+    </a>
+    <img src="https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white" alt="Docker">
+    <img src="https://img.shields.io/badge/Bash-4EAA25?logo=gnubash&logoColor=white" alt="Bash">
+  </p>
 
-**Requirements:** Docker Engine ≥25.0.3 and Docker Compose ≥1.29.2 (`docker compose` plugin or standalone `docker-compose`)
+  <p>
+    <a href="#start-on-a-connected-machine">Get started</a> ·
+    <a href="#build-an-offline-package">Build a package</a> ·
+    <a href="https://github.com/bso-d/Krate/releases">Downloads</a> ·
+    <a href="#guides">Guides</a>
+  </p>
+</div>
 
-**Architecture:** see [`docs/architecture.html`](docs/architecture.html) for the KRaft microarchitecture (producer, consumer, brokers, replication, quorum) and the operational/build planes.
+<details>
+  <summary>Contents</summary>
 
----
+  - [What Krate does](#what-krate-does)
+  - [Problems Krate solves](#problems-krate-solves)
+  - [How it differs from similar repositories](#how-it-differs-from-similar-repositories)
+  - [Choose an edition](#choose-an-edition)
+  - [What you need](#what-you-need)
+  - [Start on a connected machine](#start-on-a-connected-machine)
+  - [Build an offline package](#build-an-offline-package)
+  - [Install the package on a VM](#install-the-package-on-a-vm)
+  - [Everyday commands](#everyday-commands)
+  - [Monitoring](#monitoring)
+  - [How the parts fit together](#how-the-parts-fit-together)
+  - [Limits to understand](#limits-to-understand)
+  - [Development and checks](#development-and-checks)
+  - [Guides](#guides)
+  - [Component credits](#component-credits)
+  - [Contributing and community conduct](#contributing-and-community-conduct)
 
-## Quick Start (online machine)
+</details>
+
+## What Krate does
+
+[Apache Kafka](https://kafka.apache.org/) lets applications send, store, and read streams of messages. A Kafka **broker** is a server that handles those messages. Several brokers working together form a **cluster**.
+
+Krate supplies the files and command-line tools to run a Kafka cluster with [Docker](https://www.docker.com/), which runs software in containers. It can also collect the container images and setup files into one compressed package. Build that package on a machine with internet access, copy it to a matching virtual machine (VM), and install it there without downloading the images again.
+
+Each edition includes [Kafbat UI](https://github.com/kafbat/kafka-ui), a browser interface for viewing brokers, topics (named message streams), and consumer groups (applications sharing the work of reading messages). The UI sits behind an nginx web proxy with HTTPS and a login.
+
+## Problems Krate solves
+
+| Problem | What Krate provides |
+| --- | --- |
+| The VM cannot download container images | A package containing the images and setup files, plus a checksum to check the transferred file |
+| The VM has a different processor or operating system from the build machine | A build for the chosen processor, a processor check before installation, and matching Ubuntu or RHEL Docker packages when requested |
+| Setup steps are spread across separate commands and files | A command script for installation, health checks, logs, and message backlog, with the UI already configured |
+| Measurements and logs need separate setup | Included monitoring files and images, started with a separate command when needed |
+
+You still need suitable disk space, OS dependencies, and working network settings. Krate prepares the software and runs host checks; the deployment guides cover the remaining host setup.
+
+## How it differs from similar repositories
+
+| Repository | Main purpose | Krate's focus |
+| --- | --- | --- |
+| [Apache Kafka Docker examples](https://github.com/apache/kafka/tree/trunk/docker/examples) | Show how to configure single-node and multi-node Kafka containers, including encrypted and authenticated connections | Provide selected cluster setups with an offline package builder, optional Docker installer, management commands, UI, and monitoring |
+| [Confluent cp-all-in-one](https://github.com/confluentinc/cp-all-in-one) | Run examples of the broader Confluent Platform, including schema management, connectors, and stream-processing services | Package Kafka, its UI, and monitoring for VM installation; those extra Confluent services are not included |
+
+Krate adds package builds and host management commands around Kafka and Docker, especially for a VM without internet access. Its supplied clusters share one host and need additional configuration for secure remote application access.
+
+## Choose an edition
+
+Ubuntu and Red Hat Enterprise Linux (RHEL) are the target operating systems.
+
+| Edition | What it runs | Intended host | Command |
+| --- | --- | --- | --- |
+| **KRaft** | Four brokers; Kafka manages its own coordination, without ZooKeeper | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `kraft/krate` |
+| **ZooKeeper** | Four brokers plus ZooKeeper, a separate coordination service | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `zk/kafka` |
+| **EPC** | Two brokers using KRaft, with message data stored under `/data` | Tailored for RHEL 9 on x86_64 | `epc/krate` |
+
+The ZooKeeper edition is frozen: it receives bug and security fixes, with no new features. EPC is the repository's name for the tailored RHEL deployment; follow its [installation guide](docs/epc-install-runbook.md) for host and disk settings.
+
+For a first local run, the steps below use KRaft. All brokers in these setups run on the same host.
+
+### Ready-made downloads
+
+The [releases page](https://github.com/bso-d/Krate/releases) currently contains:
+
+| Release | Package |
+| --- | --- |
+| [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | ZooKeeper, x86_64: `kafka-zk-v5-amd64.tar.gz` and its checksum |
+| [`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1) | RHEL/EPC, x86_64: `kafka-epc-v1-amd64.tar.gz` and its checksum |
+
+Build KRaft or ARM64 packages from source using the commands below. Existing downloads keep their original `kafka-*` names. New KRaft and EPC packages use `krate-*`; ZooKeeper keeps `kafka-zk-*`.
+
+## What you need
+
+- **To run a cluster:** Docker Engine 25.0.3 or newer, a working Docker service, and Docker Compose. The scripts accept the `docker compose` plugin or standalone `docker-compose` 1.29.2 or newer; the examples use the plugin.
+- **To create the UI certificate:** OpenSSL, or your own certificate and key at `certs/server.crt` and `certs/server.key`.
+- **To build packages:** a connected machine with Docker, Bash, Git, and GNU Make 4.0 or newer. On macOS, use `gmake` wherever the examples say `make`.
+- **For KRaft/EPC monitoring:** Python 3 on the host, in addition to Docker.
+
+Choose the package for the target VM's processor: `amd64` means x86_64; `arm64` means ARM64. Leave room for the package, loaded images, and stored messages. The EPC guide explains how to budget its `/data` disk.
+
+## Start on a connected machine
+
+1. Clone the repository and create the KRaft settings file.
+
+   ```bash
+   git clone https://github.com/bso-d/Krate.git
+   cd Krate/kraft
+   cp .env.template .env
+   ```
+
+2. Edit `.env`. Set `KAFKA_UI_USER` and `KAFKA_UI_PASSWORD` to your own login details. Set `KAFKA_UI_FQDN` to the hostname you will use to open the UI. The default login is `admin` / `changeme`; replace it before exposing the UI.
+
+3. Start the cluster and check it.
+
+   ```bash
+   ./krate gen-cert
+   ./krate start
+   ./krate health
+   ./krate ui
+   ```
+
+Docker downloads the images on this first run. When startup is complete, `health` should report healthy services. `ui` prints the address and login details; open that HTTPS address to view the four brokers in Kafbat UI.
+
+The generated certificate is self-signed, so the browser will show a trust warning. You can trust `certs/server.crt` or supply a certificate trusted by your browser.
+
+For ZooKeeper, use `cd Krate/zk` and `./kafka` instead of `./krate`. Use `start` when running directly from the repository. The `install` command is for an extracted package containing saved images.
+
+## Build an offline package
+
+Run these commands from the repository root on the connected machine:
 
 ```bash
-# Test locally — no bundling needed
-cd zk                        # or: cd kraft
-cp .env.template .env
-./krate gen-cert             # generate the self-signed TLS cert the proxy needs
-docker compose up -d
+# KRaft package for an x86_64 VM
+make bundle VERSION=v1 MODE=kraft ARCH=amd64
+
+# KRaft package for an ARM64 VM
+make bundle VERSION=v1 MODE=kraft ARCH=arm64
 ```
 
-Kafbat UI → `https://<hostname>/` (TLS-terminated by nginx; self-signed cert, so accept the browser warning). Set `KAFKA_UI_FQDN` in `.env` to control the cert's name.
+`VERSION` is a package label in the form `vN`, such as `v1` or `v5`. `MODE=both` builds KRaft and ZooKeeper; `MODE=zk` builds only ZooKeeper. `ARCH` defaults to the build machine's processor when omitted.
 
----
+Each build writes a package, a SHA-256 checksum, and a record of the saved images under `dist/`. For the first command above:
 
-## Broker image releases
-
-KRaft and ZooKeeper publish independent release/debug broker images to GHCR for
-amd64 and arm64. See the [container release guide](docs/container-releases.md)
-for CI, version tags, image references, and Compose configuration.
-
-## Building Offline Bundles
-
-Run on any machine with Docker, GNU Make 4.0 or newer, and internet access. Bundles are **architecture-specific** — build one per target CPU (`amd64` for x86_64 VMs, `arm64` for ARM). `ARCH` defaults to the build host's architecture.
-
-```bash
-# Build both variants for a given arch
-make bundle VERSION=v2 ARCH=amd64
-make bundle VERSION=v2 ARCH=arm64
-
-# Build one variant
-make bundle VERSION=v2 ARCH=amd64 MODE=zk
-
-# Skip re-pulling if images are already local (must match ARCH)
-make bundle VERSION=v2 ARCH=arm64 NO_PULL=1
-
-# Include Docker CE .deb packages for fully offline VM installs (per-arch)
-make docker-debs UBUNTU_VERSION=noble ARCH=amd64
-make bundle VERSION=v2 ARCH=amd64 INCLUDE_DOCKER=1
-```
-
-Set `UBUNTU_VERSION=jammy` for Ubuntu 22.04 targets or `UBUNTU_VERSION=noble` for Ubuntu 24.04 targets. The command replaces any existing Docker packages under `docker-offline/<arch>/`, so run the matching `bundle` command before preparing the same architecture for a different Ubuntu release.
-
-Output lands in `dist/` (one set per arch):
-
-```
+```text
 dist/
-├── kafka-zk-v5-amd64.tar.gz       (+ .sha256)
-├── krate-kraft-v5-amd64.tar.gz    (+ .sha256)
-├── kafka-zk-v5-arm64.tar.gz       (+ .sha256)
-└── krate-kraft-v5-arm64.tar.gz    (+ .sha256)
+├── krate-kraft-v1-amd64.tar.gz
+├── krate-kraft-v1-amd64.tar.gz.sha256
+└── krate-kraft-v1-amd64.tar.gz.images.lock.tsv
 ```
 
-> KRaft bundle (~720 MB) is smaller than ZK (~1.2 GB) since it doesn't need the ZooKeeper image.
-> Pick the bundle matching the VM's CPU — `krate doctor` will flag an arch mismatch before install.
+The package includes the cluster files, its command script, saved Docker images, and monitoring files. The image record lists the exact images, their checksums, and their processor type; a copy is also inside the package. `NO_PULL=1` reuses images already on the build machine; they must match `ARCH`.
 
----
+### Include Docker for a VM that does not have it
 
-## Installing on the VM
-
-The current [release](https://github.com/bso-d/kafka-offline-install-package/releases/latest) publishes the **ZooKeeper / amd64** bundle (`kafka-zk-v5-amd64.tar.gz`), for x86_64 Ubuntu VMs. Other variants/arches build from source — see [Other variants & architectures](#other-variants--architectures).
-
-### Install the ZooKeeper bundle (amd64)
-
-For an x86_64 VM (`uname -m` → `x86_64`):
+For Ubuntu 24.04 on x86_64:
 
 ```bash
-# 1 — Download (on the VM, or transfer manually)
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v5-amd64.tar.gz
-wget https://github.com/bso-d/kafka-offline-install-package/releases/download/v1.0.0/kafka-zk-v5-amd64.tar.gz.sha256
-
-# 2 — Verify integrity
-sha256sum -c kafka-zk-v5-amd64.tar.gz.sha256
-
-# 3 — Extract
-tar -xzf kafka-zk-v5-amd64.tar.gz
-cd kafka-zk-v5-amd64
-
-# 4 — Install
-./kafka doctor             # preflight: ports, firewalld, Docker, architecture
-./kafka docker-check       # verify Docker is ready
-./kafka docker-install     # only if Docker isn't installed (bundle ships amd64 .debs)
-./kafka install            # load images → configure → start cluster
-```
-
-Then open Kafbat UI at **`https://<fqdn>/`** (TLS-terminated by nginx; `kafka install` auto-generates a self-signed cert for `KAFKA_UI_FQDN`, so accept the browser warning or trust `certs/server.crt`). Credentials are in `.env` — change them with `kafka config set`. Run `kafka ui` to print the exact URL.
-
-> `kafka doctor` runs automatically at the start of `kafka install`, so a port conflict, a firewalld `docker`-zone issue, or an architecture mismatch is caught before anything starts.
-
-### EPC deployment (RHEL 9)
-
-A tailored 2-broker deployment for RHEL 9 / x86_64 hosts, published separately as
-[`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1). It differs from the
-baseline: 2 brokers on host ports **9092/9093**, RF 2 with `min.insync.replicas` 1,
-broker data bind-mounted on **`/data`**, byte-capped retention, and an offline
-Docker CE install from bundled **RPMs** rather than `.deb`s.
-
-```bash
-sha256sum -c kafka-epc-v1-amd64.tar.gz.sha256
-tar -xzf kafka-epc-v1-amd64.tar.gz && cd kafka-epc-v1-amd64
-./krate doctor && ./krate docker-install && ./krate install
-```
-
-Build it with `make bundle VERSION=vN MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1`
-(prepare packages first with `make docker-rpms RHEL_VERSION=9 ARCH=amd64`). Full
-steps in [docs/epc-install-runbook.md](docs/epc-install-runbook.md).
-
-> The published `epc-v1` asset predates the Krate rename, so it is named
-> `kafka-epc-v1-amd64.tar.gz`; bundles built after it are `krate-<mode>-<version>-<arch>.tar.gz`.
-
-### Other variants & architectures
-
-The KRaft variant and arm64 builds aren't published in the current release, but build from source on a machine with Docker + internet:
-
-```bash
-make docker-debs UBUNTU_VERSION=noble ARCH=arm64
-make bundle VERSION=v5 ARCH=arm64 INCLUDE_DOCKER=1        # arm64 ZK + KRaft
 make docker-debs UBUNTU_VERSION=noble ARCH=amd64
-make bundle VERSION=v5 ARCH=amd64 MODE=kraft INCLUDE_DOCKER=1
+make bundle VERSION=v1 MODE=kraft ARCH=amd64 TARGET_OS=noble INCLUDE_DOCKER=1
 ```
 
-See [Building Offline Bundles](#building-offline-bundles) for details.
+Use `jammy` for Ubuntu 22.04 and `arm64` for an ARM64 VM. Prepared packages live under `docker-offline/<os>/<arch>/`. The build checks that these match the requested OS and processor. Docker package versions are selected at download time.
 
----
-
-## `krate` CLI
-
-The `krate` script in each bundle (and in `kraft/` / `epc/`) — the frozen ZooKeeper edition still ships it as `kafka` is a wrapper over `docker compose` with cluster-aware helpers.
-
-```
-krate install                   First-time setup: load images, configure, start
-krate start                     Start all services
-krate stop                      Stop all services (data preserved)
-krate restart [service]         Restart all or a specific service
-krate down                      Remove containers (volumes preserved)
-krate status                    Show running service state
-krate logs [-f] [service]       Show logs; -f to follow
-krate health                    Health check of all services
-krate lag                       Summary of all consumer group lag
-krate lag <group>               Per-partition lag for a specific group
-krate lag --topic <topic>       Lag filtered to a specific topic
-krate ui                        Show Kafbat UI URL and credentials
-krate config                    Show current .env config
-krate config set KEY=VALUE      Set a config value
-krate load-images               Load Docker images without starting
-krate uninstall                 Remove containers (volumes kept)
-krate uninstall --purge         Remove containers AND delete all data
-krate doctor                    Preflight checks (ports, firewalld, Docker) before install
-krate gen-cert                  (Re)generate the self-signed TLS cert for the UI
-krate docker-check              Verify Docker installation
-krate docker-install            Install Docker from bundled .deb packages
-```
-
-### Examples
+For the RHEL 9 EPC edition:
 
 ```bash
-krate install
-krate logs -f kafka-92
-krate lag
-krate lag my-consumer-group
-krate lag --topic payments
-krate config set KAFKA_UI_USER=admin
-krate health
-krate uninstall --purge
+make docker-rpms RHEL_VERSION=9 ARCH=amd64
+make bundle VERSION=v1 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
 ```
 
----
+The Ubuntu installer uses `dpkg` and may try `apt-get` to repair missing dependencies. Make sure the target has the required OS dependencies before relying on a fully offline install. The RHEL installer disables network repositories; missing OS dependencies must be supplied locally. See the [EPC guide](docs/epc-install-runbook.md).
 
-## Cluster Configuration
+## Install the package on a VM
 
-Both variants use the same broker sizing:
-
-| Setting | Value |
-|---|---|
-| Brokers | 4 (ports 9092–9095) |
-| Default partitions | 24 |
-| Replication factor | 3 |
-| Min in-sync replicas | 2 |
-| Log retention | 168 h (7 days) |
-| Log segment size | 1 GB |
-
-External client ports (host → broker): `19092–19095`
-
-### ZooKeeper variant
-
-```
-zk-zookeeper   :2181
-zk-broker-92   :9092  :19092
-zk-broker-93   :9093  :19093
-zk-broker-94   :9094  :19094
-zk-broker-95   :9095  :19095
-zk-kafbat      (internal only — fronted by zk-proxy)
-zk-proxy       :443 (HTTPS UI)  :80 (→ redirects to 443)
-```
-
-### KRaft variant
-
-Each broker runs in combined mode (broker + controller). Controller quorum is internal-only on ports 29092–29095.
-
-```
-krate-broker-92   :9092  :19092
-krate-broker-93   :9093  :19093
-krate-broker-94   :9094  :19094
-krate-broker-95   :9095  :19095
-krate-kafbat      (internal only — fronted by krate-proxy)
-krate-proxy       :443 (HTTPS UI)  :80 (→ redirects to 443)
-```
-
----
-
-## Credentials & TLS
-
-Kafbat UI login and the UI's hostname are configured via `.env` (not committed). Copy the template and edit before starting:
+Copy the package and its `.sha256` file to the VM. For the KRaft package built above:
 
 ```bash
+sha256sum -c krate-kraft-v1-amd64.tar.gz.sha256
+tar -xzf krate-kraft-v1-amd64.tar.gz
+cd krate-kraft-v1-amd64
 cp .env.template .env
-# edit KAFKA_UI_USER, KAFKA_UI_PASSWORD, and KAFKA_UI_FQDN
 ```
 
-Or use the CLI:
+The checksum should report `OK`. Edit `.env` to set your UI login and hostname, as in the connected setup.
+
+If Docker is missing and you included its packages, run `./krate docker-install` first. It needs administrator access. Then run:
 
 ```bash
-krate config set KAFKA_UI_USER=admin
-krate config set KAFKA_UI_PASSWORD=yourpassword
-krate config set KAFKA_UI_FQDN=kafka.internal.example
-```
-
-The UI is served over **HTTPS** by the nginx proxy (HTTP on :80 redirects to :443). `krate install` auto-generates a **self-signed** cert with `KAFKA_UI_FQDN` (falling back to the host's FQDN) as the CN/SAN. To use your own cert instead, drop it in as `certs/server.crt` + `certs/server.key` and `krate restart proxy`. Regenerate the self-signed one anytime with `krate gen-cert`.
-
----
-
-## Offline Docker Install
-
-If Docker is not installed or not working on the VM, build a bundle that includes Docker CE packages. Choose the `UBUNTU_VERSION` and `ARCH` that match the target VM. Package versions are not pinned: `docker-debs` downloads the current candidate versions from Docker's APT repository at build time.
-
-```bash
-# On the connected machine (downloads current candidates for the target Ubuntu release and arch)
-make docker-debs UBUNTU_VERSION=noble ARCH=amd64   # or ARCH=arm64
-
-make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
-```
-
-On the VM:
-
-```bash
-./krate docker-install   # installs containerd, docker-ce, docker-compose-plugin
+./krate doctor
 ./krate install
+./krate health
+./krate ui
 ```
 
-If Docker ≥25.0.3 is already installed with the legacy `docker-compose` (v1 ≥1.29.2), `krate install` will use it automatically — no reinstall needed.
+`doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images, creates a UI certificate if needed, and starts the cluster.
 
----
+For a downloaded ZooKeeper package, use `./kafka`. For EPC, follow the [RHEL installation guide](docs/epc-install-runbook.md): set `KAFKA_ADVERTISED_HOST` for clients on other machines and review the data directory before the first start.
 
-## Repository Layout
+## Everyday commands
 
-```
-├── zk/
-│   ├── docker-compose.yml    ZooKeeper + Kafka + Kafbat
-│   ├── .env.template
-│   └── kafka                 CLI tool
-├── kraft/
-│   ├── docker-compose.yml    KRaft + Kafka + Kafbat
-│   ├── .env.template
-│   └── kafka                 CLI tool
-├── Makefile                  Build, validation, and image-transfer workflow
-└── docs/
-    └── architecture.html     Microarchitecture + operational/build diagrams
-```
+Run these inside the KRaft or EPC directory, or an extracted package:
 
+| Command | What it does |
+| --- | --- |
+| `./krate status` | Lists the services and their state |
+| `./krate health` | Checks whether services are healthy |
+| `./krate logs -f kafka-92` | Follows one broker's logs |
+| `./krate lag` | Shows how many messages consumer groups still need to read |
+| `./krate lag my-group` | Shows that backlog for one group |
+| `./krate stop` / `./krate start` | Stops or starts services, keeping stored messages |
+| `./krate down` | Removes containers while keeping stored messages |
+| `./krate help` | Lists the available commands |
+
+Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
+
+Settings live in `.env`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
+
+See the [topic and consumer guide](docs/topic-consumer-runbook.md) for creating message streams, testing delivery, sharing work between consumers, and removing test data. The `uninstall --purge` option deletes stored data; it is not part of the normal stop/start workflow.
 
 ## Monitoring
 
-KRaft and EPC bundles include kafka-exporter, node-exporter, Prometheus, Loki,
-promtail, and Grafana. With Python 3 installed on the host, start the cluster
-and run `./krate monitor up`. SMTP is opt-in; recipients and notification rules
-are editable in Grafana. See the [Phase 2 runbook](docs/phase-2-runbook.md).
+KRaft and EPC include a separate monitoring stack: Prometheus collects measurements, Grafana displays dashboards and alerts, and Loki with Promtail collects container logs. A host exporter supplies disk, CPU, and memory measurements.
 
-Each phase is developed and validated on its own branch before merging into
-`main`. Keep integration tests and validation artifacts local; the remote repo
-contains source, release tooling, and documentation. `make check` remains
-available for static source validation; use `gmake check` on macOS.
+Before starting it, copy `monitoring/.env.template` to `monitoring/.env` and change the Grafana login. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
 
-## Topic and consumer operations
+```bash
+./krate monitor up
+./krate monitor status
+./krate monitor ui
+```
 
-See the [topic, consumer group, and consumer runbook](docs/topic-consumer-runbook.md)
-for safe creation, message-delivery and restart checks, consumer scaling, and
-ordered cleanup on KRaft or EPC.
+The default Grafana address uses port `3000`; Prometheus uses `9090` and Loki uses `3100`. Email alerts require your own mail server and recipients; they are off by default. See the [monitoring guide](docs/phase-2-runbook.md) for setup and checks.
+
+ZooKeeper has its own smaller stack: Kafka measurements, Prometheus, and Grafana, started with `./kafka monitor up`. It does not include Loki or host measurements. See the [ZooKeeper monitoring overview](docs/zk-observability.html).
+
+## How the parts fit together
+
+A connected machine prepares the package. The target VM runs the containers from that package:
+
+```mermaid
+flowchart LR
+    Build["Connected machine"] --> Package["Package + checksum"]
+    Package --> VM["Target VM"]
+    VM --> Brokers["Kafka brokers"]
+    Apps["Your applications"] -->|messages| Brokers
+    Browser["Your browser"] -->|HTTPS| Proxy["nginx proxy"]
+    Proxy --> UI["Kafbat UI"]
+    UI --> Brokers
+    Brokers --- Data["Stored message data"]
+```
+
+KRaft's four containers each handle messages and participate in cluster coordination. ZooKeeper handles coordination in a separate container. EPC uses two combined broker/coordination containers. KRaft and ZooKeeper store data in Docker volumes; EPC uses host directories under `/data` by default.
+
+### Repository layout
+
+```text
+kraft/       Four-broker KRaft setup and krate command script
+zk/          Frozen ZooKeeper setup and kafka command script
+epc/         Two-broker RHEL setup and krate command script
+monitoring/  Shared KRaft/EPC dashboards, alerts, and log collection
+docker/      Broker image definitions: release and debug versions
+docs/        Installation, operations, and release guides
+Makefile     Package builds and source checks
+```
+
+The [container release guide](docs/container-releases.md) explains the separate KRaft and ZooKeeper image release workflows. They build regular and diagnostic images for both processors. The default setup still uses the upstream Kafka images selected in each edition's `.env.template`; the release workflow requires an edition-specific tag before publishing to GHCR, GitHub's container registry.
+
+## Limits to understand
+
+- **One host is one point of failure.** Multiple brokers on the same VM do not protect against losing that VM. EPC also needs both of its coordination nodes available; losing either prevents its two-node group from reaching agreement.
+- **Remote application connections need configuration.** KRaft and ZooKeeper advertise `localhost` on ports `19092–19095` by default. Change their Compose listener settings for clients on other machines. EPC uses `KAFKA_ADVERTISED_HOST` and host ports `9092/9093`.
+- **HTTPS protects the UI only.** The Kafka listeners use plaintext, without client authentication. The monitoring web endpoints use HTTP. Restrict access or add the protection your deployment needs.
+- **Disk use grows with messages and topics.** EPC limits how much data each part of a topic can keep and requires topics to be created explicitly by default. Its [guide](docs/epc-install-runbook.md) covers storage planning and topic creation.
+- **Host checks still matter.** A valid package and healthy containers do not verify your network, remote clients, storage capacity, or email delivery. Follow the relevant runbook on the target VM.
+
+## Development and checks
+
+From the repository root:
+
+```bash
+make help
+make check
+```
+
+`make check` checks Bash syntax, runs ShellCheck, and validates the Compose files. It needs GNU Make, Bash, ShellCheck, and the Docker Compose plugin. On macOS, run `gmake check`. `make test` and `make validate` are aliases for these same checks; they do not start a cluster.
+
+The [broker CI workflow](.github/workflows/broker-ci.yml) separately builds the broker images and checks message delivery on GitHub Actions. Use the installation and operations guides for checks on your target host.
+
+Keep contributions focused, work on a separate branch, and describe the checks run in the pull request. Keep local test scripts and validation output out of commits, following the repository's handoff guidance.
+
+## Guides
+
+| Guide | Use it for |
+| --- | --- |
+| [EPC installation](docs/epc-install-runbook.md) | RHEL packages, data directories, remote clients, and troubleshooting |
+| [Topic and consumer operations](docs/topic-consumer-runbook.md) | Create topics, test message delivery, check backlog, and clean up |
+| [KRaft operations](docs/phase-1-runbook.md) | KRaft settings and cluster checks |
+| [KRaft/EPC monitoring](docs/phase-2-runbook.md) | Dashboards, logs, alerts, and email setup |
+| [ZooKeeper freeze notes](docs/zk-v5-freeze-release-notes.md) | Scope and status of the legacy edition |
+| [Broker image releases](docs/container-releases.md) | Build and publish regular or diagnostic broker images |
+
+## Component credits
+
+Krate uses the projects below. Credit belongs to their owners, maintainers, and contributors; each project has its own license and notices.
+
+| Component | Credit | Used for |
+| --- | --- | --- |
+| [Apache Kafka](https://kafka.apache.org/) and [ZooKeeper](https://zookeeper.apache.org/) | Apache Software Foundation and project contributors | Message handling and legacy cluster coordination |
+| [Confluent container images](https://github.com/confluentinc/cp-docker-images) | Confluent and contributors | Kafka and ZooKeeper images in the legacy edition |
+| [Docker Engine](https://www.docker.com/), [Compose](https://github.com/docker/compose), and [Buildx](https://github.com/docker/buildx) | Docker and project contributors | Running containers and building broker images |
+| [containerd](https://containerd.io/) | containerd maintainers and contributors; a CNCF project | Container runtime included with the Docker packages |
+| [Kafbat UI](https://github.com/kafbat/kafka-ui) | Kafbat and contributors | Browser interface for Kafka |
+| [nginx](https://github.com/nginx/nginx) | NGINX authors, F5, and contributors | HTTPS access to the UI |
+| [Kafka Exporter](https://github.com/danielqsj/kafka_exporter) | danielqsj and contributors | Kafka measurements |
+| [Prometheus](https://prometheus.io/) and [Node Exporter](https://github.com/prometheus/node_exporter) | Prometheus maintainers and contributors; a CNCF project | Kafka and host measurements |
+| [Grafana](https://github.com/grafana/grafana), [Loki and Promtail](https://github.com/grafana/loki) | Grafana Labs and contributors | Dashboards, alerts, and log collection |
+| [Ubuntu](https://ubuntu.com/) | Canonical and the Ubuntu community | Ubuntu targets and Docker package preparation |
+| [Red Hat Enterprise Linux](https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux) | Red Hat and contributors | RHEL target for the EPC edition |
+| [AlmaLinux](https://almalinux.org/) | AlmaLinux OS Foundation and community | Default container used to prepare RHEL packages |
+| [Alpine Linux](https://www.alpinelinux.org/) | Alpine Linux contributors | Base system used by some upstream containers |
+| [Bash](https://www.gnu.org/software/bash/) and [GNU Make](https://www.gnu.org/software/make/) | GNU project, Free Software Foundation, and contributors | Command scripts and package builds |
+| [Git](https://git-scm.com/) | Git maintainers and contributors | Source checkout |
+| [ShellCheck](https://github.com/koalaman/shellcheck) | koalaman and contributors | Shell script checks |
+| [Python](https://www.python.org/psf/) | Python Software Foundation and contributors | Monitoring alert setup |
+| [OpenSSL](https://openssl-library.org/) | OpenSSL project and contributors | UI certificate creation |
+| [GitHub Actions and GHCR](https://github.com/features/actions) | GitHub | Automated checks and container publishing |
+
+The diagnostic broker images also use [BIND](https://www.isc.org/bind/) (ISC), [curl](https://curl.se/) (curl project), [iproute2](https://wiki.linuxfoundation.org/networking/iproute2) (Linux networking contributors), [jq](https://jqlang.org/) (jqlang contributors), [OpenBSD netcat](https://www.openbsd.org/) (OpenBSD project) or [Ncat](https://nmap.org/ncat/) (Nmap project), [procps-ng](https://gitlab.com/procps-ng/procps) (procps-ng contributors), and [strace](https://strace.io/) (strace contributors).
 
 ## Contributing and community conduct
 
-See the [contributing guidelines](CONTRIBUTING.md) for setup, validation, and
-pull request expectations.
+See the [contributing guidelines](CONTRIBUTING.md) for setup, validation, and pull request expectations.
 
-Participation in Krate is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
-Please read it before contributing or joining project discussions.
+Participation in Krate is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). Please read it before contributing or joining project discussions.
+
+<p align="right"><a href="#readme-top">Back to top</a></p>
