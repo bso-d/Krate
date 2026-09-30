@@ -66,3 +66,12 @@ kafka monitor ui     # Grafana :3000 · Prometheus :9090
 
 - Feature schema & observability overview: [`docs/zk-observability.html`](./zk-observability.html)
 - Published artifact: https://claude.ai/code/artifact/d5b92794-d920-4596-b0dd-7a2817f461c9
+
+### Broker outage alert baseline
+
+`kafka monitor up` derives the expected broker count from configured cluster
+Compose services, including stopped brokers. Prometheus records this count as
+`kafka_expected_brokers`; a broker outage no longer expires after an hour.
+Recovery clears the alert. After an intentional topology change, run
+`kafka monitor up` again to apply the new count. Direct monitoring Compose users
+must set `KAFKA_EXPECTED_BROKERS` in `monitoring/.env` to match their topology.

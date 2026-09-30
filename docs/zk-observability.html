@@ -354,9 +354,9 @@
   <section>
     <div class="sec-head">
       <span class="sec-tag mono">alerts/</span>
-      <h2>Alert rules — dynamic, not hardcoded</h2>
+      <h2>Alert rules — configured topology</h2>
     </div>
-    <p class="sec-note" style="margin-bottom:22px;">Rules adapt to whatever the cluster size is. "Broker disappeared" compares the live count to the last hour's peak, so it needs no fixed broker number baked in.</p>
+    <p class="sec-note" style="margin-bottom:22px;">"Broker disappeared" compares the live count to the expected count derived from configured Compose services. It stays active throughout a prolonged outage. After an intentional topology change, run <code>kafka monitor up</code> again to apply the new count.</p>
     <div class="table-scroll">
       <table>
         <thead>
@@ -371,7 +371,7 @@
           </tr>
           <tr>
             <td>KafkaBrokerDisappeared</td>
-            <td class="mono">kafka_brokers &lt; max_over_time(kafka_brokers[1h])</td>
+            <td class="mono">kafka_brokers &lt; scalar(kafka_expected_brokers)</td>
             <td class="mono">2m</td>
             <td><span class="sev critical">Critical</span></td>
           </tr>

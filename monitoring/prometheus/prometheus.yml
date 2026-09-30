@@ -8,6 +8,7 @@ global:
 
 rule_files:
   - /etc/prometheus/alerts.yml
+  - /tmp/krate-topology.yml
 
 scrape_configs:
   # Cluster/topic/consumer-group metrics.

@@ -554,6 +554,13 @@ monitor_targets() {
   echo "${out% }"
 }
 
+# Count configured broker services independently of their runtime state.
+monitor_broker_count() {
+  local services
+  services="$(compose_cmd config --services)" || return 1
+  printf '%s\n' "$services" | awk '/^kafka-[0-9]+$/ { count++ } END { if (count < 1) exit 1; print count }'
+}
+
 monitor_compose() {
   [[ -d "$MONITOR_DIR" ]] || die "monitoring/ not found in $SCRIPT_DIR
 This bundle was built without the observability stack."
@@ -561,6 +568,11 @@ This bundle was built without the observability stack."
   net="$(monitor_network)" || net=""
   if [[ "$1" == "up" && -z "$net" ]]; then
     die "The cluster is not running — start it first: krate start"
+  fi
+  local expected
+  expected="$(monitor_broker_count)" || expected=""
+  if [[ "$1" == "up" && -z "$expected" ]]; then
+    die "Cannot determine the configured broker count from cluster Compose services."
   fi
   # down/ps/logs must still work after the broker containers are removed.
   net="${net:-krate-unused-network}"
@@ -571,6 +583,7 @@ This bundle was built without the observability stack."
     warn "Created monitoring/.env from template (default Grafana credentials)."
   fi
 
+  KAFKA_EXPECTED_BROKERS="${expected:-1}" \
   KAFKA_NETWORK="$net" \
   KAFKA_EXPORTER_TARGETS="$(monitor_targets)" \
   CLUSTER_LABEL="$KRATE_VARIANT" \

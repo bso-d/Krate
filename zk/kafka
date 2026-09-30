@@ -128,13 +128,26 @@ monitor_network() {
   return 1
 }
 
+# Count configured broker services independently of their runtime state.
+monitor_broker_count() {
+  local services
+  services="$(compose_cmd config --services)" || return 1
+  printf '%s\n' "$services" | awk '/^kafka-[0-9]+$/ { count++ } END { if (count < 1) exit 1; print count }'
+}
+
 monitor_compose() {
   local network
   network="$(monitor_network)" || network=""
   if [[ "$1" == "up" && -z "$network" ]]; then
     die "No running broker Kafka network found — start the cluster first: kafka start"
   fi
+  local expected
+  expected="$(monitor_broker_count)" || expected=""
+  if [[ "$1" == "up" && -z "$expected" ]]; then
+    die "Cannot determine the configured broker count from cluster Compose services."
+  fi
   # Compose still needs an interpolated name for down/ps/logs after cluster removal.
+  KAFKA_EXPECTED_BROKERS="${expected:-1}" \
   KAFKA_NETWORK="${network:-zk-monitoring-unused-network}" \
     "${COMPOSE_BIN[@]}" --env-file "$MON_ENV" -f "$MON_COMPOSE" "$@"
 }
