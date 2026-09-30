@@ -1,0 +1,124 @@
+name: Broker images CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      edition:
+        type: string
+        default: both
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate source and Compose
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          make check
+
+  build:
+    name: ${{ matrix.edition }} / ${{ matrix.flavor }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: ${{ fromJSON(inputs.edition == 'kraft' && '["kraft"]' || inputs.edition == 'zk' && '["zk"]' || '["kraft","zk"]') }}
+        flavor: [release, debug]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build native image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/${{ matrix.edition }}/Dockerfile
+          target: ${{ matrix.flavor }}
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: krate-ci:broker
+          cache-from: type=gha,scope=${{ matrix.edition }}-${{ matrix.flavor }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.edition }}-${{ matrix.flavor }}-${{ matrix.arch }}
+      - name: Check image and broker startup
+        timeout-minutes: 8
+        env:
+          EDITION: ${{ matrix.edition }}
+          FLAVOR: ${{ matrix.flavor }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect krate-ci:broker --format '{{.Architecture}}')" = "$ARCH"
+          test "$(docker image inspect krate-ci:broker --format '{{.Config.User}}')" = appuser
+          docker run --rm --entrypoint /bin/sh krate-ci:broker -ec \
+            'test "$KRATE_EDITION" = "$1"; test "$KRATE_IMAGE_FLAVOR" = "$2"' sh "$EDITION" "$FLAVOR"
+          if [[ "$FLAVOR" == debug ]]; then
+            docker run --rm --entrypoint /bin/sh krate-ci:broker -ec \
+              'for tool in curl dig ip jq nc ps strace; do command -v "$tool"; done'
+          fi
+          cleanup() {
+            docker logs krate-ci-broker 2>&1 || true
+            docker logs krate-ci-zookeeper 2>&1 || true
+            docker rm -f krate-ci-broker krate-ci-zookeeper >/dev/null 2>&1 || true
+            docker network rm krate-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker network create krate-ci
+          args=(--detach --name krate-ci-broker --network krate-ci
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://krate-ci-broker:9092
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+            -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+            -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+            -e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0)
+          if [[ "$EDITION" == kraft ]]; then
+            args+=(-e KAFKA_NODE_ID=1 -e 'KAFKA_PROCESS_ROLES=broker,controller'
+              -e 'KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093'
+              -e 'KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT'
+              -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+              -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+              -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@krate-ci-broker:9093
+              -e CLUSTER_ID=4GThRKJoQF2BmLyqAl4JlQ)
+            bin=/opt/kafka/bin
+            suffix=.sh
+          else
+            docker run --detach --name krate-ci-zookeeper --network krate-ci \
+              -e ZOOKEEPER_CLIENT_PORT=2181 -e ZOOKEEPER_TICK_TIME=2000 \
+              confluentinc/cp-zookeeper:7.6.1@sha256:4dc780642bfc5ec3a2d4901e2ff1f9ddef7f7c5c0b793e1e2911cbfb4e3a3214
+            args+=(-e KAFKA_BROKER_ID=1 -e KAFKA_ZOOKEEPER_CONNECT=krate-ci-zookeeper:2181
+              -e KAFKA_LISTENERS=PLAINTEXT://:9092)
+            bin=/usr/bin
+            suffix=
+          fi
+          docker run "${args[@]}" krate-ci:broker
+          ready=false
+          for attempt in {1..60}; do
+            echo "Broker readiness attempt $attempt"
+            if timeout 10 docker exec krate-ci-broker "$bin/kafka-topics$suffix" --bootstrap-server localhost:9092 --list; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          "$ready"
+          docker exec krate-ci-broker "$bin/kafka-topics$suffix" --bootstrap-server localhost:9092 \
+            --create --topic krate-ci --partitions 1 --replication-factor 1
+          printf '%s\n' krate-ci-message | docker exec -i krate-ci-broker "$bin/kafka-console-producer$suffix" \
+            --bootstrap-server localhost:9092 --topic krate-ci
+          received="$(docker exec krate-ci-broker "$bin/kafka-console-consumer$suffix" \
+            --bootstrap-server localhost:9092 --topic krate-ci --from-beginning --max-messages 1 --timeout-ms 30000)"
+          test "$received" = krate-ci-message
