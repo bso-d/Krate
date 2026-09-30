@@ -108,9 +108,15 @@ compose_cmd() {
 
 # ─── Monitoring helpers ───────────────────────────────────────────────────────
 ensure_mon_env() {
-  [[ -f "$MON_ENV" ]] && return 0
   [[ -f "$MON_ENV_TEMPLATE" ]] || die "monitoring/.env.template not found in $MON_DIR"
-  cp "$MON_ENV_TEMPLATE" "$MON_ENV"
+  if [[ ! -f "$MON_ENV" ]]; then
+    cp "$MON_ENV_TEMPLATE" "$MON_ENV"
+  fi
+  local key value
+  while IFS='=' read -r key value; do
+    [[ "$key" == *_IMAGE ]] || continue
+    grep -q "^${key}=" "$MON_ENV" || printf '\n%s=%s\n' "$key" "$value" >> "$MON_ENV"
+  done < "$MON_ENV_TEMPLATE"
 }
 
 # Inspect a running broker rather than inferring the project from its directory.
@@ -149,7 +155,7 @@ monitor_compose() {
   # Compose still needs an interpolated name for down/ps/logs after cluster removal.
   KAFKA_EXPECTED_BROKERS="${expected:-1}" \
   KAFKA_NETWORK="${network:-zk-monitoring-unused-network}" \
-    "${COMPOSE_BIN[@]}" --env-file "$MON_ENV" -f "$MON_COMPOSE" "$@"
+    "${COMPOSE_BIN[@]}" -p zk-monitoring --env-file "$MON_ENV" -f "$MON_COMPOSE" "$@"
 }
 
 # Resolve a single var from the monitoring .env (empty if unset).

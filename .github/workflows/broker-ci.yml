@@ -24,6 +24,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
           make check
+      - name: Validate legacy Compose configuration
+        run: |
+          docker run --rm --network none --platform linux/amd64 \
+            -e KAFKA_NETWORK=zk-validation-network -v "$PWD:/workspace:ro" -w /workspace \
+            docker/compose:1.29.2@sha256:ae66070588c539b965986dc74e9371e3e62ef71668b72a5eed70de111ed3659e \
+            -p zk-monitoring --env-file zk/monitoring/.env.template -f zk/monitoring/docker-compose.yml config --quiet
+          docker run --rm --network none --platform linux/amd64 \
+            -v "$PWD:/workspace:ro" -w /workspace \
+            docker/compose:1.29.2@sha256:ae66070588c539b965986dc74e9371e3e62ef71668b72a5eed70de111ed3659e \
+            -p krate-kraft-monitoring --env-file monitoring/.env.template -f monitoring/docker-compose.yml config --quiet
 
   build:
     name: ${{ matrix.edition }} / ${{ matrix.flavor }} / ${{ matrix.arch }}

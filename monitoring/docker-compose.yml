@@ -6,8 +6,6 @@
 # Requires the cluster to be up first: the exporter joins its network to reach
 # the brokers by name.
 
-name: ${MONITOR_PROJECT:-krate-monitoring}
-
 networks:
   kafka-network:
     external: true
