@@ -303,3 +303,8 @@ available for static source validation; use `gmake check` on macOS.
 See the [topic, consumer group, and consumer runbook](docs/topic-consumer-runbook.md)
 for safe creation, message-delivery and restart checks, consumer scaling, and
 ordered cleanup on KRaft or EPC.
+
+## Community conduct
+
+Participation in Krate is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+Please read it before contributing or joining project discussions.
