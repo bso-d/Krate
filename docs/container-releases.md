@@ -88,5 +88,20 @@ docker build --target debug -f docker/zk/Dockerfile -t krate-zk:debug .
 Monitoring configuration supports standalone Compose 1.29.2 and the Compose
 v2 plugin. CLIs set the monitoring project using `-p`: `zk-monitoring`,
 `krate-kraft-monitoring`, or `krate-epc-monitoring`. Direct Compose commands must
-use the same project name for `up`, `down`, `ps`, and `logs`. CI validates both
-monitoring files with Compose 1.29.2 as well as the current plugin.
+use the same project name for `up`, `down`, `ps`, and `logs`. For the shared
+KRaft/EPC stack, also set `MONITOR_PROJECT` to that same value; the Compose file
+uses it to name containers. For example, after setting `KAFKA_NETWORK` and
+`KAFKA_EXPORTER_TARGETS` for each running cluster:
+
+```bash
+MONITOR_PROJECT=krate-kraft-monitoring KAFKA_EXPECTED_BROKERS=4 \
+  docker compose -p krate-kraft-monitoring \
+  --env-file monitoring/.env -f monitoring/docker-compose.yml up -d
+MONITOR_PROJECT=krate-epc-monitoring KAFKA_EXPECTED_BROKERS=2 \
+  docker compose -p krate-epc-monitoring \
+  --env-file monitoring/.env -f monitoring/docker-compose.yml up -d
+```
+
+Supply the same environment/project pairing for subsequent commands. The CLIs
+supply both values automatically. CI validates both monitoring files with
+Compose 1.29.2 as well as the current plugin.
