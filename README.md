@@ -304,7 +304,10 @@ See the [topic, consumer group, and consumer runbook](docs/topic-consumer-runboo
 for safe creation, message-delivery and restart checks, consumer scaling, and
 ordered cleanup on KRaft or EPC.
 
-## Community conduct
+## Contributing and community conduct
+
+See the [contributing guidelines](CONTRIBUTING.md) for setup, validation, and
+pull request expectations.
 
 Participation in Krate is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 Please read it before contributing or joining project discussions.
