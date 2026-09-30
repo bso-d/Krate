@@ -5,8 +5,6 @@
 # Brought up by:  kafka monitor up   (see zk/kafka)
 # Requires the ZK cluster to be running first; the CLI discovers its network.
 
-name: zk-monitoring
-
 networks:
   # The ZK cluster's network, so the exporter can reach kafka-92:9092 etc. by name.
   kafka-network:
@@ -24,7 +22,7 @@ services:
   # No JMX javaagent needed: connects over the broker's PLAINTEXT listener and
   # exposes broker count, partitions, ISR/under-replication, and consumer lag.
   kafka-exporter:
-    image: danielqsj/kafka-exporter:latest
+    image: ${KAFKA_EXPORTER_IMAGE}
     container_name: zk-kafka-exporter
     restart: unless-stopped
     command:
@@ -44,7 +42,7 @@ services:
 
   # ── Prometheus — metrics storage + alert-rule evaluation ─────────────────────
   prometheus:
-    image: prom/prometheus:latest
+    image: ${PROMETHEUS_IMAGE}
     container_name: zk-prometheus
     restart: unless-stopped
     ports:
@@ -84,7 +82,7 @@ services:
 
   # ── Grafana — provisioned datasource + dashboards ────────────────────────────
   grafana:
-    image: grafana/grafana:latest
+    image: ${GRAFANA_IMAGE}
     container_name: zk-grafana
     restart: unless-stopped
     ports:

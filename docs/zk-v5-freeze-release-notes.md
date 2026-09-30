@@ -75,3 +75,13 @@ Compose services, including stopped brokers. Prometheus records this count as
 Recovery clears the alert. After an intentional topology change, run
 `kafka monitor up` again to apply the new count. Direct monitoring Compose users
 must set `KAFKA_EXPECTED_BROKERS` in `monitoring/.env` to match their topology.
+
+### Image pins and Compose compatibility
+
+Cluster and monitoring image references are digest-pinned in their environment
+templates. The bundle builder saves image-ID tags and records source digests,
+runtime references, image IDs and archive checksums in `images.lock.tsv`, with
+a matching release sidecar. `kafka monitor` supplies `-p zk-monitoring`; the
+monitoring YAML supports standalone Compose 1.29.2 and the Compose v2 plugin.
+Existing monitoring environment files receive missing image keys from the
+shipped template while retaining configured values.

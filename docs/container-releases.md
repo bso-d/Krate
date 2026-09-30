@@ -35,8 +35,9 @@ also run.
 commit is already merged into `main`, and calls CI for that edition. Only after
 those checks pass does it publish release/debug images to GHCR, with SBOM and
 provenance attestations, using `GITHUB_TOKEN` with `packages: write` permission.
-It then creates a separate GitHub Release containing both image references and
-digests. Re-running the workflow updates the same release.
+It then creates a separate GitHub Release containing both image references,
+digests, and `dependencies.txt` with the deployment dependency digest pins.
+Re-running the workflow updates the same release.
 
 After merging the PR, tag the intended `main` commit and push the tag:
 
@@ -69,8 +70,11 @@ KAFKA_IMAGE=ghcr.io/bso-d/krate-zk:v5.0.0-release
 Use the matching `-debug` tag for diagnosis. GitHub Release assets also contain
 immutable digest references that can replace version tags. Existing upstream
 image defaults remain usable before the first GHCR publication. Offline bundle
-builders take their broker image from each edition's `.env.template`; select
-the intended image there before building a bundle.
+builders take images from the edition and monitoring `.env.template` files.
+Every bundle input must include an `@sha256:` digest. The bundle selects local
+tags derived from image IDs and records source references, runtime tags, image
+IDs, archive checksums and platform in `images.lock.tsv`. The builder also writes
+a `.tar.gz.images.lock.tsv` sidecar for release uploads.
 
 Local builds:
 
@@ -78,3 +82,11 @@ Local builds:
 docker build --target release -f docker/kraft/Dockerfile -t krate-kraft:release .
 docker build --target debug -f docker/zk/Dockerfile -t krate-zk:debug .
 ```
+
+## Compose compatibility
+
+Monitoring configuration supports standalone Compose 1.29.2 and the Compose
+v2 plugin. CLIs set the monitoring project using `-p`: `zk-monitoring`,
+`krate-kraft-monitoring`, or `krate-epc-monitoring`. Direct Compose commands must
+use the same project name for `up`, `down`, `ps`, and `logs`. CI validates both
+monitoring files with Compose 1.29.2 as well as the current plugin.

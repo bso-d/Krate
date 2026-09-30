@@ -721,7 +721,7 @@ This bundle was built without the observability stack."
   KAFKA_EXPORTER_TARGETS="$(monitor_targets)" \
   CLUSTER_LABEL="$KRATE_VARIANT" \
   MONITOR_PROJECT="krate-${KRATE_VARIANT}-monitoring" \
-  "${COMPOSE_BIN[@]}" --env-file "$env_file" -f "$MONITOR_DIR/docker-compose.yml" "$@"
+  "${COMPOSE_BIN[@]}" -p "krate-${KRATE_VARIANT}-monitoring" --env-file "$env_file" -f "$MONITOR_DIR/docker-compose.yml" "$@"
 }
 
 cmd_monitor() {

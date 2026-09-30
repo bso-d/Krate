@@ -23,13 +23,11 @@ CLI_FILES := zk/kafka kraft/krate epc/krate
 VARIANT ?= kraft
 MONITOR_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' monitoring/.env.template)
 
-ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 $(shell . ./zk/.env.template >/dev/null 2>&1; echo "$$KAFKA_IMAGE") kafbat/kafka-ui:v1.5.0 nginx:1.27-alpine
-# KRaft images are derived from kraft/.env.template — the single source of truth
-# shared with kraft/docker-compose.yml — so the bundle can never ship images that
-# differ from what the cluster actually runs.
-KRAFT_IMAGES := $(shell . ./kraft/.env.template >/dev/null 2>&1; echo "$$KAFKA_IMAGE $$KAFKA_UI_IMAGE $$NGINX_IMAGE")
-EPC_IMAGES := $(shell . ./epc/.env.template >/dev/null 2>&1; echo "$$KAFKA_IMAGE $$KAFKA_UI_IMAGE $$NGINX_IMAGE")
-ZK_MONITOR_IMAGES := danielqsj/kafka-exporter:latest prom/prometheus:latest grafana/grafana:latest
+# Image references are read from the runtime environment templates.
+ZK_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' zk/.env.template)
+KRAFT_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' kraft/.env.template)
+EPC_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' epc/.env.template)
+ZK_MONITOR_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' zk/monitoring/.env.template)
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 # RHEL needs buildx explicitly; on Debian it arrives as a docker-ce dependency.
 DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-extras docker-compose-plugin docker-buildx-plugin
@@ -87,6 +85,12 @@ lint:
 >shellcheck $(CLI_FILES)
 
 compose-check:
+>for template in zk/.env.template kraft/.env.template epc/.env.template monitoring/.env.template zk/monitoring/.env.template; do
+>  while IFS='=' read -r key image; do
+>    [[ "$$key" == *_IMAGE ]] || continue
+>    [[ "$$image" =~ @sha256:[a-f0-9]{64}$$ ]] || { echo "Image must be digest-pinned: $$key=$$image" >&2; exit 1; }
+>  done < "$$template"
+>done
 >docker compose --env-file zk/.env.template -f zk/docker-compose.yml config --quiet
 >docker compose --env-file kraft/.env.template -f kraft/docker-compose.yml config --quiet
 >docker compose --env-file epc/.env.template -f epc/docker-compose.yml config --quiet
@@ -113,6 +117,10 @@ bundle:
 >  name="$${image//\//__}"
 >  printf '%s.tar\n' "$${name//:/_}"
 >}
+>inspect_platform=()
+>if docker image inspect --help 2>&1 | grep -q -- '--platform'; then
+>  inspect_platform=(--platform "linux/$(ARCH)")
+>fi
 >save_platform=()
 >if docker save --help 2>&1 | grep -q -- '--platform'; then
 >  save_platform=(--platform "linux/$(ARCH)")
@@ -137,6 +145,10 @@ bundle:
 >    *)     images=($(KRAFT_IMAGES) $(MONITOR_IMAGES)) ;;
 >  esac
 >
+>  for image in "$${images[@]}"; do
+>    [[ "$$image" =~ @sha256:[a-f0-9]{64}$$ ]] || { echo "Bundle image must be digest-pinned: $$image" >&2; exit 1; }
+>  done
+>
 >  echo "==> Building bundle: $$bundle_name"
 >  rm -rf "$$bundle_dir"
 >  mkdir -p "$$bundle_dir/images"
@@ -144,7 +156,7 @@ bundle:
 >  if enabled "$(NO_PULL)"; then
 >    echo "==> Verifying local images match $(ARCH)"
 >    for image in "$${images[@]}"; do
->      image_arch="$$(docker image inspect "$$image" --format '{{.Architecture}}' 2>/dev/null || true)"
+>      image_arch="$$(docker image inspect "$${inspect_platform[@]}" "$$image" --format '{{.Architecture}}' 2>/dev/null || true)"
 >      [[ -n "$$image_arch" ]] || { echo "Image not found locally: $$image" >&2; exit 1; }
 >      [[ "$$image_arch" == "$(ARCH)" ]] || { echo "$$image is $$image_arch, expected $(ARCH)" >&2; exit 1; }
 >      echo "  ok $$image ($$image_arch)"
@@ -157,9 +169,23 @@ bundle:
 >  fi
 >
 >  echo "==> Saving images"
+>  printf 'source_reference\truntime_reference\timage_id\trepo_digests\tarchive\tarchive_sha256\tplatform\n' > "$$bundle_dir/images.lock.tsv"
 >  for image in "$${images[@]}"; do
+>    image_id="$$(docker image inspect "$${inspect_platform[@]}" "$$image" --format '{{.Id}}')"
+>    image_arch="$$(docker image inspect "$${inspect_platform[@]}" "$$image" --format '{{.Architecture}}')"
+>    [[ "$$image_arch" == "$(ARCH)" ]] || { echo "$$image is $$image_arch, expected $(ARCH)" >&2; exit 1; }
+>    # Archive tags contain the image ID; loaded archives retain these tags.
+>    runtime_image="krate-offline/image:sha256-$${image_id#sha256:}"
+>    docker tag "$$image" "$$runtime_image"
 >    filename="$$(image_filename "$$image")"
->    docker save "$${save_platform[@]}" "$$image" -o "$$bundle_dir/images/$$filename"
+>    docker save "$${save_platform[@]}" "$$runtime_image" -o "$$bundle_dir/images/$$filename"
+>    repo_digests="$$(docker image inspect "$${inspect_platform[@]}" "$$image" --format '{{json .RepoDigests}}')"
+>    if command -v sha256sum >/dev/null 2>&1; then
+>      archive_sha="$$(sha256sum "$$bundle_dir/images/$$filename" | awk '{print $$1}')"
+>    else
+>      archive_sha="$$(shasum -a 256 "$$bundle_dir/images/$$filename" | awk '{print $$1}')"
+>    fi
+>    printf '%s\t%s\t%s\t%s\timages/%s\t%s\tlinux/%s\n' "$$image" "$$runtime_image" "$$image_id" "$$repo_digests" "$$filename" "$$archive_sha" "$(ARCH)" >> "$$bundle_dir/images.lock.tsv"
 >  done
 >
 >  cp "$$src_dir/docker-compose.yml" "$$bundle_dir/docker-compose.yml"
@@ -187,6 +213,13 @@ bundle:
 >    cp -r "$$src_dir/monitoring" "$$bundle_dir/monitoring"
 >    rm -f "$$bundle_dir/monitoring/.env"
 >  fi
+>
+>  # Environment templates select the tagged images stored in the archives.
+>  for env_template in "$$bundle_dir/.env.template" "$$bundle_dir/monitoring/.env.template"; do
+>    awk -F '\t' 'NR==FNR { runtime[$$1]=$$2; next } /^[A-Z_]+_IMAGE=/ { split($$0, entry, "="); if (entry[2] in runtime) $$0=entry[1] "=" runtime[entry[2]] } { print }' "$$bundle_dir/images.lock.tsv" "$$env_template" > "$$env_template.tmp"
+>    mv "$$env_template.tmp" "$$env_template"
+>  done
+>  cp "$$bundle_dir/images.lock.tsv" "$$out_file.images.lock.tsv"
 >
 >  if enabled "$(INCLUDE_DOCKER)"; then
 >    pkg_dir="$(DOCKER_OFFLINE_DIR)/$(TARGET_OS)/$(ARCH)"
