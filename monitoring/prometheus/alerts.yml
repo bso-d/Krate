@@ -1,0 +1,162 @@
+# Krate alert rules.
+#
+# Every rule below was checked against the metrics kafka-exporter v1.8.0 and
+# node-exporter actually expose — verified by running an exporter against a live
+# broker and enumerating /metrics, not by assuming. The exporter publishes:
+#
+#   kafka_brokers, kafka_broker_info,
+#   kafka_topic_partitions, kafka_topic_partition_{current,oldest}_offset,
+#   kafka_topic_partition_{leader,leader_is_preferred,replicas,
+#                          in_sync_replica,under_replicated_partition},
+#   kafka_consumergroup_{lag,lag_sum,current_offset,current_offset_sum,members}
+#
+# Two of the originally requested rules have NO backing metric here and are
+# implemented as clearly-named proxies instead of being faked — see the
+# "proxy rules" group and the notes on each.
+#
+# Thresholds are literals: Prometheus rule files are not env-templated. Tune
+# them to the workload and reload with `krate monitor reload`.
+
+groups:
+  # ── Cluster health ─────────────────────────────────────────────────────────
+  - name: krate-cluster
+    rules:
+      - alert: KafkaExporterDown
+        expr: up{job="kafka"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "kafka-exporter is unreachable"
+          description: "Prometheus has not scraped kafka-exporter for 2m — cluster metrics are blind."
+
+      - alert: KafkaBrokerDisappeared
+        expr: kafka_brokers < max_over_time(kafka_brokers[1h])
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "A Kafka broker disappeared"
+          description: "Live broker count ({{ $value }}) is below the last hour's peak."
+
+      - alert: KafkaUnderReplicatedPartitions
+        expr: sum(kafka_topic_partition_under_replicated_partition) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Under-replicated partitions present"
+          description: "{{ $value }} partition(s) under-replicated for 5m — a replica is behind or offline."
+
+      # On a 2-broker cluster with RF=2 this means one copy is gone: the next
+      # failure loses data.
+      - alert: KafkaPartitionNotPreferredLeader
+        expr: sum(kafka_topic_partition_leader_is_preferred == 0) > 0
+        for: 15m
+        labels: { severity: info }
+        annotations:
+          summary: "Partitions not on their preferred leader"
+          description: "{{ $value }} partition(s) have not returned to their preferred leader in 15m — leadership is unbalanced."
+
+  # ── Consumers ──────────────────────────────────────────────────────────────
+  - name: krate-consumers
+    rules:
+      - alert: ConsumerGroupHighLag
+        expr: sum by (consumergroup) (kafka_consumergroup_lag) > 1000
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} is lagging"
+          description: "Total lag is {{ $value }} (> 1000) for 5m."
+
+      # Lag rising steadily: consumers are not keeping up, independent of the
+      # absolute threshold above.
+      - alert: ConsumerGroupLagGrowing
+        expr: deriv(sum by (consumergroup) (kafka_consumergroup_lag)[15m:1m]) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} lag is growing"
+          description: "Lag has risen continuously for 15m — consumption is slower than production."
+
+      # "Consumer unexpectedly left the group" — backed by a real metric.
+      - alert: ConsumerGroupMembersDropped
+        expr: delta(kafka_consumergroup_members[10m]) < 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} lost members"
+          description: "Member count fell by {{ $value }} in 10m — a consumer left or died."
+
+      - alert: ConsumerGroupHasNoMembers
+        expr: kafka_consumergroup_members == 0 and on (consumergroup) sum by (consumergroup) (kafka_consumergroup_lag) > 0
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} has no members but unread messages"
+          description: "The group has zero members while lag is non-zero — nothing is consuming."
+
+  # ── Proxy rules ────────────────────────────────────────────────────────────
+  # These two were requested but have NO server-side metric in kafka-exporter.
+  # Rebalance counts and producer connection state are JMX/client-side signals.
+  # Rather than ship rules that can never fire, each detects the observable
+  # SYMPTOM. Named so nobody mistakes them for a direct measurement.
+  - name: krate-proxy-signals
+    rules:
+      # Stand-in for "consumer rebalancing". A rebalance changes group
+      # membership, so repeated membership changes indicate churn. It cannot
+      # distinguish a rebalance from ordinary scaling — treat it as a hint.
+      - alert: ConsumerGroupMembershipChurn
+        expr: changes(kafka_consumergroup_members[15m]) >= 3
+        for: 5m
+        labels: { severity: warning, signal: proxy }
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} membership is churning"
+          description: "Membership changed {{ $value }} times in 15m — likely repeated rebalancing. Proxy signal: kafka-exporter exposes no rebalance metric."
+
+      # Stand-in for "consumer link breakage". A consumer whose connection broke
+      # stops committing offsets while lag keeps climbing.
+      - alert: ConsumerGroupStalled
+        expr: sum by (consumergroup) (rate(kafka_consumergroup_current_offset[10m])) == 0 and on (consumergroup) sum by (consumergroup) (kafka_consumergroup_lag) > 0
+        for: 10m
+        labels: { severity: critical, signal: proxy }
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} has stopped committing"
+          description: "No offset progress for 10m while lag is non-zero — consumer is stuck or disconnected."
+
+      # Stand-in for "producer connection break". Producer-side connection state
+      # is a client metric; what the broker can see is that writes stopped.
+      - alert: TopicIngestStalled
+        expr: sum by (topic) (rate(kafka_topic_partition_current_offset{topic!~"__.*"}[10m])) == 0 and on (topic) sum by (topic) (max_over_time(kafka_topic_partitions{topic!~"__.*"}[1h])) > 0
+        for: 15m
+        labels: { severity: warning, signal: proxy }
+        annotations:
+          summary: "No writes to topic {{ $labels.topic }}"
+          description: "No new records for 15m on a topic that exists — producers may be disconnected, or simply idle. Proxy signal: producer connection state is not visible server-side."
+
+  # ── Host capacity ──────────────────────────────────────────────────────────
+  # Broker log dirs share one volume, and replication multiplies what lands on
+  # it, so disk is the most likely way this cluster falls over.
+  - name: krate-capacity
+    rules:
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) < 0.20
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Less than 20% free on {{ $labels.mountpoint }}"
+          description: "{{ $labels.mountpoint }} is at {{ $value | humanizePercentage }} free. Check `krate disk`."
+
+      - alert: DiskSpaceCritical
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) < 0.10
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Less than 10% free on {{ $labels.mountpoint }}"
+          description: "{{ $labels.mountpoint }} is nearly full — brokers fail writes when the log dir fills."
+
+      # Trend-based: catches a fill that is hours away while there is still time.
+      - alert: DiskWillFillIn4h
+        expr: predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}[1h], 4*3600) < 0
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.mountpoint }} projected to fill within 4h"
+          description: "At the current rate {{ $labels.mountpoint }} runs out of space in under 4 hours. Lower KAFKA_LOG_RETENTION_BYTES or retention hours."

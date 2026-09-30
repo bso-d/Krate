@@ -1,3 +1,0 @@
-:80 {
-	reverse_proxy kafka-ui:8080
-}

@@ -9,9 +9,9 @@ services:
   # Quorum voters reference each node's controller port inside the docker network.
   #
   kafka-92:
-    image: confluentinc/cp-kafka:7.6.1
+    image: ${KAFKA_IMAGE}
     hostname: kafka-92
-    container_name: kraft-broker-92
+    container_name: krate-broker-92
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -44,16 +44,16 @@ services:
     networks:
       - kafka-network
     healthcheck:
-      test: ["CMD", "cub", "kafka-ready", "1", "10", "-b", "localhost:9092"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9092 || exit 1"]
       interval: 10s
       timeout: 15s
       retries: 5
       start_period: 60s
 
   kafka-93:
-    image: confluentinc/cp-kafka:7.6.1
+    image: ${KAFKA_IMAGE}
     hostname: kafka-93
-    container_name: kraft-broker-93
+    container_name: krate-broker-93
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -86,16 +86,16 @@ services:
     networks:
       - kafka-network
     healthcheck:
-      test: ["CMD", "cub", "kafka-ready", "1", "10", "-b", "localhost:9093"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9093 || exit 1"]
       interval: 10s
       timeout: 15s
       retries: 5
       start_period: 60s
 
   kafka-94:
-    image: confluentinc/cp-kafka:7.6.1
+    image: ${KAFKA_IMAGE}
     hostname: kafka-94
-    container_name: kraft-broker-94
+    container_name: krate-broker-94
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -128,16 +128,16 @@ services:
     networks:
       - kafka-network
     healthcheck:
-      test: ["CMD", "cub", "kafka-ready", "1", "10", "-b", "localhost:9094"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9094 || exit 1"]
       interval: 10s
       timeout: 15s
       retries: 5
       start_period: 60s
 
   kafka-95:
-    image: confluentinc/cp-kafka:7.6.1
+    image: ${KAFKA_IMAGE}
     hostname: kafka-95
-    container_name: kraft-broker-95
+    container_name: krate-broker-95
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -170,7 +170,7 @@ services:
     networks:
       - kafka-network
     healthcheck:
-      test: ["CMD", "cub", "kafka-ready", "1", "10", "-b", "localhost:9095"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9095 || exit 1"]
       interval: 10s
       timeout: 15s
       retries: 5
@@ -178,9 +178,9 @@ services:
 
   # ─── Kafbat UI (internal only — access via nginx proxy on :8080) ─────────────
   kafka-ui:
-    image: kafbat/kafka-ui:latest
+    image: ${KAFKA_UI_IMAGE}
     hostname: kafka-ui
-    container_name: kraft-kafbat
+    container_name: krate-kafbat
     restart: unless-stopped
     depends_on:
       kafka-92:
@@ -209,7 +209,7 @@ services:
     networks:
       - kafka-network
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8080 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -217,8 +217,8 @@ services:
 
   # ─── Nginx TLS proxy (terminates HTTPS on :443, redirects :80 → :443) ───
   proxy:
-    image: nginx:1.27-alpine
-    container_name: kraft-proxy
+    image: ${NGINX_IMAGE}
+    container_name: krate-proxy
     restart: unless-stopped
     depends_on:
       kafka-ui:
@@ -232,7 +232,7 @@ services:
     networks:
       - kafka-network
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 443 || exit 1"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 443 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3

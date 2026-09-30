@@ -3,6 +3,7 @@
 zk/.env
 kraft/.env
 zk/monitoring/.env
+epc/.env
 
 # reference files not needed in repo
 docker-compose-ref.yml
@@ -17,4 +18,16 @@ security-reports/
 # Generated TLS certs (created at install time)
 zk/certs/
 kraft/certs/
+epc/certs/
 certs/
+
+# local working docs — not part of the repo
+PLAN.md
+docs/architecture.html
+
+# interim VM survey tooling — not part of the repo build
+vm-survey.sh
+vm-survey.mk
+
+# local validation tooling — source and releases only in the remote repo
+tests/

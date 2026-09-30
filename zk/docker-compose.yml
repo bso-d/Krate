@@ -204,7 +204,7 @@ services:
 
   # ─── Kafbat UI (internal only — access via nginx proxy on :8080) ─────────────
   kafka-ui:
-    image: kafbat/kafka-ui:latest
+    image: kafbat/kafka-ui:v1.5.0
     hostname: kafka-ui
     container_name: zk-kafbat
     restart: unless-stopped

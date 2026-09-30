@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# kafka — Kafka cluster management CLI
-# Usage: kafka <command> [options]
+# krate — Krate (Kafka) cluster management CLI
+# Usage: krate <command> [options]
 
 set -euo pipefail
 
@@ -10,6 +10,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 ENV_TEMPLATE="$SCRIPT_DIR/.env.template"
 IMAGES_DIR="$SCRIPT_DIR/images"
 DOCKER_OFFLINE_DIR="$SCRIPT_DIR/docker-offline"
+KRATE_VARIANT="epc"
 CERTS_DIR="$SCRIPT_DIR/certs"
 CERT_CRT="$CERTS_DIR/server.crt"
 CERT_KEY="$CERTS_DIR/server.key"
@@ -60,7 +61,7 @@ get_compose_version() {
 # ─── Prerequisites ────────────────────────────────────────────────────────────
 require_docker() {
   if ! command -v docker &>/dev/null; then
-    die "Docker not found. Run: kafka docker-install"
+    die "Docker not found. Run: krate docker-install"
   fi
   if ! docker info &>/dev/null 2>&1; then
     die "Docker daemon is not running or not accessible.
@@ -73,7 +74,7 @@ require_compose() {
   require_docker
   if [[ ${#COMPOSE_BIN[@]} -eq 0 ]]; then
     die "Docker Compose not found. Need 'docker compose' plugin or 'docker-compose' ≥1.29.2.
-Run: kafka docker-install"
+Run: krate docker-install"
   fi
 }
 
@@ -90,7 +91,7 @@ require_env() {
       warn "Review credentials in $ENV_FILE before starting:"
       echo "    nano $ENV_FILE"
       echo ""
-      die "Edit .env, then run: kafka install"
+      die "Edit .env, then run: krate install"
     else
       die ".env not found and no .env.template available. Create $ENV_FILE with KAFKA_UI_USER and KAFKA_UI_PASSWORD."
     fi
@@ -104,7 +105,7 @@ compose_cmd() {
 
 # Returns the name of the first running broker container
 find_broker() {
-  local services=("kafka-92" "kafka-93" "kafka-94" "kafka-95")
+  local services=("kafka-92" "kafka-93")
   for svc in "${services[@]}"; do
     local cid
     cid=$(compose_cmd ps -q "$svc" 2>/dev/null || true)
@@ -117,10 +118,11 @@ find_broker() {
       fi
     fi
   done
-  die "No running broker found. Run: kafka start"
+  die "No running broker found. Run: krate start"
 }
 
-BOOTSTRAP="kafka-92:9092,kafka-93:9093,kafka-94:9094,kafka-95:9095"
+# Internal listener — reachable from inside the compose network only.
+BOOTSTRAP="kafka-92:19092,kafka-93:19093"
 
 # ─── Preflight helpers ────────────────────────────────────────────────────────
 # Resolve a single env var from .env, echoing its value (empty if unset).
@@ -190,6 +192,132 @@ ensure_cert() {
   cmd_gen_cert
 }
 
+# Human-readable size from a kilobyte count.
+fmt_kb() {
+  awk -v k="${1:-0}" 'BEGIN{
+    if (k >= 1048576)      printf "%.1f GB", k/1048576;
+    else if (k >= 1024)    printf "%.0f MB", k/1024;
+    else                   printf "%d KB", k;
+  }'
+}
+
+# ─── disk (data-disk usage vs the budget) ─────────────────────────────────────
+# Kafka has no global disk quota. log.retention.bytes caps a single partition
+# replica, so the real ceiling is topics x partitions x RF x that cap, and every
+# new topic raises it. This reports what is on disk now and what the current
+# settings allow it to become.
+cmd_disk() {
+  local base pct parts cap_bytes
+  base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
+  pct="$(env_value KAFKA_DATA_BUDGET_PCT)"; pct="${pct:-60}"
+  parts="$(env_value KAFKA_NUM_PARTITIONS)"; parts="${parts:-24}"
+  cap_bytes="$(env_value KAFKA_LOG_RETENTION_BYTES)"; cap_bytes="${cap_bytes:-2147483648}"
+
+  [[ -d "$base" ]] || die "Data disk $base not found."
+
+  step "Data disk — $base"
+  echo ""
+
+  local total_kb avail_kb used_kb
+  read -r total_kb used_kb avail_kb < <(df -Pk "$base" | awk 'NR==2{print $2, $3, $4}')
+
+  local kafka_kb=0 d sub
+  for node in 92 93; do
+    d="$base/krate/broker-$node"
+    sub="$(du -sk "$d" 2>/dev/null | awk '{print $1}')"
+    sub="${sub:-0}"
+    kafka_kb=$((kafka_kb + sub))
+    printf "  %-28s %s\n" "broker-$node" "$(fmt_kb "$sub")"
+  done
+
+  echo ""
+  printf "  %-28s %s\n" "kafka total"     "$(fmt_kb "$kafka_kb")"
+  printf "  %-28s %s\n" "disk used (all)" "$(fmt_kb "$used_kb")"
+  printf "  %-28s %s\n" "disk free"       "$(fmt_kb "$avail_kb")"
+  printf "  %-28s %s\n" "disk size"       "$(fmt_kb "$total_kb")"
+  echo ""
+
+  # Budget check — kafka's own footprint against the configured share.
+  local budget_kb
+  budget_kb=$(awk -v t="$total_kb" -v p="$pct" 'BEGIN{printf "%d", t*p/100}')
+  local pct_now
+  pct_now=$(awk -v k="$kafka_kb" -v t="$total_kb" 'BEGIN{printf "%.1f", (t>0)? k*100/t : 0}')
+  if (( kafka_kb > budget_kb )); then
+    warn "Kafka is using ${pct_now}% of $base — over the ${pct}% budget."
+    warn "Lower KAFKA_LOG_RETENTION_BYTES or KAFKA_LOG_RETENTION_HOURS, or delete unused topics."
+  else
+    ok "Kafka is using ${pct_now}% of $base (budget ${pct}%)."
+  fi
+
+  # Ceiling implied by the current settings, per topic.
+  echo ""
+  info "Ceiling from current settings"
+  local per_topic_gb
+  per_topic_gb=$(awk -v p="$parts" -v c="$cap_bytes" 'BEGIN{printf "%.0f", p*2*c/1073741824}')
+  echo "  $parts partitions x RF 2 x $(awk -v c="$cap_bytes" 'BEGIN{printf "%.0f", c/1073741824}') GiB = ~${per_topic_gb} GB of $base per topic"
+  local max_topics
+  max_topics=$(awk -v b="$budget_kb" -v g="$per_topic_gb" 'BEGIN{printf "%d", (g>0)? b/1048576/g : 0}')
+  echo "  the ${pct}% budget covers about $max_topics such topic(s)"
+  echo ""
+  note_auto_create
+}
+
+# Auto-created topics count against the same disk, without an admin in the loop.
+note_auto_create() {
+  local ac
+  ac="$(env_value KAFKA_AUTO_CREATE_TOPICS_ENABLE)"
+  # Only "true" is on; anything else (unset, false, an unresolved compose
+  # default) leaves creation in the hands of an admin or the UI.
+  if [[ "$ac" == "true" ]]; then
+    warn "auto.create.topics.enable is ON — clients can add topics, and disk, on their own."
+    warn "The per-topic ceiling above is then a floor, not a limit."
+  else
+    ok "auto.create.topics.enable is off — topics are created explicitly (UI / AdminClient)."
+  fi
+}
+
+# ─── Broker data directories ──────────────────────────────────────────────────
+# Broker logs are bind-mounted from KAFKA_DATA_DIR (the /data disk), not a docker
+# named volume. A bind mount keeps the HOST directory's ownership, so each dir
+# must exist and already be owned by the uid the apache/kafka image runs as —
+# otherwise the broker exits at startup unable to write its log dir.
+ensure_data_dirs() {
+  local base uid gid d owner
+  base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
+  uid="$(env_value KAFKA_UID)"; uid="${uid:-1000}"
+  gid="$(env_value KAFKA_GID)"; gid="${gid:-1000}"
+
+  local -a sudo_cmd=()
+  if [[ "$(id -u)" -ne 0 ]] && command -v sudo &>/dev/null; then
+    sudo_cmd=(sudo)
+  fi
+
+  [[ -d "$base" ]] || die "Data disk $base does not exist.
+Mount it (or set a different path) before installing:
+  krate config set KAFKA_DATA_DIR=/path/to/disk"
+
+  for node in 92 93; do
+    d="$base/krate/broker-$node"
+    if [[ ! -d "$d" ]]; then
+      info "Creating broker data directory $d"
+      "${sudo_cmd[@]}" mkdir -p "$d" || die "Could not create $d — create it manually and re-run."
+    fi
+    owner="$(stat -c '%u:%g' "$d" 2>/dev/null || true)"
+    if [[ "$owner" != "$uid:$gid" ]]; then
+      info "Setting owner of $d to $uid:$gid (the uid apache/kafka runs as)"
+      "${sudo_cmd[@]}" chown "$uid:$gid" "$d" || die "Could not chown $d
+Run this, then re-run the install:
+  sudo chown -R $uid:$gid $base/krate"
+    fi
+  done
+  local avail_gb
+  avail_gb="$(df -Pk "$base" 2>/dev/null | awk 'NR==2{printf "%.0f", $4/1048576}')"
+  if [[ -n "$avail_gb" ]] && (( avail_gb < 50 )); then
+    warn "Only ${avail_gb} GB free on $base — check ./krate disk before loading traffic."
+  fi
+  ok "Broker data directories ready under $base/krate"
+}
+
 # Returns 0 if a TCP listener already holds the given port on this host.
 port_in_use() {
   local port="$1"
@@ -210,7 +338,7 @@ cmd_install() {
   # 1. Preflight — fail safe with guidance instead of half-applying
   if ! cmd_doctor; then
     echo ""
-    die "Preflight checks failed — fix the issues above, then re-run: kafka install"
+    die "Preflight checks failed — fix the issues above, then re-run: krate install"
   fi
   require_compose_file
   echo ""
@@ -223,8 +351,8 @@ cmd_install() {
     [[ -f "$ENV_TEMPLATE" ]] || die ".env.template not found in $SCRIPT_DIR"
     cp "$ENV_TEMPLATE" "$ENV_FILE"
     warn "Created .env from template with default credentials."
-    warn "To change them: kafka config set KAFKA_UI_USER=youruser"
-    warn "                kafka config set KAFKA_UI_PASSWORD=yourpass"
+    warn "To change them: krate config set KAFKA_UI_USER=youruser"
+    warn "                krate config set KAFKA_UI_PASSWORD=yourpass"
   fi
   echo ""
 
@@ -232,23 +360,28 @@ cmd_install() {
   cmd_load_images
   echo ""
 
-  # 4. TLS certificate for the UI proxy
+  # 4. Broker data directories on the /data disk
+  info "Checking broker data directories..."
+  ensure_data_dirs
+  echo ""
+
+  # 5. TLS certificate for the UI proxy
   info "Checking TLS certificate..."
   ensure_cert
   echo ""
 
-  # 5. Start
+  # 6. Start and wait for the cluster to become healthy
   info "Starting cluster..."
   compose_cmd up -d
   echo ""
+  cmd_health || true      # wait for the cluster to settle, then show final health
+  echo ""
 
-  ok "Cluster started."
   sep
   cmd_ui
   echo ""
-  echo -e "  ${DIM}kafka status     — check running services"
-  echo -e "  kafka health     — wait for all services to be healthy"
-  echo -e "  kafka logs -f    — follow all logs${RESET}"
+  echo -e "  ${DIM}krate status     — check running services"
+  echo -e "  krate logs -f    — follow all logs${RESET}"
   echo ""
 }
 
@@ -276,10 +409,12 @@ cmd_load_images() {
 # ─── start ────────────────────────────────────────────────────────────────────
 cmd_start() {
   require_compose; require_compose_file; require_env
+  ensure_data_dirs
   ensure_cert
   info "Starting cluster..."
   compose_cmd up -d
-  ok "Done. Run: kafka status"
+  echo ""
+  cmd_health || true      # wait for the cluster to settle, then show final health
 }
 
 # ─── stop ─────────────────────────────────────────────────────────────────────
@@ -310,7 +445,7 @@ cmd_down() {
   require_compose; require_compose_file
   info "Removing containers (named volumes preserved)..."
   compose_cmd down
-  ok "Containers removed. Run: kafka start"
+  ok "Containers removed. Run: krate start"
 }
 
 # ─── status ───────────────────────────────────────────────────────────────────
@@ -340,20 +475,66 @@ cmd_logs() {
 }
 
 # ─── health ───────────────────────────────────────────────────────────────────
+# Count containers still in Docker's transient "starting" state — i.e. inside
+# their healthcheck start_period, not yet settled either way.
+health_pending_count() {
+  local cid n=0 h
+  while IFS= read -r cid; do
+    [[ -z "$cid" ]] && continue
+    h=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo none)
+    [[ "$h" == "starting" ]] && n=$((n + 1))
+  done <<< "$1"
+  echo "$n"
+}
+
 cmd_health() {
   require_compose; require_compose_file
-  sep
-  echo -e "${BOLD}  Service Health${RESET}"
-  sep
-  echo ""
+
+  # A service reports "starting" until its start_period elapses, so a one-shot
+  # check straight after `krate start` is a false negative (the proxy is the
+  # usual victim — it only starts once the UI, and thus every broker, is up).
+  # Wait for the cluster to settle by default; an already-settled cluster
+  # returns immediately, so this costs nothing once things are steady.
+  local wait=true timeout=120
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-wait) wait=false; shift ;;
+      --timeout) timeout="${2:?--timeout needs a value in seconds}"; shift 2 ;;
+      *)         die "Unknown option: $1 (usage: krate health [--no-wait] [--timeout N])" ;;
+    esac
+  done
+  [[ "$timeout" =~ ^[0-9]+$ ]] || die "--timeout must be a whole number of seconds"
 
   local container_ids
   container_ids=$(compose_cmd ps -q 2>/dev/null || true)
 
   if [[ -z "$container_ids" ]]; then
-    warn "No containers running. Run: kafka start"
+    warn "No containers running. Run: krate start"
     return 1
   fi
+
+  if $wait; then
+    local waited=0 interval=3 pending
+    pending=$(health_pending_count "$container_ids")
+    while (( pending > 0 )) && (( waited < timeout )); do
+      if [[ -t 1 ]]; then
+        printf "\r  ${DIM}waiting for %d service(s) to settle... %ds/%ds${RESET}" \
+          "$pending" "$waited" "$timeout"
+      fi
+      sleep "$interval"
+      waited=$(( waited + interval ))
+      container_ids=$(compose_cmd ps -q 2>/dev/null || true)
+      pending=$(health_pending_count "$container_ids")
+    done
+    if [[ -t 1 ]]; then
+      printf "\r\033[K"
+    fi
+  fi
+
+  sep
+  echo -e "${BOLD}  Service Health${RESET}"
+  sep
+  echo ""
 
   local all_ok=true
 
@@ -384,7 +565,12 @@ cmd_health() {
   if $all_ok; then
     ok "All services healthy"
   else
-    warn "Some services not ready. Run: kafka logs <service>"
+    if $wait && (( $(health_pending_count "$container_ids") > 0 )); then
+      warn "Still starting after ${timeout}s — the cluster may just need longer."
+      warn "Retry with a longer wait: krate health --timeout $(( timeout * 2 ))"
+    else
+      warn "Some services not ready. Run: krate logs <service>"
+    fi
     return 1
   fi
 }
@@ -428,7 +614,7 @@ cmd_config() {
       ;;
     set)
       local kv="${1:-}"
-      [[ -z "$kv" ]] && die "Usage: kafka config set KEY=VALUE"
+      [[ -z "$kv" ]] && die "Usage: krate config set KEY=VALUE"
       local key="${kv%%=*}"
       local val="${kv#*=}"
       [[ -f "$ENV_FILE" ]] || cp "$ENV_TEMPLATE" "$ENV_FILE"
@@ -443,7 +629,7 @@ cmd_config() {
       ok "Set ${key}"
       ;;
     *)
-      die "Usage: kafka config [show | set KEY=VALUE]"
+      die "Usage: krate config [show | set KEY=VALUE]"
       ;;
   esac
 }
@@ -469,6 +655,115 @@ cmd_uninstall() {
     compose_cmd down
   fi
   ok "Done"
+}
+
+# ─── monitor (observability stack) ───────────────────────────────────────────
+# The stack in monitoring/ is shared by every variant. Rather than hardcode a
+# network name and broker list per variant, discover both from the cluster that
+# is actually running: the compose project name varies with the directory a
+# bundle was extracted into, so a hardcoded external network would break.
+# In a bundle the stack sits beside the CLI; in the repo it lives once at the
+# root and is shared by every variant.
+MONITOR_DIR="$SCRIPT_DIR/monitoring"
+[[ -d "$MONITOR_DIR" ]] || MONITOR_DIR="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)/monitoring"
+
+# The docker network the brokers are attached to.
+monitor_network() {
+  local cid
+  cid="$(compose_cmd ps -q 2>/dev/null | head -1)"
+  [[ -n "$cid" ]] || return 1
+  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" 2>/dev/null \
+    | tr ' ' '\n' | grep -v '^$' | head -1
+}
+
+# One --kafka.server= flag per broker, taken from the internal bootstrap list so
+# the exporter uses the same listener the brokers use for each other.
+monitor_targets() {
+  local out=""
+  local IFS=','
+  for hp in $BOOTSTRAP; do
+    out+="--kafka.server=$hp "
+  done
+  echo "${out% }"
+}
+
+monitor_compose() {
+  [[ -d "$MONITOR_DIR" ]] || die "monitoring/ not found in $SCRIPT_DIR
+This bundle was built without the observability stack."
+  local net
+  net="$(monitor_network)" || net=""
+  if [[ "$1" == "up" && -z "$net" ]]; then
+    die "The cluster is not running — start it first: krate start"
+  fi
+  # down/ps/logs must still work after the broker containers are removed.
+  net="${net:-krate-unused-network}"
+
+  local env_file="$MONITOR_DIR/.env"
+  if [[ ! -f "$env_file" ]]; then
+    cp "$MONITOR_DIR/.env.template" "$env_file"
+    warn "Created monitoring/.env from template (default Grafana credentials)."
+  fi
+
+  KAFKA_NETWORK="$net" \
+  KAFKA_EXPORTER_TARGETS="$(monitor_targets)" \
+  CLUSTER_LABEL="$KRATE_VARIANT" \
+  MONITOR_PROJECT="krate-${KRATE_VARIANT}-monitoring" \
+  "${COMPOSE_BIN[@]}" --env-file "$env_file" -f "$MONITOR_DIR/docker-compose.yml" "$@"
+}
+
+cmd_monitor() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    up)
+      require_compose
+      info "Starting observability stack..."
+      command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
+      monitor_compose up -d
+      python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
+      echo ""
+      ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+      ok "Prometheus: http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)"
+      note_smtp
+      ;;
+    down)    require_compose; monitor_compose down "$@" ;;
+    status)  require_compose; monitor_compose ps ;;
+    logs)    require_compose; monitor_compose logs --tail 100 "$@" ;;
+    reload)
+      # Re-read alert rules without restarting Prometheus.
+      require_compose
+      if monitor_compose exec -T prometheus wget -q -O /dev/null --post-data='' http://127.0.0.1:9090/-/reload; then
+        ok "Prometheus reloaded its rules."
+      else
+        die "Reload failed — is the stack up?"
+      fi
+      ;;
+    ui)
+      local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+      echo "Grafana:  http://$(hostname -f 2>/dev/null || hostname):${port}"
+      echo "User:     $(env_value_file "$MONITOR_DIR/.env" GRAFANA_USER admin)"
+      echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
+      ;;
+    *)
+      echo "Usage: krate monitor {up|down|status|logs|reload|ui}"
+      return 1 ;;
+  esac
+}
+
+# Read a key from an arbitrary env file, with a default.
+env_value_file() {
+  local file="$1" key="$2" default="${3:-}" v=""
+  [[ -f "$file" ]] && v="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"'"')"
+  echo "${v:-$default}"
+}
+
+# Alerting works without SMTP; only delivery is off. Say so rather than let an
+# operator assume email is configured.
+note_smtp() {
+  local en; en="$(env_value_file "$MONITOR_DIR/.env" GF_SMTP_ENABLED false)"
+  if [[ "$en" != "true" ]]; then
+    warn "Email delivery is off (GF_SMTP_ENABLED=false). Alerts still fire and show in Grafana."
+    warn "To enable: edit monitoring/.env and re-run 'krate monitor up'."
+  fi
 }
 
 # ─── doctor (preflight) ───────────────────────────────────────────────────────
@@ -501,7 +796,7 @@ cmd_doctor() {
       problems=$((problems + 1))
     fi
   else
-    err "docker not found — run: kafka docker-install"
+    err "docker not found — run: krate docker-install"
     problems=$((problems + 1))
   fi
   echo ""
@@ -518,7 +813,7 @@ cmd_doctor() {
       problems=$((problems + 1))
     fi
   else
-    err "Docker Compose not found — run: kafka docker-install"
+    err "Docker Compose not found — run: krate docker-install"
     problems=$((problems + 1))
   fi
   echo ""
@@ -534,7 +829,7 @@ cmd_doctor() {
   if [[ -f "$ENV_FILE" ]]; then
     ok ".env present"
   else
-    warn ".env missing — it will be created from template on 'kafka install'"
+    warn ".env missing — it will be created from template on 'krate install'"
   fi
   if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
     ok "TLS certificate present"
@@ -568,6 +863,45 @@ cmd_doctor() {
     warn "no .bundle-arch marker — cannot verify architecture (older bundle?)"
   fi
   echo ""
+
+  # ── RHEL family: SELinux and package conflicts ──
+  # These are the two things that break a Docker install on RHEL. Surfacing them
+  # in preflight is cheaper than discovering them mid-install.
+  local os_id=""
+  [[ -r /etc/os-release ]] && os_id="$(awk -F= '/^ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)"
+  if [[ "$os_id" =~ ^(rhel|centos|rocky|almalinux|ol)$ ]]; then
+    info "SELinux"
+    local se="unknown"
+    if command -v getenforce &>/dev/null; then
+      se="$(getenforce 2>/dev/null || echo unknown)"
+    elif [[ -r /sys/fs/selinux/enforce ]]; then
+      [[ "$(cat /sys/fs/selinux/enforce)" == "1" ]] && se="Enforcing" || se="Permissive"
+    fi
+    case "$se" in
+      Enforcing)  ok "SELinux is Enforcing — broker data and proxy mounts are labelled (:Z / :z)" ;;
+      Permissive|Disabled) ok "SELinux is $se" ;;
+      *) warn "Could not determine SELinux state" ;;
+    esac
+    if command -v rpm &>/dev/null && ! rpm -q container-selinux &>/dev/null; then
+      warn "container-selinux is not installed — 'krate docker-install' will use the bundled copy."
+    fi
+    echo ""
+
+    info "Package conflicts"
+    local -a found=()
+    local p
+    for p in podman-docker docker docker-engine docker-client docker-common \
+             docker-latest docker-logrotate docker-engine-selinux; do
+      command -v rpm &>/dev/null && rpm -q "$p" &>/dev/null && found+=("$p")
+    done
+    if [[ ${#found[@]} -gt 0 ]]; then
+      warn "Conflicting package(s) installed: ${found[*]}"
+      warn "'krate docker-install' removes them (podman and runc are unaffected)."
+    else
+      ok "no conflicting docker/podman-docker packages installed"
+    fi
+    echo ""
+  fi
 
   # ── Host port availability ──
   info "Host port availability"
@@ -640,7 +974,7 @@ cmd_doctor() {
     ok "All preflight checks passed."
     return 0
   else
-    warn "$problems blocking issue(s) found — resolve them before 'kafka install'."
+    warn "$problems blocking issue(s) found — resolve them before 'krate install'."
     return 1
   fi
 }
@@ -700,29 +1034,114 @@ cmd_docker_check() {
   if $all_ok; then
     ok "Docker is ready"
   else
-    warn "Issues found. Run: kafka docker-install"
+    warn "Issues found. Run: krate docker-install"
     return 1
   fi
 }
 
 # ─── docker-install ───────────────────────────────────────────────────────────
 cmd_docker_install() {
-  [[ -d "$DOCKER_OFFLINE_DIR" ]] || die "docker-offline/ not found in $SCRIPT_DIR
-This bundle was not packaged with Docker. On an internet-connected build machine, rebuild it with:
-  make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=<amd64|arm64>
-  make bundle VERSION=vN ARCH=<amd64|arm64> INCLUDE_DOCKER=1
+  local rebuild_hint="On an internet-connected build machine, rebuild the bundle with:
+  make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=<amd64|arm64>   # Debian/Ubuntu
+  make docker-rpms RHEL_VERSION=9 ARCH=<amd64|arm64>                 # RHEL/Rocky/Alma
+  make bundle VERSION=vN MODE=epc ARCH=<amd64|arm64> INCLUDE_DOCKER=1
 Then transfer the rebuilt bundle to this offline VM."
+
+  [[ -d "$DOCKER_OFFLINE_DIR" ]] || die "docker-offline/ not found in $SCRIPT_DIR
+This bundle was not packaged with Docker. $rebuild_hint"
 
   shopt -s nullglob
   local debs=("$DOCKER_OFFLINE_DIR"/*.deb)
+  local rpms=("$DOCKER_OFFLINE_DIR"/*.rpm)
   shopt -u nullglob
 
-  [[ ${#debs[@]} -gt 0 ]] || die "No .deb files in $DOCKER_OFFLINE_DIR
-On an internet-connected build machine, rebuild the bundle with:
-  make docker-debs UBUNTU_VERSION=<jammy|noble> ARCH=<amd64|arm64>
-  make bundle VERSION=vN ARCH=<amd64|arm64> INCLUDE_DOCKER=1
-Then transfer the rebuilt bundle to this offline VM."
+  # The bundle carries one package family, matched to the target OS at build
+  # time. Pick the installer that matches what is actually here.
+  if [[ ${#rpms[@]} -gt 0 && ${#debs[@]} -gt 0 ]]; then
+    die "$DOCKER_OFFLINE_DIR holds both .rpm and .deb packages; refusing to guess.
+Rebuild the bundle for a single target OS."
+  elif [[ ${#rpms[@]} -gt 0 ]]; then
+    docker_install_rpm "$DOCKER_OFFLINE_DIR"
+  elif [[ ${#debs[@]} -gt 0 ]]; then
+    docker_install_deb "${debs[@]}"
+  else
+    die "No .deb or .rpm files in $DOCKER_OFFLINE_DIR
+$rebuild_hint"
+  fi
 
+  sudo systemctl enable docker
+  sudo systemctl start docker
+
+  if ! groups "$USER" 2>/dev/null | grep -q '\bdocker\b'; then
+    sudo usermod -aG docker "$USER"
+    warn "Added $USER to docker group."
+    warn "Run 'newgrp docker' or log out and back in before using Docker without sudo."
+  fi
+
+  echo ""
+  ok "$(docker --version)"
+  ok "$(docker compose version 2>/dev/null || docker-compose version 2>/dev/null)"
+  ok "Docker installed successfully."
+}
+
+# RHEL family. dnf resolves install order and inter-package deps itself, so the
+# whole set goes in one transaction. --disablerepo='*' keeps it strictly offline:
+# every dependency must already be on the box or in the bundle, and we fail
+# loudly rather than silently reaching for a network repo that isn't there.
+docker_install_rpm() {
+  local pkg_dir="$1"
+  local -a rpms optional
+  shopt -s nullglob
+  rpms=("$pkg_dir"/*.rpm)
+  optional=("$pkg_dir"/optional/*.rpm)
+  shopt -u nullglob
+
+  local installer=""
+  if command -v dnf &>/dev/null; then installer=dnf
+  elif command -v yum &>/dev/null; then installer=yum
+  else die "Neither dnf nor yum found — cannot install RPM packages on this host."
+  fi
+
+  # podman-docker ships /usr/bin/docker and conflicts with docker-ce-cli.
+  # Removing it leaves podman and runc untouched — only the CLI alias goes.
+  local -a conflicts=()
+  local p
+  for p in podman-docker docker docker-engine docker-client docker-client-latest \
+           docker-common docker-latest docker-latest-logrotate docker-logrotate \
+           docker-engine-selinux; do
+    rpm -q "$p" &>/dev/null && conflicts+=("$p")
+  done
+  if [[ ${#conflicts[@]} -gt 0 ]]; then
+    warn "These installed packages conflict with Docker CE and will be removed:"
+    printf '    %s\n' "${conflicts[@]}"
+    warn "podman and runc themselves are not affected."
+    echo ""
+  fi
+
+  info "Installing Docker CE from ${#rpms[@]} bundled RPM packages..."
+  echo ""
+  if ! sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}"; then
+    # containerd.io requires container-selinux. A host that has run containers
+    # already has it; a minimal one may not. It is kept out of the main set
+    # because the newest build needs a newer selinux-policy than RHEL 9.6 ships,
+    # so installing it unconditionally would fail on a host that was fine.
+    if [[ ${#optional[@]} -gt 0 ]]; then
+      echo ""
+      info "Retrying with the bundled optional dependencies..."
+      sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" "${optional[@]}" \
+        || die "Offline install failed even with the bundled dependencies.
+A dependency is missing from both this host and the bundle. Install it from your
+RHEL media or Satellite, then re-run: krate docker-install"
+    else
+      die "Offline install failed and no optional/ dependencies are bundled."
+    fi
+  fi
+}
+
+# Debian/Ubuntu. dpkg does not resolve dependencies, so install in dependency
+# order and let 'apt-get install -f' repair anything left over.
+docker_install_deb() {
+  local -a debs=("$@")
   info "Installing Docker CE from ${#debs[@]} bundled packages..."
   echo ""
 
@@ -749,20 +1168,6 @@ $(printf '  %s\n' "${matches[@]}")"
   echo ""
   info "Resolving any remaining dependencies..."
   sudo apt-get install -f -y 2>/dev/null || true
-
-  sudo systemctl enable docker
-  sudo systemctl start docker
-
-  if ! groups "$USER" 2>/dev/null | grep -q '\bdocker\b'; then
-    sudo usermod -aG docker "$USER"
-    warn "Added $USER to docker group."
-    warn "Run 'newgrp docker' or log out and back in before using Docker without sudo."
-  fi
-
-  echo ""
-  ok "$(docker --version)"
-  ok "$(docker compose version 2>/dev/null || docker-compose version 2>/dev/null)"
-  ok "Docker installed successfully."
 }
 
 # ─── lag ──────────────────────────────────────────────────────────────────────
@@ -776,7 +1181,7 @@ cmd_lag() {
     case "$1" in
       --group|-g) group="$2"; shift 2 ;;
       --topic|-t) topic="$2"; shift 2 ;;
-      -*)         die "Unknown option: $1. Usage: kafka lag [group] [--topic <topic>]" ;;
+      -*)         die "Unknown option: $1. Usage: krate lag [group] [--topic <topic>]" ;;
       *)          group="$1"; shift ;;
     esac
   done
@@ -793,7 +1198,7 @@ cmd_lag() {
     echo ""
 
     local raw
-    raw=$(docker exec "$broker" kafka-consumer-groups.sh \
+    raw=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
       --bootstrap-server "$BOOTSTRAP" \
       --describe --group "$group" 2>&1) || die "Failed to describe group '$group'"
 
@@ -860,7 +1265,7 @@ cmd_lag() {
     echo ""
 
     local groups
-    groups=$(docker exec "$broker" kafka-consumer-groups.sh \
+    groups=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
       --bootstrap-server "$BOOTSTRAP" \
       --list 2>/dev/null | grep -v "^$" | sort) || die "Failed to list consumer groups"
 
@@ -878,7 +1283,7 @@ cmd_lag() {
       [[ -z "$grp" ]] && continue
 
       local raw_desc
-      raw_desc=$(docker exec "$broker" kafka-consumer-groups.sh \
+      raw_desc=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
         --bootstrap-server "$BOOTSTRAP" \
         --describe --group "$grp" 2>/dev/null || true)
 
@@ -914,8 +1319,8 @@ cmd_lag() {
     sep
     printf "  %s group(s)   %s with lag > 0\n" "$group_count" "$lagging_count"
     echo ""
-    echo -e "  ${DIM}Drill down:  kafka lag <group-name>"
-    echo -e "  Topic only:  kafka lag --topic <topic-name>${RESET}"
+    echo -e "  ${DIM}Drill down:  krate lag <group-name>"
+    echo -e "  Topic only:  krate lag --topic <topic-name>${RESET}"
     echo ""
   fi
 }
@@ -936,7 +1341,9 @@ cmd_help() {
   printf "  %-30s %s\n" "down"                 "Remove containers (volumes preserved)"
   printf "  %-30s %s\n" "status"               "Show running service state"
   printf "  %-30s %s\n" "logs [-f] [service]"  "Show logs; -f to follow"
-  printf "  %-30s %s\n" "health"               "Detailed health check of all services"
+  printf "  %-30s %s\n" "health"               "Health of all services; waits for any still starting"
+  printf "  %-30s %s\n" "health --no-wait"     "Health as an instant snapshot, without waiting"
+  printf "  %-30s %s\n" "health --timeout N"   "Wait up to N seconds to settle (default 120)"
   printf "  %-30s %s\n" "lag"                  "Summary of all consumer group lag"
   printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
   printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
@@ -946,26 +1353,28 @@ cmd_help() {
   printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
   printf "  %-30s %s\n" "uninstall"            "Remove containers (volumes kept)"
   printf "  %-30s %s\n" "uninstall --purge"    "Remove containers AND delete all data"
+  printf "  %-30s %s\n" "disk"                 "Data-disk usage vs the configured budget"
+  printf "  %-30s %s\n" "monitor {up|down|status|logs|reload|ui}" "Observability stack (Grafana, Prometheus, Loki)"
   printf "  %-30s %s\n" "doctor"               "Preflight checks (ports, firewalld, Docker) before install"
   printf "  %-30s %s\n" "gen-cert"             "(Re)generate the self-signed TLS cert for the UI"
   printf "  %-30s %s\n" "docker-check"         "Verify Docker installation"
-  printf "  %-30s %s\n" "docker-install"       "Install Docker from bundled .deb packages"
+  printf "  %-30s %s\n" "docker-install"       "Install Docker from bundled .deb/.rpm packages"
   echo ""
   echo -e "${BOLD}EXAMPLES${RESET}"
-  echo "  kafka doctor                          # preflight checks before installing"
-  echo "  kafka install                         # full first-time setup"
-  echo "  kafka logs -f kafka-92                # tail broker 92 logs"
-  echo "  kafka restart kafka-ui                # restart Kafbat UI"
-  echo "  kafka config set KAFKA_UI_USER=admin"
-  echo "  kafka health                          # check all service health"
-  echo "  kafka lag                             # all consumer groups + lag"
-  echo "  kafka lag my-app-consumer             # per-partition detail"
-  echo "  kafka lag --topic orders              # all groups on 'orders' topic"
-  echo "  kafka lag my-group --topic payments   # specific group + topic"
-  echo "  kafka uninstall --purge               # full teardown + data wipe"
+  echo "  krate doctor                          # preflight checks before installing"
+  echo "  krate install                         # full first-time setup"
+  echo "  krate logs -f kafka-92                # tail broker 92 logs"
+  echo "  krate restart kafka-ui                # restart Kafbat UI"
+  echo "  krate config set KAFKA_UI_USER=admin"
+  echo "  krate health                          # check all service health"
+  echo "  krate lag                             # all consumer groups + lag"
+  echo "  krate lag my-app-consumer             # per-partition detail"
+  echo "  krate lag --topic orders              # all groups on 'orders' topic"
+  echo "  krate lag my-group --topic payments   # specific group + topic"
+  echo "  krate uninstall --purge               # full teardown + data wipe"
   echo ""
   echo -e "${BOLD}SERVICES${RESET}"
-  echo "  zookeeper   kafka-92   kafka-93   kafka-94   kafka-95   kafka-ui"
+  echo "  kafka-92   kafka-93   kafka-ui   proxy"
   echo ""
 }
 
@@ -982,11 +1391,13 @@ case "$CMD" in
   down)           cmd_down ;;
   status)         cmd_status ;;
   logs)           cmd_logs "$@" ;;
-  health)         cmd_health ;;
+  health)         cmd_health "$@" ;;
   lag)            cmd_lag "$@" ;;
   ui)             cmd_ui ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
+  disk)           cmd_disk ;;
+  monitor)        cmd_monitor "$@" ;;
   doctor)         cmd_doctor ;;
   gen-cert)       cmd_gen_cert ;;
   docker-check)   cmd_docker_check ;;
