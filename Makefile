@@ -219,7 +219,6 @@ bundle:
 >    awk -F '\t' 'NR==FNR { runtime[$$1]=$$2; next } /^[A-Z_]+_IMAGE=/ { split($$0, entry, "="); if (entry[2] in runtime) $$0=entry[1] "=" runtime[entry[2]] } { print }' "$$bundle_dir/images.lock.tsv" "$$env_template" > "$$env_template.tmp"
 >    mv "$$env_template.tmp" "$$env_template"
 >  done
->  cp "$$bundle_dir/images.lock.tsv" "$$out_file.images.lock.tsv"
 >
 >  if enabled "$(INCLUDE_DOCKER)"; then
 >    pkg_dir="$(DOCKER_OFFLINE_DIR)/$(TARGET_OS)/$(ARCH)"
@@ -265,16 +264,28 @@ bundle:
 >      tar_opts+=("$$opt")
 >    fi
 >  done
->  COPYFILE_DISABLE=1 tar "$${tar_opts[@]}" -czf "$$out_file" -C "$(DIST_DIR)/staging" "$$bundle_name"
->  rm -rf "$$bundle_dir"
+>  local release_dir cleanup_command
+>  release_dir="$$(mktemp -d "$(DIST_DIR)/.$${bundle_name}.release.XXXXXX")"
+>  printf -v cleanup_command 'rm -rf -- %q' "$$release_dir"
+>  trap "$$cleanup_command" EXIT
+>  COPYFILE_DISABLE=1 tar "$${tar_opts[@]}" -czf "$$release_dir/$${bundle_name}.tar.gz" -C "$(DIST_DIR)/staging" "$$bundle_name"
+>  cp "$$bundle_dir/images.lock.tsv" "$$release_dir/$${bundle_name}.tar.gz.images.lock.tsv"
 >
 >  if command -v sha256sum >/dev/null 2>&1; then
->    ( cd "$(DIST_DIR)" && sha256sum "$${bundle_name}.tar.gz" ) > "$${out_file}.sha256"
+>    ( cd "$$release_dir" && sha256sum "$${bundle_name}.tar.gz" ) > "$$release_dir/$${bundle_name}.tar.gz.sha256"
 >  elif command -v shasum >/dev/null 2>&1; then
->    ( cd "$(DIST_DIR)" && shasum -a 256 "$${bundle_name}.tar.gz" ) > "$${out_file}.sha256"
+>    ( cd "$$release_dir" && shasum -a 256 "$${bundle_name}.tar.gz" ) > "$$release_dir/$${bundle_name}.tar.gz.sha256"
 >  else
->    echo "No sha256sum or shasum found; checksum sidecar not written" >&2
+>    echo "No sha256sum or shasum found; bundle not published" >&2
+>    exit 1
 >  fi
+>
+>  # Release paths receive the staged archive, lock manifest and checksum.
+>  for suffix in "" .images.lock.tsv .sha256; do
+>    mv "$$release_dir/$${bundle_name}.tar.gz$$suffix" "$$out_file$$suffix"
+>  done
+>  rm -rf "$$release_dir" "$$bundle_dir"
+>  trap - EXIT
 >
 >  echo "==> Wrote $$out_file"
 >}
