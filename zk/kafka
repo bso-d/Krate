@@ -17,7 +17,6 @@ MON_DIR="$SCRIPT_DIR/monitoring"
 MON_COMPOSE="$MON_DIR/docker-compose.yml"
 MON_ENV="$MON_DIR/.env"
 MON_ENV_TEMPLATE="$MON_DIR/.env.template"
-CLUSTER_NETWORK="zk_kafka-network"
 
 # ─── Compose binary detection (v2 plugin or v1 standalone) ───────────────────
 if docker compose version &>/dev/null 2>&1; then
@@ -114,8 +113,30 @@ ensure_mon_env() {
   cp "$MON_ENV_TEMPLATE" "$MON_ENV"
 }
 
+# Inspect a running broker rather than inferring the project from its directory.
+# Match the logical Compose network label so unrelated attached networks are skipped.
+monitor_network() {
+  local broker network
+  broker="$(find_broker 2>/dev/null)" || return 1
+  while IFS= read -r network; do
+    [[ -n "$network" ]] || continue
+    if [[ "$(docker network inspect --format '{{index .Labels "com.docker.compose.network"}}' "$network" 2>/dev/null)" == "kafka-network" ]]; then
+      printf '%s\n' "$network"
+      return 0
+    fi
+  done < <(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$broker")
+  return 1
+}
+
 monitor_compose() {
-  "${COMPOSE_BIN[@]}" --env-file "$MON_ENV" -f "$MON_COMPOSE" "$@"
+  local network
+  network="$(monitor_network)" || network=""
+  if [[ "$1" == "up" && -z "$network" ]]; then
+    die "No running broker Kafka network found — start the cluster first: kafka start"
+  fi
+  # Compose still needs an interpolated name for down/ps/logs after cluster removal.
+  KAFKA_NETWORK="${network:-zk-monitoring-unused-network}" \
+    "${COMPOSE_BIN[@]}" --env-file "$MON_ENV" -f "$MON_COMPOSE" "$@"
 }
 
 # Resolve a single var from the monitoring .env (empty if unset).
@@ -967,11 +988,6 @@ cmd_monitor() {
 
   case "$action" in
     up)
-      # The exporter attaches to the cluster's compose network, so the cluster
-      # must be running before the monitoring stack can join it.
-      if ! docker network inspect "$CLUSTER_NETWORK" &>/dev/null; then
-        die "Cluster network '$CLUSTER_NETWORK' not found — start the cluster first: kafka start"
-      fi
       ensure_mon_env
       info "Starting observability stack (kafka-exporter, Prometheus, Grafana)..."
       monitor_compose up -d

@@ -91,7 +91,7 @@ compose-check:
 >docker compose --env-file kraft/.env.template -f kraft/docker-compose.yml config --quiet
 >docker compose --env-file epc/.env.template -f epc/docker-compose.yml config --quiet
 >docker compose --env-file monitoring/.env.template -f monitoring/docker-compose.yml config --quiet
->docker compose --env-file zk/monitoring/.env.template -f zk/monitoring/docker-compose.yml config --quiet
+>KAFKA_NETWORK=zk-validation-network docker compose --env-file zk/monitoring/.env.template -f zk/monitoring/docker-compose.yml config --quiet
 
 bundle-zk:
 >$(MAKE) bundle MODE=zk VERSION="$(VERSION)" ARCH="$(ARCH)" INCLUDE_DOCKER="$(INCLUDE_DOCKER)" NO_PULL="$(NO_PULL)"

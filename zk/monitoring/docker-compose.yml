@@ -3,7 +3,7 @@
 # Prometheus scrapes + evaluates alert rules, Grafana serves provisioned dashboards.
 #
 # Brought up by:  kafka monitor up   (see zk/kafka)
-# Requires the ZK cluster to be running first (external network zk_kafka-network).
+# Requires the ZK cluster to be running first; the CLI discovers its network.
 
 name: zk-monitoring
 
@@ -11,7 +11,7 @@ networks:
   # The ZK cluster's network, so the exporter can reach kafka-92:9092 etc. by name.
   kafka-network:
     external: true
-    name: zk_kafka-network
+    name: ${KAFKA_NETWORK:?Run kafka monitor to discover the cluster network}
   monitoring:
     driver: bridge
 
