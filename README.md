@@ -227,7 +227,9 @@ Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show dat
 
 Settings live in `.env`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
 
-See the [topic and consumer guide](docs/topic-consumer-runbook.md) for creating message streams, testing delivery, sharing work between consumers, and removing test data. The `uninstall --purge` option deletes stored data; it is not part of the normal stop/start workflow.
+See the [topic and consumer guide](docs/topic-consumer-runbook.md) for creating message streams, testing delivery, sharing work between consumers, and removing test data.
+
+In the supplied KRaft and ZooKeeper setups, `uninstall --purge` deletes stored Kafka messages by removing their Docker storage volumes. EPC stores messages in host folders under `KAFKA_DATA_DIR` (default `/data`), so those messages remain after purge. Deleting EPC messages requires stopping the cluster and separately removing its broker folders. Purge is not part of the normal stop/start workflow.
 
 ## Monitoring
 
