@@ -29,6 +29,7 @@ ZK_IMAGES := confluentinc/cp-zookeeper:7.6.1 confluentinc/cp-kafka:7.6.1 kafbat/
 # differ from what the cluster actually runs.
 KRAFT_IMAGES := $(shell . ./kraft/.env.template >/dev/null 2>&1; echo "$$KAFKA_IMAGE $$KAFKA_UI_IMAGE $$NGINX_IMAGE")
 EPC_IMAGES := $(shell . ./epc/.env.template >/dev/null 2>&1; echo "$$KAFKA_IMAGE $$KAFKA_UI_IMAGE $$NGINX_IMAGE")
+ZK_MONITOR_IMAGES := danielqsj/kafka-exporter:latest prom/prometheus:latest grafana/grafana:latest
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 # RHEL needs buildx explicitly; on Debian it arrives as a docker-ce dependency.
 DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-extras docker-compose-plugin docker-buildx-plugin
@@ -90,6 +91,7 @@ compose-check:
 >docker compose --env-file kraft/.env.template -f kraft/docker-compose.yml config --quiet
 >docker compose --env-file epc/.env.template -f epc/docker-compose.yml config --quiet
 >docker compose --env-file monitoring/.env.template -f monitoring/docker-compose.yml config --quiet
+>KAFKA_NETWORK=zk-validation-network docker compose --env-file zk/monitoring/.env.template -f zk/monitoring/docker-compose.yml config --quiet
 
 bundle-zk:
 >$(MAKE) bundle MODE=zk VERSION="$(VERSION)" ARCH="$(ARCH)" INCLUDE_DOCKER="$(INCLUDE_DOCKER)" NO_PULL="$(NO_PULL)"
@@ -130,7 +132,7 @@ bundle:
 >  local -a images
 >
 >  case "$$mode" in
->    zk)    images=($(ZK_IMAGES)) ;;
+>    zk)    images=($(ZK_IMAGES) $(ZK_MONITOR_IMAGES)) ;;
 >    epc)   images=($(EPC_IMAGES) $(MONITOR_IMAGES)) ;;
 >    *)     images=($(KRAFT_IMAGES) $(MONITOR_IMAGES)) ;;
 >  esac
@@ -179,6 +181,12 @@ bundle:
 >  fi
 >  cp "$$src_dir/.env.template" "$$bundle_dir/.env.template"
 >  printf '%s\n' "$(ARCH)" > "$$bundle_dir/.bundle-arch"
+>
+>  # zk bundles ship the observability stack (kafka monitor up)
+>  if [[ "$$mode" == "zk" && -d "$$src_dir/monitoring" ]]; then
+>    cp -r "$$src_dir/monitoring" "$$bundle_dir/monitoring"
+>    rm -f "$$bundle_dir/monitoring/.env"
+>  fi
 >
 >  if enabled "$(INCLUDE_DOCKER)"; then
 >    pkg_dir="$(DOCKER_OFFLINE_DIR)/$(TARGET_OS)/$(ARCH)"

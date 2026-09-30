@@ -2,6 +2,7 @@
 .env
 zk/.env
 kraft/.env
+zk/monitoring/.env
 epc/.env
 
 # reference files not needed in repo

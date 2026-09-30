@@ -1,0 +1,48 @@
+# Alert rules for the ZK cluster.
+# Rules are dynamic — no hardcoded broker count. "Broker disappeared" compares
+# the live count to the recent peak, so it adapts to whatever the cluster size is.
+groups:
+  - name: kafka-cluster
+    rules:
+      # The exporter itself is down → we are blind to the cluster.
+      - alert: KafkaExporterDown
+        expr: up{job="kafka"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "kafka-exporter is not reachable"
+          description: "Prometheus cannot scrape kafka-exporter (job=kafka) for 2m — cluster metrics are unavailable."
+
+      # A broker that was reporting has dropped out (count < recent peak).
+      - alert: KafkaBrokerDisappeared
+        expr: kafka_brokers < max_over_time(kafka_brokers[1h])
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A Kafka broker disappeared"
+          description: "Live broker count ({{ $value }}) is below the last hour's peak — a broker has stopped reporting."
+
+      # Any under-replicated partition means a replica is behind or offline.
+      - alert: UnderReplicatedPartitions
+        expr: sum(kafka_topic_partition_under_replicated_partition) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Under-replicated partitions present"
+          description: "{{ $value }} partition(s) are under-replicated for 5m — check broker/ISR health."
+
+  - name: kafka-consumers
+    rules:
+      # Consumer group falling behind. Threshold is intentionally a literal here
+      # (Prometheus rule files are not env-templated); tune to your workload.
+      - alert: ConsumerGroupHighLag
+        expr: sum by (consumergroup) (kafka_consumergroup_lag) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} is lagging"
+          description: "Total lag for {{ $labels.consumergroup }} is {{ $value }} (> 1000) for 5m."
