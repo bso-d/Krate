@@ -1,6 +1,17 @@
 name: Release broker images
 
 on:
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: Broker edition
+        required: true
+        type: choice
+        options: [kraft, zk]
+      version:
+        description: 'New version: vN, vN.N or vN.N.N'
+        required: true
+        type: string
   push:
     tags: ['kraft-v*', 'zk-v*']
 
@@ -8,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: broker-release-${{ github.ref }}
+  group: broker-release-${{ github.event_name == 'workflow_dispatch' && format('{0}-{1}', inputs.edition, inputs.version) || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -18,6 +29,8 @@ jobs:
       edition: ${{ steps.release.outputs.edition }}
       version: ${{ steps.release.outputs.version }}
       image: ${{ steps.release.outputs.image }}
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -25,7 +38,9 @@ jobs:
       - name: Validate release tag and source
         id: release
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('{0}-{1}', inputs.edition, inputs.version) || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -35,6 +50,22 @@ jobs:
           }
           edition="${BASH_REMATCH[1]}"
           version="${BASH_REMATCH[2]}"
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main ]] || {
+              echo 'Manual releases must run from main' >&2
+              exit 1
+            }
+            git ls-remote --tags origin "refs/tags/$RELEASE_TAG" > existing-tag.txt
+            [[ ! -s existing-tag.txt ]] || {
+              echo 'Manual releases require a new tag' >&2
+              exit 1
+            }
+          fi
+          gh api --paginate "repos/$REPOSITORY/releases" --jq '.[].tag_name' > existing-releases.txt
+          if grep -Fxq "$RELEASE_TAG" existing-releases.txt; then
+            echo 'An existing release cannot be republished' >&2
+            exit 1
+          fi
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main || {
             echo 'Release commits must already be merged into main' >&2
@@ -42,15 +73,46 @@ jobs:
           }
           printf 'edition=%s\nversion=%s\nimage=ghcr.io/%s-%s\n' \
             "$edition" "$version" "${REPOSITORY,,}" "$edition" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\nsha=%s\n' "$RELEASE_TAG" "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   validate:
     needs: metadata
     uses: ./.github/workflows/broker-ci.yml
     with:
       edition: ${{ needs.metadata.outputs.edition }}
+      source_sha: ${{ needs.metadata.outputs.sha }}
+
+  tag:
+    needs: [metadata, validate]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+      - name: Create manual release tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$SOURCE_SHA"
+      - name: Verify release tag
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
 
   publish:
-    needs: [metadata, validate]
+    needs: [metadata, tag]
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
@@ -62,6 +124,8 @@ jobs:
         flavor: [release, debug]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Authenticate to GHCR
@@ -82,7 +146,7 @@ jobs:
           tags: ${{ needs.metadata.outputs.image }}:${{ needs.metadata.outputs.version }}-${{ matrix.flavor }}
           labels: |
             org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.metadata.outputs.sha }}
           provenance: mode=max
           sbom: true
       - name: Record published digest
@@ -106,6 +170,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
       - name: Download image references
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -115,7 +181,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
           EDITION: ${{ needs.metadata.outputs.edition }}
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
@@ -132,10 +198,5 @@ jobs:
             printf '\nDependency digests are recorded in dependencies.txt.\n'
             printf '\nDebug adds network and process diagnostic tools; both targets retain upstream broker startup.\n'
           } > release-notes.md
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release.txt debug.txt dependencies.txt --clobber
-            gh release edit "$RELEASE_TAG" --notes-file release-notes.md
-          else
-            gh release create "$RELEASE_TAG" release.txt debug.txt dependencies.txt \
-              --verify-tag --latest=false --title "Krate $EDITION $VERSION" --notes-file release-notes.md
-          fi
+          gh release create "$RELEASE_TAG" release.txt debug.txt dependencies.txt \
+            --verify-tag --latest=false --title "Krate $EDITION $VERSION" --notes-file release-notes.md
