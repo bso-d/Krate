@@ -37,7 +37,26 @@ those checks pass does it publish release/debug images to GHCR, with SBOM and
 provenance attestations, using `GITHUB_TOKEN` with `packages: write` permission.
 It then creates a separate GitHub Release containing both image references,
 digests, and `dependencies.txt` with the deployment dependency digest pins.
-Re-running the workflow updates the same release.
+Existing GitHub Releases are rejected before building, so ordinary runs do not
+replace their images or assets.
+
+To create a new tag manually, open **Actions → Release broker images → Run
+workflow**, select `main`, choose `kraft` or `zk`, and enter an unused version
+such as `v1.0.0`. Manual runs validate the selected main commit, run edition CI,
+create `<edition>-<version>` at that exact commit, and then publish the images
+and GitHub Release. All source checkouts and image revision labels use the
+validated commit SHA. Both triggers share a concurrency group for the release
+tag. The tag is created using `GITHUB_TOKEN`, which does not start another
+push-triggered workflow.
+
+Write repository access is sufficient to dispatch the workflow. Tag creation
+and GitHub Release creation use job-scoped `contents: write`; image publication
+uses `packages: write`. Repository or organization policies must permit those
+operations and GHCR package access. No personal publishing token is required.
+
+If publishing fails after tag creation, rerun the failed jobs from that run.
+A fresh manual run rejects the existing tag. Once a GitHub Release exists,
+choose a new version instead of republishing it.
 
 After merging the PR, tag the intended `main` commit and push the tag:
 
