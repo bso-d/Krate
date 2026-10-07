@@ -100,7 +100,39 @@ require_env() {
 
 # Wrapper so all compose calls use the right files and detected binary
 compose_cmd() {
+  if [[ -f "$ENV_FILE" && "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
+    local version
+    version="$(get_compose_version)"
+    version_gte "$version" "2.20.2" || die "SSO requires Docker Compose 2.20.2 or newer; found $version"
+    if [[ "${1:-}" == up ]]; then
+      local auth_tools="$SCRIPT_DIR/sso"
+      [[ -d "$auth_tools" ]] || auth_tools="$SCRIPT_DIR/../sso"
+      "${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile sso config --format json | python3 "$auth_tools/preflight.py" --directory "$SCRIPT_DIR" --mode runtime.yml
+      shift
+      set -- up --pull never --no-build "$@"
+    fi
+    set -- --profile sso "$@"
+  fi
   "${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+cmd_auth() {
+  local action="${1:-}" sso_dir="$SCRIPT_DIR/sso"
+  [[ -d "$sso_dir" ]] || sso_dir="$SCRIPT_DIR/../sso"
+  case "$action" in
+    configure)
+      [[ $# -eq 2 ]] || die "Usage: krate auth configure <settings.json>"
+      python3 "$sso_dir/configure-dual.py" --settings "$2" --output-dir "$SCRIPT_DIR/auth"
+      mkdir -p "$SCRIPT_DIR/auth/keycloak/truststores"
+      ;;
+    apply)
+      [[ -f "$sso_dir/activate.sh" ]] || die "Missing packaged SSO activation helper"
+      # shellcheck disable=SC1091
+      source "$sso_dir/activate.sh"
+      apply_auth "$sso_dir"
+      ;;
+    *) die "Usage: krate auth {configure <settings.json>|apply}" ;;
+  esac
 }
 
 # Returns the name of the first running broker container
@@ -455,8 +487,14 @@ cmd_ui() {
   echo -e "${BOLD}  Kafbat UI${RESET}"
   sep
   echo "  URL       https://${fqdn}${port_suffix}/"
-  [[ -n "$user" ]] && echo "  Username  $user"
-  [[ -n "$pass" ]] && echo "  Password  $pass"
+  if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
+    echo "  Sign-in   Shared app login (Admin) or SSO via Keycloak"
+  elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "pingfederate.yml" ]]; then
+    echo "  Sign-in   PingFederate (company SSO)"
+  else
+    [[ -n "$user" ]] && echo "  Username  $user"
+    [[ -n "$pass" ]] && echo "  Password  $pass"
+  fi
   echo -e "  ${DIM}TLS is a self-signed cert — trust certs/server.crt or proceed past the browser warning.${RESET}"
   sep
 }
@@ -1117,6 +1155,7 @@ cmd_help() {
   printf "  %-30s %s\n" "lag"                  "Summary of all consumer group lag"
   printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
   printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
+  printf "  %-30s %s\n" "auth {configure FILE|apply}" "Generate SSO config; apply validates and activates authentication"
   printf "  %-30s %s\n" "ui"                   "Show Kafbat UI URL and credentials"
   printf "  %-30s %s\n" "config"               "Show current .env config"
   printf "  %-30s %s\n" "config set KEY=VAL"   "Set a config value in .env"
@@ -1163,6 +1202,7 @@ case "$CMD" in
   health)         cmd_health "$@" ;;
   lag)            cmd_lag "$@" ;;
   ui)             cmd_ui ;;
+  auth)           cmd_auth "$@" ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
   monitor)        cmd_monitor "$@" ;;

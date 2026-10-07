@@ -1,0 +1,14 @@
+# Kafbat's cluster list: add one entry per independent Kafka cluster.
+# These placeholders are resolved by Kafbat from its container environment.
+kafka:
+  clusters:
+    - name: "${KAFKA_UI_CLUSTER_NAME:cluster-epc}"
+      bootstrapServers: kafka-92:19092,kafka-93:19093
+      readOnly: "${KAFKA_UI_READONLY:false}"
+
+    # Uncomment and replace the example domain with the real broker FQDN.
+    # Both ports must be reachable from this Kafbat container. These are Kafka
+    # broker ports, not the remote UI's HTTPS port. Add further entries as needed.
+    # - name: epc-appkfk-02
+    #   bootstrapServers: epc-appkfk-02.example.internal:9092,epc-appkfk-02.example.internal:9093
+    #   readOnly: true

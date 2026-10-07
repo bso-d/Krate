@@ -19,8 +19,11 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate
+CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh
 VARIANT ?= kraft
+SSO_APP ?= kafbat
+SSO_SETTINGS ?= sso/site.json
+SSO_OUTPUT ?= $(VARIANT)/auth/ui/pingfederate.yml
 MONITOR_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' monitoring/.env.template)
 
 # Image references are read from the runtime environment templates.
@@ -46,13 +49,19 @@ help:
 >Krate offline bundle workflow
 >
 >Targets:
->  make check                                     Run syntax, ShellCheck, and Compose validation
+>  make check                                     Run syntax, ShellCheck, Compose and offline-policy validation
+>  make offline-check                             Verify offline application defaults (Python 3 + Compose v2)
+>  make offline-smoke                             Test pinned Kafbat locally with networking disabled
+>  make sso-config VARIANT=epc SSO_SETTINGS=sso/site.json
+>                                                Generate opt-in SSO config (no activation)
+>  make kafbat-ui ARCH=amd64                     Build native Kafbat login + SSO image (online build host)
+>  make dual-config SSO_SETTINGS=sso/site.json     Generate shared Admin + SSO configuration
 >  make test                                      Alias for make check
 >  make validate                                  Alias for make check
->  make bundle VERSION=v5 ARCH=amd64              Build both zk and kraft bundles
->  make bundle VERSION=v5 MODE=zk ARCH=arm64      Build one bundle variant
+>  make bundle VERSION=v2 ARCH=amd64              Build Krate and EPC bundles
+>  make bundle VERSION=v5 MODE=zk ARCH=arm64      Build the archived ZooKeeper variant
 >  make bundle VERSION=v5 ARCH=amd64 INCLUDE_DOCKER=1
->  make bundle VERSION=v1 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
+>  make bundle VERSION=v2 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
 >  make docker-debs UBUNTU_VERSION=noble ARCH=amd64
 >  make docker-rpms RHEL_VERSION=9 ARCH=amd64
 >  make monitor-up VARIANT=kraft                  Start Grafana/Prometheus/Loki for a variant
@@ -62,7 +71,7 @@ help:
 >
 >Variables:
 >  VERSION=vN              Required for bundle targets
->  MODE=zk|kraft|epc|both  Default: both (epc = 2-broker EPC variant)
+>  MODE=kraft|epc|both|zk  Default: both (Krate and EPC; zk is archived)
 >  ARCH=amd64|arm64        Default: detected host architecture
 >  UBUNTU_VERSION=jammy|noble
 >                          Target Ubuntu release for docker-debs; default: noble
@@ -74,7 +83,26 @@ help:
 >  VARIANT=kraft|epc       Which cluster the monitor-* targets act on
 >EOF
 
-check: syntax lint compose-check
+.PHONY: offline-check
+.PHONY: sso-config
+.PHONY: dual-config kafbat-ui
+
+kafbat-ui:
+>python3 kafbat-ui/build.py --arch "$(ARCH)"
+
+dual-config:
+>python3 sso/configure-dual.py --settings "$(SSO_SETTINGS)" --output-dir "$(VARIANT)/auth"
+
+sso-config:
+>python3 sso/configure.py --app "$(SSO_APP)" --settings "$(SSO_SETTINGS)" --output "$(SSO_OUTPUT)"
+
+check: syntax lint compose-check offline-check
+
+offline-check:
+>python3 scripts/check-offline.py
+
+offline-smoke: offline-check
+>bash
 
 test validate: check
 
@@ -106,10 +134,14 @@ bundle-kraft:
 bundle-epc:
 >$(MAKE) bundle MODE=epc VERSION="$(VERSION)" ARCH="$(ARCH)" TARGET_OS="$(TARGET_OS)" INCLUDE_DOCKER="$(INCLUDE_DOCKER)" NO_PULL="$(NO_PULL)"
 
-bundle:
+bundle: offline-check
 >[[ "$(VERSION)" =~ ^v[0-9]+$$ ]] || { echo "VERSION must be in the form vN, e.g. VERSION=v5" >&2; exit 1; }
 >[[ "$(MODE)" =~ ^(zk|kraft|epc|both)$$ ]] || { echo "MODE must be zk, kraft, epc, or both" >&2; exit 1; }
 >[[ "$(ARCH)" =~ ^(amd64|arm64)$$ ]] || { echo "ARCH must be amd64 or arm64" >&2; exit 1; }
+>if [[ "$(MODE)" == both ]] && [[ "$(INCLUDE_DOCKER)" =~ ^(1|true|yes|on)$$ ]]; then
+>  echo "Build Krate and EPC separately when INCLUDE_DOCKER=1; they need different OS packages." >&2
+>  exit 1
+>fi
 >
 >enabled() { [[ "$$1" =~ ^(1|true|yes|on)$$ ]]; }
 >image_filename() {
@@ -164,7 +196,12 @@ bundle:
 >  else
 >    echo "==> Pulling $(ARCH) images"
 >    for image in "$${images[@]}"; do
->      docker pull --platform "linux/$(ARCH)" "$$image"
+>      if [[ "$$image" == krate/kafka-ui:1.5.0-sso.*@sha256:* ]]; then
+>        image_arch="$$(docker image inspect "$$image" --format '{{.Architecture}}' 2>/dev/null || true)"
+>        [[ "$$image_arch" == "$(ARCH)" ]] || { echo "Build the UI first: make kafbat-ui ARCH=$(ARCH)" >&2; exit 1; }
+>      else
+>        docker pull --platform "linux/$(ARCH)" "$$image"
+>      fi
 >    done
 >  fi
 >
@@ -189,7 +226,16 @@ bundle:
 >  done
 >
 >  cp "$$src_dir/docker-compose.yml" "$$bundle_dir/docker-compose.yml"
+>  if [[ "$$mode" == "epc" ]]; then
+>    cp "$$src_dir/kafbat.yml" "$$bundle_dir/kafbat.yml"
+>  fi
 >  cp "$$src_dir/nginx.conf" "$$bundle_dir/nginx.conf"
+>  if [[ "$$mode" != "zk" ]]; then
+>    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso" "$$bundle_dir/docs"
+>    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
+>    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py "$$bundle_dir/sso/"
+>    cp sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md "$$bundle_dir/docs/"
+>  fi
 >  # The CLI ships as ./krate everywhere except the frozen ZooKeeper edition,
 >  # whose published v5 bundle documents ./kafka.
 >  local cli_name="krate"
@@ -202,8 +248,12 @@ bundle:
 >  # The observability stack is shared, so it is copied in rather than duplicated
 >  # per variant. The frozen ZooKeeper edition is skipped.
 >  if [[ "$$mode" != "zk" && -d monitoring ]]; then
->    cp -r monitoring "$$bundle_dir/monitoring"
->    rm -f "$$bundle_dir/monitoring/.env"
+>    mkdir -p "$$bundle_dir/monitoring"
+>    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py "$$bundle_dir/monitoring/"
+>    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/promtail "$$bundle_dir/monitoring/"
+>    # Only the local default is copied: never stage site auth files or secrets.
+>    mkdir -p "$$bundle_dir/monitoring/auth"
+>    cp monitoring/auth/local.ini "$$bundle_dir/monitoring/auth/local.ini"
 >  fi
 >  cp "$$src_dir/.env.template" "$$bundle_dir/.env.template"
 >  printf '%s\n' "$(ARCH)" > "$$bundle_dir/.bundle-arch"
@@ -247,6 +297,9 @@ bundle:
 >    fi
 >  fi
 >
+>  if [[ "$$mode" != "zk" ]]; then
+>    python3 scripts/check-bundle.py "$$bundle_dir"
+>  fi
 >  mkdir -p "$(DIST_DIR)"
 >
 >  # Strip macOS/Docker-Desktop extended attributes before archiving. Files copied
@@ -295,7 +348,7 @@ bundle:
 >  zk) build_one zk ;;
 >  kraft) build_one kraft ;;
 >  epc) build_one epc ;;
->  both) build_one zk; build_one kraft ;;
+>  both) build_one kraft; build_one epc ;;
 >esac
 
 docker-debs:

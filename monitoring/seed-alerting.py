@@ -28,13 +28,26 @@ def env_file(path):
 def seed(path):
     env = env_file(path)
     base = os.environ.get('GRAFANA_URL', 'http://127.0.0.1:' + env.get('GRAFANA_PORT', '3000'))
-    token = base64.b64encode((env.get('GRAFANA_USER', 'admin') + ':' +
-                             env.get('GRAFANA_PASSWORD', 'changeme')).encode()).decode()
+    token_file = env.get('GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE', '')
+    if token_file:
+        token_path = Path(token_file)
+        if not token_path.is_absolute():
+            token_path = Path(path).resolve().parent / token_path
+        token = token_path.read_text().strip()
+        if not token or any(c.isspace() for c in token):
+            raise ValueError('Grafana service-account token file is empty or malformed')
+        authorization = 'Bearer ' + token
+    else:
+        if env.get('GRAFANA_AUTH_CONFIG', 'local.ini') != 'local.ini':
+            raise ValueError('SSO alert seeding requires GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE')
+        token = base64.b64encode((env.get('GRAFANA_USER', 'admin') + ':' +
+                                 env.get('GRAFANA_PASSWORD', 'changeme')).encode()).decode()
+        authorization = 'Basic ' + token
 
     def api(method, endpoint, body=None):
         request = Request(base + endpoint, method=method,
                           data=None if body is None else json.dumps(body).encode(),
-                          headers={'Authorization': 'Basic ' + token,
+                          headers={'Authorization': authorization,
                                    'Content-Type': 'application/json',
                                    'X-Disable-Provenance': 'true'})
         with urlopen(request, timeout=10) as response:

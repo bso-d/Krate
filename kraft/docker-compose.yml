@@ -197,19 +197,25 @@ services:
         max-size: "100m"
         max-file: "3"
     environment:
-      AUTH_TYPE: "LOGIN_FORM"
+      SPRING_CONFIG_ADDITIONAL_LOCATION: file:/etc/krate/auth/${KAFKA_UI_AUTH_CONFIG:-local.yml}
+      JAVA_TOOL_OPTIONS: ${KAFKA_UI_JAVA_OPTS:-}
+      # Offline runtime: disable startup/hourly requests to api.github.com.
+      GITHUB_RELEASE_INFO_ENABLED: "false"
       # Honor X-Forwarded-* from the nginx TLS proxy so login redirects/cookies
       # use https (not the internal http://...:8080).
       SERVER_FORWARDHEADERSSTRATEGY: "framework"
       SPRING_SECURITY_USER_NAME: ${KAFKA_UI_USER}
       SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD}
+      KEYCLOAK_KAFBAT_CLIENT_SECRET: ${KEYCLOAK_KAFBAT_CLIENT_SECRET}
       KAFKA_CLUSTERS_0_NAME: cluster-1-kraft
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka-92:9092,kafka-93:9093,kafka-94:9094,kafka-95:9095"
       KAFKA_CLUSTERS_0_READONLY: "false"
+    volumes:
+      - ./auth/ui:/etc/krate/auth:ro,z
     networks:
       - kafka-network
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 8080 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/actuator/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -238,12 +244,66 @@ services:
       retries: 3
       start_period: 10s
 
+  keycloak-db:
+    profiles: [sso]
+    image: ${KEYCLOAK_DB_IMAGE}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+    volumes:
+      - keycloak_db_data:/var/lib/postgresql/data
+    networks: [kafka-network]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  keycloak:
+    profiles: [sso]
+    image: ${KEYCLOAK_IMAGE}
+    restart: unless-stopped
+    command: ["start", "--import-realm"]
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL}
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_RELATIVE_PATH: /identity
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+      KC_TRUSTSTORE_PATHS: /opt/keycloak/conf/truststores
+      KEYCLOAK_KAFBAT_CLIENT_SECRET: ${KEYCLOAK_KAFBAT_CLIENT_SECRET}
+      PING_KEYCLOAK_CLIENT_SECRET: ${PING_KEYCLOAK_CLIENT_SECRET}
+    healthcheck:
+      test: ["CMD", "bash", "-ec", "{ printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/127.0.0.1/9000"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    volumes:
+      - ./auth/keycloak/krate-realm.json:/opt/keycloak/data/import/krate-realm.json:ro,z
+      - ./auth/keycloak/truststores:/opt/keycloak/conf/truststores:ro,z
+    networks: [kafka-network]
+
 # ─── Named Volumes ─────────────────────────────────────────────────────────────
 volumes:
   kafka-92-data:
   kafka-93-data:
   kafka-94-data:
   kafka-95-data:
+  keycloak_db_data:
 
 # ─── Networks ──────────────────────────────────────────────────────────────────
 networks:

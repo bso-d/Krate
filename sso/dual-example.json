@@ -1,0 +1,23 @@
+{
+  "issuer": "https://ping.example.internal",
+  "public_url": "https://epc-appkfk-01.example.internal",
+  "client_id": "REPLACE_WITH_PINGFEDERATE_CLIENT_ID",
+  "viewer_group": "KRATE_VIEWERS",
+  "admin_group": "KRATE_ADMINS",
+  "groups_claim": "groups",
+  "scopes": [
+    "openid",
+    "profile",
+    "email"
+  ],
+  "clusters": [
+    "epc-appkfk-01",
+    "epc-appkfk-02"
+  ],
+  "viewer_messages": true,
+  "session_idle_minutes": 30,
+  "authorization_url": "https://ping.example.internal/as/authorization.oauth2",
+  "token_url": "https://ping.example.internal/as/token.oauth2",
+  "userinfo_url": "https://ping.example.internal/idp/userinfo.openid",
+  "jwks_url": "https://ping.example.internal/pf/JWKS"
+}

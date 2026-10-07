@@ -23,7 +23,8 @@ certs/
 
 # local working docs — not part of the repo
 PLAN.md
-docs/architecture.html
+HANDOFF.md
+docs/
 
 # interim VM survey tooling — not part of the repo build
 vm-survey.sh
@@ -31,3 +32,25 @@ vm-survey.mk
 
 # local validation tooling — source and releases only in the remote repo
 tests/
+
+# Site-specific SSO settings and credentials; only local defaults are shipped.
+epc/auth/*
+!epc/auth/ui/
+epc/auth/ui/*
+!epc/auth/ui/local.yml
+kraft/auth/*
+!kraft/auth/ui/
+kraft/auth/ui/*
+!kraft/auth/ui/local.yml
+monitoring/auth/*
+!monitoring/auth/local.ini
+sso/site*.json
+
+# Python tooling bytecode
+__pycache__/
+*.pyc
+
+# Phase 4 open-source drafts — kept local until adoption is approved
+GOVERNANCE.md
+THIRD_PARTY.md
+licensing/

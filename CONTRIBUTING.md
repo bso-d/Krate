@@ -27,7 +27,8 @@ The main areas are:
 - `zk/`: frozen ZooKeeper edition; preserve its documented compatibility.
 - `monitoring/`: shared observability configuration.
 - `docker/`: broker image definitions.
-- `docs/`: installation, operations, and release guides.
+- `sso/`: SSO activation helpers and operator guides.
+- `kafbat-ui/`: customized Kafbat UI build for shared login and SSO.
 
 Use the [README](README.md) for local startup and bundle commands. Copy the
 appropriate `.env.template` to `.env` for local configuration; never commit
@@ -48,8 +49,8 @@ Compose configurations. `make test` and `make validate` are aliases for the
 same static checks; they do not prove that a cluster runs correctly.
 
 For behavior changes, also exercise the affected workflow on a disposable
-cluster using the relevant runbook in `docs/`. Record the commands, environment,
-and outcomes, including checks for restart and data preservation when relevant.
+cluster. Record the commands, environment, and outcomes, including checks for
+restart and data preservation when relevant.
 For image changes, review the broker CI build and startup results. Describe any
 validation you could not perform; do not present an untested path as verified.
 Keep integration test artifacts and generated bundles local, as described in

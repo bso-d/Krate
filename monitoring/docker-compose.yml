@@ -144,13 +144,21 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro,z
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro,z
+      - ./auth:/etc/krate/auth:ro,z
     environment:
+      GF_PATHS_CONFIG: /etc/krate/auth/${GRAFANA_AUTH_CONFIG:-local.ini}
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-changeme}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true"
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
       # SMTP is opt-in. With it disabled the rules still fire and are visible in
       # the UI; only delivery is off, so the stack stays fully offline-capable.
       GF_SMTP_ENABLED: ${GF_SMTP_ENABLED:-false}

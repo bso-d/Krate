@@ -1,0 +1,420 @@
+diff --git a/frontend/src/components/AuthPage/AuthPage.tsx b/frontend/src/components/AuthPage/AuthPage.tsx
+index ceae306..b0f85c8 100644
+--- a/frontend/src/components/AuthPage/AuthPage.tsx
++++ b/frontend/src/components/AuthPage/AuthPage.tsx
+@@ -1,4 +1,6 @@
+ import React from 'react';
++import { ThemeProvider } from 'styled-components';
++import { darkTheme } from 'theme/theme';
+ import { useAuthSettings } from 'lib/hooks/api/appConfig';
+ 
+ import Header from './Header/Header';
+@@ -9,12 +11,17 @@ function AuthPage() {
+   const { data } = useAuthSettings();
+ 
+   return (
+-    <S.AuthPageStyled>
+-      <Header />
+-      {data && (
+-        <SignIn authType={data.authType} oAuthProviders={data.oAuthProviders} />
+-      )}
+-    </S.AuthPageStyled>
++    <ThemeProvider theme={darkTheme}>
++      <S.AuthPageStyled>
++        <Header />
++        {data && (
++          <SignIn
++            authType={data.authType}
++            oAuthProviders={data.oAuthProviders}
++          />
++        )}
++      </S.AuthPageStyled>
++    </ThemeProvider>
+   );
+ }
+ 
+diff --git a/frontend/src/components/AuthPage/Header/Header.tsx b/frontend/src/components/AuthPage/Header/Header.tsx
+index 16980af..cb5b87b 100644
+--- a/frontend/src/components/AuthPage/Header/Header.tsx
++++ b/frontend/src/components/AuthPage/Header/Header.tsx
+@@ -1,7 +1,6 @@
+ import React from 'react';
+ 
+ import * as S from './Header.styled';
+-import HeaderLogo from './HeaderLogo';
+ 
+ function Header() {
+   return (
+@@ -65,8 +64,6 @@ function Header() {
+       {Array(5).fill(<S.HeaderCell $sections={2} />)}
+       {Array(2).fill(<S.HeaderCell />)}
+ 
+-      <HeaderLogo />
+-
+       {Array(5).fill(<S.HeaderCell $sections={2} />)}
+       {Array(2).fill(<S.HeaderCell />)}
+       <S.HeaderCell $sections={2} />
+diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.styled.tsx b/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.styled.tsx
+index da1388b..8450aac 100644
+--- a/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.styled.tsx
++++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.styled.tsx
+@@ -54,3 +54,38 @@ export const ErrorMessageText = styled.span`
+   font-size: 14px;
+   line-height: 20px;
+ `;
++
++export const SsoSection = styled.div`
++  width: 100%;
++  display: flex;
++  flex-direction: column;
++  gap: 16px;
++  margin-top: -16px;
++`;
++
++export const Divider = styled.div`
++  display: flex;
++  align-items: center;
++  gap: 16px;
++  font-size: 12px;
++  opacity: 0.6;
++  color: ${({ theme }) => theme.auth_page.signIn.titleColor};
++
++  &::before,
++  &::after {
++    content: '';
++    flex: 1;
++    height: 1px;
++    background: currentColor;
++    opacity: 0.25;
++  }
++`;
++
++export const SsoHint = styled.p`
++  font-size: 12px;
++  line-height: 16px;
++  text-align: center;
++  margin: 0;
++  opacity: 0.65;
++  color: ${({ theme }) => theme.auth_page.signIn.titleColor};
++`;
+diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.tsx b/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.tsx
+index fc5273f..1e4204c 100644
+--- a/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.tsx
++++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.tsx
+@@ -1,4 +1,4 @@
+-import React from 'react';
++import React, { useState } from 'react';
+ import { Button } from 'components/common/Button/Button';
+ import Input from 'components/common/Input/Input';
+ import { Controller, FormProvider, useForm } from 'react-hook-form';
+@@ -8,25 +8,35 @@ import { useNavigate } from 'react-router-dom';
+ import { useQueryClient } from '@tanstack/react-query';
+ 
+ import * as S from './BasicSignIn.styled';
++import { ssoLoginUrl } from './ssoLogin';
+ 
+ interface FormValues {
+   username: string;
+   password: string;
+ }
+ 
+-function BasicSignIn() {
++interface Props {
++  ssoAuthorizationUri?: string;
++}
++
++function BasicSignIn({ ssoAuthorizationUri }: Props) {
++  const [ssoPending, setSsoPending] = useState(false);
+   const methods = useForm<FormValues>({
+     defaultValues: { username: '', password: '' },
+   });
+   const navigate = useNavigate();
+   const { mutateAsync, isPending } = useAuthenticate();
+   const client = useQueryClient();
++  const pending = isPending || ssoPending;
+ 
+   const onSubmit = async (data: FormValues) => {
++    methods.clearErrors('root');
+     await mutateAsync(data, {
+       onSuccess: async (response) => {
+         if (response.raw.url.includes('error')) {
+-          methods.setError('root', { message: 'error' });
++          methods.setError('root', {
++            message: 'Username or password entered incorrectly',
++          });
+         } else {
+           await client.invalidateQueries({ queryKey: ['app', 'info'] });
+           navigate('/');
+@@ -38,12 +48,12 @@ function BasicSignIn() {
+   return (
+     <FormProvider {...methods}>
+       <S.Form onSubmit={methods.handleSubmit(onSubmit)}>
+-        <S.Fieldset>
++        <S.Fieldset disabled={pending}>
+           {methods.formState.errors.root && (
+-            <S.ErrorMessage>
++            <S.ErrorMessage role="alert">
+               <AlertIcon />
+               <S.ErrorMessageText>
+-                Username or password entered incorrectly
++                {methods.formState.errors.root.message}
+               </S.ErrorMessageText>
+             </S.ErrorMessage>
+           )}
+@@ -52,13 +62,21 @@ function BasicSignIn() {
+             control={methods.control}
+             render={({ field }) => (
+               <S.Field>
+-                <S.Label htmlFor={field.name}>Username</S.Label>
++                <S.Label htmlFor={field.name}>
++                  {ssoAuthorizationUri ? 'Username / email' : 'Username'}
++                </S.Label>
+                 <Input
+                   onChange={field.onChange}
+                   value={field.value}
+                   name={field.name}
+                   id={field.name}
+-                  placeholder="Enter your username"
++                  autoComplete="username"
++                  required
++                  placeholder={
++                    ssoAuthorizationUri
++                      ? 'Username or company email'
++                      : 'Enter your username'
++                  }
+                   style={{ borderRadius: '8px' }}
+                 />
+               </S.Field>
+@@ -76,6 +94,8 @@ function BasicSignIn() {
+                   name={field.name}
+                   type="password"
+                   id={field.name}
++                  autoComplete="current-password"
++                  required
+                   placeholder="Enter your password"
+                   style={{ borderRadius: '8px' }}
+                 />
+@@ -88,11 +108,43 @@ function BasicSignIn() {
+           buttonType="primary"
+           type="submit"
+           style={{ width: '100%', borderRadius: '8px' }}
+-          disabled={!methods.formState.isValid}
++          disabled={!methods.formState.isValid || pending}
+           inProgress={isPending}
+         >
+           {!isPending && 'Log in'}
+         </Button>
++        {ssoAuthorizationUri && (
++          <S.SsoSection>
++            <S.Divider>or</S.Divider>
++            <Button
++              buttonSize="L"
++              buttonType="secondary"
++              type="button"
++              style={{ width: '100%', borderRadius: '8px' }}
++              disabled={pending}
++              inProgress={ssoPending}
++              onClick={() => {
++                try {
++                  const url = ssoLoginUrl(
++                    ssoAuthorizationUri,
++                    methods.getValues('username')
++                  );
++                  methods.setValue('password', '');
++                  setSsoPending(true);
++                  window.location.assign(url);
++                } catch (error) {
++                  methods.setError('root', {
++                    message: (error as Error).message,
++                  });
++                  methods.setFocus('username');
++                }
++              }}
++            >
++              {!ssoPending && 'Sign in with SSO'}
++            </Button>
++            <S.SsoHint>Continue with your company account</S.SsoHint>
++          </S.SsoSection>
++        )}
+       </S.Form>
+     </FormProvider>
+   );
+diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/dualLogin.spec.tsx b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/dualLogin.spec.tsx
+new file mode 100644
+index 0000000..2ce4cec
+--- /dev/null
++++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/dualLogin.spec.tsx
+@@ -0,0 +1,57 @@
++import React from 'react';
++import { screen } from '@testing-library/react';
++import { render } from 'lib/testHelpers';
++import { AuthType } from 'generated-sources';
++import SignInForm from 'components/AuthPage/SignIn/SignIn';
++
++it('keeps the native username/password form and adds one independent SSO button', () => {
++  render(
++    <SignInForm
++      authType={AuthType.LOGIN_FORM}
++      oAuthProviders={[
++        {
++          clientName: 'SSO',
++          authorizationUri: '/oauth2/authorization/keycloak',
++        },
++      ]}
++    />
++  );
++  expect(screen.getByLabelText('Username / email')).toBeInTheDocument();
++  expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'password');
++  expect(screen.getByRole('button', { name: 'Log in' })).toBeInTheDocument();
++  expect(
++    screen.getByRole('button', { name: 'Sign in with SSO' })
++  ).toBeEnabled();
++  expect(
++    screen.getByRole('button', { name: 'Sign in with SSO' })
++  ).toHaveAttribute('type', 'button');
++  expect(
++    screen.queryByText('Use an account issued by the organization')
++  ).not.toBeInTheDocument();
++});
++
++it('preserves native basic-login mode', () => {
++  render(<SignInForm authType={AuthType.LOGIN_FORM} />);
++  expect(screen.getByLabelText('Username')).toBeInTheDocument();
++  expect(
++    screen.queryByRole('button', { name: 'Sign in with SSO' })
++  ).not.toBeInTheDocument();
++});
++
++it('preserves other OAuth provider configurations', () => {
++  render(
++    <SignInForm
++      authType={AuthType.OAUTH2}
++      oAuthProviders={[
++        {
++          clientName: 'Company',
++          authorizationUri: '/oauth2/authorization/company',
++        },
++      ]}
++    />
++  );
++  expect(
++    screen.getByRole('button', { name: 'Log in with Company' })
++  ).toBeInTheDocument();
++  expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
++});
+diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/ssoLogin.spec.ts b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/ssoLogin.spec.ts
+new file mode 100644
+index 0000000..042679e
+--- /dev/null
++++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/ssoLogin.spec.ts
+@@ -0,0 +1,27 @@
++import { ssoLoginUrl } from 'components/AuthPage/SignIn/BasicSignIn/ssoLogin';
++
++it('passes only the entered identity hint, safely encoded', () => {
++  expect(
++    ssoLoginUrl(
++      '/oauth2/authorization/keycloak',
++      ' person+test@example.com '
++    )
++  ).toBe(
++    '/oauth2/authorization/keycloak?login_hint=person%2Btest%40example.com'
++  );
++});
++
++it.each(['', '   ', 'a\nb', 'a'.repeat(255)])(
++  'rejects an invalid hint',
++  (value) => {
++    expect(() =>
++      ssoLoginUrl('/oauth2/authorization/keycloak', value)
++    ).toThrow();
++  }
++);
++
++it('cannot redirect to an arbitrary server', () => {
++  expect(() =>
++    ssoLoginUrl('https://other.example', 'user@example.com')
++  ).toThrow();
++});
+diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/ssoLogin.ts b/frontend/src/components/AuthPage/SignIn/BasicSignIn/ssoLogin.ts
+new file mode 100644
+index 0000000..9d5330d
+--- /dev/null
++++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/ssoLogin.ts
+@@ -0,0 +1,20 @@
++export function ssoLoginUrl(
++  authorizationUri: string,
++  username: string
++): string {
++  if (authorizationUri !== '/oauth2/authorization/keycloak') {
++    throw new Error('Unable to start SSO');
++  }
++  const hint = username.trim();
++  if (
++    !hint ||
++    hint.length > 254 ||
++    Array.from(hint).some(
++      (c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127
++    )
++  ) {
++    throw new Error('Enter your company email to continue with SSO');
++  }
++  const query = new URLSearchParams({ login_hint: hint });
++  return `${window.basePath || ''}${authorizationUri}?${query}`;
++}
+diff --git a/frontend/src/components/AuthPage/SignIn/SignIn.styled.tsx b/frontend/src/components/AuthPage/SignIn/SignIn.styled.tsx
+index 0f24b45..c841ec0 100644
+--- a/frontend/src/components/AuthPage/SignIn/SignIn.styled.tsx
++++ b/frontend/src/components/AuthPage/SignIn/SignIn.styled.tsx
+@@ -6,6 +6,7 @@ export const SignInStyled = styled.div`
+   align-items: center;
+   justify-content: center;
+   width: 320px;
++  max-width: calc(100vw - 40px);
+   gap: 56px;
+   flex-grow: 1;
+ `;
+@@ -17,3 +18,10 @@ export const SignInTitle = styled.span(
+     font-weight: 600;
+   `
+ );
++
++export const AuthError = styled.p`
++  color: ${({ theme }) => theme.auth_page.signIn.titleColor};
++  font-size: 14px;
++  line-height: 20px;
++  text-align: center;
++`;
+diff --git a/frontend/src/components/AuthPage/SignIn/SignIn.tsx b/frontend/src/components/AuthPage/SignIn/SignIn.tsx
+index 987ee5e..b0c9dde 100644
+--- a/frontend/src/components/AuthPage/SignIn/SignIn.tsx
++++ b/frontend/src/components/AuthPage/SignIn/SignIn.tsx
+@@ -1,4 +1,5 @@
+ import React from 'react';
++import { useSearchParams } from 'react-router-dom';
+ import { AuthType, OAuthProvider } from 'generated-sources';
+ 
+ import BasicSignIn from './BasicSignIn/BasicSignIn';
+@@ -11,11 +12,22 @@ interface Props {
+ }
+ 
+ function SignInForm({ authType, oAuthProviders }: Props) {
++  const [params] = useSearchParams();
++  const sso = oAuthProviders?.find(
++    (provider) =>
++      provider.authorizationUri === '/oauth2/authorization/keycloak'
++  );
++
+   return (
+     <S.SignInStyled>
+       <S.SignInTitle>Sign in</S.SignInTitle>
++      {params.has('error') && (
++        <S.AuthError role="alert">
++          Sign-in was not completed. Check your company access or try again.
++        </S.AuthError>
++      )}
+       {(authType === AuthType.LDAP || authType === AuthType.LOGIN_FORM) && (
+-        <BasicSignIn />
++        <BasicSignIn ssoAuthorizationUri={sso?.authorizationUri} />
+       )}
+       {authType === AuthType.OAUTH2 && (
+         <OAuthSignIn oAuthProviders={oAuthProviders} />
