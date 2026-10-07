@@ -1,7 +1,7 @@
 <a id="readme-top"></a>
 
 <div align="center">
-  <img src="docs/assets/krate-logo.png" alt="Krate logo: a blue and teal crate with connected nodes" width="240">
+  <img src="assets/krate-logo.png" alt="Krate logo: a blue and teal crate with connected nodes" width="240">
 
   <h1>Krate</h1>
 
@@ -42,7 +42,6 @@
   - [How the parts fit together](#how-the-parts-fit-together)
   - [Limits to understand](#limits-to-understand)
   - [Development and checks](#development-and-checks)
-  - [Guides](#guides)
   - [Component credits](#component-credits)
   - [Contributing and community conduct](#contributing-and-community-conduct)
 
@@ -86,7 +85,7 @@ Ubuntu and Red Hat Enterprise Linux (RHEL) are the target operating systems.
 | **ZooKeeper** | Four brokers plus ZooKeeper, a separate coordination service | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `zk/kafka` |
 | **EPC** | Two brokers using KRaft, with message data stored under `/data` | Tailored for RHEL 9 on x86_64 | `epc/krate` |
 
-The ZooKeeper edition is frozen: it receives bug and security fixes, with no new features. EPC is the repository's name for the tailored RHEL deployment; follow its [installation guide](docs/epc-install-runbook.md) for host and disk settings.
+The ZooKeeper edition is frozen: it receives bug and security fixes, with no new features. EPC is the repository's name for the tailored RHEL deployment.
 
 For a first local run, the steps below use KRaft. All brokers in these setups run on the same host.
 
@@ -180,7 +179,7 @@ make docker-rpms RHEL_VERSION=9 ARCH=amd64
 make bundle VERSION=v1 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
 ```
 
-The Ubuntu installer uses `dpkg` and may try `apt-get` to repair missing dependencies. Make sure the target has the required OS dependencies before relying on a fully offline install. The RHEL installer disables network repositories; missing OS dependencies must be supplied locally. See the [EPC guide](docs/epc-install-runbook.md).
+The Ubuntu installer uses `dpkg` and may try `apt-get` to repair missing dependencies. Make sure the target has the required OS dependencies before relying on a fully offline install. The RHEL installer disables network repositories; missing OS dependencies must be supplied locally.
 
 ## Install the package on a VM
 
@@ -206,7 +205,7 @@ If Docker is missing and you included its packages, run `./krate docker-install`
 
 `doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images, creates a UI certificate if needed, and starts the cluster.
 
-For a downloaded ZooKeeper package, use `./kafka`. For EPC, follow the [RHEL installation guide](docs/epc-install-runbook.md): set `KAFKA_ADVERTISED_HOST` for clients on other machines and review the data directory before the first start.
+For a downloaded ZooKeeper package, use `./kafka`. For EPC, set `KAFKA_ADVERTISED_HOST` for clients on other machines and review the data directory before the first start.
 
 ## Everyday commands
 
@@ -227,8 +226,6 @@ Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show dat
 
 Settings live in `.env`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
 
-See the [topic and consumer guide](docs/topic-consumer-runbook.md) for creating message streams, testing delivery, sharing work between consumers, and removing test data.
-
 In the supplied KRaft and ZooKeeper setups, `uninstall --purge` deletes stored Kafka messages by removing their Docker storage volumes. EPC stores messages in host folders under `KAFKA_DATA_DIR` (default `/data`), so those messages remain after purge. Deleting EPC messages requires stopping the cluster and separately removing its broker folders. Purge is not part of the normal stop/start workflow.
 
 ## Monitoring
@@ -243,9 +240,9 @@ Before starting it, copy `monitoring/.env.template` to `monitoring/.env` and cha
 ./krate monitor ui
 ```
 
-The default Grafana address uses port `3000`; Prometheus uses `9090` and Loki uses `3100`. Email alerts require your own mail server and recipients; they are off by default. See the [monitoring guide](docs/phase-2-runbook.md) for setup and checks.
+The default Grafana address uses port `3000`; Prometheus uses `9090` and Loki uses `3100`. Email alerts require your own mail server and recipients; they are off by default.
 
-ZooKeeper has its own smaller stack: Kafka measurements, Prometheus, and Grafana, started with `./kafka monitor up`. It does not include Loki or host measurements. See the [ZooKeeper monitoring overview](docs/zk-observability.html).
+ZooKeeper has its own smaller stack: Kafka measurements, Prometheus, and Grafana, started with `./kafka monitor up`. It does not include Loki or host measurements.
 
 ## How the parts fit together
 
@@ -273,18 +270,17 @@ zk/          Frozen ZooKeeper setup and kafka command script
 epc/         Two-broker RHEL setup and krate command script
 monitoring/  Shared KRaft/EPC dashboards, alerts, and log collection
 docker/      Broker image definitions: release and debug versions
-docs/        Installation, operations, and release guides
 Makefile     Package builds and source checks
 ```
 
-The [container release guide](docs/container-releases.md) explains the separate KRaft and ZooKeeper image release workflows. They build regular and diagnostic images for both processors. The default setup still uses the upstream Kafka images selected in each edition's `.env.template`; the release workflow requires an edition-specific tag before publishing to GHCR, GitHub's container registry.
+Separate KRaft and ZooKeeper image release workflows build regular and diagnostic images for both processors. The default setup still uses the upstream Kafka images selected in each edition's `.env.template`; the release workflow requires an edition-specific tag before publishing to GHCR, GitHub's container registry.
 
 ## Limits to understand
 
 - **One host is one point of failure.** Multiple brokers on the same VM do not protect against losing that VM. EPC also needs both of its coordination nodes available; losing either prevents its two-node group from reaching agreement.
 - **Remote application connections need configuration.** KRaft and ZooKeeper advertise `localhost` on ports `19092–19095` by default. Change their Compose listener settings for clients on other machines. EPC uses `KAFKA_ADVERTISED_HOST` and host ports `9092/9093`.
 - **HTTPS protects the UI only.** The Kafka listeners use plaintext, without client authentication. The monitoring web endpoints use HTTP. Restrict access or add the protection your deployment needs.
-- **Disk use grows with messages and topics.** EPC limits how much data each part of a topic can keep and requires topics to be created explicitly by default. Its [guide](docs/epc-install-runbook.md) covers storage planning and topic creation.
+- **Disk use grows with messages and topics.** EPC limits how much data each part of a topic can keep and requires topics to be created explicitly by default.
 - **Host checks still matter.** A valid package and healthy containers do not verify your network, remote clients, storage capacity, or email delivery. Follow the relevant runbook on the target VM.
 
 ## Development and checks
@@ -300,18 +296,7 @@ make check
 
 The [broker CI workflow](.github/workflows/broker-ci.yml) separately builds the broker images and checks message delivery on GitHub Actions. Use the installation and operations guides for checks on your target host.
 
-Keep contributions focused, work on a separate branch, and describe the checks run in the pull request. Keep local test scripts and validation output out of commits, following the repository's handoff guidance.
-
-## Guides
-
-| Guide | Use it for |
-| --- | --- |
-| [EPC installation](docs/epc-install-runbook.md) | RHEL packages, data directories, remote clients, and troubleshooting |
-| [Topic and consumer operations](docs/topic-consumer-runbook.md) | Create topics, test message delivery, check backlog, and clean up |
-| [KRaft operations](docs/phase-1-runbook.md) | KRaft settings and cluster checks |
-| [KRaft/EPC monitoring](docs/phase-2-runbook.md) | Dashboards, logs, alerts, and email setup |
-| [ZooKeeper freeze notes](docs/zk-v5-freeze-release-notes.md) | Scope and status of the legacy edition |
-| [Broker image releases](docs/container-releases.md) | Build and publish regular or diagnostic broker images |
+Keep contributions focused, work on a separate branch, and describe the checks run in the pull request. Keep local test scripts and validation output out of commits.
 
 ## Component credits
 

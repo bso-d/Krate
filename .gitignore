@@ -23,7 +23,8 @@ certs/
 
 # local working docs — not part of the repo
 PLAN.md
-docs/architecture.html
+HANDOFF.md
+docs/
 
 # interim VM survey tooling — not part of the repo build
 vm-survey.sh
