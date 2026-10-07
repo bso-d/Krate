@@ -38,6 +38,8 @@ def configs(settings):
     realm = {
         "realm": "krate", "enabled": True, "registrationAllowed": False,
         "resetPasswordAllowed": False, "rememberMe": False,
+        "bruteForceProtected": True, "failureFactor": 5, "permanentLockout": False,
+        "waitIncrementSeconds": 60, "maxFailureWaitSeconds": 900,
         "ssoSessionIdleTimeout": settings.get("session_idle_minutes", 30) * 60,
         "ssoSessionMaxLifespan": 28800,
         "groups": [{"name": group} for group in groups],

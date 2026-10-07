@@ -78,6 +78,40 @@ hint is not proof of identity. PingFederate decides whether an existing
 enterprise session is enough or a new sign-in or MFA is required. The shared
 password is never sent on the SSO route.
 
+## Keycloak administration
+
+The proxy sends only `/identity/realms/krate/` and `/identity/resources/` to
+Keycloak. All other `/identity/` paths return 404. This blocks the Keycloak
+admin console, the Admin REST API and the `master` realm on the application
+URL. The proxy also rejects identity paths that contain `..`, `;` or encoded
+separators, limits identity requests per client address, and logs them
+without query strings.
+
+Administer Keycloak only from the installation host. Run these commands in the
+installation directory. Use the admin CLI in the Keycloak container. The CLI asks for the `KEYCLOAK_ADMIN_PASSWORD`; do not
+type it on the command line:
+
+```bash
+docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+  --config /tmp/kcadm.config --server http://localhost:8080/identity --realm master --user admin
+docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh get realms/krate \
+  --config /tmp/kcadm.config --fields realm,bruteForceProtected
+docker compose --profile sso exec keycloak rm -f /tmp/kcadm.config
+```
+
+Use the `KEYCLOAK_ADMIN_USER` value in place of `admin` if you changed it.
+
+New installations create the `krate` realm with brute-force protection. Realm
+import does not change an existing realm. For an installation that existed
+before this change, and for the `master` realm, turn the protection on once:
+
+```bash
+docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh update realms/krate \
+  --config /tmp/kcadm.config -s bruteForceProtected=true -s failureFactor=5
+docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh update realms/master \
+  --config /tmp/kcadm.config -s bruteForceProtected=true -s failureFactor=5
+```
+
 ## Updates and recovery
 
 Keycloak stores users, broker links and sessions in the named PostgreSQL volume.
