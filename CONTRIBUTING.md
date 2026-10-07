@@ -27,6 +27,8 @@ The main areas are:
 - `zk/`: frozen ZooKeeper edition; preserve its documented compatibility.
 - `monitoring/`: shared observability configuration.
 - `docker/`: broker image definitions.
+- `sso/`: SSO activation helpers and operator guides.
+- `kafbat-ui/`: customized Kafbat UI build for shared login and SSO.
 
 Use the [README](README.md) for local startup and bundle commands. Copy the
 appropriate `.env.template` to `.env` for local configuration; never commit

@@ -81,11 +81,10 @@ Ubuntu and Red Hat Enterprise Linux (RHEL) are the target operating systems.
 
 | Edition | What it runs | Intended host | Command |
 | --- | --- | --- | --- |
-| **KRaft** | Four brokers; Kafka manages its own coordination, without ZooKeeper | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `kraft/krate` |
-| **ZooKeeper** | Four brokers plus ZooKeeper, a separate coordination service | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `zk/kafka` |
+| **Krate (default)** | Four brokers; Kafka manages its own coordination | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `kraft/krate` |
 | **EPC** | Two brokers using KRaft, with message data stored under `/data` | Tailored for RHEL 9 on x86_64 | `epc/krate` |
 
-The ZooKeeper edition is frozen: it receives bug and security fixes, with no new features. EPC is the repository's name for the tailored RHEL deployment.
+These are the two active releases. Each package contains its own security features and monitoring files. The `zk/` directory is a frozen legacy package for existing users. EPC is the tailored RHEL deployment.
 
 For a first local run, the steps below use KRaft. All brokers in these setups run on the same host.
 
@@ -95,7 +94,7 @@ The [releases page](https://github.com/bso-d/Krate/releases) currently contains:
 
 | Release | Package |
 | --- | --- |
-| [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | ZooKeeper, x86_64: `kafka-zk-v5-amd64.tar.gz` and its checksum |
+| [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | Archived ZooKeeper package, x86_64: `kafka-zk-v5-amd64.tar.gz` and its checksum |
 | [`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1) | RHEL/EPC, x86_64: `kafka-epc-v1-amd64.tar.gz` and its checksum |
 
 Build KRaft or ARM64 packages from source using the commands below. Existing downloads keep their original `kafka-*` names. New KRaft and EPC packages use `krate-*`; ZooKeeper keeps `kafka-zk-*`.
@@ -148,7 +147,7 @@ make bundle VERSION=v1 MODE=kraft ARCH=amd64
 make bundle VERSION=v1 MODE=kraft ARCH=arm64
 ```
 
-`VERSION` is a package label in the form `vN`, such as `v1` or `v5`. `MODE=both` builds KRaft and ZooKeeper; `MODE=zk` builds only ZooKeeper. `ARCH` defaults to the build machine's processor when omitted.
+`VERSION` is a package label in the form `vN`, such as `v1` or `v5`. `MODE=both` builds default Krate and EPC. `MODE=zk` builds only the frozen legacy package. `ARCH` defaults to the build machine's processor when omitted.
 
 Each build writes a package, a SHA-256 checksum, and a record of the saved images under `dist/`. For the first command above:
 
@@ -176,7 +175,7 @@ For the RHEL 9 EPC edition:
 
 ```bash
 make docker-rpms RHEL_VERSION=9 ARCH=amd64
-make bundle VERSION=v1 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
+make bundle VERSION=v2 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
 ```
 
 The Ubuntu installer uses `dpkg` and may try `apt-get` to repair missing dependencies. Make sure the target has the required OS dependencies before relying on a fully offline install. The RHEL installer disables network repositories; missing OS dependencies must be supplied locally.
@@ -228,9 +227,27 @@ Settings live in `.env`. For example, `./krate config set KAFKA_UI_FQDN=kafka.ex
 
 In the supplied KRaft and ZooKeeper setups, `uninstall --purge` deletes stored Kafka messages by removing their Docker storage volumes. EPC stores messages in host folders under `KAFKA_DATA_DIR` (default `/data`), so those messages remain after purge. Deleting EPC messages requires stopping the cluster and separately removing its broker folders. Purge is not part of the normal stop/start workflow.
 
+## SSO for EPC and regular Krate
+
+The SSO integration uses the same dark Kafbat login page for the
+shared Admin account and Keycloak SSO. Keycloak connects to PingFederate.
+AD groups determine Viewer and Admin access. Keycloak and its database use
+the `sso` profile in each release's existing Compose file.
+SSO requires Compose 2.20.2 or newer. `./krate auth apply` validates the
+installation and reconciles only the identity/UI services, using locally loaded
+images. Keycloak and PostgreSQL are included in both offline packages even when
+the SSO profile is inactive.
+See the [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and
+[operator setup guide](sso/guides/dual-login.md).
+
+For this checkout, build the customized image with `make kafbat-ui ARCH=amd64`
+before starting or bundling EPC or KRaft; see the [build notes](kafbat-ui/README.md).
+The resulting offline bundles include that image. This integration has not yet
+been published in the released bundles linked above.
+
 ## Monitoring
 
-KRaft and EPC include a separate monitoring stack: Prometheus collects measurements, Grafana displays dashboards and alerts, and Loki with Promtail collects container logs. A host exporter supplies disk, CPU, and memory measurements.
+Krate and EPC each include monitoring files in their package. Prometheus collects measurements, Grafana displays dashboards and alerts, and Loki with Promtail collects container logs. A host exporter supplies disk, CPU, and memory measurements.
 
 Before starting it, copy `monitoring/.env.template` to `monitoring/.env` and change the Grafana login. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
 
@@ -270,6 +287,8 @@ zk/          Frozen ZooKeeper setup and kafka command script
 epc/         Two-broker RHEL setup and krate command script
 monitoring/  Shared KRaft/EPC dashboards, alerts, and log collection
 docker/      Broker image definitions: release and debug versions
+sso/         SSO activation helpers and operator guides
+kafbat-ui/   Customized Kafbat UI build for shared login and SSO
 Makefile     Package builds and source checks
 ```
 
@@ -308,7 +327,9 @@ Krate uses the projects below. Credit belongs to their owners, maintainers, and 
 | [Confluent container images](https://github.com/confluentinc/cp-docker-images) | Confluent and contributors | Kafka and ZooKeeper images in the legacy edition |
 | [Docker Engine](https://www.docker.com/), [Compose](https://github.com/docker/compose), and [Buildx](https://github.com/docker/buildx) | Docker and project contributors | Running containers and building broker images |
 | [containerd](https://containerd.io/) | containerd maintainers and contributors; a CNCF project | Container runtime included with the Docker packages |
-| [Kafbat UI](https://github.com/kafbat/kafka-ui) | Kafbat and contributors | Browser interface for Kafka |
+| [Kafbat UI](https://github.com/kafbat/kafka-ui) | Kafbat and contributors | Browser interface for Kafka. KRaft and EPC ship a modified v1.5.0 build that adds the SSO button; the image contains the upstream license, notice, and patches. See the [build notes](kafbat-ui/README.md). |
+| [Keycloak](https://github.com/keycloak/keycloak) | Keycloak project and contributors; a CNCF project | SSO connection between Kafbat and the company identity provider |
+| [PostgreSQL](https://www.postgresql.org/) | PostgreSQL Global Development Group | Keycloak data storage |
 | [nginx](https://github.com/nginx/nginx) | NGINX authors, F5, and contributors | HTTPS access to the UI |
 | [Kafka Exporter](https://github.com/danielqsj/kafka_exporter) | danielqsj and contributors | Kafka measurements |
 | [Prometheus](https://prometheus.io/) and [Node Exporter](https://github.com/prometheus/node_exporter) | Prometheus maintainers and contributors; a CNCF project | Kafka and host measurements |

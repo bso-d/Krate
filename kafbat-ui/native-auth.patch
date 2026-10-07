@@ -1,0 +1,211 @@
+diff --git a/api/src/main/java/io/kafbat/ui/config/auth/NativeLoginSupport.java b/api/src/main/java/io/kafbat/ui/config/auth/NativeLoginSupport.java
+new file mode 100644
+index 0000000..3f02c35
+--- /dev/null
++++ b/api/src/main/java/io/kafbat/ui/config/auth/NativeLoginSupport.java
+@@ -0,0 +1,90 @@
++package io.kafbat.ui.config.auth;
++
++import io.kafbat.ui.service.rbac.AccessControlService;
++import java.util.Collection;
++import java.util.List;
++import org.springframework.core.env.Environment;
++import org.springframework.security.authentication.ReactiveAuthenticationManager;
++import org.springframework.security.authentication.UserDetailsRepositoryReactiveAuthenticationManager;
++import org.springframework.security.core.authority.SimpleGrantedAuthority;
++import org.springframework.security.core.userdetails.User;
++import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
++import org.springframework.security.oauth2.client.registration.ReactiveClientRegistrationRepository;
++import org.springframework.security.oauth2.client.web.server.DefaultServerOAuth2AuthorizationRequestResolver;
++import org.springframework.security.oauth2.client.web.server.ServerOAuth2AuthorizationRequestResolver;
++import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestCustomizers;
++import org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest;
++import org.springframework.util.Assert;
++import org.springframework.web.server.ServerWebExchange;
++import reactor.core.publisher.Mono;
++
++/** Local shared login and an optional identity hint; OAuth authentication remains Spring's. */
++public final class NativeLoginSupport {
++  private NativeLoginSupport() { }
++
++  public static boolean sharedEnabled(Environment environment) {
++    return environment.getProperty("auth.oauth2.allow-shared-login", Boolean.class, false);
++  }
++
++  public static ReactiveAuthenticationManager sharedManager(Environment environment, AccessControlService acs) {
++    String username = environment.getRequiredProperty("spring.security.user.name");
++    String password = environment.getRequiredProperty("spring.security.user.password");
++    String role = environment.getRequiredProperty("auth.oauth2.shared-role");
++    Assert.hasText(username, "Shared username is required");
++    Assert.hasText(password, "Shared password is required");
++    Assert.isTrue(acs.isRbacEnabled() && acs.getRoles().stream().anyMatch(r -> role.equals(r.getName())),
++        "Shared login requires a configured RBAC role");
++    var encoder = new BCryptPasswordEncoder();
++    String hash = encoder.encode(password);
++    var manager = new UserDetailsRepositoryReactiveAuthenticationManager(
++        name -> Mono.<org.springframework.security.core.userdetails.UserDetails>just(
++            new SharedUser(username, hash, role)).filter(u -> u.getUsername().equals(name)));
++    manager.setPasswordEncoder(encoder);
++    return manager;
++  }
++
++  private static final class SharedUser extends User implements RbacUser {
++    private final String role;
++
++    SharedUser(String username, String hash, String role) {
++      super(username, hash, List.of(new SimpleGrantedAuthority(role)));
++      this.role = role;
++    }
++
++    @Override
++    public String name() { return getUsername(); }
++
++    @Override
++    public Collection<String> groups() { return List.of(role); }
++  }
++
++  public static ServerOAuth2AuthorizationRequestResolver resolver(ReactiveClientRegistrationRepository clients) {
++    var delegate = new DefaultServerOAuth2AuthorizationRequestResolver(clients);
++    delegate.setAuthorizationRequestCustomizer(OAuth2AuthorizationRequestCustomizers.withPkce());
++    return new ServerOAuth2AuthorizationRequestResolver() {
++      @Override
++      public Mono<OAuth2AuthorizationRequest> resolve(ServerWebExchange exchange) {
++        return hint(delegate.resolve(exchange), exchange);
++      }
++
++      @Override
++      public Mono<OAuth2AuthorizationRequest> resolve(ServerWebExchange exchange, String id) {
++        return hint(delegate.resolve(exchange, id), exchange);
++      }
++    };
++  }
++
++  private static Mono<OAuth2AuthorizationRequest> hint(
++      Mono<OAuth2AuthorizationRequest> request, ServerWebExchange exchange) {
++    String hint = exchange.getRequest().getQueryParams().getFirst("login_hint");
++    if (hint == null || hint.isBlank() || hint.length() > 254 || hint.chars().anyMatch(Character::isISOControl)) {
++      return request;
++    }
++    // Only this non-authoritative hint is copied. Password, role, state, nonce,
++    // redirect_uri and other caller parameters can never override the OIDC request.
++    return request.map(original -> OAuth2AuthorizationRequest.from(original)
++        .additionalParameters(params -> params.put("login_hint", hint.strip()))
++        .authorizationRequestUri((String) null)
++        .build());
++  }
++}
+diff --git a/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java b/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
+index 16b75d4..a56bf10 100644
+--- a/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
++++ b/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
+@@ -11,6 +11,11 @@ import java.util.Optional;
+ import lombok.RequiredArgsConstructor;
+ import lombok.extern.slf4j.Slf4j;
+ import org.springframework.beans.factory.annotation.Qualifier;
++import org.springframework.core.env.Environment;
++import org.springframework.http.HttpMethod;
++import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
++import org.springframework.security.oauth2.core.OAuth2Error;
++import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatchers;
+ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+ import org.springframework.boot.autoconfigure.security.oauth2.client.OAuth2ClientProperties;
+ import org.springframework.boot.autoconfigure.security.oauth2.client.OAuth2ClientPropertiesMapper;
+@@ -58,6 +63,7 @@ import reactor.netty.http.client.HttpClient;
+ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+ 
+   private final OAuthProperties properties;
++  private final Environment environment;
+ 
+   /**
+    * WebClient configured to use system proxy properties (http.proxyHost/https.proxyHost,
+@@ -78,7 +84,9 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+       ReactiveOAuth2AccessTokenResponseClient<OAuth2AuthorizationCodeGrantRequest> tokenResponseClient,
+       ReactiveOAuth2UserService<OidcUserRequest, OidcUser> oidcUserService,
+       ReactiveOAuth2UserService<OAuth2UserRequest, OAuth2User> oauth2UserService,
+-      @Qualifier("oauthWebClient") WebClient webClient
++      @Qualifier("oauthWebClient") WebClient webClient,
++      ReactiveClientRegistrationRepository registrations,
++      AccessControlService acs
+   ) {
+     log.info("Configuring OAUTH2 authentication.");
+ 
+@@ -102,10 +110,24 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+             .anyExchange()
+             .authenticated()
+         )
+-        .oauth2Login(oauth2 -> oauth2.authenticationManager(delegatingAuthManager))
++        .oauth2Login(oauth2 -> oauth2.authenticationManager(delegatingAuthManager)
++            .authorizationRequestResolver(NativeLoginSupport.resolver(registrations)))
+         .logout(spec -> spec.logoutSuccessHandler(logoutHandler))
+         .csrf(ServerHttpSecurity.CsrfSpec::disable);
+ 
++    if (environment.getProperty("auth.oauth2.require-mapped-role", Boolean.class, false)
++        && !acs.isRbacEnabled()) {
++      throw new IllegalArgumentException("SSO requires explicit RBAC roles");
++    }
++    if (NativeLoginSupport.sharedEnabled(environment)) {
++      builder.formLogin(form -> form.loginPage(LOGIN_URL)
++          .authenticationManager(NativeLoginSupport.sharedManager(environment, acs))
++          .authenticationSuccessHandler(emptyRedirectSuccessHandler()));
++      // End this application session; an enterprise-wide IdP logout is separate.
++      builder.logout(spec -> spec.logoutSuccessHandler(redirectLogoutSuccessHandler())
++          .requiresLogout(ServerWebExchangeMatchers.pathMatchers(HttpMethod.GET, "/logout")));
++    }
++
+     if (properties.getResourceServer() != null) {
+       OAuth2ResourceServerProperties resourceServer = properties.getResourceServer();
+       if (resourceServer.getJwt() != null && resourceServer.getJwt().getJwkSetUri() != null) {
+@@ -155,7 +177,13 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+           }
+ 
+           return extractor.extract(acs, user, Map.of("request", request, "provider", provider))
+-              .map(groups -> new RbacOidcUser(user, groups));
++              .flatMap(groups -> {
++                if (groups.isEmpty()
++                    && environment.getProperty("auth.oauth2.require-mapped-role", Boolean.class, false)) {
++                  return Mono.error(new OAuth2AuthenticationException(new OAuth2Error("access_denied")));
++                }
++                return Mono.just(new RbacOidcUser(user, groups));
++              });
+         });
+   }
+ 
+@@ -181,8 +209,20 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+   @Bean
+   public InMemoryReactiveClientRegistrationRepository clientRegistrationRepository() {
+     final OAuth2ClientProperties props = OAuthPropertiesConverter.convertProperties(properties);
+-    final List<ClientRegistration> registrations =
+-        new ArrayList<>(new OAuth2ClientPropertiesMapper(props).asClientRegistrations().values());
++    final Map<String, String> explicitIssuers = new java.util.HashMap<>();
++    props.getProvider().forEach((id, provider) -> {
++      if (provider.getIssuerUri() != null && provider.getAuthorizationUri() != null
++          && provider.getTokenUri() != null && provider.getJwkSetUri() != null
++          && provider.getUserInfoUri() != null) {
++        explicitIssuers.put(id, provider.getIssuerUri());
++        provider.setIssuerUri(null);
++      }
++    });
++    final List<ClientRegistration> registrations = new ArrayList<>();
++    new OAuth2ClientPropertiesMapper(props).asClientRegistrations().forEach((id, registration) ->
++        registrations.add(explicitIssuers.containsKey(id)
++            ? ClientRegistration.withClientRegistration(registration).issuerUri(explicitIssuers.get(id)).build()
++            : registration));
+     if (registrations.isEmpty()) {
+       throw new IllegalArgumentException("OAuth2 authentication is enabled but no providers specified.");
+     }
+diff --git a/api/src/main/java/io/kafbat/ui/service/ApplicationInfoService.java b/api/src/main/java/io/kafbat/ui/service/ApplicationInfoService.java
+index dd5d9c4..a445fa7 100644
+--- a/api/src/main/java/io/kafbat/ui/service/ApplicationInfoService.java
++++ b/api/src/main/java/io/kafbat/ui/service/ApplicationInfoService.java
+@@ -106,8 +106,10 @@ public class ApplicationInfoService {
+   }
+ 
+   public AppAuthenticationSettingsDTO getAuthenticationProperties() {
++    boolean shared = getAuthType().equalsIgnoreCase(OAUTH2.getValue())
++        && io.kafbat.ui.config.auth.NativeLoginSupport.sharedEnabled(applicationContext.getEnvironment());
+     return new AppAuthenticationSettingsDTO()
+-        .authType(AuthTypeDTO.fromValue(getAuthType()))
++        .authType(shared ? AuthTypeDTO.LOGIN_FORM : AuthTypeDTO.fromValue(getAuthType()))
+         .oAuthProviders(getOAuthProviders());
+   }
+ 

@@ -1,0 +1,3 @@
+# Default authentication. Set KAFKA_UI_AUTH_CONFIG=pingfederate.yml to opt in.
+auth:
+  type: LOGIN_FORM

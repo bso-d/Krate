@@ -224,6 +224,8 @@ services:
         max-file: "3"
     environment:
       AUTH_TYPE: "LOGIN_FORM"
+      # Offline runtime: disable startup/hourly requests to api.github.com.
+      GITHUB_RELEASE_INFO_ENABLED: "false"
       # Honor X-Forwarded-* from the nginx TLS proxy so login redirects/cookies
       # use https (not the internal http://...:8080).
       SERVER_FORWARDHEADERSSTRATEGY: "framework"
