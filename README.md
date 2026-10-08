@@ -90,14 +90,22 @@ For a first local run, the steps below use KRaft. All brokers in these setups ru
 
 ### Ready-made downloads
 
-The [releases page](https://github.com/bso-d/Krate/releases) currently contains:
+The [releases page](https://github.com/bso-d/Krate/releases) holds two kinds of release. Check the tag prefix and title before downloading:
+
+| Kind | Tag | Title starts with | What you get |
+| --- | --- | --- | --- |
+| **Offline install package** | `package-kraft-vN`, `package-epc-vN` | `Offline install package` | A `.tar.gz` to copy to the VM, its `.sha256` checksum and the image lock file. Install it with `./krate install`. |
+| **Broker images** | `kraft-vX.Y.Z`, `zk-vX.Y.Z` | `Broker images` | References to container images on GHCR. Nothing to install on a VM; the default setups do not use these images. |
+
+Offline install packages published so far, all x86_64:
 
 | Release | Package |
 | --- | --- |
-| [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | Archived ZooKeeper package, x86_64: `kafka-zk-v5-amd64.tar.gz` and its checksum |
-| [`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1) | RHEL/EPC, x86_64: `kafka-epc-v1-amd64.tar.gz` and its checksum |
+| [`epc-v2`](https://github.com/bso-d/Krate/releases/tag/epc-v2) | RHEL/EPC with Keycloak SSO: `krate-epc-v2-amd64.tar.gz` |
+| [`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1) | RHEL/EPC: `kafka-epc-v1-amd64.tar.gz` |
+| [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | Archived ZooKeeper package: `kafka-zk-v5-amd64.tar.gz` |
 
-Build KRaft or ARM64 packages from source using the commands below. Existing downloads keep their original `kafka-*` names. New KRaft and EPC packages use `krate-*`; ZooKeeper keeps `kafka-zk-*`.
+These were published before the `package-` tags existed. New KRaft and EPC packages are released as `package-kraft-vN` and `package-epc-vN`; see [Release an offline install package](#release-an-offline-install-package). Until a KRaft package is released, build it from source using the commands below. Existing downloads keep their original `kafka-*` names. New KRaft and EPC packages use `krate-*`; ZooKeeper keeps `kafka-zk-*`.
 
 ## What you need
 
@@ -242,8 +250,8 @@ See the [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and
 
 For this checkout, build the customized image with `make kafbat-ui ARCH=amd64`
 before starting or bundling EPC or KRaft; see the [build notes](kafbat-ui/README.md).
-The resulting offline bundles include that image. This integration has not yet
-been published in the released bundles linked above.
+The resulting offline bundles include that image. EPC packages include SSO from
+`epc-v2`; KRaft packages include it from the first `package-kraft-vN` release.
 
 ## Monitoring
 
@@ -293,6 +301,18 @@ Makefile     Package builds and source checks
 ```
 
 Separate KRaft and ZooKeeper image release workflows build regular and diagnostic images for both processors. The default setup still uses the upstream Kafka images selected in each edition's `.env.template`; the release workflow requires an edition-specific tag before publishing to GHCR, GitHub's container registry.
+
+### Release an offline install package
+
+The [package release workflow](.github/workflows/package-release.yml) runs `scripts/package-release.sh`. That script builds the Kafbat UI image, prepares the Docker packages, builds the package and writes the release files to `dist/release/package-<edition>-vN/`. Run the same script locally first, and start the workflow only after the local package installs:
+
+```bash
+# macOS: MAKE=gmake; Node 22 recommended
+scripts/package-release.sh kraft v2 amd64        # Docker packages: noble for kraft, rhel9 for epc
+scripts/package-release.sh epc v3 amd64 none     # without Docker packages
+```
+
+Then start **Release offline install packages** from `main` in GitHub Actions with the same edition, version, processor and Docker package choice. The workflow creates the `package-<edition>-vN` tag and refuses a version that already exists. For EPC, it also refuses a version already released under the earlier `epc-vN` tags. Broker image releases use the separate [broker release workflow](.github/workflows/broker-release.yml) and `kraft-v*`/`zk-v*` tags.
 
 ## Limits to understand
 
