@@ -31,7 +31,10 @@ case "$edition/$target_os" in
   kraft/noble|kraft/jammy|kraft/none|epc/rhel9|epc/none) ;;
   *) die "target OS $target_os does not apply to $edition (kraft: noble|jammy|none; epc: rhel9|none)" ;;
 esac
-"$MAKE" --version 2>/dev/null | grep -q 'GNU Make [4-9]' || die "GNU Make 4.0+ required; set MAKE=gmake on macOS"
+make_major="$("$MAKE" --version 2>/dev/null | sed -n '1s/^GNU Make \([0-9][0-9]*\)\..*/\1/p')"
+if [[ -z "$make_major" ]] || (( make_major < 4 )); then
+  die "GNU Make 4.0+ required; set MAKE=gmake on macOS"
+fi
 
 tag="package-${edition}-${version}"
 bundle="krate-${edition}-${version}-${arch}"
@@ -77,7 +80,13 @@ checksum="$(awk '{print $1}' "$out_dir/${bundle}.tar.gz.sha256")"
 docker_note="not included"
 [[ "$include_docker" == 1 ]] && docker_note="included for \`${target_os}\`"
 {
-  printf '### %s\n\n' "$bundle"
+  processor="x86_64"
+  [[ "$arch" == amd64 ]] || processor="ARM64"
+  printf '### %s (%s)\n\n' "$bundle" "$processor"
+  # One install block per archive, so each processor names its own file.
+  # shellcheck disable=SC2016  # backticks are Markdown code fences
+  printf '```bash\nsha256sum -c %s.tar.gz.sha256\ntar -xzf %s.tar.gz\ncd %s\ncp .env.template .env\n./krate doctor\n./krate install\n```\n\n' \
+    "$bundle" "$bundle" "$bundle"
   # shellcheck disable=SC2016  # backticks are Markdown code spans
   printf -- '- SHA-256: `%s`\n' "$checksum"
   printf -- '- Docker packages: %s\n\n' "$docker_note"
