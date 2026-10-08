@@ -16,7 +16,7 @@ on:
         type: choice
         options: [kraft, epc]
       version:
-        description: 'New package version: vN'
+        description: 'Package version for the new tag, for example v2 (a new version, not the vN pattern)'
         required: true
         type: string
       arch:
@@ -57,7 +57,13 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^v[0-9]+$ ]] || { echo 'Version must be vN' >&2; exit 1; }
+          if [[ ! "$VERSION" =~ ^v[0-9]+$ ]]; then
+            echo "Invalid version '$VERSION'. Enter a real version in the form vN, for example v2." >&2
+            latest="$(gh api "repos/$REPOSITORY/git/matching-refs/tags/package-$EDITION-v" --jq '.[].ref' \
+              | sed 's#^refs/tags/##' | sort -V | tail -1)"
+            echo "Latest package-$EDITION tag: ${latest:-none}" >&2
+            exit 1
+          fi
           case "$EDITION/$TARGET_OS" in
             */auto|*/none|kraft/noble|kraft/jammy|epc/rhel9) ;;
             *) echo "Docker packages for $TARGET_OS do not apply to $EDITION" >&2; exit 1 ;;
