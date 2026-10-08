@@ -103,7 +103,13 @@ require_env() {
 # classic image store resolves name@digest only against registry digests, so
 # pass Compose the bare image ID. Packages use krate-offline tags instead.
 resolve_local_ui_image() {
-  local image="${KAFKA_UI_IMAGE:-$(env_value KAFKA_UI_IMAGE)}"
+  # A set KAFKA_UI_IMAGE, even an empty one, overrides .env for Compose.
+  local image
+  if [[ -n "${KAFKA_UI_IMAGE+set}" ]]; then
+    image="$KAFKA_UI_IMAGE"
+  else
+    image="$(env_value KAFKA_UI_IMAGE)"
+  fi
   [[ "$image" == krate/kafka-ui:*@sha256:* ]] || return 0
   docker image inspect "$image" >/dev/null 2>&1 && return 0
   docker image inspect "${image##*@}" >/dev/null 2>&1 || return 0
