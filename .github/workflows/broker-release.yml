@@ -9,7 +9,7 @@ on:
         type: choice
         options: [kraft, zk]
       version:
-        description: 'New version: vN, vN.N or vN.N.N'
+        description: 'Version for the new tag, for example v1.0.2 (a new version, not the vN.N.N pattern)'
         required: true
         type: string
   push:
@@ -45,7 +45,12 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^(kraft|zk)-(v[0-9]+(\.[0-9]+){0,2})$ ]] || {
-            echo 'Use kraft-vN[.N[.N]] or zk-vN[.N[.N]]' >&2
+            echo "Invalid release tag '$RELEASE_TAG'. Enter a real version, for example v1.0.2." >&2
+            echo 'Tags must be kraft-vN[.N[.N]] or zk-vN[.N[.N]]. Latest existing tags:' >&2
+            for prefix in kraft zk; do
+              latest="$(git tag -l "$prefix-v*" --sort=-v:refname | head -1)"
+              echo "  ${latest:-$prefix: none}" >&2
+            done
             exit 1
           }
           edition="${BASH_REMATCH[1]}"
