@@ -116,6 +116,19 @@ jobs:
             docker run --detach --name krate-ci-zookeeper --network krate-ci \
               -e ZOOKEEPER_CLIENT_PORT=2181 -e ZOOKEEPER_TICK_TIME=2000 \
               confluentinc/cp-zookeeper:7.6.1@sha256:4dc780642bfc5ec3a2d4901e2ff1f9ddef7f7c5c0b793e1e2911cbfb4e3a3214
+            # Like zk/docker-compose.yml, start the broker only after ZooKeeper
+            # is ready. A session request sent while ZooKeeper is still
+            # starting gets no reply, and the broker's one 40 s check then exits.
+            zk_ready=false
+            for attempt in {1..30}; do
+              echo "ZooKeeper readiness attempt $attempt"
+              if docker exec krate-ci-zookeeper cub zk-ready localhost:2181 5; then
+                zk_ready=true
+                break
+              fi
+              sleep 2
+            done
+            "$zk_ready"
             args+=(-e KAFKA_BROKER_ID=1 -e KAFKA_ZOOKEEPER_CONNECT=krate-ci-zookeeper:2181
               -e KAFKA_LISTENERS=PLAINTEXT://:9092)
             bin=/usr/bin
