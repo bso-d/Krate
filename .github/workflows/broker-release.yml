@@ -190,7 +190,7 @@ jobs:
           if [[ "$EDITION" == zk ]]; then monitor_dir=zk/monitoring; fi
           awk -F= '/^[A-Z_]+_IMAGE=/{print $2}' "$EDITION/.env.template" "$monitor_dir/.env.template" > dependencies.txt
           {
-            printf 'Krate %s broker images %s (linux/amd64 and linux/arm64).\n\n' "$EDITION" "$VERSION"
+            printf 'Krate %s broker container images %s on GHCR (linux/amd64 and linux/arm64). This is not an offline install package; those are released as package-<edition>-vN.\n\n' "$EDITION" "$VERSION"
             printf 'Release image:\n\n'
             sed 's/^/    /' release.txt
             printf '\nDebug image:\n\n'
@@ -199,4 +199,4 @@ jobs:
             printf '\nDebug adds network and process diagnostic tools; both targets retain upstream broker startup.\n'
           } > release-notes.md
           gh release create "$RELEASE_TAG" release.txt debug.txt dependencies.txt \
-            --verify-tag --latest=false --title "Krate $EDITION $VERSION" --notes-file release-notes.md
+            --verify-tag --latest=false --title "Broker images · $EDITION $VERSION" --notes-file release-notes.md

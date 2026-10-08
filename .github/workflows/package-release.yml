@@ -1,0 +1,182 @@
+name: Release offline install packages
+
+# Offline install packages (brokers, SSO UI, Keycloak, PostgreSQL, monitoring
+# and optional Docker packages, as one tarball per processor) are released as
+# package-kraft-vN or package-epc-vN, titled "Offline install package".
+# Broker image releases (broker-release.yml) use kraft-v*/zk-v* tags and are
+# titled "Broker images"; the package- prefix never matches those triggers.
+# The build itself is scripts/package-release.sh; run it locally first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: Edition
+        required: true
+        type: choice
+        options: [kraft, epc]
+      version:
+        description: 'New package version: vN'
+        required: true
+        type: string
+      arch:
+        description: Target processor
+        required: true
+        type: choice
+        default: amd64
+        options: [amd64, arm64, both]
+      target_os:
+        description: 'Docker packages to include (auto: kraft=noble, epc=rhel9)'
+        required: true
+        type: choice
+        default: auto
+        options: [auto, none, noble, jammy, rhel9]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-release-${{ inputs.edition }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+      arches: ${{ steps.release.outputs.arches }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Validate release tag and source
+        id: release
+        env:
+          EDITION: ${{ inputs.edition }}
+          VERSION: ${{ inputs.version }}
+          ARCH: ${{ inputs.arch }}
+          TARGET_OS: ${{ inputs.target_os }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+$ ]] || { echo 'Version must be vN' >&2; exit 1; }
+          case "$EDITION/$TARGET_OS" in
+            */auto|*/none|kraft/noble|kraft/jammy|epc/rhel9) ;;
+            *) echo "Docker packages for $TARGET_OS do not apply to $EDITION" >&2; exit 1 ;;
+          esac
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Releases must run from main' >&2; exit 1; }
+          tag="package-$EDITION-$VERSION"
+          # EPC packages were released as epc-vN before this workflow existed.
+          tags=("$tag")
+          [[ "$EDITION" != epc ]] || tags+=("epc-$VERSION")
+          gh api --paginate "repos/$REPOSITORY/releases" --jq '.[].tag_name' > existing-releases.txt
+          for candidate in "${tags[@]}"; do
+            git ls-remote --tags origin "refs/tags/$candidate" > existing-tag.txt
+            [[ ! -s existing-tag.txt ]] || { echo "Tag $candidate already exists" >&2; exit 1; }
+            ! grep -Fxq "$candidate" existing-releases.txt || { echo "Release $candidate already exists" >&2; exit 1; }
+          done
+          arches='["amd64"]'
+          [[ "$ARCH" != arm64 ]] || arches='["arm64"]'
+          [[ "$ARCH" != both ]] || arches='["amd64","arm64"]'
+          printf 'tag=%s\nsha=%s\narches=%s\n' "$tag" "$(git rev-parse HEAD)" "$arches" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: metadata
+    name: ${{ inputs.edition }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: ${{ fromJSON(needs.metadata.outputs.arches) }}
+    steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Validate source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          make check
+      - name: Build package
+        env:
+          EDITION: ${{ inputs.edition }}
+          VERSION: ${{ inputs.version }}
+          ARCH: ${{ matrix.arch }}
+          TARGET_OS: ${{ inputs.target_os }}
+        run: scripts/package-release.sh "$EDITION" "$VERSION" "$ARCH" "$TARGET_OS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bundle-${{ matrix.arch }}
+          path: dist/release/${{ needs.metadata.outputs.tag }}/
+          compression-level: 0
+          retention-days: 1
+
+  release:
+    needs: [metadata, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+      - name: Download packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: bundle-*
+          path: release
+          merge-multiple: true
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
+          EDITION: ${{ inputs.edition }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cd release
+          for checksum in ./*.tar.gz.sha256; do sha256sum -c "$checksum"; done
+          title="Offline install package · KRaft $VERSION"
+          [[ "$EDITION" != epc ]] || title="Offline install package · EPC $VERSION"
+          packages=(./*.tar.gz)
+          first="$(basename "${packages[0]}")"
+          fence='```'
+          cat > release-notes.md <<NOTES
+          Offline install package for the $EDITION edition (not broker images), built by the package release workflow from \`${SOURCE_SHA:0:7}\`.
+
+          Includes the brokers, Kafbat UI with shared login and SSO, Keycloak and PostgreSQL (optional \`sso\` profile) and monitoring.
+
+          ## Install
+
+          ${fence}bash
+          sha256sum -c $first.sha256
+          tar -xzf $first
+          cd ${first%.tar.gz}
+          cp .env.template .env
+          ./krate doctor
+          ./krate install
+          ${fence}
+
+          SSO setup guides are in \`docs/\` inside the package; start with \`docs/dual-login.md\`. SSO needs Docker Compose 2.20.2 or newer and a site acceptance test against your identity provider.
+
+          ## Packages
+
+          NOTES
+          cat ./*.notes.md >> release-notes.md
+          gh api --method POST "repos/$REPOSITORY/git/refs" -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$SOURCE_SHA"
+          gh release create "$RELEASE_TAG" ./*.tar.gz ./*.tar.gz.sha256 ./*.images.lock.tsv \
+            --verify-tag --latest=false --title "$title" --notes-file release-notes.md
