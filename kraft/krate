@@ -98,8 +98,21 @@ require_env() {
   fi
 }
 
+# A source checkout pins the locally built Kafbat UI image (make kafbat-ui) as
+# krate/kafka-ui:...@<image ID>. That image has no registry digest, and Docker's
+# classic image store resolves name@digest only against registry digests, so
+# pass Compose the bare image ID. Packages use krate-offline tags instead.
+resolve_local_ui_image() {
+  local image="${KAFKA_UI_IMAGE:-$(env_value KAFKA_UI_IMAGE)}"
+  [[ "$image" == krate/kafka-ui:*@sha256:* ]] || return 0
+  docker image inspect "$image" >/dev/null 2>&1 && return 0
+  docker image inspect "${image##*@}" >/dev/null 2>&1 || return 0
+  export KAFKA_UI_IMAGE="${image##*@}"
+}
+
 # Wrapper so all compose calls use the right files and detected binary
 compose_cmd() {
+  resolve_local_ui_image
   if [[ -f "$ENV_FILE" && "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
     local version
     version="$(get_compose_version)"
