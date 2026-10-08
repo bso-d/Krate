@@ -250,7 +250,8 @@ bundle: offline-check
 >  if [[ "$$mode" != "zk" && -d monitoring ]]; then
 >    mkdir -p "$$bundle_dir/monitoring"
 >    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py "$$bundle_dir/monitoring/"
->    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/promtail "$$bundle_dir/monitoring/"
+>    cp monitoring/README.md "$$bundle_dir/monitoring/"
+>    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit "$$bundle_dir/monitoring/"
 >    # Only the local default is copied: never stage site auth files or secrets.
 >    mkdir -p "$$bundle_dir/monitoring/auth"
 >    cp monitoring/auth/local.ini "$$bundle_dir/monitoring/auth/local.ini"

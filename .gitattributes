@@ -1,2 +1,4 @@
 # Patch files keep one-space context lines; whitespace checks do not apply.
 kafbat-ui/*.patch -whitespace
+# Preserve byte-exact upstream notices/decoder and their recorded checksums.
+monitoring/fluent-bit/vendor/** -text -whitespace

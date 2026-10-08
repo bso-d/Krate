@@ -1,0 +1,284 @@
+[
+  {
+    "path": "lib/avro/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/avro/LICENSE",
+    "file": "avro__LICENSE",
+    "sha256": "d62488d6ba17132e92c23c03c80bfedc848267f96ab36489fec860f76cf6819a"
+  },
+  {
+    "path": "lib/avro/NOTICE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/avro/NOTICE",
+    "file": "avro__NOTICE",
+    "sha256": "92f7a23b4d6f91c27f5dc089fa2f30c9b4b13ac5b7cf872b351752463e7f9d4d"
+  },
+  {
+    "path": "lib/c-ares-1.34.6/LICENSE.md",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/c-ares-1.34.6/LICENSE.md",
+    "file": "c-ares-1.34.6__LICENSE.md",
+    "sha256": "460f5e768fda3752ca2169a95df062578a10fb126bfd65f3b9b1a1bed2f84807"
+  },
+  {
+    "path": "lib/cfl/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/cfl/LICENSE",
+    "file": "cfl__LICENSE",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "path": "lib/chunkio/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/chunkio/LICENSE",
+    "file": "chunkio__LICENSE",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "path": "lib/cmetrics/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/cmetrics/LICENSE",
+    "file": "cmetrics__LICENSE",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "path": "lib/cprofiles/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/cprofiles/LICENSE",
+    "file": "cprofiles__LICENSE",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "path": "lib/ctraces/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/ctraces/LICENSE",
+    "file": "ctraces__LICENSE",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "path": "lib/fluent-otel-proto/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/fluent-otel-proto/LICENSE",
+    "file": "fluent-otel-proto__LICENSE",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "path": "lib/jansson-e23f558/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/jansson-e23f558/LICENSE",
+    "file": "jansson-e23f558__LICENSE",
+    "sha256": "1fff7d37d22157bcd81ab53b6c54da755d7c2f868f15807d9bde920f10730da0"
+  },
+  {
+    "path": "lib/jemalloc-5.3.0/COPYING",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/jemalloc-5.3.0/COPYING",
+    "file": "jemalloc-5.3.0__COPYING",
+    "sha256": "94aa2caa98c25d942f58b956c71dba6a99ff98fc3a31cbc669fe2a4cd0268b53"
+  },
+  {
+    "path": "lib/jsmn/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/jsmn/LICENSE",
+    "file": "jsmn__LICENSE",
+    "sha256": "4675b94a50d2afe811c52785463c854f1156056632cce17cc7133939eac8ed55"
+  },
+  {
+    "path": "lib/libbacktrace-b9e4006/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/libbacktrace-b9e4006/LICENSE",
+    "file": "libbacktrace-b9e4006__LICENSE",
+    "sha256": "ef8a9b3247488f8901ca60de9b17b745d7bd67e5ec1e622f80d62364572200d8"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE",
+    "file": "librdkafka-2.15.0__LICENSE",
+    "sha256": "c545fe812d514aa0151449062eecfc181b8c9d49b6c0b540593110bf79749eaa"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.cjson",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.cjson",
+    "file": "librdkafka-2.15.0__LICENSE.cjson",
+    "sha256": "cf71db3b634e5ba91135a2586bc29f4e25eb1fae2da2d8a007416e1cca26258c"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.crc32c",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.crc32c",
+    "file": "librdkafka-2.15.0__LICENSE.crc32c",
+    "sha256": "e656e5c30757446ff679353dc564b683b17a3f5b023b05afecd66d536a479a04"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.fnv1a",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.fnv1a",
+    "file": "librdkafka-2.15.0__LICENSE.fnv1a",
+    "sha256": "b139b565d9375700817b289437bf2e72508e94ed32b439373d1ee74489fe6606"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.hdrhistogram",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.hdrhistogram",
+    "file": "librdkafka-2.15.0__LICENSE.hdrhistogram",
+    "sha256": "791fbc8e3f15eac5035a5e09c5e31b0af2841c71891d5d1401a4770c70472936"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.lz4",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.lz4",
+    "file": "librdkafka-2.15.0__LICENSE.lz4",
+    "sha256": "d488a29d1b3d4fe1f91c368032ab980ce871638e2537b5d69c129f65c5a2ae76"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.murmur2",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.murmur2",
+    "file": "librdkafka-2.15.0__LICENSE.murmur2",
+    "sha256": "60ee0bcfa41a71413b7b9af2d0a8dca689012e5c39dd056031e5f977f8caaef9"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.nanopb",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.nanopb",
+    "file": "librdkafka-2.15.0__LICENSE.nanopb",
+    "sha256": "14c2cd11a18dc5eb86c1b6f35f39c09f9a909de044aa8dcb4e4276486a196334"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.opentelemetry",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.opentelemetry",
+    "file": "librdkafka-2.15.0__LICENSE.opentelemetry",
+    "sha256": "a2b5c8febb48912033135426fc235ec90bfcc23007b1e3aed9c3dae6fadbcd2b"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.pycrc",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.pycrc",
+    "file": "librdkafka-2.15.0__LICENSE.pycrc",
+    "sha256": "dbc7b34593b58baaf58286a31ee8a668cda5030e745992c48e29ce54878acd1a"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.queue",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.queue",
+    "file": "librdkafka-2.15.0__LICENSE.queue",
+    "sha256": "cbf6ed3c5e15c63b893eda59add51344dbc92fba5e00142f9af833aa5896ad17"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.regexp",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.regexp",
+    "file": "librdkafka-2.15.0__LICENSE.regexp",
+    "sha256": "73f69af2e26b1f386e89412035653abf38c8aa0e55356920ffe925873df7164b"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.snappy",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.snappy",
+    "file": "librdkafka-2.15.0__LICENSE.snappy",
+    "sha256": "864f888ca28018591b1efdef16e43d6e053230e030062b1283d321c003cf69c3"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.tinycthread",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.tinycthread",
+    "file": "librdkafka-2.15.0__LICENSE.tinycthread",
+    "sha256": "3ea2a53e28481396ebc723686596c06007df34b3f298961e144950d5312184aa"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSE.wingetopt",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSE.wingetopt",
+    "file": "librdkafka-2.15.0__LICENSE.wingetopt",
+    "sha256": "b014a77424a8b8f070ce43bdfcd62fe2575b65be33b49e49e742cc61a4f60ecc"
+  },
+  {
+    "path": "lib/librdkafka-2.15.0/LICENSES.txt",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/librdkafka-2.15.0/LICENSES.txt",
+    "file": "librdkafka-2.15.0__LICENSES.txt",
+    "sha256": "b9e4616bb9dd0c9ce3fa52e81c7bfc596e60b8855a1df5dce5fa50732b1ccdec"
+  },
+  {
+    "path": "lib/luajit-7152e154/COPYRIGHT",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/luajit-7152e154/COPYRIGHT",
+    "file": "luajit-7152e154__COPYRIGHT",
+    "sha256": "5b79fb4754728487cf43d55b213bb68369912484f2dd7ab68380435e994bce39"
+  },
+  {
+    "path": "lib/luajit-cmake/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/luajit-cmake/LICENSE",
+    "file": "luajit-cmake__LICENSE",
+    "sha256": "1ec002459f93c16e1699a0cbcdd702d4a6cb69b69f87cd79b13e026acddcc7c4"
+  },
+  {
+    "path": "lib/lwrb/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/lwrb/LICENSE",
+    "file": "lwrb__LICENSE",
+    "sha256": "488c25f5de8d36c1ca85964c5b3f729fd0655a4c8ce73ca088ff4933eceb2f89"
+  },
+  {
+    "path": "lib/miniz/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/miniz/LICENSE",
+    "file": "miniz__LICENSE",
+    "sha256": "0115478d567121238cf6cc1c0c361926cf07a49d9e4c9e66da97fac6a01646b3"
+  },
+  {
+    "path": "lib/monkey/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/monkey/LICENSE",
+    "file": "monkey__LICENSE",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "path": "lib/monkey/NOTICE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/monkey/NOTICE",
+    "file": "monkey__NOTICE",
+    "sha256": "7387a0f57dc3ca22577c7459b6b2cd6c7f26d902cd88717427bce3af78e7302e"
+  },
+  {
+    "path": "lib/mpack-amalgamation-1.1.1/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/mpack-amalgamation-1.1.1/LICENSE",
+    "file": "mpack-amalgamation-1.1.1__LICENSE",
+    "sha256": "260ffd3e123c24170cffccdc509ffd9339e71479735c080a3bf7db2da0b9331d"
+  },
+  {
+    "path": "lib/nghttp2-1.65.0/COPYING",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/nghttp2-1.65.0/COPYING",
+    "file": "nghttp2-1.65.0__COPYING",
+    "sha256": "6b94f3abc1aabd0c72a7c7d92a77f79dda7c8a0cb3df839a97890b4116a2de2a"
+  },
+  {
+    "path": "lib/onigmo/COPYING",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/onigmo/COPYING",
+    "file": "onigmo__COPYING",
+    "sha256": "3d157c160af394dab4a2b117f09bece2644f9d13965dfafdfba77f7423a9aec7"
+  },
+  {
+    "path": "lib/ripser-1.2.1/COPYING.txt",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/ripser-1.2.1/COPYING.txt",
+    "file": "ripser-1.2.1__COPYING.txt",
+    "sha256": "5aab2f524181a693f3a8494069255323a48a194f0b329d3218b5f6626230e520"
+  },
+  {
+    "path": "lib/simdutf-amalgamation-5.5.0/LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/simdutf-amalgamation-5.5.0/LICENSE-APACHE",
+    "file": "simdutf-amalgamation-5.5.0__LICENSE-APACHE",
+    "sha256": "3d34610fc6b5e1b0bfe4e2f36171c2d62c28ef05cb8d704f5a0073be41a43b3d"
+  },
+  {
+    "path": "lib/simdutf-amalgamation-5.5.0/LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/simdutf-amalgamation-5.5.0/LICENSE-MIT",
+    "file": "simdutf-amalgamation-5.5.0__LICENSE-MIT",
+    "sha256": "fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f"
+  },
+  {
+    "path": "lib/snappy-fef67ac/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/snappy-fef67ac/LICENSE",
+    "file": "snappy-fef67ac__LICENSE",
+    "sha256": "230a67e770d90be1654560605e4fad6e8cf1823f994bb2e9ede7054f45a8caa4"
+  },
+  {
+    "path": "lib/tutf8e/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/tutf8e/LICENSE",
+    "file": "tutf8e__LICENSE",
+    "sha256": "09ef16a9ceb811c7952555c369c237538822b4f5bc5337be60720b2d3c1c1454"
+  },
+  {
+    "path": "lib/wasm-micro-runtime-WAMR-2.4.1/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/wasm-micro-runtime-WAMR-2.4.1/LICENSE",
+    "file": "wasm-micro-runtime-WAMR-2.4.1__LICENSE",
+    "sha256": "0a274df3755e61b169266fba62d842489378bc9a6e9a63fe24f02ee6f5de419f"
+  },
+  {
+    "path": "lib/yyjson-0.12.0/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/yyjson-0.12.0/LICENSE",
+    "file": "yyjson-0.12.0__LICENSE",
+    "sha256": "45e384d3d52c73cba3a64d6e6c25d47cd738cd8a55c30629e3201046eda62947"
+  },
+  {
+    "path": "lib/zstd-1.5.7/COPYING",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/zstd-1.5.7/COPYING",
+    "file": "zstd-1.5.7__COPYING",
+    "sha256": "f9c375a1be4a41f7b70301dd83c91cb89e41567478859b77eef375a52d782505"
+  },
+  {
+    "path": "lib/zstd-1.5.7/LICENSE",
+    "url": "https://raw.githubusercontent.com/fluent/fluent-bit/v5.1.3/lib/zstd-1.5.7/LICENSE",
+    "file": "zstd-1.5.7__LICENSE",
+    "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8"
+  }
+]
