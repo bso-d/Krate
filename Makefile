@@ -149,6 +149,17 @@ bundle: offline-check
 >  name="$${image//\//__}"
 >  printf '%s.tar\n' "$${name//:/_}"
 >}
+># The Kafbat UI image is built locally and pinned as name@<image ID>. It has
+># no registry digest, and the classic Docker image store only resolves
+># name@digest against registry digests, so look local builds up by image ID.
+>local_ref() {
+>  local image="$$1"
+>  if [[ "$$image" == krate/kafka-ui:1.5.0-sso.*@sha256:* ]]; then
+>    printf '%s\n' "$${image##*@}"
+>  else
+>    printf '%s\n' "$$image"
+>  fi
+>}
 >inspect_platform=()
 >if docker image inspect --help 2>&1 | grep -q -- '--platform'; then
 >  inspect_platform=(--platform "linux/$(ARCH)")
@@ -188,7 +199,7 @@ bundle: offline-check
 >  if enabled "$(NO_PULL)"; then
 >    echo "==> Verifying local images match $(ARCH)"
 >    for image in "$${images[@]}"; do
->      image_arch="$$(docker image inspect "$${inspect_platform[@]}" "$$image" --format '{{.Architecture}}' 2>/dev/null || true)"
+>      image_arch="$$(docker image inspect "$${inspect_platform[@]}" "$$(local_ref "$$image")" --format '{{.Architecture}}' 2>/dev/null || true)"
 >      [[ -n "$$image_arch" ]] || { echo "Image not found locally: $$image" >&2; exit 1; }
 >      [[ "$$image_arch" == "$(ARCH)" ]] || { echo "$$image is $$image_arch, expected $(ARCH)" >&2; exit 1; }
 >      echo "  ok $$image ($$image_arch)"
@@ -197,7 +208,7 @@ bundle: offline-check
 >    echo "==> Pulling $(ARCH) images"
 >    for image in "$${images[@]}"; do
 >      if [[ "$$image" == krate/kafka-ui:1.5.0-sso.*@sha256:* ]]; then
->        image_arch="$$(docker image inspect "$$image" --format '{{.Architecture}}' 2>/dev/null || true)"
+>        image_arch="$$(docker image inspect "$$(local_ref "$$image")" --format '{{.Architecture}}' 2>/dev/null || true)"
 >        [[ "$$image_arch" == "$(ARCH)" ]] || { echo "Build the UI first: make kafbat-ui ARCH=$(ARCH)" >&2; exit 1; }
 >      else
 >        docker pull --platform "linux/$(ARCH)" "$$image"
@@ -208,15 +219,16 @@ bundle: offline-check
 >  echo "==> Saving images"
 >  printf 'source_reference\truntime_reference\timage_id\trepo_digests\tarchive\tarchive_sha256\tplatform\n' > "$$bundle_dir/images.lock.tsv"
 >  for image in "$${images[@]}"; do
->    image_id="$$(docker image inspect "$${inspect_platform[@]}" "$$image" --format '{{.Id}}')"
->    image_arch="$$(docker image inspect "$${inspect_platform[@]}" "$$image" --format '{{.Architecture}}')"
+>    ref="$$(local_ref "$$image")"
+>    image_id="$$(docker image inspect "$${inspect_platform[@]}" "$$ref" --format '{{.Id}}')"
+>    image_arch="$$(docker image inspect "$${inspect_platform[@]}" "$$ref" --format '{{.Architecture}}')"
 >    [[ "$$image_arch" == "$(ARCH)" ]] || { echo "$$image is $$image_arch, expected $(ARCH)" >&2; exit 1; }
 >    # Archive tags contain the image ID; loaded archives retain these tags.
 >    runtime_image="krate-offline/image:sha256-$${image_id#sha256:}"
->    docker tag "$$image" "$$runtime_image"
+>    docker tag "$$ref" "$$runtime_image"
 >    filename="$$(image_filename "$$image")"
 >    docker save "$${save_platform[@]}" "$$runtime_image" -o "$$bundle_dir/images/$$filename"
->    repo_digests="$$(docker image inspect "$${inspect_platform[@]}" "$$image" --format '{{json .RepoDigests}}')"
+>    repo_digests="$$(docker image inspect "$${inspect_platform[@]}" "$$ref" --format '{{json .RepoDigests}}')"
 >    if command -v sha256sum >/dev/null 2>&1; then
 >      archive_sha="$$(sha256sum "$$bundle_dir/images/$$filename" | awk '{print $$1}')"
 >    else
