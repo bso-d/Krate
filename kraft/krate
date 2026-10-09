@@ -14,6 +14,12 @@ KRATE_VARIANT="kraft"
 CERTS_DIR="$SCRIPT_DIR/certs"
 CERT_CRT="$CERTS_DIR/server.crt"
 CERT_KEY="$CERTS_DIR/server.key"
+# Set when this CLI runs from a source checkout, where it can also build the
+# Kafbat UI image and offline packages; empty inside an extracted package.
+REPO_DIR=""
+if [[ -f "$SCRIPT_DIR/../Makefile" && -f "$SCRIPT_DIR/../kafbat-ui/build.py" ]]; then
+  REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
 # ─── Compose binary detection (v2 plugin or v1 standalone) ───────────────────
 if docker compose version &>/dev/null 2>&1; then
@@ -121,14 +127,14 @@ sync_image_pins() {
   warn "Updated $keys in $env_file to match ${template##*/}" >&2
 }
 
-# A random 24-character secret of letters and digits, which neither .env
-# quoting nor Compose interpolation alters.
+# A random secret of letters and digits (24 characters unless given), which
+# neither .env quoting nor Compose interpolation alters.
 random_secret() {
-  local secret=""
-  while (( ${#secret} < 24 )); do
+  local length="${1:-24}" secret=""
+  while (( ${#secret} < length )); do
     secret+="$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
   done
-  echo "${secret:0:24}"
+  echo "${secret:0:length}"
 }
 
 # Set KEY=VALUE in an env file, replacing its line or appending one. Rewrites
@@ -151,35 +157,174 @@ compose_volume_exists() {
     --filter "label=com.docker.compose.volume=$2" 2>/dev/null)" ]]
 }
 
-# Replace placeholder passwords and secrets in .env with generated ones, so an
-# install needs no hand-edited credentials; `krate ui` shows the UI login. Run
-# only before containers are (re)created, so .env and the services agree.
-# Keycloak keeps its admin, database and client secrets from its first start,
-# so those are generated only while its database volume does not exist yet.
-# PING_KEYCLOAK_CLIENT_SECRET is issued by PingFederate and left to the site.
-generate_secrets() {
-  [[ -f "$ENV_FILE" ]] || return 0
-  local key keycloak_new="" project generated=()
-  for key in KAFKA_UI_PASSWORD KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET; do
-    case "$(env_value "$key")" in
+# Fill each KEY whose value in an env file is still a placeholder (empty,
+# changeme or REPLACE_ME) with a random secret of the given length, and print
+# the keys filled. Values a site set are never changed.
+fill_secrets() {
+  local file="$1" length="$2" key
+  shift 2
+  for key in "$@"; do
+    case "$(env_value_file "$file" "$key")" in
       ""|changeme|REPLACE_ME) ;;
       *) continue ;;
     esac
-    if [[ "$key" == KEYCLOAK_* && -z "$keycloak_new" ]]; then
-      project="$("${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config 2>/dev/null | awk '/^name:/ { print $2; exit }')"
-      [[ -n "$project" ]] || die "Cannot read the Compose project name to check for an existing Keycloak database."
-      keycloak_new=yes
-      if compose_volume_exists "$project" keycloak_db_data; then
-        keycloak_new=no
-      fi
-    fi
-    [[ "$key" == KEYCLOAK_* && "$keycloak_new" == no ]] && continue
-    set_env_file_value "$ENV_FILE" "$key" "$(random_secret)"
-    generated+=("$key")
+    set_env_file_value "$file" "$key" "$(random_secret "$length")"
+    echo "$key"
   done
-  (( ${#generated[@]} )) || return 0
+}
+
+# The Compose project name of this cluster (its directory name by default).
+compose_project() {
+  local project
+  project="$("${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config 2>/dev/null \
+    | awk '/^name:/ && !found { print $2; found = 1 }')"
+  [[ -n "$project" ]] || die "Cannot read the Compose project name from $COMPOSE_FILE."
+  echo "$project"
+}
+
+# Passwords and secrets of the cluster .env. Keycloak keeps its admin, database
+# and client secrets from its first start, so those are generated only while its
+# database volume does not exist yet. PING_KEYCLOAK_CLIENT_SECRET is issued by
+# PingFederate; `krate auth apply` asks for it.
+generate_secrets() {
+  local keys=(KAFKA_UI_PASSWORD) generated
+  if ! compose_volume_exists "$(compose_project)" keycloak_db_data; then
+    keys+=(KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET)
+  fi
+  generated="$(fill_secrets "$ENV_FILE" 24 "${keys[@]}" | xargs)"
+  if [[ -n "$generated" ]]; then
+    ok "Generated $generated in .env"
+  fi
+}
+
+# monitoring/.env: created from its template, image pins kept current, and its
+# passwords and keys generated. Grafana keeps the admin password from its first
+# start, so that one is generated only before Grafana's volume exists.
+prepare_monitor_env() {
+  local env_file="$MONITOR_DIR/.env" keys=(PERSES_ADMIN_PASSWORD) generated
+  if [[ ! -f "$env_file" ]]; then
+    cp "$MONITOR_DIR/.env.template" "$env_file"
+    ok "Created monitoring/.env from its template"
+  fi
+  chmod 600 "$env_file"
+  sync_image_pins "$env_file" "$MONITOR_DIR/.env.template"
+  if ! compose_volume_exists "krate-${KRATE_VARIANT}-monitoring" grafana_data; then
+    keys+=(GRAFANA_PASSWORD)
+  fi
+  generated="$({ fill_secrets "$env_file" 24 "${keys[@]}"
+    fill_secrets "$env_file" 32 PERSES_ENCRYPTION_KEY OAUTH2_PROXY_COOKIE_SECRET; } | xargs)"
+  if [[ -n "$generated" ]]; then
+    ok "Generated $generated in monitoring/.env"
+  fi
+}
+
+# GNU Make 4+ runs the build (macOS's make is 3.81; Homebrew installs gmake).
+make_cmd() {
+  local bin major
+  for bin in gmake make; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    major="$("$bin" --version 2>/dev/null | sed -n '1s/^GNU Make \([0-9][0-9]*\)\..*/\1/p')"
+    if [[ -n "$major" ]] && (( major >= 4 )); then
+      echo "$bin"
+      return 0
+    fi
+  done
+  die "Building needs GNU Make 4.0 or newer (on macOS: brew install make)."
+}
+
+host_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) die "Unsupported processor: $(uname -m)" ;;
+  esac
+}
+
+# ─── setup: the one preparation step ─────────────────────────────────────────
+# Every command that creates containers (start, install, auth apply, monitor
+# up) runs this first, so nothing is copied or edited by hand: both settings
+# files, image pins, every generated password and secret, the TLS certificate
+# and, in a source checkout, the Kafbat UI image. It only fills what is
+# missing, and never changes a value the site set.
+prepare() {
+  require_compose; require_compose_file
+  if [[ ! -f "$ENV_FILE" ]]; then
+    [[ -f "$ENV_TEMPLATE" ]] || die ".env.template not found in $SCRIPT_DIR"
+    cp "$ENV_TEMPLATE" "$ENV_FILE"
+    ok "Created .env from .env.template"
+  fi
   chmod 600 "$ENV_FILE"
-  ok "Generated ${generated[*]} in $ENV_FILE (show the UI login: krate ui)"
+  sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
+  generate_secrets
+  if [[ -d "$MONITOR_DIR" ]]; then
+    prepare_monitor_env
+  fi
+  ensure_cert
+  ensure_ui_image
+}
+
+cmd_setup() {
+  step "Krate setup"
+  prepare
+  ok "Ready. Start with: krate start   Logins: krate credentials"
+}
+
+# A source checkout runs the Kafbat UI image it builds itself; build it when
+# the pinned one is not on this host. Packages ship the image instead.
+ensure_ui_image() {
+  local image
+  image="$(env_value KAFKA_UI_IMAGE)"
+  [[ "$image" == krate/kafka-ui:*@sha256:* ]] || return 0
+  docker image inspect "${image##*@}" >/dev/null 2>&1 && return 0
+  [[ -n "$REPO_DIR" ]] || die "Kafbat UI image $image is not on this host; install from a package that includes it."
+  warn "Kafbat UI image $image is not on this host; building it."
+  cmd_build
+}
+
+# Build the Kafbat UI image for this host from a source checkout.
+cmd_build() {
+  [[ -n "$REPO_DIR" ]] || die "krate build runs in a source checkout; a package already contains the image."
+  require_docker
+  local make
+  make="$(make_cmd)"
+  info "Building the Kafbat UI image (several minutes; needs Git, Node.js, npm and internet access)..."
+  "$make" -C "$REPO_DIR" kafbat-ui ARCH="$(host_arch)"
+  # The build pins the new image ID in .env.template; carry it into .env.
+  sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
+  ok "Kafbat UI image built"
+}
+
+# Build this edition's offline install package from a source checkout: the
+# Kafbat UI image, Docker OS packages for the target and every pinned image.
+cmd_package() {
+  [[ -n "$REPO_DIR" ]] || die "krate package runs in a source checkout."
+  local version="${1:-}" arch="${2:-}" target_os="${3:-auto}" make
+  [[ "$version" =~ ^v[0-9]+$ ]] || die "Usage: krate package <vN> [amd64|arm64] [auto|none|noble|jammy|rhel9]"
+  [[ -n "$arch" ]] || arch="$(host_arch)"
+  require_docker
+  make="$(make_cmd)"
+  MAKE="$make" "$REPO_DIR/scripts/package-release.sh" "$KRATE_VARIANT" "$version" "$arch" "$target_os"
+  ok "Package written to $REPO_DIR/dist/release/package-${KRATE_VARIANT}-${version}/"
+}
+
+# Every login of this installation, in one place.
+cmd_credentials() {
+  cmd_ui
+  if [[ -f "$MONITOR_DIR/.env" ]]; then
+    echo -e "${BOLD}  Monitoring${RESET}"
+    sep
+    monitor_logins | sed 's/^/  /'
+    sep
+  fi
+  if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
+    echo -e "${BOLD}  Keycloak admin${RESET}"
+    sep
+    echo "  URL       $(env_value KEYCLOAK_PUBLIC_URL)/admin/"
+    echo "  Username  $(env_value KEYCLOAK_ADMIN_USER)"
+    echo "  Password  $(env_value KEYCLOAK_ADMIN_PASSWORD)"
+    sep
+  fi
+  echo -e "  ${DIM}Stored in .env and monitoring/.env (mode 600). Change one with: krate config set KEY=VALUE${RESET}"
 }
 
 # A source checkout pins the locally built Kafbat UI image (make kafbat-ui) as
@@ -225,6 +370,22 @@ compose_cmd() {
   "${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+# The one secret that cannot be generated: PingFederate issues it for Keycloak.
+# Ask for it when SSO is applied interactively; otherwise say how to set it.
+ensure_ping_secret() {
+  local secret
+  case "$(env_value PING_KEYCLOAK_CLIENT_SECRET)" in
+    ""|REPLACE_ME) ;;
+    *) return 0 ;;
+  esac
+  [[ -t 0 ]] || die "Set the client secret PingFederate issued for Keycloak: krate config set PING_KEYCLOAK_CLIENT_SECRET=..."
+  read -rsp "  Client secret PingFederate issued for Keycloak: " secret
+  echo ""
+  [[ -n "$secret" ]] || die "No secret entered."
+  set_env_file_value "$ENV_FILE" PING_KEYCLOAK_CLIENT_SECRET "$secret"
+  ok "Saved PING_KEYCLOAK_CLIENT_SECRET in .env"
+}
+
 cmd_auth() {
   local action="${1:-}" sso_dir="$SCRIPT_DIR/sso"
   [[ -d "$sso_dir" ]] || sso_dir="$SCRIPT_DIR/../sso"
@@ -236,7 +397,8 @@ cmd_auth() {
       ;;
     apply)
       [[ -f "$sso_dir/activate.sh" ]] || die "Missing packaged SSO activation helper"
-      generate_secrets
+      prepare
+      ensure_ping_secret
       # shellcheck disable=SC1091
       source "$sso_dir/activate.sh"
       apply_auth "$sso_dir"
@@ -358,29 +520,16 @@ cmd_install() {
   require_compose_file
   echo ""
 
-  # 2. Credentials
-  info "Checking credentials..."
-  if [[ -f "$ENV_FILE" ]]; then
-    ok ".env found"
-  else
-    [[ -f "$ENV_TEMPLATE" ]] || die ".env.template not found in $SCRIPT_DIR"
-    cp "$ENV_TEMPLATE" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
-    ok "Created .env from template. Change settings with: krate config set KEY=VALUE"
-  fi
-  generate_secrets
-  echo ""
-
-  # 3. Load images
+  # 2. Load images
   cmd_load_images
   echo ""
 
-  # 4. TLS certificate for the UI proxy
-  info "Checking TLS certificate..."
-  ensure_cert
+  # 3. Settings, passwords and certificate
+  info "Preparing settings, passwords and the TLS certificate..."
+  prepare
   echo ""
 
-  # 5. Start and wait for the cluster to become healthy
+  # 4. Start and wait for the cluster to become healthy
   info "Starting cluster..."
   compose_cmd up -d
   echo ""
@@ -388,7 +537,7 @@ cmd_install() {
   echo ""
 
   sep
-  cmd_ui
+  cmd_credentials
   echo ""
   echo -e "  ${DIM}krate status     — check running services"
   echo -e "  krate logs -f    — follow all logs${RESET}"
@@ -411,16 +560,14 @@ cmd_load_images() {
     local name
     name="$(basename "$tar")"
     echo -n "    $name ... "
-    docker load -i "$tar" 2>&1 | grep -oP '(?<=Loaded image: ).*' || echo ""
+    docker load -i "$tar" 2>&1 | sed -n 's/^Loaded image: //p' || echo ""
   done
   ok "All images loaded"
 }
 
 # ─── start ────────────────────────────────────────────────────────────────────
 cmd_start() {
-  require_compose; require_compose_file; require_env
-  ensure_cert
-  generate_secrets
+  prepare
   info "Starting cluster..."
   compose_cmd up -d
   echo ""
@@ -730,7 +877,7 @@ This bundle was built without the observability stack."
   local env_file="$MONITOR_DIR/.env"
   if [[ ! -f "$env_file" ]]; then
     cp "$MONITOR_DIR/.env.template" "$env_file"
-    ok "Created monitoring/.env from template."
+    chmod 600 "$env_file"
   fi
   sync_image_pins "$env_file" "$MONITOR_DIR/.env.template"
 
@@ -760,6 +907,21 @@ This bundle was built without the observability stack."
   "${COMPOSE_BIN[@]}" -p "krate-${KRATE_VARIANT}-monitoring" --env-file "$env_file" -f "$MONITOR_DIR/docker-compose.yml" "$@"
 }
 
+# Grafana and Perses addresses and logins.
+monitor_logins() {
+  local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+  echo "Grafana:  http://$(hostname -f 2>/dev/null || hostname):${port}"
+  echo "User:     $(env_value_file "$MONITOR_DIR/.env" GRAFANA_USER admin)"
+  echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
+  echo "Perses:   https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
+  if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
+    echo "User:     $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_USER admin)"
+    echo "Password: $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_PASSWORD)"
+  else
+    echo "Sign-in:  company SSO ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) mode)"
+  fi
+}
+
 cmd_monitor() {
   local sub="${1:-}"; shift || true
   case "$sub" in
@@ -767,7 +929,7 @@ cmd_monitor() {
       require_compose
       info "Starting observability stack..."
       command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
-      [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]] || die "Perses HTTPS needs $CERT_CRT and $CERT_KEY — run: krate gen-cert"
+      ensure_cert
       monitor_prepare
       # Compose leaves a dropped profile's services running. In local mode remove
       # the SSO services first, so the previous mode's guard cannot act on Perses.
@@ -794,19 +956,7 @@ cmd_monitor() {
         die "Reload failed — is the stack up?"
       fi
       ;;
-    ui)
-      local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
-      echo "Grafana:  http://$(hostname -f 2>/dev/null || hostname):${port}"
-      echo "User:     $(env_value_file "$MONITOR_DIR/.env" GRAFANA_USER admin)"
-      echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
-      echo "Perses:   https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
-      if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
-        echo "User:     $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_USER admin)"
-        echo "Password: $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_PASSWORD)"
-      else
-        echo "Sign-in:  company SSO ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) mode)"
-      fi
-      ;;
+    ui) monitor_logins ;;
     *)
       echo "Usage: krate monitor {up|down|status|logs|reload|ui}"
       return 1 ;;
@@ -826,19 +976,10 @@ env_value_file() {
 # unsafe defaults, before the monitoring-init renderer reads monitoring/.env.
 monitor_prepare() {
   local env_file="$MONITOR_DIR/.env"
-  if [[ ! -f "$env_file" ]]; then
-    cp "$MONITOR_DIR/.env.template" "$env_file"
-    ok "Created monitoring/.env from template."
-  fi
-  chmod 600 "$env_file"
+  prepare_monitor_env
   mkdir -p "$MONITOR_DIR/auth/perses"
-  # Grafana keeps its admin password from its first start.
-  local grafana_new=yes
-  if compose_volume_exists "krate-${KRATE_VARIANT}-monitoring" grafana_data; then
-    grafana_new=no
-  fi
-  python3 - "$env_file" "$grafana_new" <<'PY' || die "monitoring/.env is not ready for the Perses stack (see above)."
-import re, secrets, string, sys
+  python3 - "$env_file" <<'PY' || die "monitoring/.env is not ready for the Perses stack (see above)."
+import re, sys
 path = sys.argv[1]
 text = open(path).read()
 
@@ -846,33 +987,7 @@ def value(key):
     found = re.findall(r'^%s=(.*)$' % re.escape(key), text, re.M)
     return found[-1].strip().strip('"\'') if found else ''
 
-def assign(key, new):
-    global text
-    if re.search(r'^%s=' % re.escape(key), text, re.M):
-        text = re.sub(r'^%s=.*$' % re.escape(key), lambda _: key + '=' + new, text, flags=re.M)
-    else:
-        text += ('' if text.endswith('\n') else '\n') + key + '=' + new + '\n'
-
-alphabet = string.ascii_letters + string.digits
-placeholders = ('', 'changeme', 'REPLACE_ME')
-generated = []
-if value('PERSES_ADMIN_PASSWORD') in placeholders:
-    assign('PERSES_ADMIN_PASSWORD', ''.join(secrets.choice(alphabet) for _ in range(24)))
-    generated.append('PERSES_ADMIN_PASSWORD')
-if sys.argv[2] == 'yes' and value('GRAFANA_PASSWORD') in placeholders:
-    assign('GRAFANA_PASSWORD', ''.join(secrets.choice(alphabet) for _ in range(24)))
-    generated.append('GRAFANA_PASSWORD')
-if not value('PERSES_ENCRYPTION_KEY'):
-    assign('PERSES_ENCRYPTION_KEY', ''.join(secrets.choice(alphabet) for _ in range(32)))
-    generated.append('PERSES_ENCRYPTION_KEY')
 mode = value('PERSES_AUTH_MODE') or 'local'
-if mode in ('native', 'gateway') and not value('OAUTH2_PROXY_COOKIE_SECRET'):
-    assign('OAUTH2_PROXY_COOKIE_SECRET', ''.join(secrets.choice(alphabet) for _ in range(32)))
-    generated.append('OAUTH2_PROXY_COOKIE_SECRET')
-if generated:
-    with open(path, 'w') as stream:
-        stream.write(text)
-    print('  Generated ' + ', '.join(generated) + ' in monitoring/.env (show the logins: krate monitor ui)')
 if mode == 'local' and len(value('PERSES_ADMIN_PASSWORD')) < 12:
     sys.exit('  PERSES_ADMIN_PASSWORD in monitoring/.env is shorter than 12 characters; set a longer one or empty it to generate one.')
 if mode in ('native', 'gateway') and not value('OAUTH2_PROXY_CLIENT_SECRET'):
@@ -1342,14 +1457,18 @@ cmd_lag() {
 # ─── help ─────────────────────────────────────────────────────────────────────
 cmd_help() {
   echo ""
-  echo -e "${BOLD}kafka${RESET} — Kafka cluster management CLI"
+  echo -e "${BOLD}krate${RESET} — Kafka cluster management CLI"
   echo ""
   echo -e "${BOLD}USAGE${RESET}"
-  echo "  kafka <command> [options]"
+  echo "  krate <command> [options]"
   echo ""
   echo -e "${BOLD}COMMANDS${RESET}"
-  printf "  %-30s %s\n" "install"              "First-time setup: load images, configure, start"
-  printf "  %-30s %s\n" "start"                "Start all services"
+  printf "  %-30s %s\n" "install"              "Package: checks, load images, setup, start"
+  printf "  %-30s %s\n" "start"                "Setup if needed, then start all services"
+  printf "  %-30s %s\n" "setup"                "Create settings, passwords and certificate; build the UI image in a checkout"
+  printf "  %-30s %s\n" "credentials"          "Show every login (Kafbat UI, Grafana, Perses, Keycloak)"
+  printf "  %-30s %s\n" "build"                "Checkout: rebuild the Kafbat UI image for this host"
+  printf "  %-30s %s\n" "package <vN> [arch] [os]" "Checkout: build this edition's offline install package"
   printf "  %-30s %s\n" "stop"                 "Stop all services (data preserved)"
   printf "  %-30s %s\n" "restart [service]"    "Restart all or a specific service"
   printf "  %-30s %s\n" "down"                 "Remove containers (volumes preserved)"
@@ -1376,7 +1495,10 @@ cmd_help() {
   echo ""
   echo -e "${BOLD}EXAMPLES${RESET}"
   echo "  krate doctor                          # preflight checks before installing"
-  echo "  krate install                         # full first-time setup"
+  echo "  krate start                           # from a checkout: set up and start"
+  echo "  krate install                         # from a package: set up and start"
+  echo "  krate credentials                     # every login"
+  echo "  krate package v3 amd64                # offline package for an x86_64 VM"
   echo "  krate logs -f kafka-92                # tail broker 92 logs"
   echo "  krate restart kafka-ui                # restart Kafbat UI"
   echo "  krate config set KAFKA_UI_USER=admin"
@@ -1388,7 +1510,7 @@ cmd_help() {
   echo "  krate uninstall --purge               # full teardown + data wipe"
   echo ""
   echo -e "${BOLD}SERVICES${RESET}"
-  echo "  zookeeper   kafka-92   kafka-93   kafka-94   kafka-95   kafka-ui"
+  echo "  kafka-92   kafka-93   kafka-94   kafka-95   kafka-ui   proxy"
   echo ""
 }
 
@@ -1400,6 +1522,10 @@ case "$CMD" in
   install)        cmd_install "$@" ;;
   load-images)    cmd_load_images ;;
   start)          cmd_start ;;
+  setup)          cmd_setup ;;
+  credentials)    cmd_credentials ;;
+  build)          cmd_build ;;
+  package)        cmd_package "$@" ;;
   stop)           cmd_stop ;;
   restart)        cmd_restart "$@" ;;
   down)           cmd_down ;;
