@@ -73,6 +73,13 @@ def site_settings(path, mode):
     return site
 
 
+def bounded_int(site, key, default, low, high):
+    value = site.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ConfigError('site settings: %s must be a whole number between %d and %d' % (key, low, high))
+    return value
+
+
 def yaml_string(value):
     return json.dumps(value)
 
@@ -158,12 +165,8 @@ def perses_provisioning(mode, env, site):
 def oauth2_proxy_config(site, env):
     public = site['public_url']
     host = urlsplit(public).netloc
-    minutes = int(site.get('group_proof_minutes', 15))
-    if not 1 <= minutes <= 60:
-        raise ConfigError('site settings: group_proof_minutes must be between 1 and 60')
-    hours = int(site.get('session_hours', 8))
-    if not 1 <= hours <= 24:
-        raise ConfigError('site settings: session_hours must be between 1 and 24')
+    minutes = bounded_int(site, 'group_proof_minutes', 15, 1, 60)
+    hours = bounded_int(site, 'session_hours', 8, 1, 24)
     scopes = ' '.join(site.get('scopes', ['openid', 'profile', 'email']))
     settings = {
         'provider': 'oidc',
@@ -211,7 +214,7 @@ def sync_config(mode, site):
         'listen_port': 9091, 'verify_ttl': 30,
         # A user not seen with a current IdP proof for one proof period plus a
         # margin loses their grants; the next authenticated request restores them.
-        'grant_ttl': int(site.get('group_proof_minutes', 15)) * 60 + 120,
+        'grant_ttl': bounded_int(site, 'group_proof_minutes', 15, 1, 60) * 60 + 120,
     }
     if mode == 'native':
         config.update({'service_client_id': site['service_client_id'],
@@ -233,6 +236,9 @@ server {
     ssl_certificate_key /etc/nginx/certs/server.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     client_max_body_size 8m;
+    # nginx listens on 3443 here; PERSES_PORT may publish another port, so
+    # redirects keep the browser's own host and port.
+    absolute_redirect off;
     # OAuth2 Proxy keeps its session in cookies; responses and requests carry
     # them, so the default 4k/8k header buffers are too small.
     large_client_header_buffers 8 32k;
@@ -374,8 +380,8 @@ map $request_uri $krate_return {
 
 def gateway_config(mode, env):
     port = env.get('PERSES_PORT', '3443')
-    if not port.isdigit():
-        raise ConfigError('PERSES_PORT must be a port number')
+    if not re.fullmatch(r'[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
+        raise ConfigError('PERSES_PORT must be a port number from 1 to 65535')
     perses = GATEWAY_FORWARD + GATEWAY_INJECT + ('' if mode == 'local' else GATEWAY_COOKIE_ONLY)
     body = (GATEWAY_LOCAL if mode == 'local' else GATEWAY_SSO) % {'inject': indent(perses, 8)}
     return GATEWAY_HTTP + GATEWAY_COMMON % {'port': port, 'forward': indent(GATEWAY_FORWARD, 4)} + body
@@ -428,7 +434,10 @@ def alertmanager_config(env):
 def write(path, content, uid, mode=0o400):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name('.' + path.name + '.tmp')
-    temporary.write_text(content)
+    # Never follow or reuse something already at the temporary path.
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'w') as handle:
+        handle.write(content)
     os.chown(temporary, uid, uid)
     os.chmod(temporary, mode)
     os.replace(temporary, path)

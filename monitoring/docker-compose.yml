@@ -12,6 +12,11 @@ networks:
     name: ${KAFKA_NETWORK}
   monitoring:
     driver: bridge
+  # Perses, its gateway and guard, and the two datasources Perses queries. No
+  # other monitoring service can reach Perses or the guard; users come in only
+  # through perses-gateway. Not internal: Perses and OAuth2 Proxy call the IdP.
+  perses:
+    driver: bridge
 
 volumes:
   prometheus_data:
@@ -100,7 +105,7 @@ services:
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=${PROM_RETENTION:-15d}
       - --web.enable-lifecycle
-    networks: [monitoring]
+    networks: [monitoring, perses]
     depends_on: [kafka-exporter]
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/healthy || exit 1"]
@@ -299,7 +304,7 @@ services:
       - -httpListenAddr=:9428
     volumes:
       - victorialogs_data:/victoria-logs-data
-    networks: [monitoring]
+    networks: [monitoring, perses]
     logging:
       driver: "json-file"
       options: { max-size: "20m", max-file: "3" }
@@ -352,7 +357,7 @@ services:
       - perses_data:/perses
       - ./perses/provisioning:/etc/krate/perses/provisioning:ro,z
       - perses_rendered:/etc/krate/perses/rendered:ro
-    networks: [monitoring]
+    networks: [perses]
     depends_on:
       monitoring-init:
         condition: service_completed_successfully
@@ -384,7 +389,7 @@ services:
       PERSES_ADMIN_PASSWORD: ${PERSES_ADMIN_PASSWORD:-}
       PERSES_SYNC_CLIENT_SECRET: ${PERSES_SYNC_CLIENT_SECRET:-}
     command: ["python3", "/etc/krate/perses/seed.py"]
-    networks: [monitoring]
+    networks: [perses]
     depends_on:
       perses:
         condition: service_started
@@ -409,7 +414,7 @@ services:
       - ./perses/gateway:/etc/krate/perses-gateway:ro,z
       # krate monitor up sets the cluster's certificate directory.
       - ${PERSES_CERTS_DIR:-../certs}:/etc/nginx/certs:ro,z
-    networks: [monitoring]
+    networks: [perses]
     depends_on:
       monitoring-init:
         condition: service_completed_successfully
@@ -442,7 +447,7 @@ services:
       OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:-}
     volumes:
       - oauth2_proxy_rendered:/etc/oauth2-proxy:ro
-    networks: [monitoring]
+    networks: [perses]
     depends_on:
       monitoring-init:
         condition: service_completed_successfully
@@ -470,7 +475,7 @@ services:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
       PYTHONDONTWRITEBYTECODE: "1"
     command: ["python3", "/etc/krate/perses-sync/app/perses_sync.py", "--config", "/etc/krate/perses-sync/rendered/config.json"]
-    networks: [monitoring]
+    networks: [perses]
     depends_on:
       monitoring-init:
         condition: service_completed_successfully

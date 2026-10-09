@@ -23,7 +23,11 @@ Perses v0.54.0 is reachable only through the `perses-gateway` nginx service on
 `PERSES_PORT`, which serves HTTPS with the cluster certificate
 (`certs/server.crt` and `certs/server.key`; create them with `./krate gen-cert`
 or install your own). Perses, VictoriaLogs, Alertmanager, OAuth2 Proxy and the
-access guard publish no host ports.
+access guard publish no host ports. Perses, the gateway, OAuth2 Proxy and the
+guard run on their own `perses` network, which Prometheus and VictoriaLogs join
+as Perses' datasources; Grafana and the other monitoring services cannot reach
+Perses or the guard. The network is not internal, because Perses and OAuth2
+Proxy call the IdP.
 
 Dashboards: **Krate — Cluster Overview**, **Consumer Groups**, **Host & Disk**
 (the Grafana dashboards with the same queries, units, thresholds and layout,

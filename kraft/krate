@@ -629,10 +629,12 @@ This bundle was built without the observability stack."
   esac
   [[ "$1" == "up" ]] || profiles="perses-sso"
 
-  # Recreate the rendered-config consumers whenever their inputs change.
+  # Recreate the rendered-config consumers whenever their inputs change,
+  # including a renewed gateway certificate.
   local revision
   revision="$(find "$env_file" "$MONITOR_DIR/auth/perses" "$MONITOR_DIR/render.py" "$MONITOR_DIR/perses" \
-    -type f ! -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort | xargs cat 2>/dev/null | cksum | cut -d' ' -f1)"
+    "$CERT_CRT" "$CERT_KEY" -type f ! -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort | xargs cat 2>/dev/null \
+    | cksum | cut -d' ' -f1)"
 
   KRATE_RENDER_REVISION="$revision" \
   COMPOSE_PROFILES="$profiles" \

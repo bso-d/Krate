@@ -210,16 +210,26 @@ class Http:
 
 
 class Ledger:
-    """Persisted record of managed users, so expiry and restarts revoke them."""
+    """Record of managed users, so expiry and restarts revoke them.
+
+    The file is rewritten only when an entry changes. The last-seen time stays
+    in memory: a restart revokes every recorded user regardless of it.
+    """
 
     def __init__(self, path):
         self.path = Path(path)
         self.lock = threading.Lock()
         try:
-            self.users = json.loads(self.path.read_text())
-            if not isinstance(self.users, dict):
-                raise ValueError('ledger is not an object')
+            users = json.loads(self.path.read_text())
+            if not isinstance(users, dict) or not all(isinstance(v, dict) for v in users.values()):
+                raise ValueError('ledger is not an object of entries')
+            self.users = users
         except FileNotFoundError:
+            self.users = {}
+        except ValueError as exc:
+            # Startup still deletes every managed binding; keep the file for inspection.
+            sys.stderr.write('perses-sync: ledger unreadable (%s); moved to %s\n' % (exc, self.path.with_suffix('.corrupt')))
+            os.replace(self.path, self.path.with_suffix('.corrupt'))
             self.users = {}
 
     def save(self):
@@ -229,8 +239,11 @@ class Ledger:
 
     def touch(self, key, entry):
         with self.lock:
+            current = self.users.get(key) or {}
+            changed = {k: v for k, v in current.items() if k != 'seen'} != entry
             self.users[key] = dict(entry, seen=time.time())
-            self.save()
+            if changed:
+                self.save()
 
     def forget(self, key):
         with self.lock:
@@ -251,8 +264,9 @@ class Reconciler:
         self.ledger = ledger
         self.service_token = None
         self.token_lock = threading.Lock()
-        self.user_locks = {}
-        self.locks_lock = threading.Lock()
+        # Bindings are read, changed and written back; one lock keeps two users'
+        # changes to a shared binding from undoing each other.
+        self.lock = threading.RLock()
         self.verified = {}
 
     def token(self):
@@ -270,10 +284,6 @@ class Reconciler:
                 raise Denied(403, 'service token request returned %d' % status)
             self.service_token = json.loads(data)['access_token']
             return self.service_token
-
-    def lock_for(self, user):
-        with self.locks_lock:
-            return self.user_locks.setdefault(user, threading.Lock())
 
     def whoami(self, user_token):
         status, _, data = self.perses.request('GET', '/api/v1/user/whoami',
@@ -302,18 +312,28 @@ class Reconciler:
             raise Denied(403, 'Perses identity does not match the gateway session')
         return name
 
+    def fresh(self, key, name, role):
+        cached = self.verified.get(key)
+        return bool(cached and cached[:2] == (role, name) and time.time() - cached[2] < self.settings['verify_ttl'])
+
     def ensure(self, name, subject, role, user_token):
         """Reconcile and confirm, at most once per verify_ttl for an unchanged role."""
         key = subject_hash(self.settings['issuer'], subject)
-        cached = self.verified.get(key)
-        if cached and cached[0] == role and cached[1] == name and time.time() - cached[2] < self.settings['verify_ttl']:
-            self.ledger.touch(key, {'user': name, 'subject': subject, 'role': role})
+        entry = {'user': name, 'subject': subject, 'role': role}
+        if self.fresh(key, name, role):
+            self.ledger.touch(key, entry)
             return
-        with self.lock_for(key):
+        with self.lock:
+            if self.fresh(key, name, role):
+                self.ledger.touch(key, entry)
+                return
+            # Record the user first: if anything below fails, the grant it may have
+            # left is still revoked by the group checks, the sweep and a restart.
+            self.verified.pop(key, None)
+            self.ledger.touch(key, entry)
             self.apply(name, subject, role)
             self.confirm(name, role, user_token)
             self.verified[key] = (role, name, time.time())
-            self.ledger.touch(key, {'user': name, 'subject': subject, 'role': role})
 
     def apply(self, name, subject, role):
         token = self.token()
@@ -385,9 +405,9 @@ class Reconciler:
             raise Denied(403, 'revoked user still has permissions')
 
     def revoke(self, key, entry):
-        with self.lock_for(key):
-            self.apply(entry['user'], entry['subject'], None)
+        with self.lock:
             self.verified.pop(key, None)
+            self.apply(entry['user'], entry['subject'], None)
             self.ledger.forget(key)
 
     def sweep(self, now=None):
@@ -492,12 +512,12 @@ class Guard:
             return
         try:
             user = self.reconciler.whoami(token)
-        except Denied:
-            return
-        name = (user or {}).get('metadata', {}).get('name')
-        for key, entry in self.reconciler.ledger.snapshot().items():
-            if entry.get('user') == name:
-                self.reconciler.revoke(key, entry)
+            name = (user or {}).get('metadata', {}).get('name')
+            for key, entry in self.reconciler.ledger.snapshot().items():
+                if entry.get('user') == name:
+                    self.reconciler.revoke(key, entry)
+        except Exception as exc:  # The answer stays 401; the sweep revokes later.
+            sys.stderr.write('perses-sync: revoking after a lost session failed: %r\n' % (exc,))
 
     def revoke_known(self, subject):
         key = subject_hash(self.settings['issuer'], subject)
@@ -551,7 +571,7 @@ def make_handler(guard):
         def send(self, status, headers=(), body=b''):
             self.send_response(status)
             for name, value in headers:
-                if name.lower() not in ('transfer-encoding', 'connection', 'content-length'):
+                if name.lower() not in ('transfer-encoding', 'connection', 'content-length', 'date', 'server'):
                     self.send_header(name, value)
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store')
@@ -561,7 +581,12 @@ def make_handler(guard):
         def denied(self, exc):
             self.log_message('deny %s %s: %s', self.headers.get('X-Original-Method', self.command),
                              self.headers.get('X-Original-URI', self.path).split('?', 1)[0], exc.reason)
-            self.send(exc.status, relay(exc.cookies))
+            try:
+                headers = relay(exc.cookies)
+            except ValueError as error:
+                self.log_message('%s', error)
+                headers = []
+            self.send(exc.status, headers)
 
         def do_GET(self):
             if self.path == '/healthz':
