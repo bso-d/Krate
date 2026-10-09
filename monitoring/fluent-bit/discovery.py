@@ -122,15 +122,14 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     # The generation marker is on tmpfs, so previous-container readiness cannot
-    # pass health even before this process initializes. Publish only after a
-    # clean scan, and stop publishing while errors persist.
+    # pass health even before this process initializes. Only an error-free
+    # cycle publishes readiness.
     args.sources.mkdir(parents=True, exist_ok=True)
     (args.sources / '.ready').unlink(missing_ok=True)
     (args.sources / '.ready.tmp').unlink(missing_ok=True)
     generation = uuid.uuid4().hex
     args.generation_file.parent.mkdir(parents=True, exist_ok=True)
     args.generation_file.write_text(generation)
-    clean_once = False
     error_cycles = 0
     while running:
         try:
@@ -140,15 +139,13 @@ def main():
             errors = 1
             print('Krate discovery: refresh failed: ' + str(exc), file=sys.stderr)
         error_cycles = error_cycles + 1 if errors else 0
-        if not errors:
-            clean_once = True
-        if clean_once and error_cycles < args.max_error_cycles:
-            ready = args.sources / '.ready.tmp'
-            ready.write_text(json.dumps({'updated': time.time(), 'errors': errors,
-                                         'error_cycles': error_cycles, 'generation': generation}))
-            os.replace(ready, args.sources / '.ready')
-        else:
+        if errors:
+            # Any erroring cycle is unhealthy at once; only a clean cycle republishes.
             (args.sources / '.ready').unlink(missing_ok=True)
+        else:
+            ready = args.sources / '.ready.tmp'
+            ready.write_text(json.dumps({'updated': time.time(), 'generation': generation}))
+            os.replace(ready, args.sources / '.ready')
         if args.once:
             return 0 if not errors else 1
         if error_cycles >= args.max_error_cycles:
