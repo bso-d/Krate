@@ -264,6 +264,8 @@ bundle: offline-check
 >    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py "$$bundle_dir/monitoring/"
 >    cp monitoring/README.md "$$bundle_dir/monitoring/"
 >    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit "$$bundle_dir/monitoring/"
+>    # Local test runs leave Python bytecode beside discovery.py; never ship it.
+>    find "$$bundle_dir/monitoring" -name __pycache__ -type d -prune -exec rm -rf {} +
 >    # Only the local default is copied: never stage site auth files or secrets.
 >    mkdir -p "$$bundle_dir/monitoring/auth"
 >    cp monitoring/auth/local.ini "$$bundle_dir/monitoring/auth/local.ini"

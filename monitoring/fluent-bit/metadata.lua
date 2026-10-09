@@ -3,7 +3,9 @@ local source = debug.getinfo(1, 'S').source:sub(2)
 local directory = source:match('^(.*)/') or '.'
 local json = dofile(directory .. '/vendor/dkjson.lua')
 local root = os.getenv('KRATE_DOCKER_ROOT') or '/var/lib/docker/containers'
+local log_root = os.getenv('KRATE_LOG_ROOT') or '/sources'
 local collector = os.getenv('KRATE_COLLECTOR_CONTAINER')
+local discovery = os.getenv('KRATE_DISCOVERY_CONTAINER')
 local cache = {}
 local cache_size = 0
 
@@ -51,15 +53,15 @@ function enrich(tag, timestamp, record)
         return -1, timestamp, record
     end
     local path = record.filepath
-    if type(path) ~= 'string' or path:sub(1, #root + 1) ~= root .. '/' then
+    if type(path) ~= 'string' or path:sub(1, #log_root + 1) ~= log_root .. '/' then
         return -1, timestamp, record
     end
-    local id, filename = path:sub(#root + 2):match('^(%x+)/([^/]+)$')
+    local id, filename = path:sub(#log_root + 2):match('^(%x+)/([^/]+)$')
     if not id or #id ~= 64 or filename ~= id .. '-json.log' then
         return -1, timestamp, record
     end
     local name = metadata_name(id, now)
-    if not name or name == collector or not (name:match('^krate%-') or name:match('^epc%-')) then
+    if not name or name == collector or name == discovery or not (name:match('^krate%-') or name:match('^epc%-')) then
         return -1, timestamp, record
     end
     record.container = name

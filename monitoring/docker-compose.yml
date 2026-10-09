@@ -18,6 +18,7 @@ volumes:
   grafana_data:
   loki_data:
   fluent_bit_state:
+  fluent_bit_sources:
 
 services:
   # ── kafka-exporter — cluster/topic/consumer-group metrics as a Kafka client ──
@@ -116,10 +117,41 @@ services:
       retries: 10
       start_period: 30s
 
-  # ── Fluent Bit — ships container logs to Loki ──────────────────────────────
+  # Metadata-only discovery admits selected files before Fluent Bit tails them.
+  log-discovery:
+    image: ${LOG_DISCOVERY_IMAGE:?Merge LOG_DISCOVERY_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-log-discovery
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.1
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /run/krate:size=64k,mode=0700,noexec,nosuid,nodev
+    volumes:
+      - ./fluent-bit:/etc/krate/fluent-bit:ro,z
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - fluent_bit_sources:/sources
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      KRATE_EXCLUDED_CONTAINERS: ${MONITOR_PROJECT:-krate-monitoring}-fluent-bit,${MONITOR_PROJECT:-krate-monitoring}-log-discovery
+    command: ["python3", "/etc/krate/fluent-bit/discovery.py"]
+    healthcheck:
+      test: ["CMD", "python3", "/etc/krate/fluent-bit/discovery.py", "--health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }
+
+  # ── Fluent Bit — ships selected container logs to Loki ─────────────────────
   # Read-only Docker metadata supplies names; no Docker API socket is mounted.
   fluent-bit:
-    image: ${FLUENT_BIT_IMAGE}
+    image: ${FLUENT_BIT_IMAGE:?Merge FLUENT_BIT_IMAGE from monitoring/.env.template into .env}
     container_name: ${MONITOR_PROJECT:-krate-monitoring}-fluent-bit
     restart: unless-stopped
     stop_grace_period: 40s
@@ -129,11 +161,17 @@ services:
       - ./fluent-bit:/etc/krate/fluent-bit:ro,z
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - fluent_bit_state:/state
+      - fluent_bit_sources:/sources:ro
     environment:
       KRATE_COLLECTOR_CONTAINER: ${MONITOR_PROJECT:-krate-monitoring}-fluent-bit
+      KRATE_DISCOVERY_CONTAINER: ${MONITOR_PROJECT:-krate-monitoring}-log-discovery
     command: ["-c", "/etc/krate/fluent-bit/fluent-bit.conf"]
     networks: [monitoring]
-    depends_on: [loki]
+    depends_on:
+      loki:
+        condition: service_started
+      log-discovery:
+        condition: service_healthy
     logging:
       driver: "json-file"
       options: { max-size: "20m", max-file: "3" }

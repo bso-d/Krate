@@ -12,7 +12,8 @@ editable email contact point/rules remain in place.
    collectors under the same Compose project. Do not use `down -v`.
 2. Copy the new monitoring tree and merge the new `.env.template` into the site
    `.env`, preserving ports, SMTP, Grafana credentials and auth/token-file
-   settings. Replace `PROMTAIL_IMAGE` with the new `FLUENT_BIT_IMAGE` reference
+   settings. Replace `PROMTAIL_IMAGE` with the new `FLUENT_BIT_IMAGE` and
+   `LOG_DISCOVERY_IMAGE` references
    from the **same extracted offline bundle**; its saved runtime tag is what
    the disconnected host can load. Keep existing `grafana_data`, `loki_data`
    and `prometheus_data` volumes. Keep the old Promtail positions volume for
@@ -20,7 +21,9 @@ editable email contact point/rules remain in place.
 3. Load the new bundle's saved images before running `./krate monitor up`.
    The CLI still seeds the editable Grafana notification rules. Check Grafana
    Explore for `job="containerlogs"` with the expected container labels and
-   check the collector logs for metadata, tail, storage or output failures.
+   check discovery health and collector logs for metadata, tail, storage or
+   output failures. Discovery scans metadata periodically; only selected
+   Krate/EPC files are exposed to the collector before any log payload is read.
 
 On the first Fluent Bit run, available files are replayed from the head, subject
 to the seven-day cutoff. Existing Loki lines can therefore be duplicated;

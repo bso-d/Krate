@@ -2,14 +2,39 @@
 
 Fluent Bit 5.1.3 replaces the EOL shared Promtail collector. The built-in Loki
 output keeps `job=containerlogs`, `container`, `container_id` and `stream` labels.
-`metadata.lua` reads only the top-level Docker `Name` field from `config.v2.json`;
-the Docker API socket is no longer needed. The metadata cache refreshes every
-five seconds and retains at most 256 container identities. Only names beginning
-`krate-` or `epc-` are selected; the collector excludes itself. Missing/invalid
+The `log-discovery` helper scans only metadata every five seconds and exposes
+symlinks for names beginning `krate-` or `epc-` in the dedicated sources volume.
+Fluent Bit tails that allowlist, so unrelated containers' log payloads never
+enter Docker fragment decoding, Java assembly, offsets or filesystem buffering.
+The helper never opens log payloads. It has no network, a read-only root filesystem
+and a separate 64 MiB/0.1 CPU budget. `krate monitor up` starts the collector
+only after a clean initial discovery scan. After a Docker daemon restart or host
+reboot the restart policy starts both without that ordering; the collector then
+tails the sources kept in the volume, which still point at the same container
+IDs with their saved offsets. Recreated IDs are discovered without a collector
+restart. Discovery plus tail refresh can take roughly ten seconds, so a
+container that starts and is removed within that window is not collected. Both
+collector and discovery containers are excluded.
+
+Readiness is bound to a fresh startup generation on a 64 KiB tmpfs; a persisted
+receipt from the previous container cannot satisfy the initial-discovery gate.
+A container whose metadata cannot be read keeps its existing source rather than
+being pruned, because removing a tailed link makes Fluent Bit drop that file's
+offset and re-admission would replay the whole log. Only containers that were
+positively renamed out of scope or removed are pruned; Fluent Bit keeps reading
+a pruned file for its 30-second rotate wait and the Lua guard drops those lines.
+Metadata or pruning errors make the helper unhealthy, and after twelve
+consecutive erroring cycles (about a minute) it exits so its restart policy
+shows the problem in `krate monitor status` instead of collecting less silently.
+
+`metadata.lua` verifies the top-level Docker `Name` again for each admitted
+container, with a five-second cache and at most 256 identities. Neither service
+needs the Docker API socket. Missing/invalid
 metadata for unknown containers is rejected and reported in collector logs.
 Previously identified removed containers can drain using their cached name.
 
 The named state volume holds the SQLite tail offsets and filesystem chunks.
+The separate sources volume holds only symlinks and the discovery health receipt.
 Tail compares filename and inode, watches rotated open files for 30 seconds,
 and reads a new file from its head. Docker fragment reassembly precedes Java
 stacktrace joining. Tags include the file path, so different containers have
@@ -45,6 +70,13 @@ The only collector output is the monitoring network's Loki service.
   unchanged `vendor/dkjson.lua`. Source: <https://dkolf.de/dkjson-lua/dkjson-2.11.lua>.
   SHA-256: `197cb50834c642f84b4cf99fe724932c50e6d9c92faec7ad89aa25e91df4d481`.
   LPeg is optional upstream and is not bundled or required here.
+- Discovery uses the official Python 3.14.8 slim-trixie image, pinned for Linux
+  amd64/arm64. Its Python license, bundled Expat notice, exact Debian inventory
+  and dependency notices are retained and hash-checked under
+  [vendor/discovery-notices](vendor/discovery-notices/README.md). Both architectures
+  have 87 Debian packages covering the same 61 source versions; one binary
+  package has an architecture-specific rebuild. GPL tools and LGPL libraries
+  are included, so their redistribution obligations remain applicable.
 - The selected official image uses distroless Debian 13 and additional Debian
   runtime libraries. Its Apache OCI label describes the project, not every
   component. The upstream build copies libcurl, OpenSSL, systemd, gcrypt, GnuTLS,
