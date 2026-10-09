@@ -98,11 +98,39 @@ require_env() {
   fi
 }
 
+# Image pins belong to the release, not the site: keep every *_IMAGE in an .env
+# equal to its template, so an .env copied from an older package or before a
+# `make kafbat-ui` rebuild never sends Compose after an image that is not here.
+# Other settings are left alone. To change a pin, edit the template, or export
+# the variable in the shell for one run (Compose prefers it over the .env).
+sync_image_pins() {
+  local env_file="$1" template="$2" keys tmp
+  [[ -f "$env_file" && -f "$template" ]] || return 0
+  keys="$(awk -F= '
+    NR == FNR { if ($1 ~ /^[A-Z0-9_]+_IMAGE$/) pin[$1] = substr($0, length($1) + 2); next }
+    $1 in pin { cur[$1] = substr($0, length($1) + 2); seen[$1] = 1 }
+    END { for (k in pin) if (!(k in seen) || cur[k] != pin[k]) print k }
+  ' "$template" "$env_file" | LC_ALL=C sort | xargs)"
+  [[ -n "$keys" ]] || return 0
+  tmp="$(mktemp)"
+  awk -F= '
+    NR == FNR { if ($1 ~ /^[A-Z0-9_]+_IMAGE$/) pin[$1] = substr($0, length($1) + 2); next }
+    $1 in pin { seen[$1] = 1; $0 = $1 "=" pin[$1] }
+    { print }
+    END { for (k in pin) if (!(k in seen)) print k "=" pin[k] }
+  ' "$template" "$env_file" > "$tmp" || { rm -f "$tmp"; die "Cannot update image pins in $env_file"; }
+  # Rewrite in place so the file keeps its owner and mode (it holds secrets).
+  cat "$tmp" > "$env_file"
+  rm -f "$tmp"
+  warn "Updated $keys in $env_file to match ${template##*/}" >&2
+}
+
 # A source checkout pins the locally built Kafbat UI image (make kafbat-ui) as
 # krate/kafka-ui:...@<image ID>. That image has no registry digest, and Docker's
 # classic image store resolves name@digest only against registry digests, so
 # pass Compose the bare image ID. Packages use krate-offline tags instead.
 resolve_local_ui_image() {
+  local action="${1:-}"
   # A set KAFKA_UI_IMAGE, even an empty one, overrides .env for Compose.
   local image
   if [[ -n "${KAFKA_UI_IMAGE+set}" ]]; then
@@ -112,13 +140,18 @@ resolve_local_ui_image() {
   fi
   [[ "$image" == krate/kafka-ui:*@sha256:* ]] || return 0
   docker image inspect "$image" >/dev/null 2>&1 && return 0
-  docker image inspect "${image##*@}" >/dev/null 2>&1 || return 0
-  export KAFKA_UI_IMAGE="${image##*@}"
+  if docker image inspect "${image##*@}" >/dev/null 2>&1; then
+    export KAFKA_UI_IMAGE="${image##*@}"
+  elif [[ "$action" == up ]]; then
+    # Compose would try Docker Hub, where this locally built image never exists.
+    die "Kafbat UI image $image is not built on this host. Build it from the repository root: make kafbat-ui"
+  fi
 }
 
 # Wrapper so all compose calls use the right files and detected binary
 compose_cmd() {
-  resolve_local_ui_image
+  sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
+  resolve_local_ui_image "${1:-}"
   if [[ -f "$ENV_FILE" && "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
     local version
     version="$(get_compose_version)"
@@ -541,6 +574,7 @@ cmd_config() {
       [[ -z "$kv" ]] && die "Usage: krate config set KEY=VALUE"
       local key="${kv%%=*}"
       local val="${kv#*=}"
+      [[ "$key" =~ ^[A-Z0-9_]+_IMAGE$ ]] && die "Image pins come from .env.template; change $key there, or export it in the shell for one run."
       [[ -f "$ENV_FILE" ]] || cp "$ENV_TEMPLATE" "$ENV_FILE"
       if grep -qE "^${key}=" "$ENV_FILE"; then
         # Use a temp file for portability (avoids sed -i differences)
@@ -639,6 +673,7 @@ This bundle was built without the observability stack."
     cp "$MONITOR_DIR/.env.template" "$env_file"
     warn "Created monitoring/.env from template (default Grafana credentials)."
   fi
+  sync_image_pins "$env_file" "$MONITOR_DIR/.env.template"
 
   # SSO-only services run in native/gateway mode; down/ps/logs always include
   # them so switching back to local mode still stops and shows them.

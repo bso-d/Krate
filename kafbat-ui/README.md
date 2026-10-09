@@ -41,6 +41,10 @@ make kafbat-ui ARCH=amd64
 # Or: python3 kafbat-ui/build.py --arch arm64 --source /path/to/pinned-checkout
 ```
 
+The build pins the new image ID as `KAFKA_UI_IMAGE` in `kraft/.env.template`
+and `epc/.env.template`. The next `./krate` command copies that pin into an
+existing `.env`.
+
 Use a connected build host with Python 3, Git, Docker, Node and npm. Upstream
 recommends Node 22. The builder pins upstream commit, pnpm and code generation
 artifacts, runs TypeScript/lint/React tests, and compiles three authentication
