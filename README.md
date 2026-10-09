@@ -322,7 +322,7 @@ scripts/package-release.sh kraft v3 amd64        # Docker packages: noble for kr
 scripts/package-release.sh epc v5 amd64 none     # without Docker packages
 ```
 
-Then start **Release offline install packages** from `main` in GitHub Actions with the same edition, version, processor and Docker package choice. The workflow creates the `package-<edition>-vN` tag and refuses a version that already exists. For EPC, it also refuses a version already released under the earlier `epc-vN` tags. Broker image releases use the separate [broker release workflow](.github/workflows/broker-release.yml) and `kraft-v*`/`zk-v*` tags.
+Then start **Release offline install packages** from `main` in GitHub Actions with the same edition, version, processor and Docker package choice. The workflow creates the `package-<edition>-vN` tag and refuses a version that already exists. For EPC, it also refuses a version already released under the earlier `epc-vN` tags. A KRaft package with the highest version becomes the repository's Latest release; EPC and broker image releases do not. Broker image releases use the separate [broker release workflow](.github/workflows/broker-release.yml) and `kraft-v*`/`zk-v*` tags.
 
 ## Limits to understand
 

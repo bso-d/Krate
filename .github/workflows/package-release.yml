@@ -236,4 +236,12 @@ jobs:
               echo "Release $RELEASE_TAG is already published" >&2
               exit 1 ;;
           esac
-          gh release edit "$RELEASE_TAG" --draft=false --latest=false
+          # KRaft is the default edition: its highest package version is the
+          # repository's Latest release. EPC and broker image releases never are.
+          latest=false
+          if [[ "$EDITION" == kraft ]]; then
+            newest="$(gh api "repos/$REPOSITORY/git/matching-refs/tags/package-kraft-v" --jq '.[].ref' \
+              | sed 's#^refs/tags/##' | sort -V | tail -1)"
+            [[ "$newest" != "$RELEASE_TAG" ]] || latest=true
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --latest="$latest"
