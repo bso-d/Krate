@@ -406,6 +406,7 @@ services:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
     volumes:
       - gateway_rendered:/etc/nginx/conf.d:ro
+      - ./perses/gateway:/etc/krate/perses-gateway:ro,z
       # krate monitor up sets the cluster's certificate directory.
       - ${PERSES_CERTS_DIR:-../certs}:/etc/nginx/certs:ro,z
     networks: [monitoring]

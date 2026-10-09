@@ -39,6 +39,13 @@ VIEWER_QUERY_SUFFIXES = re.compile(
     r'|metadata|status/buildinfo)'
     r'|/select/logsql/(query|stats_query|stats_query_range|field_names|field_values|hits|streams'
     r'|stream_field_names|stream_field_values)')
+# API reads a Viewer may make: the kinds of the krate-viewer role in roles.json, the
+# UI's own settings, and the caller's permissions (Perses answers only for the caller).
+# Gateway mode depends on this list because Perses' authorization is off there.
+VIEWER_READS = re.compile(
+    r'/api/config|/api/v1/(health|plugins|user/whoami|users/[^/]+/permissions)'
+    r'|/api/v1/(projects|dashboards|datasources|variables|folders|globaldatasources|globalvariables)(/[^/]+)?'
+    r'|/api/v1/projects/[^/]+/(dashboards|datasources|variables|folders)(/[^/]+)?')
 PROXY_SAVED = re.compile(
     r'/proxy/(globaldatasources/[^/]+|projects/[^/]+/datasources/[^/]+'
     r'|projects/[^/]+/dashboards/[^/]+/datasources/[^/]+)(?P<suffix>/.*)?')
@@ -104,6 +111,8 @@ def viewer_allowed(method, path):
             return False
         return method in ('GET', 'POST') and bool(VIEWER_QUERY_SUFFIXES.fullmatch(match.group('suffix')))
     if method in ('GET', 'HEAD'):
+        if path == '/api' or path.startswith('/api/'):
+            return bool(VIEWER_READS.fullmatch(path))
         return True
     return method == 'POST' and path == '/api/v1/view'
 
@@ -441,6 +450,14 @@ class Guard:
             raise
         return role, cookies
 
+    def role(self, cookie):
+        """The caller's current role for the UI, from the same IdP proof."""
+        subject, groups, cookies = self.proof(cookie)
+        role = role_for(groups, self.settings)
+        if role is None:
+            raise Denied(403, 'no Viewer or Admin group', cookies)
+        return role, cookies
+
     def revoke_token_holder(self, token):
         """Revoke the grants of the Perses user presenting a token without an IdP session.
 
@@ -532,6 +549,16 @@ def make_handler(guard):
         def do_GET(self):
             if self.path == '/healthz':
                 return self.send(200, [('Content-Type', 'text/plain')], b'ok\n')
+            if self.path == '/role':
+                try:
+                    role, cookies = guard.role(self.headers.get('Cookie'))
+                    return self.send(200, [('Content-Type', 'text/plain')] + [('Set-Cookie', c) for c in cookies],
+                                     role.encode())
+                except Denied as exc:
+                    return self.send(exc.status, [('Set-Cookie', c) for c in exc.cookies])
+                except Exception as exc:
+                    self.log_message('error: %r', exc)
+                    return self.send(403)
             if self.path != '/guard':
                 return self.send(404)
             try:

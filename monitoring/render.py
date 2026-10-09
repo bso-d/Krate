@@ -251,6 +251,19 @@ server {
     # Resolve upstreams per request, so the gateway starts before them.
     resolver 127.0.0.11 valid=10s ipv6=off;
     set $krate_perses http://perses:8080;
+    # Krate's viewer UI script (hides write controls Perses would show).
+    location = /krate/ui.js {
+        alias /etc/krate/perses-gateway/krate-ui.js;
+        default_type application/javascript;
+        add_header Cache-Control "no-cache" always;
+        add_header X-Content-Type-Options nosniff always;
+    }
+'''
+
+GATEWAY_INJECT = '''        # Inject the viewer UI script into Perses' HTML (uncompressed for sub_filter).
+        proxy_set_header Accept-Encoding "";
+        sub_filter '</head>' '<script src="/krate/ui.js"></script></head>';
+        sub_filter_once on;
 '''
 
 GATEWAY_LOCAL = '''    location = /api/auth/providers/native/login {
@@ -261,8 +274,14 @@ GATEWAY_LOCAL = '''    location = /api/auth/providers/native/login {
     location ~ ^/api/auth/providers/(oidc|oauth)/ {
         return 404;
     }
+    # Local mode has only the provisioned admin.
+    location = /krate/role {
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+        return 200 'admin';
+    }
     location / {
-        proxy_pass $krate_perses;
+%(inject)s        proxy_pass $krate_perses;
         proxy_http_version 1.1;
         proxy_read_timeout 300s;
     }
@@ -291,6 +310,15 @@ GATEWAY_SSO = '''    set $krate_oauth2 http://oauth2-proxy:4180;
     location = /api/auth/refresh {
         proxy_pass $krate_sync/refresh;
     }
+    # The current role from the guard (same IdP groups the server enforces).
+    # Not 'return' + auth_request: return runs before the access phase.
+    location = /krate/role {
+        proxy_pass $krate_sync/role;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Cookie $http_cookie;
+        add_header Cache-Control "no-store" always;
+    }
     location @krate_signin {
         if ($krate_browser) {
             return 302 /oauth2/start?rd=$krate_return;
@@ -314,7 +342,7 @@ GATEWAY_SSO = '''    set $krate_oauth2 http://oauth2-proxy:4180;
         add_header X-Content-Type-Options nosniff always;
         add_header Referrer-Policy no-referrer always;
         add_header Strict-Transport-Security "max-age=31536000" always;
-        proxy_pass $krate_perses;
+%(inject)s        proxy_pass $krate_perses;
         proxy_http_version 1.1;
         proxy_read_timeout 300s;
     }
@@ -337,7 +365,7 @@ def gateway_config(mode, env):
     port = env.get('PERSES_PORT', '3443')
     if not port.isdigit():
         raise ConfigError('PERSES_PORT must be a port number')
-    body = GATEWAY_LOCAL if mode == 'local' else GATEWAY_SSO
+    body = (GATEWAY_LOCAL if mode == 'local' else GATEWAY_SSO) % {'inject': GATEWAY_INJECT}
     return GATEWAY_HTTP + GATEWAY_COMMON % {'port': port} + body
 
 

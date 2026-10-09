@@ -83,7 +83,8 @@ the service client secret.
 
 - Unauthenticated browsers are sent to the IdP; API clients get 401.
 - A Viewer can open every dashboard and run queries but cannot save, create or
-  delete anything (403); an Admin can.
+  delete anything (403), cannot read secrets, roles or users (403), and sees no
+  Edit, create, duplicate or delete controls; an Admin sees and can use them.
 - A user in no group is refused by OAuth2 Proxy after signing in.
 - Remove a test user from a group: within `group_proof_minutes` their requests
   are refused and, in `native` mode, their Perses grants are deleted.

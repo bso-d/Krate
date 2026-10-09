@@ -46,9 +46,11 @@ For `native` and `gateway`, follow the [Perses SSO guide](../sso/guides/perses-s
 In both SSO modes, OAuth2 Proxy holds the IdP session and the `perses-sync`
 guard checks every request:
 
-- **Viewer** can read dashboards, datasources, variables and folders and run
-  queries through saved datasources (PromQL and LogsQL read endpoints only).
-  Every change, unsaved-datasource proxying and other proxy paths are refused.
+- **Viewer** can read projects, dashboards, datasources, variables and folders
+  and run queries through saved datasources (PromQL and LogsQL read endpoints
+  only). Secrets, roles, role bindings and users cannot be read, in either
+  mode. Every change, unsaved-datasource proxying and other proxy paths are
+  refused.
 - **Admin** has full Perses access, including creating projects.
 - In `native` mode the guard keeps each user's native Perses role bindings equal
   to their current groups and confirms the user's live permissions before a
@@ -61,8 +63,14 @@ guard checks every request:
   next refresh. Sessions last `session_hours` (default 8).
 - Any failure denies the request; nothing falls back to an earlier grant.
 
-Perses' **Edit** button is visible to every signed-in user, as in upstream
-Perses; saving is refused unless the user is an Admin.
+In both SSO modes the gateway adds a small script to Perses' pages that asks the
+guard for the user's current role. For a Viewer it hides Perses' write controls
+(Edit, create, import, duplicate, rename and delete), the tabs for secrets,
+roles, role bindings and users, and the edit-mode (`D` then `M`) and save
+(`Ctrl`/`⌘`+`S`) shortcuts. If the role cannot be read, the controls stay hidden.
+This only keeps the UI consistent: the guard and, in `native` mode, Perses refuse
+every change by a Viewer either way. The script matches Perses v0.54.0 labels
+and icons and must be re-checked when Perses is upgraded.
 
 Switching modes: change `PERSES_AUTH_MODE` and run `./krate monitor up`. The CLI
 re-renders configuration and recreates the affected services. Grants from the

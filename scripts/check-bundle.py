@@ -59,7 +59,7 @@ def main():
         for name in ('render.py', 'perses/seed.py', 'perses/sync/perses_sync.py', 'perses/provisioning/krate.json',
                      'perses/provisioning/roles.json', 'perses/dashboards/kafka-overview.json',
                      'perses/dashboards/consumer-groups.json', 'perses/dashboards/host-capacity.json',
-                     'perses/dashboards/logs.json', 'perses/vendor/notices/README.md'):
+                     'perses/dashboards/logs.json', 'perses/gateway/krate-ui.js', 'perses/vendor/notices/README.md'):
             if not (root / 'monitoring' / name).is_file():
                 raise SystemExit('Missing monitoring package file: ' + name)
         inventories = sorted((root / 'monitoring/perses/vendor/notices').rglob('inventory.json'))
