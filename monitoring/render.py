@@ -243,12 +243,7 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy no-referrer always;
     add_header Strict-Transport-Security "max-age=31536000" always;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    # Resolve upstreams per request, so the gateway starts before them.
+%(forward)s    # Resolve upstreams per request, so the gateway starts before them.
     resolver 127.0.0.11 valid=10s ipv6=off;
     set $krate_perses http://perses:8080;
     # Krate's viewer UI script (hides write controls Perses would show).
@@ -260,11 +255,28 @@ server {
     }
 '''
 
-GATEWAY_INJECT = '''        # Inject the viewer UI script into Perses' HTML (uncompressed for sub_filter).
-        proxy_set_header Accept-Encoding "";
-        sub_filter '</head>' '<script src="/krate/ui.js"></script></head>';
-        sub_filter_once on;
+# Forwarding headers. nginx inherits proxy_set_header only into locations that set
+# none, so the Perses location, which sets its own, repeats them.
+GATEWAY_FORWARD = '''proxy_set_header Host $http_host;
+proxy_set_header X-Forwarded-Proto https;
+proxy_set_header X-Forwarded-Host $http_host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
 '''
+
+GATEWAY_INJECT = '''# Inject the viewer UI script into Perses' HTML (uncompressed for sub_filter).
+proxy_set_header Accept-Encoding "";
+sub_filter '</head>' '<script src="/krate/ui.js"></script></head>';
+sub_filter_once on;
+'''
+
+# SSO modes: the guard verifies Perses' JWT cookies, so Perses gets no other credential.
+GATEWAY_COOKIE_ONLY = '''proxy_set_header Authorization "";
+'''
+
+
+def indent(block, spaces):
+    return ''.join(' ' * spaces + line + '\n' for line in block.splitlines())
 
 GATEWAY_LOCAL = '''    location = /api/auth/providers/native/login {
         limit_req zone=krate_perses_login burst=10 nodelay;
@@ -305,7 +317,6 @@ GATEWAY_SSO = '''    set $krate_oauth2 http://oauth2-proxy:4180;
         proxy_set_header X-Original-URI $request_uri;
         proxy_set_header X-Original-Method $request_method;
         proxy_set_header Cookie $http_cookie;
-        proxy_set_header Authorization $http_authorization;
     }
     location = /api/auth/refresh {
         proxy_pass $krate_sync/refresh;
@@ -365,8 +376,9 @@ def gateway_config(mode, env):
     port = env.get('PERSES_PORT', '3443')
     if not port.isdigit():
         raise ConfigError('PERSES_PORT must be a port number')
-    body = (GATEWAY_LOCAL if mode == 'local' else GATEWAY_SSO) % {'inject': GATEWAY_INJECT}
-    return GATEWAY_HTTP + GATEWAY_COMMON % {'port': port} + body
+    perses = GATEWAY_FORWARD + GATEWAY_INJECT + ('' if mode == 'local' else GATEWAY_COOKIE_ONLY)
+    body = (GATEWAY_LOCAL if mode == 'local' else GATEWAY_SSO) % {'inject': indent(perses, 8)}
+    return GATEWAY_HTTP + GATEWAY_COMMON % {'port': port, 'forward': indent(GATEWAY_FORWARD, 4)} + body
 
 
 def alertmanager_config(env):

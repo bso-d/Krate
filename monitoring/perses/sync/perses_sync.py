@@ -134,17 +134,36 @@ def binding_names(issuer, subject):
     return {'admin': 'krate-admin-' + digest, 'viewer': 'krate-viewer-' + digest}
 
 
-def cookie_token(cookie_header):
-    """Rebuild the native Perses access token from its two cookies."""
-    cookies = {}
+# The bytes Go accepts in a request cookie value.
+COOKIE_VALUE = re.compile(r'[\x20\x21\x23-\x3a\x3c-\x5b\x5d-\x7e]*')
+
+
+def go_cookie(cookie_header, wanted):
+    """Return the cookie value Go's Request.Cookie would return, or None.
+
+    Perses reads its JWT cookies this way: the first well-formed match wins,
+    malformed ones are skipped and one pair of double quotes is removed.
+    """
     for part in (cookie_header or '').split(';'):
-        name, _, value = part.strip().partition('=')
-        if name:
-            cookies[name] = value
-    payload, signature = cookies.get('jwtPayload'), cookies.get('jwtSignature')
-    if payload and signature:
-        return payload + '.' + signature
+        part = part.strip(' \t\r\n')
+        if not part:
+            continue
+        name, _, value = part.partition('=')
+        if name.strip(' \t\r\n') != wanted:
+            continue
+        if len(value) > 1 and value[0] == '"' and value[-1] == '"':
+            value = value[1:-1]
+        if COOKIE_VALUE.fullmatch(value):
+            return value
     return None
+
+
+def cookie_token(cookie_header):
+    """The access token Perses builds from its two cookies (it then ignores Authorization)."""
+    payload, signature = go_cookie(cookie_header, 'jwtPayload'), go_cookie(cookie_header, 'jwtSignature')
+    if payload is None or signature is None:
+        return None
+    return payload + '.' + signature
 
 
 def jwt_expiry(token):
@@ -418,7 +437,7 @@ class Guard:
             raise Denied(403, 'session has no subject', cookies)
         return subject, set(groups), cookies
 
-    def check(self, method, raw_uri, cookie, authorization=None):
+    def check(self, method, raw_uri, cookie):
         path = clean_path(raw_uri)
         if path is None:
             raise Denied(403, 'unsafe request path')
@@ -429,7 +448,7 @@ class Guard:
             subject, groups, cookies = self.proof(cookie)
         except Denied as exc:
             if exc.status == 401:
-                self.revoke_token_holder(cookie_token(cookie) or bearer(authorization))
+                self.revoke_token_holder(cookie_token(cookie))
             raise
         try:
             role = role_for(groups, self.settings)
@@ -440,11 +459,15 @@ class Guard:
             if role == 'viewer' and kind == 'api' and not viewer_allowed(method, path):
                 raise Denied(403, 'Viewer may not change resources')
             if self.settings['mode'] == 'native' and kind == 'api':
-                token = cookie_token(cookie) or bearer(authorization)
-                if token:
+                # The gateway removes Authorization towards Perses, so its cookies are the
+                # only credential Perses sees. A token it rejects is refused here as well
+                # (401 lets the UI refresh it) rather than passed on unchecked.
+                token = cookie_token(cookie)
+                if token is not None:
                     name = self.reconciler.identity(token, subject)
-                    if name is not None:
-                        self.reconciler.ensure(name, subject, role, token)
+                    if name is None:
+                        raise Denied(401, 'Perses token was not accepted')
+                    self.reconciler.ensure(name, subject, role, token)
         except Denied as exc:
             exc.cookies = cookies + exc.cookies
             raise
@@ -508,12 +531,6 @@ class Guard:
         return status, headers + [('Set-Cookie', c) for c in cookies], data
 
 
-def bearer(header):
-    if header and header.startswith('Bearer '):
-        return header[7:]
-    return None
-
-
 RELAYED_COOKIES = 4
 
 
@@ -563,7 +580,7 @@ def make_handler(guard):
                 return self.send(404)
             try:
                 role, cookies = guard.check(self.headers.get('X-Original-Method', ''), self.headers.get('X-Original-URI', ''),
-                                            self.headers.get('Cookie'), self.headers.get('Authorization'))
+                                            self.headers.get('Cookie'))
                 self.send(200, [('X-Krate-Role', role)] + relay(cookies))
             except Denied as exc:
                 self.denied(exc)

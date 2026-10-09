@@ -103,6 +103,11 @@ every other binding, including project owner grants, and the user's live
 permissions are read back before the request passes. A Perses token refresh is
 released only after the same checks. Any failure denies the request.
 
+In both SSO modes Perses is used through a browser session only: the gateway
+does not pass an `Authorization` header to Perses, and in `native` mode the
+guard checks the same Perses session cookies that Perses reads. A Perses token
+that Perses would reject is refused before it reaches Perses.
+
 The guard's service identity can only manage role bindings, read projects,
 roles and users, and seed dashboards. It signs in through Perses' private token
 route, which the gateway does not expose.
