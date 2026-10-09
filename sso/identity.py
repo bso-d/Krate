@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -244,9 +245,10 @@ def write_file(path, content, mode):
     """Create the file atomically: O_EXCL temporary beside the target, then rename."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name('.' + path.name + '.tmp')
+    # A unique name per attempt: a temporary left by an interrupted run can
+    # never block a later one (O_EXCL still refuses to reuse or follow it).
+    temporary = path.with_name('.%s.%s.tmp' % (path.name, secrets.token_hex(4)))
     data = content if isinstance(content, bytes) else content.encode()
-    # Never follow or reuse something already at the temporary path.
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(descriptor, 'wb') as handle:

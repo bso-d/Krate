@@ -291,9 +291,12 @@ PostgreSQL both read the files at start, so a renewal needs a restart of both.
 
 Run every command in the installation directory (`/opt/krate/kraft` or
 `/opt/krate/epc`) or a checkout's `kraft/` or `epc/`. Brokers do not need to be
-running for any `identity` command. Each command takes the lock
-`auth/.identity.lock/` and appends one line to `auth/identity-journal.log`:
-`<ISO8601> <command> <outcome> <detail>`, never a secret.
+running for any `identity` command. Every command that changes something
+(`up`, `down`, `users add|enable|disable|reset-password`, `rotate`, `backup`,
+`restore`, `recover-admin`) takes the lock `auth/.identity.lock/` and appends
+one line to `auth/identity-journal.log`: `<ISO8601> <command> <outcome>
+<detail>`, never a secret. The read-only commands `status`, `users list` and
+`users groups` take no lock and write no journal line.
 
 ### `./krate identity up`
 
