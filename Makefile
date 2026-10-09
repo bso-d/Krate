@@ -24,13 +24,13 @@ VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
 SSO_OUTPUT ?= $(VARIANT)/auth/ui/pingfederate.yml
-MONITOR_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' monitoring/.env.template)
+MONITOR_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' monitoring/.env.template)
 
 # Image references are read from the runtime environment templates.
-ZK_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' zk/.env.template)
-KRAFT_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' kraft/.env.template)
-EPC_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' epc/.env.template)
-ZK_MONITOR_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' zk/monitoring/.env.template)
+ZK_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' zk/.env.template)
+KRAFT_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' kraft/.env.template)
+EPC_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' epc/.env.template)
+ZK_MONITOR_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' zk/monitoring/.env.template)
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 # RHEL needs buildx explicitly; on Debian it arrives as a docker-ce dependency.
 DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-extras docker-compose-plugin docker-buildx-plugin
@@ -281,7 +281,7 @@ bundle: offline-check
 >
 >  # Environment templates select the tagged images stored in the archives.
 >  for env_template in "$$bundle_dir/.env.template" "$$bundle_dir/monitoring/.env.template"; do
->    awk -F '\t' 'NR==FNR { runtime[$$1]=$$2; next } /^[A-Z_]+_IMAGE=/ { split($$0, entry, "="); if (entry[2] in runtime) $$0=entry[1] "=" runtime[entry[2]] } { print }' "$$bundle_dir/images.lock.tsv" "$$env_template" > "$$env_template.tmp"
+>    awk -F '\t' 'NR==FNR { runtime[$$1]=$$2; next } /^[A-Z0-9_]+_IMAGE=/ { split($$0, entry, "="); if (entry[2] in runtime) $$0=entry[1] "=" runtime[entry[2]] } { print }' "$$bundle_dir/images.lock.tsv" "$$env_template" > "$$env_template.tmp"
 >    mv "$$env_template.tmp" "$$env_template"
 >  done
 >
