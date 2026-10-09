@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate effective Compose defaults without Docker daemon access or PyYAML."""
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -37,8 +38,45 @@ def violations(variant, config):
     return errors
 
 
-def main():
+INTERNAL_DATASOURCE = re.compile(r"http://(prometheus:9090|victorialogs:9428)")
+
+
+def perses_violations():
+    """Perses must load only its baked plugins and query only internal services."""
     errors = []
+    render = (ROOT / "monitoring/render.py").read_text()
+    if "'  enable_dev: false'," not in render:
+        errors.append("monitoring/render.py: Perses plugin.enable_dev must be false")
+    names = set()
+    for path in sorted((ROOT / "monitoring/perses/provisioning").glob("*.json")):
+        for resource in json.loads(path.read_text()):
+            if resource.get("kind") not in ("Datasource", "GlobalDatasource"):
+                continue
+            names.add((resource["spec"]["plugin"]["kind"], resource["metadata"]["name"]))
+            plugin = resource["spec"]["plugin"]["spec"]
+            proxy = plugin.get("proxy", {}).get("spec", {})
+            if "directUrl" in plugin or not INTERNAL_DATASOURCE.fullmatch(proxy.get("url", "")):
+                errors.append(f"{path.name}: datasource {resource['metadata']['name']} must proxy to an internal service without directUrl")
+    for path in sorted((ROOT / "monitoring/perses/dashboards").glob("*.json")):
+        def walk(node):
+            if isinstance(node, dict):
+                if "datasource" in node and isinstance(node["datasource"], dict):
+                    ref = (node["datasource"].get("kind"), node["datasource"].get("name"))
+                    if ref not in names:
+                        errors.append(f"{path.name}: datasource {ref} is not a provisioned internal datasource")
+                if "directUrl" in node:
+                    errors.append(f"{path.name}: dashboards must not set directUrl")
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+        walk(json.loads(path.read_text()))
+    return errors
+
+
+def main():
+    errors = perses_violations()
     for variant in POLICIES:
         result = subprocess.run(
             ["docker", "compose", "--env-file", str(ROOT / variant / ".env.template"),
@@ -53,7 +91,7 @@ def main():
     if errors:
         print("Offline policy check failed:\n" + "\n".join(errors), file=sys.stderr)
         return 1
-    print("Offline defaults verified: all Kafbat variants and shared Grafana.")
+    print("Offline defaults verified: all Kafbat variants, shared Grafana and Perses.")
     return 0
 
 

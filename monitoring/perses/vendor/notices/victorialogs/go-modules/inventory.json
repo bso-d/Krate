@@ -1,0 +1,512 @@
+[
+  {
+    "module": "github.com/VictoriaMetrics/VictoriaMetrics",
+    "version": "v1.152.1-0.20260924162003-018bc7808882",
+    "binary_h1": null,
+    "module_sum": "h1:fcYvz6MQqbrOhGRIXk4Mf518OKa9SE6L2AXyu1T+bfQ=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/!victoria!metrics/!victoria!metrics/@v/v1.152.1-0.20260924162003-018bc7808882.zip",
+    "file": "github.com_VictoriaMetrics_VictoriaMetrics@v1.152.1-0.20260924162003-018bc7808882__LICENSE",
+    "sha256": "778f2412aa6e874bf0e2482e17a119ea53ba508ae6ddd924859a1f32f6e2740f",
+    "licensecheck_ids": [
+      "Apache-2.0"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/VictoriaMetrics/easyproto",
+    "version": "v1.2.0",
+    "binary_h1": null,
+    "module_sum": "h1:FJT9uNXA2isppFuJErbLqD306KoFlehl7Wn2dg/6oIE=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/!victoria!metrics/easyproto/@v/v1.2.0.zip",
+    "file": "github.com_VictoriaMetrics_easyproto@v1.2.0__LICENSE",
+    "sha256": "d0418f7b641f29556d7dc19adc6998b69702fa5ed4141d0f04f0a2261c02e3d6",
+    "licensecheck_ids": [
+      "Apache-2.0"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/VictoriaMetrics/metrics",
+    "version": "v1.44.0",
+    "binary_h1": null,
+    "module_sum": "h1:Fr8yqQSV+ZfYaDD/anqk1E8e9YPgfleSleJmAI0M0Tw=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/!victoria!metrics/metrics/@v/v1.44.0.zip",
+    "file": "github.com_VictoriaMetrics_metrics@v1.44.0__LICENSE",
+    "sha256": "6d3ee5cc8f3cc2b9d0f114694c1bedb0c8d3230385decf91e4f4d090bd28b634",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.6
+  },
+  {
+    "module": "github.com/VictoriaMetrics/metricsql",
+    "version": "v0.87.4",
+    "binary_h1": null,
+    "module_sum": "h1:IgJuD6cEhhaC0kyDJcVtyjcIuiWX9yIMnbzH2F6MSpw=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/!victoria!metrics/metricsql/@v/v0.87.4.zip",
+    "file": "github.com_VictoriaMetrics_metricsql@v0.87.4__LICENSE",
+    "sha256": "88d747ed66e8dd4148c3ef1570d64e14f0a40fc46a28911028e1f9d913d24cee",
+    "licensecheck_ids": [
+      "Apache-2.0"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/cespare/xxhash/v2",
+    "version": "v2.3.0",
+    "binary_h1": null,
+    "module_sum": "h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE.txt",
+    "url": "https://proxy.golang.org/github.com/cespare/xxhash/v2/@v/v2.3.0.zip",
+    "file": "github.com_cespare_xxhash_v2@v2.3.0__LICENSE.txt",
+    "sha256": "f566a9f97bacdaf00d9f21dd991e81dc11201c4e016c86b470799429a1c9a79c",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/golang/snappy",
+    "version": "v1.0.0",
+    "binary_h1": null,
+    "module_sum": "h1:Oy607GVXHs7RtbggtPBnr2RmDArIsAefDwvrdWvRhGs=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/golang/snappy/@v/v1.0.0.zip",
+    "file": "github.com_golang_snappy@v1.0.0__LICENSE",
+    "sha256": "f69f157b0be75da373605dbc8bbf142e8924ee82d8f44f11bcaf351335bf98cf",
+    "licensecheck_ids": [
+      "BSD-3-Clause"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__LICENSE",
+    "sha256": "0d9e582ee4bff57bf1189c9e514e6da7ce277f9cd3bc2d488b22fbb39a6d87cf",
+    "licensecheck_ids": [
+      "Apache-2.0",
+      "BSD-3-Clause",
+      "MIT"
+    ],
+    "licensecheck_coverage": 99.1
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "gzhttp/LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__gzhttp__LICENSE",
+    "sha256": "2252a5b1e2b1d3663b53ea77051b8ed065cb9270a3d1174d5d6ead8a2de051b6",
+    "licensecheck_ids": [
+      "Apache-2.0"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "internal/lz4ref/LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__internal__lz4ref__LICENSE",
+    "sha256": "6a358d2540ca14048f02d366f23787c0a480157e58f058113f0e27168dd4e447",
+    "licensecheck_ids": [
+      "BSD-3-Clause"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "internal/snapref/LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__internal__snapref__LICENSE",
+    "sha256": "f69f157b0be75da373605dbc8bbf142e8924ee82d8f44f11bcaf351335bf98cf",
+    "licensecheck_ids": [
+      "BSD-3-Clause"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "s2/LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__s2__LICENSE",
+    "sha256": "08683b14bda8ae3538abf19e1879e853a39e3b8276a8d673363b529d15a61c1a",
+    "licensecheck_ids": [
+      "BSD-3-Clause"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "s2/cmd/internal/filepathx/LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__s2__cmd__internal__filepathx__LICENSE",
+    "sha256": "8582c87d9a6baa28f7827c5205b7d16c3179bc794ebd4c7cc287c49a89b7eaa1",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "s2/cmd/internal/readahead/LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__s2__cmd__internal__readahead__LICENSE",
+    "sha256": "10fa24a602fde465db603cd5d546e37e33642a73cd24ddf5910be81724fec8b2",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "snappy/LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__snappy__LICENSE",
+    "sha256": "f69f157b0be75da373605dbc8bbf142e8924ee82d8f44f11bcaf351335bf98cf",
+    "licensecheck_ids": [
+      "BSD-3-Clause"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "snappy/xerial/LICENSE",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__snappy__xerial__LICENSE",
+    "sha256": "d4ff111fa30ac75e28dca3868de957a3b73ff50b76bc4b8fe5c3a1f008d26703",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/klauspost/compress",
+    "version": "v1.20.0",
+    "binary_h1": null,
+    "module_sum": "h1:a3C1ke2ohxFymNlb2HWAHjDeKCI90scRskErZkR0ezA=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "zstd/internal/xxhash/LICENSE.txt",
+    "url": "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.20.0.zip",
+    "file": "github.com_klauspost_compress@v1.20.0__zstd__internal__xxhash__LICENSE.txt",
+    "sha256": "f566a9f97bacdaf00d9f21dd991e81dc11201c4e016c86b470799429a1c9a79c",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/valyala/bytebufferpool",
+    "version": "v1.0.0",
+    "binary_h1": null,
+    "module_sum": "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/bytebufferpool/@v/v1.0.0.zip",
+    "file": "github.com_valyala_bytebufferpool@v1.0.0__LICENSE",
+    "sha256": "c4c2923938be3bf985290743398835cb6097d277663eeb1addec34b4df28d806",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/valyala/fastjson",
+    "version": "v1.6.10",
+    "binary_h1": null,
+    "module_sum": "h1:/yjJg8jaVQdYR3arGxPE2X5z89xrlhS0eGXdv+ADTh4=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/fastjson/@v/v1.6.10.zip",
+    "file": "github.com_valyala_fastjson@v1.6.10__LICENSE",
+    "sha256": "424ae79c5b44daa99a297005ec06496f7631fcf7a3134a1704d5a689b6a4734e",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/valyala/fastrand",
+    "version": "v1.1.0",
+    "binary_h1": null,
+    "module_sum": "h1:f+5HkLW4rsgzdNoleUOB69hyT9IlD2ZQh9GyDMfb5G8=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/fastrand/@v/v1.1.0.zip",
+    "file": "github.com_valyala_fastrand@v1.1.0__LICENSE",
+    "sha256": "b9b67ce78a84d4ff9b7b62c85625b1a02ae2574a9f879500fd6b1fe2a816eace",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/valyala/fasttemplate",
+    "version": "v1.2.2",
+    "binary_h1": null,
+    "module_sum": "h1:lxLXG0uE3Qnshl9QyaK6XJxMXlQZELvChBOCmQD0Loo=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/fasttemplate/@v/v1.2.2.zip",
+    "file": "github.com_valyala_fasttemplate@v1.2.2__LICENSE",
+    "sha256": "8a314211011ad9257fa38302e8bbfe4b137a583b2b6555c61a92713b07b0b124",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/valyala/gozstd",
+    "version": "v1.26.0",
+    "binary_h1": null,
+    "module_sum": "h1:vvQxZ4FANU2Q6FG4dUMpuQ8PUvkq9MdbU2jFkF+brm8=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/gozstd/@v/v1.26.0.zip",
+    "file": "github.com_valyala_gozstd@v1.26.0__LICENSE",
+    "sha256": "424ae79c5b44daa99a297005ec06496f7631fcf7a3134a1704d5a689b6a4734e",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/valyala/gozstd",
+    "version": "v1.26.0",
+    "binary_h1": null,
+    "module_sum": "h1:vvQxZ4FANU2Q6FG4dUMpuQ8PUvkq9MdbU2jFkF+brm8=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "zstd/COPYING",
+    "url": "https://proxy.golang.org/github.com/valyala/gozstd/@v/v1.26.0.zip",
+    "file": "github.com_valyala_gozstd@v1.26.0__zstd__COPYING",
+    "sha256": "f9c375a1be4a41f7b70301dd83c91cb89e41567478859b77eef375a52d782505",
+    "licensecheck_ids": [
+      "GPL-2.0"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "github.com/valyala/gozstd",
+    "version": "v1.26.0",
+    "binary_h1": null,
+    "module_sum": "h1:vvQxZ4FANU2Q6FG4dUMpuQ8PUvkq9MdbU2jFkF+brm8=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "zstd/LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/gozstd/@v/v1.26.0.zip",
+    "file": "github.com_valyala_gozstd@v1.26.0__zstd__LICENSE",
+    "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8",
+    "licensecheck_ids": [
+      "BSD-3-Clause"
+    ],
+    "licensecheck_coverage": 97.8
+  },
+  {
+    "module": "github.com/valyala/gozstd",
+    "version": "v1.26.0",
+    "binary_h1": null,
+    "module_sum": "h1:vvQxZ4FANU2Q6FG4dUMpuQ8PUvkq9MdbU2jFkF+brm8=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "zstd/build/LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/gozstd/@v/v1.26.0.zip",
+    "file": "github.com_valyala_gozstd@v1.26.0__zstd__build__LICENSE",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "licensecheck_ids": [],
+    "licensecheck_coverage": 0
+  },
+  {
+    "module": "github.com/valyala/histogram",
+    "version": "v1.2.0",
+    "binary_h1": null,
+    "module_sum": "h1:wyYGAZZt3CpwUiIb9AU/Zbllg1llXyrtApRS815OLoQ=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/histogram/@v/v1.2.0.zip",
+    "file": "github.com_valyala_histogram@v1.2.0__LICENSE",
+    "sha256": "4d493a715cd8c131fbedb14ca59babbe73c03a47ce79c9a8bdf643a668cde728",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/valyala/quicktemplate",
+    "version": "v1.8.0",
+    "binary_h1": null,
+    "module_sum": "h1:zU0tjbIqTRgKQzFY1L42zq0qR3eh4WoQQdIdqCysW5k=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/quicktemplate/@v/v1.8.0.zip",
+    "file": "github.com_valyala_quicktemplate@v1.8.0__LICENSE",
+    "sha256": "c4c2923938be3bf985290743398835cb6097d277663eeb1addec34b4df28d806",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "github.com/valyala/quicktemplate",
+    "version": "v1.8.0",
+    "binary_h1": null,
+    "module_sum": "h1:zU0tjbIqTRgKQzFY1L42zq0qR3eh4WoQQdIdqCysW5k=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "qtc/LICENSE",
+    "url": "https://proxy.golang.org/github.com/valyala/quicktemplate/@v/v1.8.0.zip",
+    "file": "github.com_valyala_quicktemplate@v1.8.0__qtc__LICENSE",
+    "sha256": "c4c2923938be3bf985290743398835cb6097d277663eeb1addec34b4df28d806",
+    "licensecheck_ids": [
+      "MIT"
+    ],
+    "licensecheck_coverage": 97.7
+  },
+  {
+    "module": "golang.org/x/oauth2",
+    "version": "v0.37.0",
+    "binary_h1": null,
+    "module_sum": "h1:JUlcxA8oAtauLfiH8FX2/FkAWHAdi0QtGCGc+hofE98=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/golang.org/x/oauth2/@v/v0.37.0.zip",
+    "file": "golang.org_x_oauth2@v0.37.0__LICENSE",
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    "licensecheck_ids": [
+      "BSD-3-Clause"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "golang.org/x/sys",
+    "version": "v0.48.0",
+    "binary_h1": null,
+    "module_sum": "h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "LICENSE",
+    "url": "https://proxy.golang.org/golang.org/x/sys/@v/v0.48.0.zip",
+    "file": "golang.org_x_sys@v0.48.0__LICENSE",
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    "licensecheck_ids": [
+      "BSD-3-Clause"
+    ],
+    "licensecheck_coverage": 100
+  },
+  {
+    "module": "golang.org/x/sys",
+    "version": "v0.48.0",
+    "binary_h1": null,
+    "module_sum": "h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=",
+    "used_by": [
+      "victoria-logs-prod"
+    ],
+    "path": "PATENTS",
+    "url": "https://proxy.golang.org/golang.org/x/sys/@v/v0.48.0.zip",
+    "file": "golang.org_x_sys@v0.48.0__PATENTS",
+    "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc",
+    "licensecheck_ids": [
+      "GooglePatentsFile"
+    ],
+    "licensecheck_coverage": 100
+  }
+]

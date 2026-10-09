@@ -261,9 +261,9 @@ bundle: offline-check
 >  # per variant. The frozen ZooKeeper edition is skipped.
 >  if [[ "$$mode" != "zk" && -d monitoring ]]; then
 >    mkdir -p "$$bundle_dir/monitoring"
->    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py "$$bundle_dir/monitoring/"
+>    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py monitoring/render.py "$$bundle_dir/monitoring/"
 >    cp monitoring/README.md "$$bundle_dir/monitoring/"
->    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit "$$bundle_dir/monitoring/"
+>    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit monitoring/perses "$$bundle_dir/monitoring/"
 >    # Local test runs leave Python bytecode beside discovery.py; never ship it.
 >    find "$$bundle_dir/monitoring" -name __pycache__ -type d -prune -exec rm -rf {} +
 >    # Only the local default is copied: never stage site auth files or secrets.

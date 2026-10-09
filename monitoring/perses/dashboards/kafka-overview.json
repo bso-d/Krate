@@ -1,0 +1,428 @@
+{
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "krate-overview",
+    "project": "krate",
+    "tags": [
+      "krate"
+    ]
+  },
+  "spec": {
+    "display": {
+      "name": "Krate \u2014 Cluster Overview"
+    },
+    "panels": {
+      "BrokersUp": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Brokers up"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal",
+                "shortValues": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": 1
+                  }
+                ]
+              },
+              "colorMode": "value",
+              "legendMode": "off"
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "kafka_brokers"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "Topics": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Topics"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal",
+                "shortValues": false
+              },
+              "colorMode": "value",
+              "legendMode": "off"
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "count(count by (topic) (kafka_topic_partitions))"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "UnderReplicatedPartitions": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Under-replicated partitions"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal",
+                "shortValues": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": 1
+                  }
+                ]
+              },
+              "colorMode": "value",
+              "legendMode": "off"
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "sum(kafka_topic_partition_under_replicated_partition)"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "TotalConsumerLag": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Total consumer lag"
+          },
+          "plugin": {
+            "kind": "StatChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "decimal",
+                "shortValues": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": 1
+                  },
+                  {
+                    "value": 1000
+                  }
+                ]
+              },
+              "colorMode": "value",
+              "legendMode": "off",
+              "sparkline": {}
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "sum(kafka_consumergroup_lag)"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "MessagesInPerSec": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Messages in / sec (rate of partition offsets)"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "counts/sec",
+                  "shortValues": true
+                }
+              },
+              "visual": {
+                "display": "line",
+                "lineWidth": 1,
+                "areaOpacity": 0.1,
+                "showPoints": "auto",
+                "connectNulls": false
+              },
+              "tooltip": {
+                "enablePinning": false
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "sum(rate(kafka_topic_partition_current_offset[5m]))",
+                    "seriesNameFormat": "msgs/sec"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "ConsumerLagByGroup": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Consumer lag by group"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal",
+                  "shortValues": false
+                }
+              },
+              "visual": {
+                "display": "line",
+                "lineWidth": 1,
+                "areaOpacity": 0.1,
+                "showPoints": "auto",
+                "connectNulls": false
+              },
+              "tooltip": {
+                "enablePinning": true
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "sum by (consumergroup) (kafka_consumergroup_lag)",
+                    "seriesNameFormat": "{{consumergroup}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "BrokerCount": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Broker count"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal",
+                  "shortValues": false
+                }
+              },
+              "visual": {
+                "display": "line",
+                "lineWidth": 1,
+                "areaOpacity": 0.0,
+                "showPoints": "auto",
+                "connectNulls": false
+              },
+              "tooltip": {
+                "enablePinning": false
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "kafka_brokers",
+                    "seriesNameFormat": "brokers"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "layouts": [
+      {
+        "kind": "Grid",
+        "spec": {
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 6,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/BrokersUp"
+              }
+            },
+            {
+              "x": 6,
+              "y": 0,
+              "width": 6,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/Topics"
+              }
+            },
+            {
+              "x": 12,
+              "y": 0,
+              "width": 6,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/UnderReplicatedPartitions"
+              }
+            },
+            {
+              "x": 18,
+              "y": 0,
+              "width": 6,
+              "height": 4,
+              "content": {
+                "$ref": "#/spec/panels/TotalConsumerLag"
+              }
+            },
+            {
+              "x": 0,
+              "y": 4,
+              "width": 12,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/MessagesInPerSec"
+              }
+            },
+            {
+              "x": 12,
+              "y": 4,
+              "width": 12,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/ConsumerLagByGroup"
+              }
+            },
+            {
+              "x": 0,
+              "y": 12,
+              "width": 24,
+              "height": 6,
+              "content": {
+                "$ref": "#/spec/panels/BrokerCount"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "duration": "6h",
+    "refreshInterval": "30s",
+    "timezone": "local"
+  }
+}

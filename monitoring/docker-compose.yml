@@ -19,6 +19,17 @@ volumes:
   loki_data:
   fluent_bit_state:
   fluent_bit_sources:
+  victorialogs_data:
+  alertmanager_data:
+  perses_data:
+  perses_seed_state:
+  perses_sync_state:
+  # Per-install configuration rendered by monitoring-init, one per consumer.
+  perses_rendered:
+  gateway_rendered:
+  alertmanager_rendered:
+  oauth2_proxy_rendered:
+  perses_sync_rendered:
 
 services:
   # ── kafka-exporter — cluster/topic/consumer-group metrics as a Kafka client ──
@@ -172,6 +183,8 @@ services:
         condition: service_started
       log-discovery:
         condition: service_healthy
+      victorialogs:
+        condition: service_started
     logging:
       driver: "json-file"
       options: { max-size: "20m", max-file: "3" }
@@ -220,3 +233,254 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  # ── Parallel alternative: Perses + VictoriaLogs + Alertmanager ─────────────
+  # Runs beside Grafana/Loki. Perses is served over HTTPS on PERSES_PORT.
+
+  # Renders mode-dependent configuration and secrets into the volumes of the
+  # services that read them, then exits.
+  monitoring-init:
+    image: ${LOG_DISCOVERY_IMAGE:?Merge LOG_DISCOVERY_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-init
+    restart: "no"
+    mem_limit: 64m
+    cpus: 0.2
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./render.py:/etc/krate/monitoring/render.py:ro,z
+      - ./auth/perses:/etc/krate/site:ro,z
+      - perses_rendered:/rendered/perses
+      - gateway_rendered:/rendered/gateway
+      - alertmanager_rendered:/rendered/alertmanager
+      - oauth2_proxy_rendered:/rendered/oauth2-proxy
+      - perses_sync_rendered:/rendered/perses-sync
+      - perses_sync_state:/rendered/state/perses-sync
+      - perses_seed_state:/rendered/state/perses-seed
+    environment:
+      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PERSES_AUTH_MODE: ${PERSES_AUTH_MODE:-local}
+      PERSES_PORT: ${PERSES_PORT:-3443}
+      PERSES_ADMIN_USER: ${PERSES_ADMIN_USER:-admin}
+      PERSES_ADMIN_PASSWORD: ${PERSES_ADMIN_PASSWORD:-}
+      PERSES_ENCRYPTION_KEY: ${PERSES_ENCRYPTION_KEY:-}
+      PERSES_SYNC_CLIENT_SECRET: ${PERSES_SYNC_CLIENT_SECRET:-}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:-}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:-}
+      GF_SMTP_ENABLED: ${GF_SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${GF_SMTP_HOST:-}
+      GF_SMTP_USER: ${GF_SMTP_USER:-}
+      GF_SMTP_PASSWORD: ${GF_SMTP_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${GF_SMTP_FROM_ADDRESS:-krate-alerts@example.com}
+      GF_SMTP_FROM_NAME: ${GF_SMTP_FROM_NAME:-Krate}
+      GF_SMTP_SKIP_VERIFY: ${GF_SMTP_SKIP_VERIFY:-false}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-ops@example.com}
+      ALERTMANAGER_EMAIL_ENABLED: ${ALERTMANAGER_EMAIL_ENABLED:-}
+      ALERTMANAGER_SMTP_REQUIRE_TLS: ${ALERTMANAGER_SMTP_REQUIRE_TLS:-true}
+    command: ["python3", "/etc/krate/monitoring/render.py", "/rendered", "/etc/krate/site/perses.json"]
+    logging:
+      driver: "json-file"
+      options: { max-size: "5m", max-file: "2" }
+
+  # ── VictoriaLogs — parallel log store queried by Perses ────────────────────
+  victorialogs:
+    image: ${VICTORIALOGS_IMAGE:?Merge VICTORIALOGS_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-victorialogs
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    command:
+      - -storageDataPath=/victoria-logs-data
+      - -retentionPeriod=${VICTORIALOGS_RETENTION:-7d}
+      - -httpListenAddr=:9428
+    volumes:
+      - victorialogs_data:/victoria-logs-data
+    networks: [monitoring]
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }
+
+  # ── Alertmanager — routes Prometheus alerts to email ───────────────────────
+  alertmanager:
+    image: ${ALERTMANAGER_IMAGE:?Merge ALERTMANAGER_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-alertmanager
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.2
+    command:
+      - --config.file=/etc/alertmanager/rendered/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=
+      - --web.listen-address=:9093
+    environment:
+      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+    volumes:
+      - alertmanager_rendered:/etc/alertmanager/rendered:ro
+      - alertmanager_data:/alertmanager
+    networks: [monitoring]
+    depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9093/-/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }
+
+  # ── Perses — dashboards for Prometheus metrics and VictoriaLogs logs ───────
+  # No host port: reachable only through perses-gateway.
+  perses:
+    image: ${PERSES_IMAGE:?Merge PERSES_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-perses
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: ["--config=/etc/krate/perses/rendered/config.yaml", "--log.level=warning"]
+    environment:
+      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+    volumes:
+      - perses_data:/perses
+      - ./perses/provisioning:/etc/krate/perses/provisioning:ro,z
+      - perses_rendered:/etc/krate/perses/rendered:ro
+    networks: [monitoring]
+    depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }
+
+  # Seeds the shipped dashboards, keeping UI edits until a file changes.
+  perses-seed:
+    image: ${LOG_DISCOVERY_IMAGE:?Merge LOG_DISCOVERY_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-perses-seed
+    restart: "no"
+    user: "65534:65534"
+    mem_limit: 64m
+    cpus: 0.2
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./perses/seed.py:/etc/krate/perses/seed.py:ro,z
+      - ./perses/dashboards:/etc/krate/perses/dashboards:ro,z
+      - ./auth/perses:/etc/krate/site:ro,z
+      - perses_seed_state:/var/lib/krate-perses-seed
+    environment:
+      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PERSES_AUTH_MODE: ${PERSES_AUTH_MODE:-local}
+      PERSES_ADMIN_USER: ${PERSES_ADMIN_USER:-admin}
+      PERSES_ADMIN_PASSWORD: ${PERSES_ADMIN_PASSWORD:-}
+      PERSES_SYNC_CLIENT_SECRET: ${PERSES_SYNC_CLIENT_SECRET:-}
+    command: ["python3", "/etc/krate/perses/seed.py"]
+    networks: [monitoring]
+    depends_on:
+      perses:
+        condition: service_started
+    logging:
+      driver: "json-file"
+      options: { max-size: "5m", max-file: "2" }
+
+  # HTTPS entry point. In local mode it proxies to Perses' own login; with
+  # SSO every request is checked by perses-sync against the IdP session.
+  perses-gateway:
+    image: ${NGINX_IMAGE:?Merge NGINX_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-perses-gateway
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.5
+    ports:
+      - "${PERSES_PORT:-3443}:3443"
+    environment:
+      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+    volumes:
+      - gateway_rendered:/etc/nginx/conf.d:ro
+      # krate monitor up sets the cluster's certificate directory.
+      - ${PERSES_CERTS_DIR:-../certs}:/etc/nginx/certs:ro,z
+    networks: [monitoring]
+    depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
+      perses:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3443 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }
+
+  oauth2-proxy:
+    profiles: [perses-sso]
+    image: ${OAUTH2_PROXY_IMAGE:?Merge OAUTH2_PROXY_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-oauth2-proxy
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.3
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: ["--config=/etc/oauth2-proxy/oauth2-proxy.cfg"]
+    environment:
+      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET:-}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:-}
+    volumes:
+      - oauth2_proxy_rendered:/etc/oauth2-proxy:ro
+    networks: [monitoring]
+    depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }
+
+  # Maps current IdP groups to Perses roles and guards every request.
+  perses-sync:
+    profiles: [perses-sso]
+    image: ${LOG_DISCOVERY_IMAGE:?Merge LOG_DISCOVERY_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-perses-sync
+    restart: unless-stopped
+    user: "65534:65534"
+    mem_limit: 96m
+    cpus: 0.3
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./perses/sync:/etc/krate/perses-sync/app:ro,z
+      - perses_sync_rendered:/etc/krate/perses-sync/rendered:ro
+      - perses_sync_state:/var/lib/krate-perses-sync
+    environment:
+      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: ["python3", "/etc/krate/perses-sync/app/perses_sync.py", "--config", "/etc/krate/perses-sync/rendered/config.json"]
+    networks: [monitoring]
+    depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
+      perses:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9091/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }

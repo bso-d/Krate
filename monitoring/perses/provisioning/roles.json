@@ -1,0 +1,87 @@
+[
+  {
+    "kind": "GlobalRole",
+    "metadata": {
+      "name": "krate-admin"
+    },
+    "spec": {
+      "permissions": [
+        {
+          "actions": [
+            "*"
+          ],
+          "scopes": [
+            "*"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "kind": "GlobalRole",
+    "metadata": {
+      "name": "krate-viewer"
+    },
+    "spec": {
+      "permissions": [
+        {
+          "actions": [
+            "read"
+          ],
+          "scopes": [
+            "Project",
+            "Dashboard",
+            "Datasource",
+            "GlobalDatasource",
+            "Variable",
+            "GlobalVariable",
+            "Folder"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "kind": "GlobalRole",
+    "metadata": {
+      "name": "krate-sync"
+    },
+    "spec": {
+      "permissions": [
+        {
+          "actions": [
+            "read",
+            "create",
+            "update",
+            "delete"
+          ],
+          "scopes": [
+            "GlobalRoleBinding",
+            "RoleBinding"
+          ]
+        },
+        {
+          "actions": [
+            "read"
+          ],
+          "scopes": [
+            "Project",
+            "GlobalRole",
+            "Role",
+            "User"
+          ]
+        },
+        {
+          "actions": [
+            "read",
+            "create",
+            "update"
+          ],
+          "scopes": [
+            "Dashboard"
+          ]
+        }
+      ]
+    }
+  }
+]

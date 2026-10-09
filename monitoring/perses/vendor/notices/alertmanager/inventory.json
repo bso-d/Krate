@@ -1,0 +1,199 @@
+{
+  "image": "docker.io/prom/alertmanager:v0.34.1 (identical index at quay.io/prometheus/alertmanager:v0.34.1)",
+  "index_digest": "sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a",
+  "platform_manifests": {
+    "amd64": "sha256:84967b9b7ba45e38a9278d3e594305f43d4993c310df3905b51138b816c365f3",
+    "arm64": "sha256:47a1dc7e74f1e755e29f74d392262f8d1da41f2ada5653911199bf07219e41d9"
+  },
+  "base": "quay.io/prometheus/busybox-linux-<arch>:latest = docker.io busybox:uclibc (BusyBox 1.38.0, uClibc-ng, Buildroot 2026.05.1) + Debian trixie ca-certificates.crt, zoneinfo, services, nsswitch.conf",
+  "go_modules": "go-modules/inventory.json",
+  "packages": [
+    {
+      "architecture": "amd64",
+      "package": "busybox",
+      "version": "1.38.0",
+      "license": "GPL-2.0-only",
+      "evidence": "/bin/busybox (static, stripped, sha256 462febe85977f9787d1d4a45fae0c0858fdb65f2312ccb95e034a505cbaaebfe) prints \"BusyBox v1.38.0 (2026-05-13 02:21:49 UTC)\"; 411 hard links in /bin"
+    },
+    {
+      "architecture": "amd64",
+      "package": "uClibc-ng",
+      "version": "1.0.57",
+      "license": "LGPL-2.1-or-later",
+      "evidence": "statically linked into /bin/busybox; base layer \"BusyBox 1.38.0 (uclibc), Buildroot 2026.05.1\""
+    },
+    {
+      "architecture": "amd64",
+      "package": "ca-certificates (bundle file only)",
+      "version": "20250419",
+      "license": "MPL-2.0 AND GPL-2.0-or-later (see copyright)",
+      "evidence": "/etc/ssl/certs/ca-certificates.crt"
+    },
+    {
+      "architecture": "amd64",
+      "package": "netbase (/etc/services only)",
+      "version": "6.5",
+      "license": "GPL-2.0 (see copyright)",
+      "evidence": "/etc/services"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata (/usr/share/zoneinfo)",
+      "version": "2026b",
+      "license": "public domain (see copyright)",
+      "evidence": "/usr/share/zoneinfo/tzdata.zi"
+    },
+    {
+      "architecture": "arm64",
+      "package": "busybox",
+      "version": "1.38.0",
+      "license": "GPL-2.0-only",
+      "evidence": "/bin/busybox (static, stripped, sha256 611f34a914881a996806691ed45da0ec4c62af9f0873cd2d55380770e994a229) prints \"BusyBox v1.38.0 (2026-05-13 02:21:49 UTC)\"; 411 hard links in /bin"
+    },
+    {
+      "architecture": "arm64",
+      "package": "uClibc-ng",
+      "version": "1.0.57",
+      "license": "LGPL-2.1-or-later",
+      "evidence": "statically linked into /bin/busybox; base layer \"BusyBox 1.38.0 (uclibc), Buildroot 2026.05.1\""
+    },
+    {
+      "architecture": "arm64",
+      "package": "ca-certificates (bundle file only)",
+      "version": "20250419",
+      "license": "MPL-2.0 AND GPL-2.0-or-later (see copyright)",
+      "evidence": "/etc/ssl/certs/ca-certificates.crt"
+    },
+    {
+      "architecture": "arm64",
+      "package": "netbase (/etc/services only)",
+      "version": "6.5",
+      "license": "GPL-2.0 (see copyright)",
+      "evidence": "/etc/services"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata (/usr/share/zoneinfo)",
+      "version": "2026b",
+      "license": "public domain (see copyright)",
+      "evidence": "/usr/share/zoneinfo/tzdata.zi"
+    }
+  ],
+  "copyrights": [
+    {
+      "source": "alertmanager",
+      "version": "v0.34.1",
+      "url": "https://raw.githubusercontent.com/prometheus/alertmanager/v0.34.1/LICENSE",
+      "note": "the image contains no licence/NOTICE files",
+      "file": "ALERTMANAGER-LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "source": "alertmanager",
+      "version": "v0.34.1",
+      "url": "https://raw.githubusercontent.com/prometheus/alertmanager/v0.34.1/NOTICE",
+      "file": "ALERTMANAGER-NOTICE",
+      "sha256": "24f7d73529defd2e28b4bb5e0f0396cebb6d3e74b7f66a26b62d0d3251431582"
+    },
+    {
+      "source": "go (standard library/runtime)",
+      "version": "go1.26.8",
+      "url": "https://raw.githubusercontent.com/golang/go/go1.26.8/LICENSE",
+      "note": "linked into /bin/alertmanager, /bin/amtool",
+      "file": "go1.26.8_LICENSE",
+      "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "source": "go (standard library/runtime)",
+      "version": "go1.26.8",
+      "url": "https://raw.githubusercontent.com/golang/go/go1.26.8/PATENTS",
+      "note": "linked into /bin/alertmanager, /bin/amtool",
+      "file": "go1.26.8_PATENTS",
+      "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+    },
+    {
+      "source": "busybox",
+      "version": "1.38.0",
+      "url": "https://busybox.net/downloads/busybox-1.38.0.tar.bz2",
+      "origin": "busybox-1.38.0.tar.bz2 sha256 34f9ea6ff8636f2c9241153b9114eefa9e65674a45318ae1ef95bb5f31c53bb2 (matches docker-library/busybox versions.json):busybox-1.38.0/LICENSE",
+      "file": "busybox-1.38.0_LICENSE",
+      "sha256": "bbfc9843646d483c334664f651c208b9839626891d8f17604db2146962f43548"
+    },
+    {
+      "source": "uClibc-ng",
+      "version": "1.0.57",
+      "url": "https://downloads.uclibc-ng.org/releases/1.0.57/uClibc-ng-1.0.57.tar.xz",
+      "origin": "uClibc-ng-1.0.57.tar.xz sha256 8bc734b584e23ff6ae3d0ebb4c0fb1d1d814c58c82822b93130d436afa7ace8b (matches Buildroot 2026.05.1 uclibc.hash):COPYING.LIB",
+      "note": "version from Buildroot 2026.05.1 package/uclibc/uclibc.mk; the stripped static busybox binary does not itself print the uClibc-ng version",
+      "file": "uClibc-ng-1.0.57_COPYING.LIB",
+      "sha256": "ec60b993835e2c6b79e6d9226345f4e614e686eb57dc13b6420c15a33a8996e5"
+    },
+    {
+      "source": "prometheus/busybox",
+      "version": "c800810575da90bac8a38fbf03007f93aba9e016",
+      "url": "https://raw.githubusercontent.com/prometheus/busybox/c800810575da90bac8a38fbf03007f93aba9e016/LICENSE",
+      "file": "prometheus-busybox_LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "source": "prometheus/busybox",
+      "version": "c800810575da90bac8a38fbf03007f93aba9e016",
+      "url": "https://raw.githubusercontent.com/prometheus/busybox/c800810575da90bac8a38fbf03007f93aba9e016/NOTICE",
+      "file": "prometheus-busybox_NOTICE",
+      "sha256": "e57ffa1ba8c09ac1de3fa5f4e93bdce760b217dbc2dd0e920bc11434ed996487"
+    },
+    {
+      "source": "docker-library/busybox",
+      "version": "1dbf72408aa7d10a0336461393be964a3d163995",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/1dbf72408aa7d10a0336461393be964a3d163995/LICENSE",
+      "note": "commit that set Buildroot 2026.05.1, matching the base-layer history \"BusyBox 1.38.0 (uclibc), Buildroot 2026.05.1, Debian 13\"",
+      "file": "docker-library-busybox_LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "source": "ca-certificates",
+      "version": "20250419",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/c/ca-certificates/ca-certificates_20250419_copyright",
+      "origin": "digest-verified oauth2-proxy image:/usr/share/doc/ca-certificates/copyright",
+      "note": "/etc/ssl/certs/ca-certificates.crt byte-identical to the oauth2-proxy image (ca-certificates 20250419)",
+      "file": "ca-certificates_20250419_copyright.txt",
+      "sha256": "e85e1bcad3a915dc7e6f41412bc5bdeba275cadd817896ea0451f2140a93967c"
+    },
+    {
+      "source": "netbase",
+      "version": "6.5",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright",
+      "origin": "digest-verified oauth2-proxy image:/usr/share/doc/netbase/copyright",
+      "note": "/etc/services byte-identical to the oauth2-proxy image (netbase 6.5)",
+      "file": "netbase_6.5_copyright.txt",
+      "sha256": "795b66147ea5ad692991caa7008ece551fb0fa88b9c53656223bd1518dc58ab2"
+    },
+    {
+      "source": "tzdata",
+      "version": "2026b (Debian 13 revision not recorded)",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026b-0+deb13u1_copyright",
+      "metadata_service_error": "HTTP Error 404: Not Found",
+      "origin": "digest-verified perses image:/usr/share/doc/tzdata/copyright (tzdata 2026b-0+deb12u1)",
+      "note": "/usr/share/zoneinfo/tzdata.zi reports \"# version 2026b\"; copied by prometheus/busybox from a debian:trixie-slim builder",
+      "file": "tzdata_2026b_copyright.txt",
+      "sha256": "cb61132bc0fc7b26ef5a82ee18b2fb644a1362f4f286ed980ff22e408471f59a"
+    }
+  ],
+  "common_licenses": [
+    {
+      "file": "GPL-2",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
+      "origin": "digest-verified oauth2-proxy image:/usr/share/common-licenses/GPL-2"
+    },
+    {
+      "file": "LGPL-2.1",
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+      "origin": "digest-verified oauth2-proxy image:/usr/share/common-licenses/LGPL-2.1"
+    },
+    {
+      "file": "MPL-2.0",
+      "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+      "origin": "digest-verified oauth2-proxy image:/usr/share/common-licenses/MPL-2.0"
+    }
+  ]
+}

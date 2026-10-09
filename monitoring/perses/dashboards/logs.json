@@ -1,0 +1,158 @@
+{
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "krate-logs",
+    "project": "krate",
+    "tags": [
+      "krate"
+    ]
+  },
+  "spec": {
+    "display": {
+      "name": "Krate \u2014 Container logs"
+    },
+    "variables": [
+      {
+        "kind": "ListVariable",
+        "spec": {
+          "name": "container",
+          "display": {
+            "name": "Container",
+            "description": "Container name (VictoriaLogs stream field `container`, job=containerlogs)",
+            "hidden": false
+          },
+          "allowAllValue": true,
+          "allowMultiple": true,
+          "sort": "alphabetical-asc",
+          "plugin": {
+            "kind": "VictoriaLogsFieldValuesVariable",
+            "spec": {
+              "datasource": {
+                "kind": "VictoriaLogsDatasource",
+                "name": "victorialogs"
+              },
+              "field": "container",
+              "query": "_stream:{job=\"containerlogs\"}"
+            }
+          }
+        }
+      }
+    ],
+    "panels": {
+      "LogLinesPerContainer": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Log lines per container",
+            "description": "Log lines counted per query step (VictoriaLogs stats_query_range), one series per container, all containers."
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "right",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal",
+                  "shortValues": false
+                }
+              },
+              "visual": {
+                "display": "line",
+                "lineWidth": 1,
+                "areaOpacity": 0.1,
+                "showPoints": "auto",
+                "connectNulls": false
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "lines",
+                "plugin": {
+                  "kind": "VictoriaLogsTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "VictoriaLogsDatasource",
+                      "name": "victorialogs"
+                    },
+                    "query": "_stream:{job=\"containerlogs\"} | stats by (container) count() as lines"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "ContainerLogs": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Container logs",
+            "description": "Newest 1000 log lines in the selected time range for the selected container(s)."
+          },
+          "plugin": {
+            "kind": "LogsTable",
+            "spec": {
+              "showTime": true,
+              "allowWrap": true,
+              "enableDetails": true
+            }
+          },
+          "queries": [
+            {
+              "kind": "LogQuery",
+              "spec": {
+                "name": "logs",
+                "plugin": {
+                  "kind": "VictoriaLogsLogQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "VictoriaLogsDatasource",
+                      "name": "victorialogs"
+                    },
+                    "query": "_stream:{job=\"containerlogs\",container in (${container:doublequote})} | sort by (_time desc) | limit 1000"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "layouts": [
+      {
+        "kind": "Grid",
+        "spec": {
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/LogLinesPerContainer"
+              }
+            },
+            {
+              "x": 0,
+              "y": 8,
+              "width": 24,
+              "height": 16,
+              "content": {
+                "$ref": "#/spec/panels/ContainerLogs"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "duration": "1h",
+    "refreshInterval": "30s",
+    "timezone": "local"
+  }
+}

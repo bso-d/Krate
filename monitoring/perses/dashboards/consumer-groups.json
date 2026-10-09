@@ -1,0 +1,212 @@
+{
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "krate-consumers",
+    "project": "krate",
+    "tags": [
+      "krate"
+    ]
+  },
+  "spec": {
+    "display": {
+      "name": "Krate \u2014 Consumer Groups"
+    },
+    "panels": {
+      "LagByConsumerGroup": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Lag by consumer group"
+          },
+          "plugin": {
+            "kind": "Table",
+            "spec": {
+              "density": "standard",
+              "pagination": false,
+              "defaultColumnHidden": false,
+              "columnSettings": [
+                {
+                  "name": "consumergroup",
+                  "header": "Consumer Group",
+                  "align": "left"
+                },
+                {
+                  "name": "value",
+                  "header": "Total Lag",
+                  "align": "right"
+                },
+                {
+                  "name": "timestamp",
+                  "hide": true
+                }
+              ]
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "sum by (consumergroup) (kafka_consumergroup_lag)"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "GroupMembersAssignedPartitions": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Group members / assigned partitions"
+          },
+          "plugin": {
+            "kind": "Table",
+            "spec": {
+              "density": "standard",
+              "pagination": false,
+              "defaultColumnHidden": false,
+              "columnSettings": [
+                {
+                  "name": "consumergroup",
+                  "header": "Consumer Group",
+                  "align": "left"
+                },
+                {
+                  "name": "value",
+                  "header": "Assigned Partitions",
+                  "align": "right"
+                },
+                {
+                  "name": "timestamp",
+                  "hide": true
+                }
+              ]
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "count by (consumergroup) (kafka_consumergroup_current_offset)"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "LagOverTimeByGroupTopic": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Lag over time by group / topic"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "right",
+                "mode": "table",
+                "values": [
+                  "last-number",
+                  "max"
+                ]
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "decimal",
+                  "shortValues": false
+                }
+              },
+              "visual": {
+                "display": "line",
+                "lineWidth": 1,
+                "areaOpacity": 0.1,
+                "showPoints": "auto",
+                "connectNulls": false
+              },
+              "tooltip": {
+                "enablePinning": true
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "sum by (consumergroup, topic) (kafka_consumergroup_lag)",
+                    "seriesNameFormat": "{{consumergroup}} / {{topic}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "layouts": [
+      {
+        "kind": "Grid",
+        "spec": {
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 9,
+              "content": {
+                "$ref": "#/spec/panels/LagByConsumerGroup"
+              }
+            },
+            {
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 9,
+              "content": {
+                "$ref": "#/spec/panels/GroupMembersAssignedPartitions"
+              }
+            },
+            {
+              "x": 0,
+              "y": 9,
+              "width": 24,
+              "height": 9,
+              "content": {
+                "$ref": "#/spec/panels/LagOverTimeByGroupTopic"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "duration": "6h",
+    "refreshInterval": "30s",
+    "timezone": "local"
+  }
+}

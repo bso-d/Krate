@@ -1,0 +1,271 @@
+{
+  "image": "docker.io/victoriametrics/victoria-logs:v1.53.0",
+  "index_digest": "sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d",
+  "platform_manifests": {
+    "amd64": "sha256:45dc9bef07c0c404255790e41f2c22c62ff55a690a1d556e0f9cb6f6e2556f1b",
+    "arm64": "sha256:9beccb5e7d38e3db891578249f90ef16f572c37665062ca19cbcc753055431c9"
+  },
+  "base": "distroless static Debian 13 trixie layer set (image history: bazel //common:cacerts_debian13, @trixie packages)",
+  "go_modules": "go-modules/inventory.json",
+  "packages": [
+    {
+      "architecture": "amd64",
+      "package": "base-files",
+      "version": "13.8+deb13u4",
+      "package_architecture": "amd64",
+      "source": "base-files",
+      "source_version": "13.8+deb13u4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u4_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "media-types",
+      "version": "13.0.0",
+      "package_architecture": "all",
+      "source": "media-types",
+      "source_version": "13.0.0",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "netbase",
+      "version": "6.5",
+      "package_architecture": "all",
+      "source": "netbase",
+      "source_version": "6.5",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata",
+      "version": "2026a-0+deb13u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026a-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026a-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata-legacy",
+      "version": "2026a-0+deb13u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026a-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026a-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "base-files",
+      "version": "13.8+deb13u4",
+      "package_architecture": "arm64",
+      "source": "base-files",
+      "source_version": "13.8+deb13u4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u4_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "media-types",
+      "version": "13.0.0",
+      "package_architecture": "all",
+      "source": "media-types",
+      "source_version": "13.0.0",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "netbase",
+      "version": "6.5",
+      "package_architecture": "all",
+      "source": "netbase",
+      "source_version": "6.5",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata",
+      "version": "2026a-0+deb13u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026a-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026a-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata-legacy",
+      "version": "2026a-0+deb13u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026a-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026a-0+deb13u1_copyright"
+    }
+  ],
+  "copyrights": [
+    {
+      "source": "base-files",
+      "version": "13.8+deb13u4",
+      "file": "base-files_13.8+deb13u4_copyright.txt",
+      "sha256": "576859a65409c99cb1632c8b3de4b3deb26910800832beda76aca33d00720134",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u4_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/base-files/copyright"
+    },
+    {
+      "source": "media-types",
+      "version": "13.0.0",
+      "file": "media-types_13.0.0_copyright.txt",
+      "sha256": "5ded7c53199b6a1d089b0b7e231d77e5c84081c7156b372b3f11ad9c1c2c5cc7",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/media-types/copyright"
+    },
+    {
+      "source": "netbase",
+      "version": "6.5",
+      "file": "netbase_6.5_copyright.txt",
+      "sha256": "795b66147ea5ad692991caa7008ece551fb0fa88b9c53656223bd1518dc58ab2",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/netbase/copyright"
+    },
+    {
+      "source": "tzdata",
+      "version": "2026a-0+deb13u1",
+      "file": "tzdata_2026a-0+deb13u1_copyright.txt",
+      "sha256": "cb61132bc0fc7b26ef5a82ee18b2fb644a1362f4f286ed980ff22e408471f59a",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026a-0+deb13u1_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/tzdata/copyright"
+    },
+    {
+      "source": "ca-certificates",
+      "version": null,
+      "file": "ca-certificates_image-doc_copyright.txt",
+      "sha256": "e85e1bcad3a915dc7e6f41412bc5bdeba275cadd817896ea0451f2140a93967c",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/ca-certificates/copyright",
+      "note": "distroless ships the CA bundle without a dpkg status entry; bundle bytes equal the ca-certificates 20250419 bundle in the oauth2-proxy image"
+    },
+    {
+      "source": "VictoriaLogs",
+      "version": "v1.53.0",
+      "url": "https://raw.githubusercontent.com/VictoriaMetrics/VictoriaLogs/v1.53.0/LICENSE",
+      "note": "the image contains no project licence file; tagged source has no NOTICE (HTTP 404)",
+      "file": "VICTORIALOGS-LICENSE",
+      "sha256": "778f2412aa6e874bf0e2482e17a119ea53ba508ae6ddd924859a1f32f6e2740f"
+    },
+    {
+      "source": "go (standard library/runtime)",
+      "version": "go1.27.1",
+      "url": "https://raw.githubusercontent.com/golang/go/go1.27.1/LICENSE",
+      "note": "linked into /victoria-logs-prod",
+      "file": "go1.27.1_LICENSE",
+      "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "source": "go (standard library/runtime)",
+      "version": "go1.27.1",
+      "url": "https://raw.githubusercontent.com/golang/go/go1.27.1/PATENTS",
+      "note": "linked into /victoria-logs-prod",
+      "file": "go1.27.1_PATENTS",
+      "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+    },
+    {
+      "source": "glibc",
+      "version": "2.41-12+deb13u4",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/g/glibc/glibc_2.41-12+deb13u4_copyright",
+      "note": "statically linked C runtime (CGO_ENABLED=1, ELF \"statically linked\", glibc tunable strings, .comment \"GCC: (Debian 14.2.0-19) 14.2.0\"). The exact Debian glibc revision is NOT recorded in the binary; 2.41-12+deb13u4 is an inference from the Debian 13 toolchain and must be confirmed against the upstream build image.",
+      "file": "glibc_2.41-12+deb13u4_copyright.txt",
+      "sha256": "f5788886720a2605a946e81d571e6c8162b09f58d2e2ceb8d36e5768fccd850d"
+    },
+    {
+      "source": "gcc-14",
+      "version": "14.2.0-19",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright",
+      "note": "statically linked C runtime (CGO_ENABLED=1, ELF \"statically linked\", glibc tunable strings, .comment \"GCC: (Debian 14.2.0-19) 14.2.0\"). The exact Debian glibc revision is NOT recorded in the binary; 14.2.0-19 is an inference from the Debian 13 toolchain and must be confirmed against the upstream build image.",
+      "file": "gcc-14_14.2.0-19_copyright.txt",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
+    }
+  ],
+  "common_licenses": [
+    {
+      "file": "Apache-2.0",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "origin": "digest-verified image:/usr/share/common-licenses/Apache-2.0 (base-files)"
+    },
+    {
+      "file": "Artistic",
+      "sha256": "b7fd9b73ea99602016a326e0b62e6646060d18febdd065ceca8bb482208c3d88",
+      "origin": "digest-verified image:/usr/share/common-licenses/Artistic (base-files)"
+    },
+    {
+      "file": "BSD",
+      "sha256": "5d588eb3b157d52112afea935c88a7ff9efddc1e2d95a42c25d3b96ad9055008",
+      "origin": "digest-verified image:/usr/share/common-licenses/BSD (base-files)"
+    },
+    {
+      "file": "CC0-1.0",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+      "origin": "digest-verified image:/usr/share/common-licenses/CC0-1.0 (base-files)"
+    },
+    {
+      "file": "GFDL",
+      "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL (base-files)"
+    },
+    {
+      "file": "GFDL-1.2",
+      "sha256": "2652c22ba086f92e55ae4a9f9c890ad4766ffd7814a73d318e22a597edf857a4",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL-1.2 (base-files)"
+    },
+    {
+      "file": "GFDL-1.3",
+      "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL-1.3 (base-files)"
+    },
+    {
+      "file": "GPL",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL (base-files)"
+    },
+    {
+      "file": "GPL-1",
+      "sha256": "49c007bafb5ad6dd9f9d4dae4d3ac0461975498150c05d684c551f0914ab486c",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-1 (base-files)"
+    },
+    {
+      "file": "GPL-2",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-2 (base-files)"
+    },
+    {
+      "file": "GPL-3",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-3 (base-files)"
+    },
+    {
+      "file": "LGPL",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL (base-files)"
+    },
+    {
+      "file": "LGPL-2",
+      "sha256": "cc535c21133c895b56b374c8a1dc1eb948d99003ed2b47372069456b62f42b24",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-2 (base-files)"
+    },
+    {
+      "file": "LGPL-2.1",
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-2.1 (base-files)"
+    },
+    {
+      "file": "LGPL-3",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-3 (base-files)"
+    },
+    {
+      "file": "MPL-1.1",
+      "sha256": "f849fc26a7a99981611a3a370e83078deb617d12a45776d6c4cada4d338be469",
+      "origin": "digest-verified image:/usr/share/common-licenses/MPL-1.1 (base-files)"
+    },
+    {
+      "file": "MPL-2.0",
+      "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+      "origin": "digest-verified image:/usr/share/common-licenses/MPL-2.0 (base-files)"
+    }
+  ]
+}

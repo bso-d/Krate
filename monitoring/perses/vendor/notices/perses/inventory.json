@@ -1,0 +1,256 @@
+{
+  "image": "docker.io/persesdev/perses:v0.54.0",
+  "index_digest": "sha256:a0e34ddaf9d7599d96036611af205b948c1179646844202d869f3bcf3d5d9e9c",
+  "platform_manifests": {
+    "amd64": "sha256:6def46a662a22e790b49c01865c80f547d11d16a83213ac102a0e722d27ece13",
+    "arm64": "sha256:3d73e476d621b83098637dc4864eb90cf9748a7949eade73abe6774d4b8ef379"
+  },
+  "source_revision": "4c719fc19fa21d333797e84c4fe7e3d81c25f4f5",
+  "base": "gcr.io/distroless/static-debian12:nonroot (Debian 12 bookworm; per image history and tagged Dockerfile)",
+  "go_modules": "go-modules/inventory.json",
+  "ui_npm": "ui-npm/inventory.json",
+  "plugin_archives": "../perses-plugins/inventory.json",
+  "packages": [
+    {
+      "architecture": "amd64",
+      "package": "base-files",
+      "version": "12.4+deb12u15",
+      "package_architecture": "amd64",
+      "source": "base-files",
+      "source_version": "12.4+deb12u15",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_12.4+deb12u15_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "media-types",
+      "version": "10.0.0",
+      "package_architecture": "all",
+      "source": "media-types",
+      "source_version": "10.0.0",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_10.0.0_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "netbase",
+      "version": "6.4",
+      "package_architecture": "all",
+      "source": "netbase",
+      "source_version": "6.4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.4_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata",
+      "version": "2026b-0+deb12u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026b-0+deb12u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026b-0+deb12u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "base-files",
+      "version": "12.4+deb12u15",
+      "package_architecture": "arm64",
+      "source": "base-files",
+      "source_version": "12.4+deb12u15",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_12.4+deb12u15_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "media-types",
+      "version": "10.0.0",
+      "package_architecture": "all",
+      "source": "media-types",
+      "source_version": "10.0.0",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_10.0.0_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "netbase",
+      "version": "6.4",
+      "package_architecture": "all",
+      "source": "netbase",
+      "source_version": "6.4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.4_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata",
+      "version": "2026b-0+deb12u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026b-0+deb12u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026b-0+deb12u1_copyright"
+    }
+  ],
+  "copyrights": [
+    {
+      "source": "base-files",
+      "version": "12.4+deb12u15",
+      "file": "base-files_12.4+deb12u15_copyright.txt",
+      "sha256": "fd7e4aae7e7b05f217bcf2d02322825c360e66c52c4c2f1b28d784d6297a1c23",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_12.4+deb12u15_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/base-files/copyright"
+    },
+    {
+      "source": "media-types",
+      "version": "10.0.0",
+      "file": "media-types_10.0.0_copyright.txt",
+      "sha256": "5ded7c53199b6a1d089b0b7e231d77e5c84081c7156b372b3f11ad9c1c2c5cc7",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_10.0.0_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/media-types/copyright"
+    },
+    {
+      "source": "netbase",
+      "version": "6.4",
+      "file": "netbase_6.4_copyright.txt",
+      "sha256": "795b66147ea5ad692991caa7008ece551fb0fa88b9c53656223bd1518dc58ab2",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.4_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/netbase/copyright"
+    },
+    {
+      "source": "tzdata",
+      "version": "2026b-0+deb12u1",
+      "file": "tzdata_2026b-0+deb12u1_copyright.txt",
+      "sha256": "cb61132bc0fc7b26ef5a82ee18b2fb644a1362f4f286ed980ff22e408471f59a",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026b-0+deb12u1_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/tzdata/copyright"
+    },
+    {
+      "source": "ca-certificates",
+      "version": null,
+      "file": "ca-certificates_image-doc_copyright.txt",
+      "sha256": "e85e1bcad3a915dc7e6f41412bc5bdeba275cadd817896ea0451f2140a93967c",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/ca-certificates/copyright",
+      "note": "distroless ships the CA bundle without a dpkg status entry; package version is not recorded in the image"
+    },
+    {
+      "source": "perses",
+      "version": "v0.54.0",
+      "origin": "digest-verified image:/LICENSE (identical to tagged source)",
+      "url": "https://raw.githubusercontent.com/perses/perses/4c719fc19fa21d333797e84c4fe7e3d81c25f4f5/LICENSE",
+      "file": "PERSES-LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724"
+    },
+    {
+      "source": "go (standard library/runtime)",
+      "version": "go1.26.5",
+      "url": "https://raw.githubusercontent.com/golang/go/go1.26.5/LICENSE",
+      "note": "linked into /bin/perses, /bin/percli",
+      "file": "go1.26.5_LICENSE",
+      "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "source": "go (standard library/runtime)",
+      "version": "go1.26.5",
+      "url": "https://raw.githubusercontent.com/golang/go/go1.26.5/PATENTS",
+      "note": "linked into /bin/perses, /bin/percli",
+      "file": "go1.26.5_PATENTS",
+      "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+    },
+    {
+      "source": "perses-ui (embedded app/dist)",
+      "version": "v0.54.0",
+      "origin": "digest-verified image:/bin/perses embed.FS app/dist/576.8e43f36bf31fd7c8.js.LICENSE.txt.gz (gunzipped; amd64+arm64 identical)",
+      "embedded_gz_sha256": "2efe62d8e1f0f792b754399804d0c2097f64d8c101cb0822c62baa1a5afc6f0b",
+      "file": "ui__576.8e43f36bf31fd7c8.js.LICENSE.txt",
+      "sha256": "0f95e148996cdd03ab005dd5147069e16cde16b7aa6b3d22aedfe5c9c6410325"
+    },
+    {
+      "source": "perses-ui (embedded app/dist)",
+      "version": "v0.54.0",
+      "origin": "digest-verified image:/bin/perses embed.FS app/dist/main.9684ddd8cc16869e.js.LICENSE.txt.gz (gunzipped; amd64+arm64 identical)",
+      "embedded_gz_sha256": "194e205e95d039f0d9098271eded0c754a815861b843c2b1a32ec9a832899d8a",
+      "file": "ui__main.9684ddd8cc16869e.js.LICENSE.txt",
+      "sha256": "f952ac66540b4c5ff709a3d7dfae814cfc21fabe06dbb74bfc05cecc499cf24d"
+    }
+  ],
+  "common_licenses": [
+    {
+      "file": "Apache-2.0",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "origin": "digest-verified image:/usr/share/common-licenses/Apache-2.0 (base-files)"
+    },
+    {
+      "file": "Artistic",
+      "sha256": "b7fd9b73ea99602016a326e0b62e6646060d18febdd065ceca8bb482208c3d88",
+      "origin": "digest-verified image:/usr/share/common-licenses/Artistic (base-files)"
+    },
+    {
+      "file": "BSD",
+      "sha256": "5d588eb3b157d52112afea935c88a7ff9efddc1e2d95a42c25d3b96ad9055008",
+      "origin": "digest-verified image:/usr/share/common-licenses/BSD (base-files)"
+    },
+    {
+      "file": "CC0-1.0",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+      "origin": "digest-verified image:/usr/share/common-licenses/CC0-1.0 (base-files)"
+    },
+    {
+      "file": "GFDL",
+      "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL (base-files)"
+    },
+    {
+      "file": "GFDL-1.2",
+      "sha256": "d8e94ae5fdb5433fcae2961aeb1a8cf17174d6f4a0465d24bf37dd8a038bd439",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL-1.2 (base-files)"
+    },
+    {
+      "file": "GFDL-1.3",
+      "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL-1.3 (base-files)"
+    },
+    {
+      "file": "GPL",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL (base-files)"
+    },
+    {
+      "file": "GPL-1",
+      "sha256": "d77d235e41d54594865151f4751e835c5a82322b0e87ace266567c3391a4b912",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-1 (base-files)"
+    },
+    {
+      "file": "GPL-2",
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-2 (base-files)"
+    },
+    {
+      "file": "GPL-3",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-3 (base-files)"
+    },
+    {
+      "file": "LGPL",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL (base-files)"
+    },
+    {
+      "file": "LGPL-2",
+      "sha256": "681e386e44a19d7d0674b4320272c90e66b6610b741e7e6305f8219c42e85366",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-2 (base-files)"
+    },
+    {
+      "file": "LGPL-2.1",
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-2.1 (base-files)"
+    },
+    {
+      "file": "LGPL-3",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-3 (base-files)"
+    },
+    {
+      "file": "MPL-1.1",
+      "sha256": "f849fc26a7a99981611a3a370e83078deb617d12a45776d6c4cada4d338be469",
+      "origin": "digest-verified image:/usr/share/common-licenses/MPL-1.1 (base-files)"
+    },
+    {
+      "file": "MPL-2.0",
+      "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+      "origin": "digest-verified image:/usr/share/common-licenses/MPL-2.0 (base-files)"
+    }
+  ]
+}

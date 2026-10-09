@@ -8,6 +8,18 @@ from pathlib import Path
 import subprocess
 
 
+def notice_rows(node):
+    """Yield every inventory entry that names a notice file and its hash."""
+    if isinstance(node, dict):
+        if isinstance(node.get('file'), str) and isinstance(node.get('sha256'), str):
+            yield node
+        for value in node.values():
+            yield from notice_rows(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from notice_rows(value)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
@@ -43,6 +55,23 @@ def main():
                 raise SystemExit('Missing monitoring package file: fluent-bit/' + name)
         if not (root / 'monitoring/README.md').is_file():
             raise SystemExit('Missing monitoring package file: README.md')
+    if monitor_template.is_file() and 'PERSES_IMAGE=' in monitor_template.read_text():
+        for name in ('render.py', 'perses/seed.py', 'perses/sync/perses_sync.py', 'perses/provisioning/krate.json',
+                     'perses/provisioning/roles.json', 'perses/dashboards/kafka-overview.json',
+                     'perses/dashboards/consumer-groups.json', 'perses/dashboards/host-capacity.json',
+                     'perses/dashboards/logs.json', 'perses/vendor/notices/README.md'):
+            if not (root / 'monitoring' / name).is_file():
+                raise SystemExit('Missing monitoring package file: ' + name)
+        inventories = sorted((root / 'monitoring/perses/vendor/notices').rglob('inventory.json'))
+        if not inventories:
+            raise SystemExit('Missing monitoring package file: perses/vendor/notices inventories')
+        for inventory in inventories:
+            for row in notice_rows(json.loads(inventory.read_text())):
+                file = inventory.parent / row['file']
+                if file.parent != inventory.parent or not file.is_file():
+                    raise SystemExit('Missing monitoring package file: ' + str(file.relative_to(root)))
+                if hashlib.sha256(file.read_bytes()).hexdigest() != row['sha256']:
+                    raise SystemExit('Monitoring notice checksum mismatch: ' + str(file.relative_to(root)))
         notices = root / 'monitoring/fluent-bit/vendor/image-notices'
         for directory in (notices, notices / 'upstream', notices.parent / 'discovery-notices'):
             inventory = json.loads((directory / 'inventory.json').read_text())
