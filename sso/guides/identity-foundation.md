@@ -209,7 +209,7 @@ the authoritative store wins and `./krate` fails to log in.
 
 Placeholders in `.env.template` are only empty or `REPLACE_ME`. `./krate`
 fills them before the database first starts. The old template default
-`changeme` counts as a placeholder only while nothing uses it: `setup`/`start`
+`changeme` is also treated as a placeholder, but only while nothing uses it: `setup`/`start`
 replace it with a generated password as long as no Kafbat UI container exists,
 and `monitor up` does the same for Grafana while its volume does not exist.
 Once a value is live, `start` refuses to run with `changeme` until you set a

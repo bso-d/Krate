@@ -181,17 +181,18 @@ compose_volume_exists() {
     --filter "label=com.docker.compose.volume=$2" 2>/dev/null)" ]]
 }
 
-# Fill each KEY whose value in an env file is still a placeholder (empty or
-# REPLACE_ME) with a random secret of the given length, and print the keys
-# filled. Values a site set are never changed; the old default `changeme` is
-# a set value, so it is reported as insecure rather than replaced.
+# Fill each KEY whose value in an env file is still a placeholder (empty,
+# REPLACE_ME, or the old template default changeme) with a random secret of
+# the given length, and print the keys filled. Values a site set are never
+# changed. Callers refuse a changeme that is already live (a started Kafbat
+# UI, an existing Grafana volume) before this runs, so it never replaces a
+# value in use and never lets the insecure default through either.
 fill_secrets() {
   local file="$1" length="$2" key
   shift 2
   for key in "$@"; do
     case "$(env_value_file "$file" "$key")" in
-      ""|REPLACE_ME) ;;
-      changeme) warn "$key is changeme (insecure); set it: krate config set $key=..." >&2; continue ;;
+      ""|REPLACE_ME|changeme) ;;
       *) continue ;;
     esac
     set_env_file_value "$file" "$key" "$(random_secret "$length")"
