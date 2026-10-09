@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Static checks for the Krate identity foundation (templates, realm plan, Compose, CLI parity)."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -48,6 +49,16 @@ SYNTHETIC = {
 }
 SYNTHETIC_SECRETS = tuple(value for key, value in SYNTHETIC.items()
                           if identity.SECRET_KEY.search(key) and value not in identity.PLACEHOLDERS)
+# A runtime.yml site also needs the PingFederate secret; it must never leak either.
+RUNTIME_SITE = {'KAFKA_UI_AUTH_CONFIG': 'runtime.yml', 'PING_KEYCLOAK_CLIENT_SECRET': 'synthetic-ping-secret-2e4f6a8c0b'}
+ALL_SECRETS = SYNTHETIC_SECRETS + (RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET'],)
+PUBLIC_HOST = 'kafka.example.test'
+# .env values preflight must refuse in both Keycloak-backed modes (the key must be named in the refusal).
+REFUSED_NAMES = (('KEYCLOAK_ADMIN_USER', 'temp-admin'), ('KEYCLOAK_ADMIN_USER', 'temp-admin-1a2b3c4d'),
+                 ('KEYCLOAK_ADMIN_USER', 'Admin'), ('KEYCLOAK_VIEWER_GROUP', 'bad group'))
+EXPECTED_EVENTS = {'eventsEnabled': True, 'eventsListeners': ['jboss-logging'], 'enabledEventTypes': [],
+                   'eventsExpiration': 2592000, 'adminEventsEnabled': True, 'adminEventsDetailsEnabled': False}
+IDP_PLAN_KEYS = {'identityProviders', 'identityProviderMappers', 'authenticatorConfig', 'authenticationFlows', 'browserFlow'}
 
 # kraft/epc parity: every hunk between the two CLIs must be one of the known edition differences.
 FORBIDDEN_IN_HUNK = re.compile(r'identity|keycloak|kcadm', re.IGNORECASE)
@@ -113,7 +124,7 @@ def check_realm_contract(checks):
                           ('accessTokenLifespan', 7 * 60), ('ssoSessionIdleTimeout', 11 * 60),
                           ('ssoSessionMaxLifespan', 3 * 3600), ('otpPolicyType', 'totp'),
                           ('otpPolicyAlgorithm', 'HmacSHA1'), ('otpPolicyDigits', 6), ('otpPolicyPeriod', 30),
-                          ('browserFlow', 'browser')):
+                          ('browserFlow', 'browser'), *EXPECTED_EVENTS.items()):
         e(realm.get(key) == expected, f'realm plan: {key} must be {expected!r}; got {realm.get(key)!r}')
     for key in ('offlineSessionIdleTimeout', 'identityProviders', 'identityProviderMappers',
                 'authenticationFlows', 'authenticatorConfig', 'defaultRoles', 'defaultRole'):
@@ -159,6 +170,32 @@ def check_realm_contract(checks):
     e(placeholders == {'${KEYCLOAK_CLI_CLIENT_SECRET}', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}'},
       f'realm plan: placeholders must be exactly the two client secrets; got {sorted(placeholders)}')
     e(not any(secret in text for secret in SYNTHETIC_SECRETS), 'realm plan: a configured secret value leaked into the plan')
+
+
+def check_names(checks):
+    """Group names are plain tokens; KEYCLOAK_ADMIN_USER is a permanent lower-case name, never bootstrap-style."""
+    def accepts(function, key, value):
+        try:
+            function(dict(SYNTHETIC, **{key: value}))
+        except ValueError as exc:
+            checks.errors.append(f'identity.{function.__name__}: must accept {key}={value!r}: {exc}')
+
+    def rejects(function, key, value):
+        try:
+            function(dict(SYNTHETIC, **{key: value}))
+        except ValueError:
+            return
+        checks.errors.append(f'identity.{function.__name__}: must reject {key}={value!r}')
+
+    for group in ('Team.ops-1_x', 'a', 'G' * 64):
+        accepts(identity.settings, 'KEYCLOAK_VIEWER_GROUP', group)
+    # An empty value means "use the default" (as for every optional identity key), so it is not listed here.
+    for group in ('bad group', 'a/b', 'G' * 65, 'ops,admins', 'grüppe', '$GROUP', 'ADMINS_X'):
+        rejects(identity.settings, 'KEYCLOAK_VIEWER_GROUP', group)
+    for user in ('admin', 'ops.admin@example.test', 'a' * 63, '0ps_admin'):
+        accepts(identity.admin_user, 'KEYCLOAK_ADMIN_USER', user)
+    for user in ('temp-admin', 'temp-admin-1a2b3c4d', 'Admin', '-admin', '.admin', 'a' * 64, '', 'ad min', 'admin$'):
+        rejects(identity.admin_user, 'KEYCLOAK_ADMIN_USER', user)
 
 
 def compose_config(env_file, edition):
@@ -210,12 +247,18 @@ def check_parity(checks):
 
 
 def check_zk_frozen(checks):
-    files = subprocess.run(['git', 'ls-files', '-z', 'zk'], cwd=ROOT, text=True, capture_output=True).stdout.split('\0')
-    for name in filter(None, files):
-        if re.search(r'keycloak|identity', (ROOT / name).read_text(errors='replace'), re.IGNORECASE):
-            checks.errors.append(f'zk frozen: {name} mentions keycloak/identity')
+    listed = subprocess.run(['git', 'ls-files', '-z', 'zk'], cwd=ROOT, text=True, capture_output=True)
+    if listed.returncode == 0:
+        files = [ROOT / name for name in listed.stdout.split('\0') if name]
+    else:  # not a checkout (an extracted archive): scan the tree instead
+        files = [path for path in sorted((ROOT / 'zk').rglob('*')) if path.is_file()]
+    for path in files:
+        if re.search(r'keycloak|identity', path.read_text(errors='replace'), re.IGNORECASE):
+            checks.errors.append(f'zk frozen: {path.relative_to(ROOT)} mentions keycloak/identity')
     base = subprocess.run(['git', 'rev-parse', '--verify', '--quiet', 'origin/main'], cwd=ROOT, capture_output=True)
-    if not checks.expect(base.returncode == 0, 'zk frozen: origin/main is not available for comparison'):
+    if base.returncode:
+        print('warning: zk frozen: origin/main is not available; skipped the git diff of zk/ (string scan done)',
+              file=sys.stderr)
         return
     diff = subprocess.run(['git', 'diff', '--quiet', 'origin/main', '--', 'zk/'], cwd=ROOT)
     checks.expect(diff.returncode == 0, 'zk frozen: zk/ differs from origin/main')
@@ -250,26 +293,70 @@ def check_writers(checks):
         checks.expect(not plan.with_name('.realm.json.tmp').exists(), 'identity.write_if_changed: temporary file must not remain')
 
 
-def synthetic_site(edition, directory):
+def site_env(edition, **overrides):
+    """The .env mapping of a synthetic site: the edition template, synthetic values, then overrides."""
+    env = identity.read_env(ROOT / edition / '.env.template')
+    env.update(SYNTHETIC)
+    env.update(overrides)
+    return env
+
+
+def write_env(site, env):
+    identity.write_file(site / '.env', ''.join(f'{key}={value}\n' for key, value in env.items()), 0o600)
+
+
+def synthetic_site(edition, directory, **overrides):
     """A complete site directory for `edition` built only from synthetic values."""
     site = Path(directory) / edition
     site.mkdir(mode=0o700)
-    env = identity.read_env(ROOT / edition / '.env.template')
-    env.update(SYNTHETIC)
-    identity.write_file(site / '.env', ''.join(f'{key}={value}\n' for key, value in env.items()), 0o600)
+    write_env(site, site_env(edition, **overrides))
     identity.db_tls(site / 'auth/keycloak/db-tls')
     return site
+
+
+def self_signed(certs, host):
+    """certs/server.crt + server.key for `host` (key 0600), as krate gen-cert would provide."""
+    certs.mkdir(mode=0o700)
+    previous = os.umask(0o077)
+    try:
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '2',
+                        '-subj', '/CN=' + host, '-addext', 'subjectAltName=DNS:' + host,
+                        '-keyout', str(certs / 'server.key'), '-out', str(certs / 'server.crt')],
+                       check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    finally:
+        os.umask(previous)
+
+
+def run_plan(site):
+    """Run identity.py plan as the CLI does; returns (CompletedProcess, realm file)."""
+    realm_file = site / 'auth/keycloak/krate-realm.json'
+    command = [sys.executable, '-I', str(ROOT / 'sso/identity.py'), 'plan',
+               '--env-file', str(site / '.env'), '--output', str(realm_file)]
+    return subprocess.run(command, text=True, capture_output=True), realm_file
+
+
+def preflight(site, auth_mode, rendered):
+    return subprocess.run([sys.executable, '-I', str(ROOT / 'sso/preflight.py'), '--directory', str(site), '--mode', auth_mode],
+                          input=rendered, text=True, capture_output=True)
+
+
+def check_name_refusals(checks, edition, site, env, auth_mode, rendered):
+    """preflight must refuse bootstrap-style or malformed admin users and malformed group names."""
+    for key, value in REFUSED_NAMES:
+        write_env(site, dict(env, **{key: value}))
+        result = preflight(site, auth_mode, rendered)
+        checks.expect(result.returncode == 1 and key in result.stderr,
+                      f'{edition}: preflight --mode {auth_mode} must refuse {key}={value!r}; got exit {result.returncode}: {result.stderr.strip()}')
+    write_env(site, env)
 
 
 def check_plan_and_preflight(checks):
     for edition in EDITIONS:
         with tempfile.TemporaryDirectory() as tmp:
             site = synthetic_site(edition, tmp)
-            realm_file = site / 'auth/keycloak/krate-realm.json'
-            command = [sys.executable, '-I', str(ROOT / 'sso/identity.py'), 'plan',
-                       '--env-file', str(site / '.env'), '--output', str(realm_file), '--print']
-            first = subprocess.run(command, text=True, capture_output=True)
-            second = subprocess.run(command[:-1], text=True, capture_output=True)
+            env = site_env(edition)
+            first, realm_file = run_plan(site)
+            second, _ = run_plan(site)
             output = first.stdout + first.stderr + second.stdout + second.stderr + realm_file.read_text()
             checks.expect(first.returncode == 0 and second.returncode == 0, f'{edition}: identity.py plan failed on a synthetic .env')
             checks.expect(not any(secret in output for secret in SYNTHETIC_SECRETS), f'{edition}: identity.py plan output leaked a secret value')
@@ -277,17 +364,70 @@ def check_plan_and_preflight(checks):
             code, rendered = compose_config(site / '.env', edition)
             if not checks.expect(code == 0, f'{edition}: Compose rendering of the synthetic site failed'):
                 continue
-            result = subprocess.run([sys.executable, '-I', str(ROOT / 'sso/preflight.py'), '--directory', str(site), '--mode', 'identity'],
-                                    input=rendered, text=True, capture_output=True)
+            result = preflight(site, 'identity', rendered)
             checks.expect(result.returncode == 0, f'{edition}: preflight --mode identity refused a complete synthetic site: {result.stderr.strip()}')
             checks.expect(not any(secret in result.stdout + result.stderr for secret in SYNTHETIC_SECRETS),
                           f'{edition}: preflight output leaked a secret value')
+            check_name_refusals(checks, edition, site, env, 'identity', rendered)
+
+
+def load_configure_dual():
+    spec = importlib.util.spec_from_file_location('configure_dual', ROOT / 'sso/configure-dual.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_configure_dual(checks):
+    """auth configure writes Kafbat runtime.yml and the identity-provider plan; the realm file belongs to identity up."""
+    e = checks.expect
+    e('"keycloak/krate-realm.json"' not in (ROOT / 'sso/configure-dual.py').read_text(),
+      'configure-dual.py: must not write keycloak/krate-realm.json (owned by krate identity up)')
+    result = load_configure_dual().configs(json.loads((ROOT / 'sso/dual-example.json').read_text()))
+    e(set(result) == {'ui/runtime.yml', 'keycloak/pingfederate-idp.json'},
+      f'configure-dual.configs: must return exactly ui/runtime.yml and keycloak/pingfederate-idp.json; got {sorted(result)}')
+    idp = result.get('keycloak/pingfederate-idp.json', {})
+    e(set(idp) == IDP_PLAN_KEYS, f'configure-dual: pingfederate-idp.json keys must be {sorted(IDP_PLAN_KEYS)}; got {sorted(idp)}')
+    e([provider.get('alias') for provider in idp.get('identityProviders', [])] == ['pingfederate'],
+      'configure-dual: the identity-provider plan must define exactly the pingfederate provider')
+    e(idp.get('browserFlow') == 'krate browser', 'configure-dual: browserFlow must be the krate browser flow')
+    placeholders = set(re.findall(r'\$\{[A-Z0-9_]+\}', json.dumps(idp)))
+    e(placeholders == {'${PING_KEYCLOAK_CLIENT_SECRET}'},
+      f'configure-dual: the identity-provider plan may only reference the PingFederate secret placeholder; got {sorted(placeholders)}')
+    ui = result.get('ui/runtime.yml', {})
+    e('keycloak' in ui.get('auth', {}).get('oauth2', {}).get('client', {}), 'configure-dual: runtime.yml must configure the keycloak client')
+
+
+def check_runtime_preflight(checks):
+    """preflight --mode runtime.yml accepts the identity.py plan as the realm file and applies the name rules."""
+    settings = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    settings['public_url'] = 'https://' + PUBLIC_HOST
+    files = load_configure_dual().configs(settings)
+    for edition in EDITIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            site = synthetic_site(edition, tmp, **RUNTIME_SITE)
+            env = site_env(edition, **RUNTIME_SITE)
+            self_signed(site / 'certs', PUBLIC_HOST)
+            for name, data in files.items():
+                identity.write_file(site / 'auth' / name, json.dumps(data, indent=2) + '\n', 0o644)
+            planned, _ = run_plan(site)
+            if not checks.expect(planned.returncode == 0, f'{edition}: identity.py plan failed on a runtime.yml site'):
+                continue
+            code, rendered = compose_config(site / '.env', edition)
+            if not checks.expect(code == 0, f'{edition}: Compose rendering of the runtime.yml site failed'):
+                continue
+            result = preflight(site, 'runtime.yml', rendered)
+            checks.expect(result.returncode == 0,
+                          f'{edition}: preflight --mode runtime.yml refused the identity.py plan as realm file: {result.stderr.strip()}')
+            checks.expect(not any(secret in result.stdout + result.stderr for secret in ALL_SECRETS),
+                          f'{edition}: preflight --mode runtime.yml output leaked a secret value')
+            check_name_refusals(checks, edition, site, env, 'runtime.yml', rendered)
 
 
 def main():
     checks = Checks()
-    for check in (check_templates, check_realm_contract, check_compose, check_parity, check_zk_frozen,
-                  check_writers, check_plan_and_preflight):
+    for check in (check_templates, check_realm_contract, check_names, check_compose, check_parity, check_zk_frozen,
+                  check_writers, check_plan_and_preflight, check_configure_dual, check_runtime_preflight):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others
@@ -295,7 +435,8 @@ def main():
     if checks.errors:
         print('Identity check failed:\n' + '\n'.join(checks.errors), file=sys.stderr)
         return 1
-    print('Identity foundation verified: templates, realm plan, Compose services, CLI parity, zk frozen, writers, preflight.')
+    print('Identity foundation verified: templates, realm plan, names, Compose services, CLI parity, zk frozen, writers, '
+          'preflight (identity and runtime.yml), configure-dual.')
     return 0
 
 

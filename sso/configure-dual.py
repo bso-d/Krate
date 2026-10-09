@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Generate Kafbat dual login and a Keycloak realm that brokers PingFederate."""
+"""Generate Kafbat dual login and the PingFederate identity-provider plan for the Krate realm.
+
+The realm itself (auth/keycloak/krate-realm.json) is planned by `krate identity up`;
+this program only adds the pieces that broker PingFederate into that realm.
+"""
 import argparse
 import json
 import os
 from pathlib import Path
 import sys
 
-from configure import kafbat, validate, url
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from configure import kafbat, validate, url  # noqa: E402  (sibling module; explicit path keeps python -I working)
 
 
 def configs(settings):
@@ -35,30 +42,9 @@ def configs(settings):
                                  "shared-role": "administrator",
                                  "require-mapped-role": True})
     groups = (settings["viewer_group"], settings["admin_group"])
-    realm = {
-        "realm": "krate", "enabled": True, "registrationAllowed": False,
-        "resetPasswordAllowed": False, "rememberMe": False,
-        "bruteForceProtected": True, "failureFactor": 5, "permanentLockout": False,
-        "waitIncrementSeconds": 60, "maxFailureWaitSeconds": 900,
-        "ssoSessionIdleTimeout": settings.get("session_idle_minutes", 30) * 60,
-        "ssoSessionMaxLifespan": 28800,
-        "groups": [{"name": group} for group in groups],
-        "clients": [{"clientId": "krate-ui", "name": "Kafbat UI", "enabled": True,
-                     "protocol": "openid-connect", "publicClient": False,
-                     "clientAuthenticatorType": "client-secret",
-                     "secret": "${KEYCLOAK_KAFBAT_CLIENT_SECRET}",
-                     "standardFlowEnabled": True, "directAccessGrantsEnabled": False,
-                     "serviceAccountsEnabled": False,
-                     "redirectUris": [public_url + "/login/oauth2/code/keycloak"],
-                     "webOrigins": [public_url],
-                     "protocolMappers": [{"name": "AD groups", "protocol": "openid-connect",
-                                          "protocolMapper": "oidc-group-membership-mapper",
-                                          "consentRequired": False,
-                                          "config": {"full.path": "false", "multivalued": "true",
-                                                     "id.token.claim": "true",
-                                                     "access.token.claim": "true",
-                                                     "userinfo.token.claim": "true",
-                                                     "claim.name": "groups"}}]}],
+    # Applied to the realm in the SSO phase; the realm plan (local users, clients,
+    # groups, sessions) is owned by sso/identity.py and never written here.
+    identity_provider = {
         "identityProviders": [{"alias": "pingfederate", "displayName": "Company sign-in",
                                "providerId": "oidc", "enabled": True,
                                "trustEmail": False, "storeToken": False,
@@ -96,7 +82,7 @@ def configs(settings):
                                       "userSetupAllowed": False}]}],
         "browserFlow": "krate browser",
     }
-    return {"ui/runtime.yml": app, "keycloak/krate-realm.json": realm}
+    return {"ui/runtime.yml": app, "keycloak/pingfederate-idp.json": identity_provider}
 
 
 
@@ -120,9 +106,12 @@ def main():
             with os.fdopen(fd, "w") as output:
                 output.write(json.dumps(data, indent=2) + "\n")
                 os.fchmod(output.fileno(), 0o644)
-        print(f"Created Kafbat and Keycloak configuration in {args.output_dir}; no services changed.")
-        print('Review the generated files, then run krate auth apply (Compose 2.20.2 or newer). '
-          'It generates the Keycloak secrets and asks for the PingFederate client secret.')
+        print(f"Created Kafbat dual login and the PingFederate identity-provider plan in {args.output_dir}; "
+              "no services changed.")
+        print("The realm file auth/keycloak/krate-realm.json is owned by krate identity up; "
+              "keycloak/pingfederate-idp.json is applied to the realm in the SSO phase (Phase 3).")
+        print("Review the generated files, run krate identity up, then krate auth apply "
+              "(Compose 2.20.2 or newer); it asks for the PingFederate client secret.")
     except (OSError, ValueError) as exc:
         for path in created:
             path.unlink()

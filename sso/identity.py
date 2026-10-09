@@ -35,7 +35,21 @@ DEFAULTS = {
 PLACEHOLDERS = ('', 'REPLACE_ME')
 SECRET_KEY = re.compile(r'(_PASSWORD|_SECRET)$')
 ENV_KEY = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
-GROUP_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9 ._-]{0,254}')
+# Group names travel through kcadm arguments and the groups claim; keep them to a plain token.
+GROUP_NAME = re.compile(r'[A-Za-z0-9_.-]{1,64}')
+# The permanent master-realm admin created by `krate identity up`; kcadm addresses it by name.
+ADMIN_USER = re.compile(r'[a-z0-9][a-z0-9._@-]{0,62}')
+# `kc.sh bootstrap-admin user` names start with this; those users are temporary and get deleted.
+BOOTSTRAP_PREFIX = 'temp-admin'
+# Keycloak event settings: user and admin events logged to the server log, kept 30 days.
+EVENTS = {
+    'eventsEnabled': True,
+    'eventsListeners': ['jboss-logging'],
+    'enabledEventTypes': [],  # empty = Keycloak's default event type set
+    'eventsExpiration': 30 * 24 * 3600,
+    'adminEventsEnabled': True,
+    'adminEventsDetailsEnabled': False,
+}
 
 DB_HOST = 'keycloak-db'
 CA_NAME = 'Krate identity CA'
@@ -103,23 +117,41 @@ def _positive(env, key):
 def _group(env, key):
     value = env.get(key) or DEFAULTS[key]
     if not GROUP_NAME.fullmatch(value):
-        raise ValueError(key + ' must be a group name without slashes (letters, digits, space, . _ -)')
+        raise ValueError(key + ' must be 1-64 characters from letters, digits, . _ - (no spaces or slashes)')
+    return value
+
+
+def group_names(env):
+    """(viewer group, admin group) from a parsed .env mapping; validated and distinct."""
+    viewer, admin = _group(env, 'KEYCLOAK_VIEWER_GROUP'), _group(env, 'KEYCLOAK_ADMIN_GROUP')
+    if viewer == admin:
+        raise ValueError('KEYCLOAK_VIEWER_GROUP and KEYCLOAK_ADMIN_GROUP must differ')
+    return viewer, admin
+
+
+def admin_user(env):
+    """KEYCLOAK_ADMIN_USER: the permanent master-realm admin name; never a bootstrap-admin name."""
+    value = env.get('KEYCLOAK_ADMIN_USER', '')
+    if not ADMIN_USER.fullmatch(value):
+        raise ValueError('KEYCLOAK_ADMIN_USER must be 1-63 characters: a lower-case letter or digit,'
+                         ' then lower-case letters, digits, . _ @ -')
+    if value.startswith(BOOTSTRAP_PREFIX):
+        raise ValueError(f'KEYCLOAK_ADMIN_USER must not start with {BOOTSTRAP_PREFIX}:'
+                         ' that prefix names the temporary bootstrap admin')
     return value
 
 
 def settings(env):
     """Non-secret realm inputs taken from a parsed .env mapping."""
-    result = {
+    viewer_group, admin_group = group_names(env)
+    return {
         'public_origin': public_origin(env.get('KEYCLOAK_PUBLIC_URL')),
-        'viewer_group': _group(env, 'KEYCLOAK_VIEWER_GROUP'),
-        'admin_group': _group(env, 'KEYCLOAK_ADMIN_GROUP'),
+        'viewer_group': viewer_group,
+        'admin_group': admin_group,
         'access_token_minutes': _positive(env, 'KEYCLOAK_ACCESS_TOKEN_MINUTES'),
         'session_idle_minutes': _positive(env, 'KEYCLOAK_SESSION_IDLE_MINUTES'),
         'session_max_hours': _positive(env, 'KEYCLOAK_SESSION_MAX_HOURS'),
     }
-    if result['viewer_group'] == result['admin_group']:
-        raise ValueError('KEYCLOAK_VIEWER_GROUP and KEYCLOAK_ADMIN_GROUP must differ')
-    return result
 
 
 # ─── Realm plan (pure) ─────────────────────────────────────────────────────────
@@ -168,6 +200,7 @@ def realm(values):
         'ssoSessionMaxLifespan': values['session_max_hours'] * 3600,
         'otpPolicyType': 'totp', 'otpPolicyAlgorithm': 'HmacSHA1',
         'otpPolicyDigits': 6, 'otpPolicyPeriod': 30,
+        **EVENTS,
         'requiredActions': [
             {'alias': 'CONFIGURE_TOTP', 'name': 'Configure OTP', 'providerId': 'CONFIGURE_TOTP',
              'enabled': True, 'defaultAction': True, 'priority': 10},

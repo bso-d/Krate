@@ -89,8 +89,10 @@ def main():
     bytecode = sorted(str(path.relative_to(root)) for pattern in ('__pycache__', '*.pyc') for path in root.rglob(pattern))
     if bytecode:
         raise SystemExit('Python bytecode must not ship in release packages: ' + ', '.join(bytecode))
-    if (root / '.env').exists() or (root / 'auth/ui/runtime.yml').exists() or (root / 'auth/keycloak/krate-realm.json').exists():
-        raise SystemExit('Site configuration must not ship in release packages')
+    for site_file in ('.env', 'auth/ui/runtime.yml', 'auth/keycloak/krate-realm.json',
+                      'auth/keycloak/pingfederate-idp.json', 'auth/keycloak/db-tls', 'auth/identity-journal.log'):
+        if (root / site_file).exists():
+            raise SystemExit('Site configuration must not ship in release packages: ' + site_file)
     print(f'Package coverage verified: {len(images)} images, including all optional profiles and SSO helpers.')
 
 

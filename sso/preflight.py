@@ -60,8 +60,12 @@ def validate(root, mode, config):
         if not (root / 'auth/ui/local.yml').is_file():
             raise ValueError('Missing shared-login configuration')
         return
+    site = identity.read_env(root / '.env')
+    validate_names(site)
     runtime = json.loads((root / 'auth/ui/runtime.yml').read_text())
-    realm = json.loads((root / 'auth/keycloak/krate-realm.json').read_text())
+    # The realm file is the local plan written by `krate identity up`; identity providers are
+    # applied to the running realm separately, so their absence here is expected.
+    realm = json.loads((root / REALM_FILE).read_text())
     client = runtime['auth']['oauth2']['client']['keycloak']
     ui_clients = [client for client in realm['clients'] if client.get('clientId') == 'krate-ui']
     public = ui_clients[0]['webOrigins'][0].rstrip('/')
@@ -83,7 +87,6 @@ def validate(root, mode, config):
     validate_db_tls(root)
     # The bootstrap admin is exported only by `krate identity up` on a pristine database;
     # the permanent admin password lives in .env. The realm also carries the krate-cli secret.
-    site = identity.read_env(root / '.env')
     secrets = [site.get('KEYCLOAK_ADMIN_PASSWORD', '')] + [kc.get(key, '') for key in (
         'KC_DB_PASSWORD', 'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'PING_KEYCLOAK_CLIENT_SECRET', 'KEYCLOAK_CLI_CLIENT_SECRET')]
     if any(len(value) < 16 or value in ('REPLACE_ME', 'changeme') for value in secrets):
@@ -114,6 +117,15 @@ def identity_secrets(env):
     if env.get('KAFKA_UI_PASSWORD', '') in secrets.values():
         raise Preflight('KAFKA_UI_PASSWORD must differ from the identity secrets')
     return secrets
+
+
+def validate_names(env):
+    """KEYCLOAK_ADMIN_USER and the group names must be usable by kcadm and the realm plan."""
+    try:
+        identity.admin_user(env)
+        identity.group_names(env)
+    except ValueError as exc:  # identity's messages name the key, never the value
+        raise Preflight(str(exc)) from None
 
 
 def openssl(*args):
@@ -174,6 +186,7 @@ def validate_realm(root, origin, secrets):
 def validate_identity(root, config):
     """Identity foundation checks: .env values, rendered services, TLS material and realm plan."""
     env = identity.read_env(root / '.env')
+    validate_names(env)
     try:
         origin = identity.public_origin(env.get('KEYCLOAK_PUBLIC_URL'))
     except ValueError as exc:
