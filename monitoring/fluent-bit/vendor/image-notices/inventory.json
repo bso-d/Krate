@@ -1,0 +1,1129 @@
+{
+  "packages": [
+    {
+      "architecture": "amd64",
+      "package": "base-files",
+      "version": "13.8+deb13u7",
+      "source": "base-files",
+      "source_version": "13.8+deb13u7",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u7_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "ca-certificates",
+      "version": "20250419",
+      "source": "ca-certificates",
+      "source_version": "20250419",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/c/ca-certificates/ca-certificates_20250419_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "gcc-14-base",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libatomic1",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libbrotli1",
+      "version": "1.1.0-2+b7",
+      "source": "brotli",
+      "source_version": "1.1.0-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/brotli/brotli_1.1.0-2_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libc6",
+      "version": "2.41-12+deb13u4",
+      "source": "glibc",
+      "source_version": "2.41-12+deb13u4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/glibc/glibc_2.41-12+deb13u4_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libcap2",
+      "version": "1:2.75-10+deb13u1+b3",
+      "source": "libcap2",
+      "source_version": "2.75-10+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libc/libcap2/libcap2_2.75-10+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libcom-err2",
+      "version": "1.47.2-3+b12",
+      "source": "e2fsprogs",
+      "source_version": "1.47.2-3",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/e/e2fsprogs/e2fsprogs_1.47.2-3_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libcurl4t64",
+      "version": "8.14.1-2+deb13u5",
+      "source": "curl",
+      "source_version": "8.14.1-2+deb13u5",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/c/curl/curl_8.14.1-2+deb13u5_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libffi8",
+      "version": "3.4.8-2",
+      "source": "libffi",
+      "source_version": "3.4.8-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libf/libffi/libffi_3.4.8-2_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgcc-s1",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgcrypt20",
+      "version": "1.11.0-7+deb13u1",
+      "source": "libgcrypt20",
+      "source_version": "1.11.0-7+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libg/libgcrypt20/libgcrypt20_1.11.0-7+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgmp10",
+      "version": "2:6.3.0+dfsg-3",
+      "source": "gmp",
+      "source_version": "6.3.0+dfsg-3",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gmp/gmp_6.3.0+dfsg-3_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgnutls30t64",
+      "version": "3.8.9-3+deb13u4",
+      "source": "gnutls28",
+      "source_version": "3.8.9-3+deb13u4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gnutls28/gnutls28_3.8.9-3+deb13u4_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgomp1",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgpg-error0",
+      "version": "1.51-4",
+      "source": "libgpg-error",
+      "source_version": "1.51-4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libg/libgpg-error/libgpg-error_1.51-4_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgssapi-krb5-2",
+      "version": "1.21.3-5+deb13u1",
+      "source": "krb5",
+      "source_version": "1.21.3-5+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libhogweed6t64",
+      "version": "3.10.1-1",
+      "source": "nettle",
+      "source_version": "3.10.1-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nettle/nettle_3.10.1-1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libidn2-0",
+      "version": "2.3.8-2",
+      "source": "libidn2",
+      "source_version": "2.3.8-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libi/libidn2/libidn2_2.3.8-2_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libk5crypto3",
+      "version": "1.21.3-5+deb13u1",
+      "source": "krb5",
+      "source_version": "1.21.3-5+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libkeyutils1",
+      "version": "1.6.3-6",
+      "source": "keyutils",
+      "source_version": "1.6.3-6",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/keyutils/keyutils_1.6.3-6_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libkrb5-3",
+      "version": "1.21.3-5+deb13u1",
+      "source": "krb5",
+      "source_version": "1.21.3-5+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libkrb5support0",
+      "version": "1.21.3-5+deb13u1",
+      "source": "krb5",
+      "source_version": "1.21.3-5+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libldap2",
+      "version": "2.6.10+dfsg-1",
+      "source": "openldap",
+      "source_version": "2.6.10+dfsg-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/o/openldap/openldap_2.6.10+dfsg-1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "liblz4-1",
+      "version": "1.10.0-4",
+      "source": "lz4",
+      "source_version": "1.10.0-4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/l/lz4/lz4_1.10.0-4_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "liblzma5",
+      "version": "5.8.1-1+deb13u1",
+      "source": "xz-utils",
+      "source_version": "5.8.1-1+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/x/xz-utils/xz-utils_5.8.1-1+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libnettle8t64",
+      "version": "3.10.1-1",
+      "source": "nettle",
+      "source_version": "3.10.1-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nettle/nettle_3.10.1-1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libnghttp2-14",
+      "version": "1.64.0-1.1+deb13u1",
+      "source": "nghttp2",
+      "source_version": "1.64.0-1.1+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nghttp2/nghttp2_1.64.0-1.1+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libnghttp3-9",
+      "version": "1.8.0-1",
+      "source": "nghttp3",
+      "source_version": "1.8.0-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nghttp3/nghttp3_1.8.0-1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libp11-kit0",
+      "version": "0.25.5-3",
+      "source": "p11-kit",
+      "source_version": "0.25.5-3",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/p/p11-kit/p11-kit_0.25.5-3_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libpq5",
+      "version": "17.11-0+deb13u1",
+      "source": "postgresql-17",
+      "source_version": "17.11-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/p/postgresql-17/postgresql-17_17.11-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libpsl5t64",
+      "version": "0.21.2-1.1+b1",
+      "source": "libpsl",
+      "source_version": "0.21.2-1.1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libp/libpsl/libpsl_0.21.2-1.1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "librtmp1",
+      "version": "2.4+20151223.gitfa8646d.1-2+b5",
+      "source": "rtmpdump",
+      "source_version": "2.4+20151223.gitfa8646d.1-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/r/rtmpdump/rtmpdump_2.4+20151223.gitfa8646d.1-2_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libsasl2-2",
+      "version": "2.1.28+dfsg1-9",
+      "source": "cyrus-sasl2",
+      "source_version": "2.1.28+dfsg1-9",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/c/cyrus-sasl2/cyrus-sasl2_2.1.28+dfsg1-9_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libssh2-1t64",
+      "version": "1.11.1-1+deb13u2",
+      "source": "libssh2",
+      "source_version": "1.11.1-1+deb13u2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libs/libssh2/libssh2_1.11.1-1+deb13u2_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libssl3t64",
+      "version": "3.5.7-1~deb13u3",
+      "source": "openssl",
+      "source_version": "3.5.7-1~deb13u3",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/o/openssl/openssl_3.5.7-1~deb13u3_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libstdc++6",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libsystemd0",
+      "version": "257.13-1~deb13u1",
+      "source": "systemd",
+      "source_version": "257.13-1~deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/s/systemd/systemd_257.13-1~deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libtasn1-6",
+      "version": "4.20.0-2+deb13u1",
+      "source": "libtasn1-6",
+      "source_version": "4.20.0-2+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libt/libtasn1-6/libtasn1-6_4.20.0-2+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libunistring5",
+      "version": "1.3-2",
+      "source": "libunistring",
+      "source_version": "1.3-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libu/libunistring/libunistring_1.3-2_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxxhash0",
+      "version": "0.8.3-2",
+      "source": "xxhash",
+      "source_version": "0.8.3-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/x/xxhash/xxhash_0.8.3-2_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libyaml-0-2",
+      "version": "0.2.5-2",
+      "source": "libyaml",
+      "source_version": "0.2.5-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/liby/libyaml/libyaml_0.2.5-2_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libzstd1",
+      "version": "1.5.7+dfsg-1",
+      "source": "libzstd",
+      "source_version": "1.5.7+dfsg-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libz/libzstd/libzstd_1.5.7+dfsg-1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "media-types",
+      "version": "13.0.0",
+      "source": "media-types",
+      "source_version": "13.0.0",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "netbase",
+      "version": "6.5",
+      "source": "netbase",
+      "source_version": "6.5",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "pkg-config",
+      "version": "1.8.1-4",
+      "source": "pkgconf",
+      "source_version": "1.8.1-4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/p/pkgconf/pkgconf_1.8.1-4_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata",
+      "version": "2026c-0+deb13u1",
+      "source": "tzdata",
+      "source_version": "2026c-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata-legacy",
+      "version": "2026c-0+deb13u1",
+      "source": "tzdata",
+      "source_version": "2026c-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "zlib1g",
+      "version": "1:1.3.dfsg+really1.3.1-1+b1",
+      "source": "zlib",
+      "source_version": "1.3.dfsg+really1.3.1-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/z/zlib/zlib_1.3.dfsg+really1.3.1-1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "base-files",
+      "version": "13.8+deb13u7",
+      "source": "base-files",
+      "source_version": "13.8+deb13u7",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u7_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "ca-certificates",
+      "version": "20250419",
+      "source": "ca-certificates",
+      "source_version": "20250419",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/c/ca-certificates/ca-certificates_20250419_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "gcc-14-base",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libatomic1",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libbrotli1",
+      "version": "1.1.0-2+b7",
+      "source": "brotli",
+      "source_version": "1.1.0-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/brotli/brotli_1.1.0-2_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libc6",
+      "version": "2.41-12+deb13u4",
+      "source": "glibc",
+      "source_version": "2.41-12+deb13u4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/glibc/glibc_2.41-12+deb13u4_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libcap2",
+      "version": "1:2.75-10+deb13u1+b3",
+      "source": "libcap2",
+      "source_version": "2.75-10+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libc/libcap2/libcap2_2.75-10+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libcom-err2",
+      "version": "1.47.2-3+b12",
+      "source": "e2fsprogs",
+      "source_version": "1.47.2-3",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/e/e2fsprogs/e2fsprogs_1.47.2-3_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libcurl4t64",
+      "version": "8.14.1-2+deb13u5",
+      "source": "curl",
+      "source_version": "8.14.1-2+deb13u5",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/c/curl/curl_8.14.1-2+deb13u5_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libffi8",
+      "version": "3.4.8-2",
+      "source": "libffi",
+      "source_version": "3.4.8-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libf/libffi/libffi_3.4.8-2_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgcc-s1",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgcrypt20",
+      "version": "1.11.0-7+deb13u1",
+      "source": "libgcrypt20",
+      "source_version": "1.11.0-7+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libg/libgcrypt20/libgcrypt20_1.11.0-7+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgmp10",
+      "version": "2:6.3.0+dfsg-3",
+      "source": "gmp",
+      "source_version": "6.3.0+dfsg-3",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gmp/gmp_6.3.0+dfsg-3_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgnutls30t64",
+      "version": "3.8.9-3+deb13u4",
+      "source": "gnutls28",
+      "source_version": "3.8.9-3+deb13u4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gnutls28/gnutls28_3.8.9-3+deb13u4_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgomp1",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgpg-error0",
+      "version": "1.51-4",
+      "source": "libgpg-error",
+      "source_version": "1.51-4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libg/libgpg-error/libgpg-error_1.51-4_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgssapi-krb5-2",
+      "version": "1.21.3-5+deb13u1",
+      "source": "krb5",
+      "source_version": "1.21.3-5+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libhogweed6t64",
+      "version": "3.10.1-1",
+      "source": "nettle",
+      "source_version": "3.10.1-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nettle/nettle_3.10.1-1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libidn2-0",
+      "version": "2.3.8-2",
+      "source": "libidn2",
+      "source_version": "2.3.8-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libi/libidn2/libidn2_2.3.8-2_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libk5crypto3",
+      "version": "1.21.3-5+deb13u1",
+      "source": "krb5",
+      "source_version": "1.21.3-5+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libkeyutils1",
+      "version": "1.6.3-6",
+      "source": "keyutils",
+      "source_version": "1.6.3-6",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/keyutils/keyutils_1.6.3-6_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libkrb5-3",
+      "version": "1.21.3-5+deb13u1",
+      "source": "krb5",
+      "source_version": "1.21.3-5+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libkrb5support0",
+      "version": "1.21.3-5+deb13u1",
+      "source": "krb5",
+      "source_version": "1.21.3-5+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libldap2",
+      "version": "2.6.10+dfsg-1",
+      "source": "openldap",
+      "source_version": "2.6.10+dfsg-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/o/openldap/openldap_2.6.10+dfsg-1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "liblz4-1",
+      "version": "1.10.0-4",
+      "source": "lz4",
+      "source_version": "1.10.0-4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/l/lz4/lz4_1.10.0-4_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "liblzma5",
+      "version": "5.8.1-1+deb13u1",
+      "source": "xz-utils",
+      "source_version": "5.8.1-1+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/x/xz-utils/xz-utils_5.8.1-1+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libnettle8t64",
+      "version": "3.10.1-1",
+      "source": "nettle",
+      "source_version": "3.10.1-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nettle/nettle_3.10.1-1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libnghttp2-14",
+      "version": "1.64.0-1.1+deb13u1",
+      "source": "nghttp2",
+      "source_version": "1.64.0-1.1+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nghttp2/nghttp2_1.64.0-1.1+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libnghttp3-9",
+      "version": "1.8.0-1",
+      "source": "nghttp3",
+      "source_version": "1.8.0-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nghttp3/nghttp3_1.8.0-1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libp11-kit0",
+      "version": "0.25.5-3",
+      "source": "p11-kit",
+      "source_version": "0.25.5-3",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/p/p11-kit/p11-kit_0.25.5-3_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libpq5",
+      "version": "17.11-0+deb13u1",
+      "source": "postgresql-17",
+      "source_version": "17.11-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/p/postgresql-17/postgresql-17_17.11-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libpsl5t64",
+      "version": "0.21.2-1.1+b1",
+      "source": "libpsl",
+      "source_version": "0.21.2-1.1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libp/libpsl/libpsl_0.21.2-1.1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "librtmp1",
+      "version": "2.4+20151223.gitfa8646d.1-2+b5",
+      "source": "rtmpdump",
+      "source_version": "2.4+20151223.gitfa8646d.1-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/r/rtmpdump/rtmpdump_2.4+20151223.gitfa8646d.1-2_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libsasl2-2",
+      "version": "2.1.28+dfsg1-9",
+      "source": "cyrus-sasl2",
+      "source_version": "2.1.28+dfsg1-9",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/c/cyrus-sasl2/cyrus-sasl2_2.1.28+dfsg1-9_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libssh2-1t64",
+      "version": "1.11.1-1+deb13u2",
+      "source": "libssh2",
+      "source_version": "1.11.1-1+deb13u2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libs/libssh2/libssh2_1.11.1-1+deb13u2_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libssl3t64",
+      "version": "3.5.7-1~deb13u3",
+      "source": "openssl",
+      "source_version": "3.5.7-1~deb13u3",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/o/openssl/openssl_3.5.7-1~deb13u3_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libstdc++6",
+      "version": "14.2.0-19",
+      "source": "gcc-14",
+      "source_version": "14.2.0-19",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libsystemd0",
+      "version": "257.13-1~deb13u1",
+      "source": "systemd",
+      "source_version": "257.13-1~deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/s/systemd/systemd_257.13-1~deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libtasn1-6",
+      "version": "4.20.0-2+deb13u1",
+      "source": "libtasn1-6",
+      "source_version": "4.20.0-2+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libt/libtasn1-6/libtasn1-6_4.20.0-2+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libunistring5",
+      "version": "1.3-2",
+      "source": "libunistring",
+      "source_version": "1.3-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libu/libunistring/libunistring_1.3-2_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxxhash0",
+      "version": "0.8.3-2",
+      "source": "xxhash",
+      "source_version": "0.8.3-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/x/xxhash/xxhash_0.8.3-2_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libyaml-0-2",
+      "version": "0.2.5-2",
+      "source": "libyaml",
+      "source_version": "0.2.5-2",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/liby/libyaml/libyaml_0.2.5-2_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libzstd1",
+      "version": "1.5.7+dfsg-1",
+      "source": "libzstd",
+      "source_version": "1.5.7+dfsg-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/libz/libzstd/libzstd_1.5.7+dfsg-1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "media-types",
+      "version": "13.0.0",
+      "source": "media-types",
+      "source_version": "13.0.0",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "netbase",
+      "version": "6.5",
+      "source": "netbase",
+      "source_version": "6.5",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "pkg-config",
+      "version": "1.8.1-4",
+      "source": "pkgconf",
+      "source_version": "1.8.1-4",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/p/pkgconf/pkgconf_1.8.1-4_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata",
+      "version": "2026c-0+deb13u1",
+      "source": "tzdata",
+      "source_version": "2026c-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata-legacy",
+      "version": "2026c-0+deb13u1",
+      "source": "tzdata",
+      "source_version": "2026c-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "zlib1g",
+      "version": "1:1.3.dfsg+really1.3.1-1+b1",
+      "source": "zlib",
+      "source_version": "1.3.dfsg+really1.3.1-1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/z/zlib/zlib_1.3.dfsg+really1.3.1-1_copyright"
+    }
+  ],
+  "copyrights": [
+    {
+      "source": "base-files",
+      "version": "13.8+deb13u7",
+      "file": "base-files_13.8+deb13u7_copyright.txt",
+      "sha256": "c84c664bce3a83eaa327bb9e354c0df588bc535b5e95474aab7ca3cce74937cd",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u7_copyright"
+    },
+    {
+      "source": "brotli",
+      "version": "1.1.0-2",
+      "file": "brotli_1.1.0-2_copyright.txt",
+      "sha256": "24a64e5bb83d0960d1835696a1e23c0896ad6055b0ca47c66ab0eb9a766324b1",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/b/brotli/brotli_1.1.0-2_copyright"
+    },
+    {
+      "source": "ca-certificates",
+      "version": "20250419",
+      "file": "ca-certificates_20250419_copyright.txt",
+      "sha256": "e85e1bcad3a915dc7e6f41412bc5bdeba275cadd817896ea0451f2140a93967c",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/c/ca-certificates/ca-certificates_20250419_copyright"
+    },
+    {
+      "source": "curl",
+      "version": "8.14.1-2+deb13u5",
+      "file": "curl_8.14.1-2+deb13u5_copyright.txt",
+      "sha256": "e1b7678c8443b4f8ac69350e1eefd6132339b010cc3b870675fec0c0c29779a5",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/c/curl/curl_8.14.1-2+deb13u5_copyright"
+    },
+    {
+      "source": "cyrus-sasl2",
+      "version": "2.1.28+dfsg1-9",
+      "file": "cyrus-sasl2_2.1.28+dfsg1-9_copyright.txt",
+      "sha256": "ddb128a81d3a140ef5b3574ae000a1a50d0cb9a2ec59917121a155f91b670166",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/c/cyrus-sasl2/cyrus-sasl2_2.1.28+dfsg1-9_copyright"
+    },
+    {
+      "source": "e2fsprogs",
+      "version": "1.47.2-3",
+      "file": "e2fsprogs_1.47.2-3_copyright.txt",
+      "sha256": "2041b5febdc110151ca3372d01b16b85dda1888e33f3f60fce0f59940eed7d19",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/e/e2fsprogs/e2fsprogs_1.47.2-3_copyright"
+    },
+    {
+      "source": "gcc-14",
+      "version": "14.2.0-19",
+      "file": "gcc-14_14.2.0-19_copyright.txt",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gcc-14/gcc-14_14.2.0-19_copyright"
+    },
+    {
+      "source": "glibc",
+      "version": "2.41-12+deb13u4",
+      "file": "glibc_2.41-12+deb13u4_copyright.txt",
+      "sha256": "f5788886720a2605a946e81d571e6c8162b09f58d2e2ceb8d36e5768fccd850d",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/g/glibc/glibc_2.41-12+deb13u4_copyright"
+    },
+    {
+      "source": "gmp",
+      "version": "6.3.0+dfsg-3",
+      "file": "gmp_6.3.0+dfsg-3_copyright.txt",
+      "sha256": "7d366aef5ba325150246de1d7820c4c9926cd27ca61a69948492b26cd3b61601",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gmp/gmp_6.3.0+dfsg-3_copyright"
+    },
+    {
+      "source": "gnutls28",
+      "version": "3.8.9-3+deb13u4",
+      "file": "gnutls28_3.8.9-3+deb13u4_copyright.txt",
+      "sha256": "a07e99815cf1998f1dabbc21fe199460bfa09b85ead0d56b49a32cac3d1791b5",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/g/gnutls28/gnutls28_3.8.9-3+deb13u4_copyright"
+    },
+    {
+      "source": "keyutils",
+      "version": "1.6.3-6",
+      "file": "keyutils_1.6.3-6_copyright.txt",
+      "sha256": "73f5682b0466f41cea2b9b7f1ff8a8052464f6c09fb29eeac4490512af09bd50",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/k/keyutils/keyutils_1.6.3-6_copyright"
+    },
+    {
+      "source": "krb5",
+      "version": "1.21.3-5+deb13u1",
+      "file": "krb5_1.21.3-5+deb13u1_copyright.txt",
+      "sha256": "936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/k/krb5/krb5_1.21.3-5+deb13u1_copyright"
+    },
+    {
+      "source": "libcap2",
+      "version": "2.75-10+deb13u1",
+      "file": "libcap2_2.75-10+deb13u1_copyright.txt",
+      "sha256": "04f9fb974e10f6ca0cd226811f72b3855f8383daad0e5de7adac8d5b0b7796c3",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libc/libcap2/libcap2_2.75-10+deb13u1_copyright"
+    },
+    {
+      "source": "libffi",
+      "version": "3.4.8-2",
+      "file": "libffi_3.4.8-2_copyright.txt",
+      "sha256": "25ee86cfccc2b7eb9a156a127f1e1b38c46c231f516ff201912223eaf62ee186",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libf/libffi/libffi_3.4.8-2_copyright"
+    },
+    {
+      "source": "libgcrypt20",
+      "version": "1.11.0-7+deb13u1",
+      "file": "libgcrypt20_1.11.0-7+deb13u1_copyright.txt",
+      "sha256": "4feae258cab1ad4743fb569a77e0b2a5b7a0199520bdbc0a613916291b9aa8a8",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libg/libgcrypt20/libgcrypt20_1.11.0-7+deb13u1_copyright"
+    },
+    {
+      "source": "libgpg-error",
+      "version": "1.51-4",
+      "file": "libgpg-error_1.51-4_copyright.txt",
+      "sha256": "1edb3be55cf9371e8e7a71e53fadc2a3d33b44d7d7f15c78a7669c92ce0fade2",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libg/libgpg-error/libgpg-error_1.51-4_copyright"
+    },
+    {
+      "source": "libidn2",
+      "version": "2.3.8-2",
+      "file": "libidn2_2.3.8-2_copyright.txt",
+      "sha256": "32df8170a3c5e55c553f684576a2911e6a0611320ccd7fd65f7dceae26be61ee",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libi/libidn2/libidn2_2.3.8-2_copyright"
+    },
+    {
+      "source": "libpsl",
+      "version": "0.21.2-1.1",
+      "file": "libpsl_0.21.2-1.1_copyright.txt",
+      "sha256": "bbafb0cf52d34465fc69f5ffd22d724224f6a2f28402c88b045c69d88af06aaf",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libp/libpsl/libpsl_0.21.2-1.1_copyright"
+    },
+    {
+      "source": "libssh2",
+      "version": "1.11.1-1+deb13u2",
+      "file": "libssh2_1.11.1-1+deb13u2_copyright.txt",
+      "sha256": "fb5d6b7a53710b6ba04e412a016d222a3e56b9d6e1a2572a8ffc2eae05e6acfb",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libs/libssh2/libssh2_1.11.1-1+deb13u2_copyright"
+    },
+    {
+      "source": "libtasn1-6",
+      "version": "4.20.0-2+deb13u1",
+      "file": "libtasn1-6_4.20.0-2+deb13u1_copyright.txt",
+      "sha256": "5f9f7b538d221104bdb561ae80fd794ec5f813eb8fd04650293bddcc0f856e7d",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libt/libtasn1-6/libtasn1-6_4.20.0-2+deb13u1_copyright"
+    },
+    {
+      "source": "libunistring",
+      "version": "1.3-2",
+      "file": "libunistring_1.3-2_copyright.txt",
+      "sha256": "a585cd2cc2a5fcb8e58f12c7a710a35e06e5b897c59cd5ae4a7d835f0b49eae3",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libu/libunistring/libunistring_1.3-2_copyright"
+    },
+    {
+      "source": "libyaml",
+      "version": "0.2.5-2",
+      "file": "libyaml_0.2.5-2_copyright.txt",
+      "sha256": "3415b508dee94adcff525a8a2335dca6b9122e2543fd16566e7cfd8ab7713d6b",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/liby/libyaml/libyaml_0.2.5-2_copyright"
+    },
+    {
+      "source": "libzstd",
+      "version": "1.5.7+dfsg-1",
+      "file": "libzstd_1.5.7+dfsg-1_copyright.txt",
+      "sha256": "5cec9fef4d3fa7e0371fbef4ec3fc416e0105dc2a9922117f84e825cb11f50f8",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/libz/libzstd/libzstd_1.5.7+dfsg-1_copyright"
+    },
+    {
+      "source": "lz4",
+      "version": "1.10.0-4",
+      "file": "lz4_1.10.0-4_copyright.txt",
+      "sha256": "8dce0cb8c5a4486e4aac00466e4dd4b0b5b28d70efe3b3256ea4594099a8509c",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/l/lz4/lz4_1.10.0-4_copyright"
+    },
+    {
+      "source": "media-types",
+      "version": "13.0.0",
+      "file": "media-types_13.0.0_copyright.txt",
+      "sha256": "5ded7c53199b6a1d089b0b7e231d77e5c84081c7156b372b3f11ad9c1c2c5cc7",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright"
+    },
+    {
+      "source": "netbase",
+      "version": "6.5",
+      "file": "netbase_6.5_copyright.txt",
+      "sha256": "795b66147ea5ad692991caa7008ece551fb0fa88b9c53656223bd1518dc58ab2",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright"
+    },
+    {
+      "source": "nettle",
+      "version": "3.10.1-1",
+      "file": "nettle_3.10.1-1_copyright.txt",
+      "sha256": "344396197142cd506468b20029ea5722d507c980129bb3db4af02424ed6f39c6",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nettle/nettle_3.10.1-1_copyright"
+    },
+    {
+      "source": "nghttp2",
+      "version": "1.64.0-1.1+deb13u1",
+      "file": "nghttp2_1.64.0-1.1+deb13u1_copyright.txt",
+      "sha256": "a34ae32a5eba61e535835a8de7c398f47e420247d339bc400a3b9c618ba29a3d",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nghttp2/nghttp2_1.64.0-1.1+deb13u1_copyright"
+    },
+    {
+      "source": "nghttp3",
+      "version": "1.8.0-1",
+      "file": "nghttp3_1.8.0-1_copyright.txt",
+      "sha256": "e66d68610e086493b2dcf19539793786017922591dee5d0795b57e4219e5cc91",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/n/nghttp3/nghttp3_1.8.0-1_copyright"
+    },
+    {
+      "source": "openldap",
+      "version": "2.6.10+dfsg-1",
+      "file": "openldap_2.6.10+dfsg-1_copyright.txt",
+      "sha256": "2656a8ac4f2fda614be8fe6fd7f649665a6ca3abcf19f6ac125e2ff165b60939",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/o/openldap/openldap_2.6.10+dfsg-1_copyright"
+    },
+    {
+      "source": "openssl",
+      "version": "3.5.7-1~deb13u3",
+      "file": "openssl_3.5.7-1~deb13u3_copyright.txt",
+      "sha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/o/openssl/openssl_3.5.7-1~deb13u3_copyright"
+    },
+    {
+      "source": "p11-kit",
+      "version": "0.25.5-3",
+      "file": "p11-kit_0.25.5-3_copyright.txt",
+      "sha256": "008107de203c9f89a6c71b625fb47e10074c6b7ccb0e310694014d4551f67b2b",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/p/p11-kit/p11-kit_0.25.5-3_copyright"
+    },
+    {
+      "source": "pkgconf",
+      "version": "1.8.1-4",
+      "file": "pkgconf_1.8.1-4_copyright.txt",
+      "sha256": "676c75e54ff7e3b9892940fbf1b31763cb6f2a6527a5607a3640ac59a2441fba",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/p/pkgconf/pkgconf_1.8.1-4_copyright"
+    },
+    {
+      "source": "postgresql-17",
+      "version": "17.11-0+deb13u1",
+      "file": "postgresql-17_17.11-0+deb13u1_copyright.txt",
+      "sha256": "afcc052a946b4117667527211b4ca303f07044f5585222f4c8f577e0764b2123",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/p/postgresql-17/postgresql-17_17.11-0+deb13u1_copyright"
+    },
+    {
+      "source": "rtmpdump",
+      "version": "2.4+20151223.gitfa8646d.1-2",
+      "file": "rtmpdump_2.4+20151223.gitfa8646d.1-2_copyright.txt",
+      "sha256": "4302abcc1ea1b6cbe8d19c79b892acf78878030220210707c19006828866207c",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/r/rtmpdump/rtmpdump_2.4+20151223.gitfa8646d.1-2_copyright"
+    },
+    {
+      "source": "systemd",
+      "version": "257.13-1~deb13u1",
+      "file": "systemd_257.13-1~deb13u1_copyright.txt",
+      "sha256": "a79e4b379cabbd960bb44f6cc1a069081a3778c59a25ee529b68df5a2cb7d27d",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/s/systemd/systemd_257.13-1~deb13u1_copyright"
+    },
+    {
+      "source": "tzdata",
+      "version": "2026c-0+deb13u1",
+      "file": "tzdata_2026c-0+deb13u1_copyright.txt",
+      "sha256": "cb61132bc0fc7b26ef5a82ee18b2fb644a1362f4f286ed980ff22e408471f59a",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    },
+    {
+      "source": "xxhash",
+      "version": "0.8.3-2",
+      "file": "xxhash_0.8.3-2_copyright.txt",
+      "sha256": "81affefe3047c8a88a9e4c94c8c698f51a7e0787e75b58e901bf1f8fcd433f58",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/x/xxhash/xxhash_0.8.3-2_copyright"
+    },
+    {
+      "source": "xz-utils",
+      "version": "5.8.1-1+deb13u1",
+      "file": "xz-utils_5.8.1-1+deb13u1_copyright.txt",
+      "sha256": "d755588e2d89d7845d0d4e718ac45d49ae9fc53cec4540af105963c20598f9d7",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/x/xz-utils/xz-utils_5.8.1-1+deb13u1_copyright"
+    },
+    {
+      "source": "zlib",
+      "version": "1.3.dfsg+really1.3.1-1",
+      "file": "zlib_1.3.dfsg+really1.3.1-1_copyright.txt",
+      "sha256": "9e5b96d63773a5d177ba264254390f792be07e41748ebd94730981c6cac31cc6",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/z/zlib/zlib_1.3.dfsg+really1.3.1-1_copyright"
+    }
+  ],
+  "index_digest": "sha256:c5542543523c9678398dd78d927c05e8425ec15b038f226b67b3b019b1a70845",
+  "platform_manifests": {
+    "amd64": "sha256:07bd537485182b73af016c67dae99521e40fdf50922b39912f378c5befb8e3b1",
+    "arm64": "sha256:4c84a238ad148fcf902a10b087f5911e5355f5c6cf5fb250490f7a51af7f1f1a"
+  },
+  "common_licenses": [
+    {
+      "file": "Apache-2.0",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "file": "Artistic",
+      "sha256": "dd90d4f42e4dcadf5a7c09eea0189d93c7b37ae560c91f0f6d5233ed3b9292a2"
+    },
+    {
+      "file": "CC0-1.0",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    {
+      "file": "GFDL-1.2",
+      "sha256": "2652c22ba086f92e55ae4a9f9c890ad4766ffd7814a73d318e22a597edf857a4"
+    },
+    {
+      "file": "GFDL-1.3",
+      "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4"
+    },
+    {
+      "file": "GPL",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "file": "GPL-1",
+      "sha256": "49c007bafb5ad6dd9f9d4dae4d3ac0461975498150c05d684c551f0914ab486c"
+    },
+    {
+      "file": "GPL-2",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6"
+    },
+    {
+      "file": "GPL-3",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "file": "LGPL",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118"
+    },
+    {
+      "file": "LGPL-2",
+      "sha256": "cc535c21133c895b56b374c8a1dc1eb948d99003ed2b47372069456b62f42b24"
+    },
+    {
+      "file": "LGPL-2.1",
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+    },
+    {
+      "file": "LGPL-3",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118"
+    }
+  ]
+}

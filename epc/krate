@@ -773,6 +773,24 @@ This bundle was built without the observability stack."
     warn "Created monitoring/.env from template (default Grafana credentials)."
   fi
 
+  # SSO-only services run in native/gateway mode; down/ps/logs always include
+  # them so switching back to local mode still stops and shows them.
+  local profiles=""
+  case "$(env_value_file "$env_file" PERSES_AUTH_MODE local)" in
+    native|gateway) profiles="perses-sso" ;;
+  esac
+  [[ "$1" == "up" ]] || profiles="perses-sso"
+
+  # Recreate the rendered-config consumers whenever their inputs change,
+  # including a renewed gateway certificate.
+  local revision
+  revision="$(find "$env_file" "$MONITOR_DIR/auth/perses" "$MONITOR_DIR/render.py" "$MONITOR_DIR/perses" \
+    "$CERT_CRT" "$CERT_KEY" -type f ! -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort | xargs cat 2>/dev/null \
+    | cksum | cut -d' ' -f1)"
+
+  KRATE_RENDER_REVISION="$revision" \
+  COMPOSE_PROFILES="$profiles" \
+  PERSES_CERTS_DIR="$CERTS_DIR" \
   KAFKA_EXPECTED_BROKERS="${expected:-1}" \
   KAFKA_NETWORK="$net" \
   KAFKA_EXPORTER_TARGETS="$(monitor_targets)" \
@@ -788,11 +806,19 @@ cmd_monitor() {
       require_compose
       info "Starting observability stack..."
       command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
+      [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]] || die "Perses HTTPS needs $CERT_CRT and $CERT_KEY — run: krate gen-cert"
+      monitor_prepare
+      # Compose leaves a dropped profile's services running. In local mode remove
+      # the SSO services first, so the previous mode's guard cannot act on Perses.
+      if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
+        monitor_compose rm -s -f oauth2-proxy perses-sync >/dev/null
+      fi
       monitor_compose up -d
       python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
       echo ""
       ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
       ok "Prometheus: http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)"
+      ok "Perses:     https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443) ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) sign-in)"
       note_smtp
       ;;
     down)    require_compose; monitor_compose down "$@" ;;
@@ -812,6 +838,12 @@ cmd_monitor() {
       echo "Grafana:  http://$(hostname -f 2>/dev/null || hostname):${port}"
       echo "User:     $(env_value_file "$MONITOR_DIR/.env" GRAFANA_USER admin)"
       echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
+      echo "Perses:   https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
+      if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
+        echo "User:     $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_USER admin)  (password: PERSES_ADMIN_PASSWORD in monitoring/.env)"
+      else
+        echo "Sign-in:  company SSO ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) mode)"
+      fi
       ;;
     *)
       echo "Usage: krate monitor {up|down|status|logs|reload|ui}"
@@ -828,6 +860,54 @@ env_value_file() {
 
 # Alerting works without SMTP; only delivery is off. Say so rather than let an
 # operator assume email is configured.
+# Generate the per-install secrets of the parallel Perses stack, and refuse
+# unsafe defaults, before the monitoring-init renderer reads monitoring/.env.
+monitor_prepare() {
+  local env_file="$MONITOR_DIR/.env"
+  if [[ ! -f "$env_file" ]]; then
+    cp "$MONITOR_DIR/.env.template" "$env_file"
+    warn "Created monitoring/.env from template (default Grafana credentials)."
+  fi
+  chmod 600 "$env_file"
+  mkdir -p "$MONITOR_DIR/auth/perses"
+  python3 - "$env_file" <<'PY' || die "monitoring/.env is not ready for the Perses stack (see above)."
+import re, secrets, string, sys
+path = sys.argv[1]
+text = open(path).read()
+
+def value(key):
+    found = re.findall(r'^%s=(.*)$' % re.escape(key), text, re.M)
+    return found[-1].strip().strip('"\'') if found else ''
+
+def assign(key, new):
+    global text
+    if re.search(r'^%s=' % re.escape(key), text, re.M):
+        text = re.sub(r'^%s=.*$' % re.escape(key), lambda _: key + '=' + new, text, flags=re.M)
+    else:
+        text += ('' if text.endswith('\n') else '\n') + key + '=' + new + '\n'
+
+alphabet = string.ascii_letters + string.digits
+generated = []
+if not value('PERSES_ENCRYPTION_KEY'):
+    assign('PERSES_ENCRYPTION_KEY', ''.join(secrets.choice(alphabet) for _ in range(32)))
+    generated.append('PERSES_ENCRYPTION_KEY')
+mode = value('PERSES_AUTH_MODE') or 'local'
+if mode in ('native', 'gateway') and not value('OAUTH2_PROXY_COOKIE_SECRET'):
+    assign('OAUTH2_PROXY_COOKIE_SECRET', ''.join(secrets.choice(alphabet) for _ in range(32)))
+    generated.append('OAUTH2_PROXY_COOKIE_SECRET')
+if generated:
+    with open(path, 'w') as stream:
+        stream.write(text)
+    print('  Generated ' + ', '.join(generated) + ' in monitoring/.env')
+if mode == 'local' and len(value('PERSES_ADMIN_PASSWORD')) < 12:
+    sys.exit('  Set PERSES_ADMIN_PASSWORD (12+ characters) in monitoring/.env for the Perses admin.')
+if mode in ('native', 'gateway') and not value('OAUTH2_PROXY_CLIENT_SECRET'):
+    sys.exit('  Set OAUTH2_PROXY_CLIENT_SECRET (the Perses OIDC client secret) in monitoring/.env.')
+if mode == 'native' and not value('PERSES_SYNC_CLIENT_SECRET'):
+    sys.exit('  Set PERSES_SYNC_CLIENT_SECRET (the access guard client secret) in monitoring/.env.')
+PY
+}
+
 note_smtp() {
   local en; en="$(env_value_file "$MONITOR_DIR/.env" GF_SMTP_ENABLED false)"
   if [[ "$en" != "true" ]]; then

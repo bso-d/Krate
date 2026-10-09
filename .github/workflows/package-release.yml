@@ -96,7 +96,9 @@ jobs:
     needs: metadata
     name: ${{ inputs.edition }} / ${{ matrix.arch }}
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-    timeout-minutes: 90
+    # The package step also downloads and verifies the corresponding source of every
+    # copyleft component in the images (scripts/collect-sources.py, LICENSE-SOURCES.md).
+    timeout-minutes: 180
     # The build runs third-party npm, Jest and Vite code from the pinned Kafbat
     # source. Keep it read-only, check out only the dispatched main commit, leave
     # no token in .git/config, and use no Actions cache.
@@ -120,6 +122,12 @@ jobs:
           node-version: 22
           # No dependency cache in a release build (see the cache note above).
           package-manager-cache: false
+      # The corresponding-source step reads Go build info and downloads Go modules
+      # (scripts/collect-sources.py). The arm64 runner image has no Go.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          cache: false
       - name: Validate source
         run: |
           sudo apt-get update
@@ -164,6 +172,28 @@ jobs:
           set -euo pipefail
           cd release
           for checksum in ./*.tar.gz.sha256; do sha256sum -c "$checksum"; done
+          # Corresponding-source archives: one tar per package, or .partNNN pieces when
+          # the tar would exceed GitHub's 2 GiB asset limit. The .sha256 file lists the
+          # whole tar and each part; check what is present, then the reassembled tar.
+          shopt -s nullglob
+          source_assets=()
+          for checksum in ./*-sources.tar.sha256; do
+            tar_name="$(basename "$checksum" .sha256)"
+            [[ -e "$tar_name" || -e "$tar_name.part000" ]] || { echo "Missing $tar_name" >&2; exit 1; }
+            sha256sum -c --ignore-missing "$checksum"
+            parts=("$tar_name".part*)
+            if (( ${#parts[@]} )); then
+              whole="$(awk -v n="$tar_name" '$2 == n {print $1}' "$checksum")"
+              [[ "$(cat "${parts[@]}" | sha256sum | cut -d' ' -f1)" == "$whole" ]] \
+                || { echo "Reassembled $tar_name does not match its checksum" >&2; exit 1; }
+              source_assets+=("${parts[@]}")
+            else
+              source_assets+=("$tar_name")
+            fi
+            source_assets+=("$checksum")
+          done
+          (( ${#source_assets[@]} )) || { echo 'No corresponding-source archive was built' >&2; exit 1; }
+          shopt -u nullglob
           title="Offline install package · KRaft $VERSION"
           [[ "$EDITION" != epc ]] || title="Offline install package · EPC $VERSION"
           cat > release-notes.md <<NOTES
@@ -177,7 +207,12 @@ jobs:
 
           NOTES
           cat ./*.notes.md >> release-notes.md
-          assets=(./*.tar.gz ./*.tar.gz.sha256 ./*.images.lock.tsv)
+          cat >> release-notes.md <<'NOTES'
+          ## Corresponding source
+
+          Each package has a `-sources.tar` asset with the corresponding source of the GPL, LGPL, MPL, EPL and other copyleft components in its container images, hash-verified against their upstream publishers, with `SOURCES.md` and `manifest.json` inside. A source archive larger than 2 GiB is attached as `.partNNN` pieces: `cat <name>-sources.tar.part* > <name>-sources.tar`, then `sha256sum -c --ignore-missing <name>-sources.tar.sha256`. See LICENSE-SOURCES.md in the repository.
+          NOTES
+          assets=(./*.tar.gz ./*.tar.gz.sha256 ./*.images.lock.tsv "${source_assets[@]}")
 
           # Restartable: reuse a tag already on this commit, and fill a draft
           # release that is published only after every asset is uploaded.

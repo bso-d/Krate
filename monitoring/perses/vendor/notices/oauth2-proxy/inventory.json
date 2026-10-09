@@ -1,0 +1,318 @@
+{
+  "image": "quay.io/oauth2-proxy/oauth2-proxy:v7.15.5",
+  "index_digest": "sha256:8498b0d0ef0a7b29686414000a08aee467f02d0299c9ed1e006a8f33fc017916",
+  "platform_manifests": {
+    "amd64": "sha256:0d989b27d90d5e527fb2b045d864c4001c3104bdd763b3211b7e9ba2110380ea",
+    "arm64": "sha256:755fb16f07f22a277149a06057e06e2cfc15557621c5be2ae71645999748746d"
+  },
+  "base": "gcr.io/distroless/static:nonroot (Debian 13 trixie; Makefile DOCKER_BUILD_RUNTIME_IMAGE + image history)",
+  "go_modules": "go-modules/inventory.json",
+  "packages": [
+    {
+      "architecture": "amd64",
+      "package": "base-files",
+      "version": "13.8+deb13u7",
+      "package_architecture": "amd64",
+      "source": "base-files",
+      "source_version": "13.8+deb13u7",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u7_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "ca-certificates",
+      "version": "20250419",
+      "package_architecture": "all",
+      "source": "ca-certificates",
+      "source_version": "20250419",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/c/ca-certificates/ca-certificates_20250419_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "media-types",
+      "version": "13.0.0",
+      "package_architecture": "all",
+      "source": "media-types",
+      "source_version": "13.0.0",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "netbase",
+      "version": "6.5",
+      "package_architecture": "all",
+      "source": "netbase",
+      "source_version": "6.5",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata",
+      "version": "2026c-0+deb13u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026c-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata-legacy",
+      "version": "2026c-0+deb13u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026c-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "base-files",
+      "version": "13.8+deb13u7",
+      "package_architecture": "arm64",
+      "source": "base-files",
+      "source_version": "13.8+deb13u7",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u7_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "ca-certificates",
+      "version": "20250419",
+      "package_architecture": "all",
+      "source": "ca-certificates",
+      "source_version": "20250419",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/c/ca-certificates/ca-certificates_20250419_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "media-types",
+      "version": "13.0.0",
+      "package_architecture": "all",
+      "source": "media-types",
+      "source_version": "13.0.0",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "netbase",
+      "version": "6.5",
+      "package_architecture": "all",
+      "source": "netbase",
+      "source_version": "6.5",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata",
+      "version": "2026c-0+deb13u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026c-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata-legacy",
+      "version": "2026c-0+deb13u1",
+      "package_architecture": "all",
+      "source": "tzdata",
+      "source_version": "2026c-0+deb13u1",
+      "copyright_url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright"
+    }
+  ],
+  "copyrights": [
+    {
+      "source": "base-files",
+      "version": "13.8+deb13u7",
+      "file": "base-files_13.8+deb13u7_copyright.txt",
+      "sha256": "c84c664bce3a83eaa327bb9e354c0df588bc535b5e95474aab7ca3cce74937cd",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/b/base-files/base-files_13.8+deb13u7_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/base-files/copyright"
+    },
+    {
+      "source": "ca-certificates",
+      "version": "20250419",
+      "file": "ca-certificates_20250419_copyright.txt",
+      "sha256": "e85e1bcad3a915dc7e6f41412bc5bdeba275cadd817896ea0451f2140a93967c",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/c/ca-certificates/ca-certificates_20250419_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/ca-certificates/copyright"
+    },
+    {
+      "source": "media-types",
+      "version": "13.0.0",
+      "file": "media-types_13.0.0_copyright.txt",
+      "sha256": "5ded7c53199b6a1d089b0b7e231d77e5c84081c7156b372b3f11ad9c1c2c5cc7",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/m/media-types/media-types_13.0.0_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/media-types/copyright"
+    },
+    {
+      "source": "netbase",
+      "version": "6.5",
+      "file": "netbase_6.5_copyright.txt",
+      "sha256": "795b66147ea5ad692991caa7008ece551fb0fa88b9c53656223bd1518dc58ab2",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/n/netbase/netbase_6.5_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/netbase/copyright"
+    },
+    {
+      "source": "tzdata",
+      "version": "2026c-0+deb13u1",
+      "file": "tzdata_2026c-0+deb13u1_copyright.txt",
+      "sha256": "cb61132bc0fc7b26ef5a82ee18b2fb644a1362f4f286ed980ff22e408471f59a",
+      "url": "https://metadata.ftp-master.debian.org/changelogs/main/t/tzdata/tzdata_2026c-0+deb13u1_copyright",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/doc/tzdata/copyright"
+    },
+    {
+      "source": "oauth2-proxy",
+      "version": "v7.15.5",
+      "url": "https://raw.githubusercontent.com/oauth2-proxy/oauth2-proxy/v7.15.5/LICENSE",
+      "note": "the image contains no project licence file; tagged source has no NOTICE (HTTP 404)",
+      "file": "OAUTH2-PROXY-LICENSE",
+      "sha256": "89807acf2309bd285f033404ee78581602f3cd9b819a16ac2f0e5f60ff4a473e"
+    },
+    {
+      "source": "go (standard library/runtime)",
+      "version": "go1.26.8",
+      "url": "https://raw.githubusercontent.com/golang/go/go1.26.8/LICENSE",
+      "note": "linked into /bin/oauth2-proxy",
+      "file": "go1.26.8_LICENSE",
+      "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    {
+      "source": "go (standard library/runtime)",
+      "version": "go1.26.8",
+      "url": "https://raw.githubusercontent.com/golang/go/go1.26.8/PATENTS",
+      "note": "linked into /bin/oauth2-proxy",
+      "file": "go1.26.8_PATENTS",
+      "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+    }
+  ],
+  "common_licenses": [
+    {
+      "file": "AGPL-3.0",
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "origin": "digest-verified image:/usr/share/common-licenses/AGPL-3.0 (base-files)"
+    },
+    {
+      "file": "Apache-2.0",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "origin": "digest-verified image:/usr/share/common-licenses/Apache-2.0 (base-files)"
+    },
+    {
+      "file": "Artistic",
+      "sha256": "dd90d4f42e4dcadf5a7c09eea0189d93c7b37ae560c91f0f6d5233ed3b9292a2",
+      "origin": "digest-verified image:/usr/share/common-licenses/Artistic (base-files)"
+    },
+    {
+      "file": "Artistic-2.0",
+      "sha256": "5c29658b80a9cbb016dfe238ece8b86b5e63761355df8b872126d35bebce4303",
+      "origin": "digest-verified image:/usr/share/common-licenses/Artistic-2.0 (base-files)"
+    },
+    {
+      "file": "BSD",
+      "sha256": "5d588eb3b157d52112afea935c88a7ff9efddc1e2d95a42c25d3b96ad9055008",
+      "origin": "digest-verified image:/usr/share/common-licenses/BSD (base-files)"
+    },
+    {
+      "file": "BSL-1.0",
+      "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+      "origin": "digest-verified image:/usr/share/common-licenses/BSL-1.0 (base-files)"
+    },
+    {
+      "file": "CC-BY-3.0",
+      "sha256": "e6bc9e9c474700b708f568bac9e5a8a9bcb2b1dad53442f5ba449fcb848b8e76",
+      "origin": "digest-verified image:/usr/share/common-licenses/CC-BY-3.0 (base-files)"
+    },
+    {
+      "file": "CC-BY-4.0",
+      "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+      "origin": "digest-verified image:/usr/share/common-licenses/CC-BY-4.0 (base-files)"
+    },
+    {
+      "file": "CC-BY-SA-3.0",
+      "sha256": "3f941b3b89cf7b8370ceb83cc76d2120d471b58735d8ca60238a751a48d7f72f",
+      "origin": "digest-verified image:/usr/share/common-licenses/CC-BY-SA-3.0 (base-files)"
+    },
+    {
+      "file": "CC-BY-SA-4.0",
+      "sha256": "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5",
+      "origin": "digest-verified image:/usr/share/common-licenses/CC-BY-SA-4.0 (base-files)"
+    },
+    {
+      "file": "CC0-1.0",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+      "origin": "digest-verified image:/usr/share/common-licenses/CC0-1.0 (base-files)"
+    },
+    {
+      "file": "GFDL",
+      "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL (base-files)"
+    },
+    {
+      "file": "GFDL-1.1",
+      "sha256": "1040f0fffcf5a73398512aaa3f7cf89b7e4bb8feb13c661ad71184e015c7fcb6",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL-1.1 (base-files)"
+    },
+    {
+      "file": "GFDL-1.2",
+      "sha256": "2652c22ba086f92e55ae4a9f9c890ad4766ffd7814a73d318e22a597edf857a4",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL-1.2 (base-files)"
+    },
+    {
+      "file": "GFDL-1.3",
+      "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+      "origin": "digest-verified image:/usr/share/common-licenses/GFDL-1.3 (base-files)"
+    },
+    {
+      "file": "GPL",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL (base-files)"
+    },
+    {
+      "file": "GPL-1",
+      "sha256": "49c007bafb5ad6dd9f9d4dae4d3ac0461975498150c05d684c551f0914ab486c",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-1 (base-files)"
+    },
+    {
+      "file": "GPL-2",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-2 (base-files)"
+    },
+    {
+      "file": "GPL-3",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "origin": "digest-verified image:/usr/share/common-licenses/GPL-3 (base-files)"
+    },
+    {
+      "file": "LGPL",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL (base-files)"
+    },
+    {
+      "file": "LGPL-2",
+      "sha256": "cc535c21133c895b56b374c8a1dc1eb948d99003ed2b47372069456b62f42b24",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-2 (base-files)"
+    },
+    {
+      "file": "LGPL-2.1",
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-2.1 (base-files)"
+    },
+    {
+      "file": "LGPL-3",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "origin": "digest-verified image:/usr/share/common-licenses/LGPL-3 (base-files)"
+    },
+    {
+      "file": "MPL-1.1",
+      "sha256": "f849fc26a7a99981611a3a370e83078deb617d12a45776d6c4cada4d338be469",
+      "origin": "digest-verified image:/usr/share/common-licenses/MPL-1.1 (base-files)"
+    },
+    {
+      "file": "MPL-2.0",
+      "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+      "origin": "digest-verified image:/usr/share/common-licenses/MPL-2.0 (base-files)"
+    },
+    {
+      "file": "OFL-1.1",
+      "sha256": "1d361a8f8e8ce6e68457dcd93fb56e162e6baa3bbb7e7573a290d44399f6b57e",
+      "origin": "digest-verified image:/usr/share/common-licenses/OFL-1.1 (base-files)"
+    }
+  ]
+}

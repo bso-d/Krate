@@ -1,8 +1,17 @@
 # Native login customization
 
-EPC and regular Krate share `krate/kafka-ui:1.5.0-sso.4`, based on Kafbat v1.5.0
+EPC and regular Krate share `krate/kafka-ui:1.5.0-sso.5`, based on Kafbat v1.5.0
 at `afc9c918e13c4422268a3a5b7933c7b448746c82`. Upstream source and license:
 <https://github.com/kafbat/kafka-ui/tree/v1.5.0>.
+
+The image runs on the digest-pinned Eclipse Temurin 25 JRE (Alpine) instead of
+upstream's Azul Zulu base, because Adoptium publishes the JDK's source and Azul
+does not (see [LICENSE-SOURCES.md](../LICENSE-SOURCES.md)). The runtime setup is
+upstream's: `gcompat` and `tzdata`, the non-root `kafkaui` user, `/etc/kafkaui`,
+port 8080 and the same Java command. The builder fetches `gcompat` and its
+dependencies for the Temurin image's own Alpine release; the image build has no
+network, and `apk` checks the packages' Alpine signatures. Their file hashes are
+recorded in `provenance.json`.
 
 `native-login.patch` keeps upstream React, styled-components, inputs and buttons.
 It selects the native dark theme for the login page, removes the login wordmark,

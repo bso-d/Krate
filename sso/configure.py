@@ -64,6 +64,22 @@ def validate(settings, app):
                 url(settings, key)
         if type(settings.get("viewer_messages", True)) is not bool:
             raise ValueError("viewer_messages must be boolean")
+    elif app == "perses":
+        if urlsplit(public_url).path not in ("", "/"):
+            raise ValueError("Perses public_url must use the root path, e.g. https://host:3443")
+        # OAuth2 Proxy splits allowed groups on commas; the guard matches exact names.
+        for key in ("viewer_group", "admin_group"):
+            if re.search(r'[,\s"\'\\]', settings[key]):
+                raise ValueError(f"{key} must not contain commas, quotes or whitespace")
+        if "service_client_id" in settings and not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", text(settings, "service_client_id")):
+            raise ValueError("service_client_id must be a valid Perses user name")
+        proof = settings.get("group_proof_minutes", 15)
+        if type(proof) is not int or not 1 <= proof <= 60:
+            raise ValueError("group_proof_minutes must be between 1 and 60")
+        hours = settings.get("session_hours", 8)
+        if type(hours) is not int or not 1 <= hours <= 24:
+            raise ValueError("session_hours must be between 1 and 24")
     else:
         for key in ("authorization_url", "token_url", "userinfo_url"):
             url(settings, key)
@@ -165,16 +181,25 @@ tls_skip_verify_insecure = false
 """
 
 
+def perses(settings):
+    """Site settings read by monitoring/render.py for Perses SSO."""
+    keys = ("issuer", "public_url", "client_id", "viewer_group", "admin_group", "groups_claim",
+            "scopes", "service_client_id", "group_proof_minutes", "session_hours")
+    site = {key: settings[key] for key in keys if key in settings}
+    site["public_url"] = site["public_url"].rstrip("/")
+    return json.dumps(site, indent=2) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", choices=("kafbat", "grafana"), required=True)
+    parser.add_argument("--app", choices=("kafbat", "grafana", "perses"), required=True)
     parser.add_argument("--settings", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         settings = json.loads(args.settings.read_text())
         validate(settings, args.app)
-        content = kafbat(settings) if args.app == "kafbat" else grafana(settings)
+        content = {"kafbat": kafbat, "grafana": grafana, "perses": perses}[args.app](settings)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         # No implicit overwrite of an active deployment's authentication config.
         fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)

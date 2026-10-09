@@ -56,6 +56,10 @@ validation you could not perform; do not present an untested path as verified.
 Keep integration test artifacts and generated bundles local, as described in
 the README.
 
+## License of contributions
+
+Krate is licensed under [AGPL-3.0](LICENSE). By submitting a contribution you agree that it is licensed under the same terms.
+
 ## Open a pull request
 
 Target `main` with a descriptive title and focused commits. Explain the problem,

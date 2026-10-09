@@ -1,0 +1,1002 @@
+{
+  "image": "nginx:1.27-alpine (pinned in kraft/.env.template and epc/.env.template NGINX_IMAGE)",
+  "index_digest": "sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10",
+  "platform_manifests": {
+    "amd64": "sha256:62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8",
+    "arm64": "sha256:63ffc0d1f14e4082b832c6a42e606e9a0384a526f16ddd720af7c1f018f2f7c4"
+  },
+  "base": "Alpine Linux 3.21.3; nginx 1.27.5, njs 0.8.10",
+  "scope": "Alpine package licences are the apk database declarations; Alpine does not install per-package licence texts. Only the nginx COPYRIGHT files present in the image are copied.",
+  "packages": [
+    {
+      "architecture": "amd64",
+      "package": "alpine-baselayout",
+      "version": "3.6.8-r1",
+      "license": "GPL-2.0-only",
+      "origin": "alpine-baselayout"
+    },
+    {
+      "architecture": "amd64",
+      "package": "alpine-baselayout-data",
+      "version": "3.6.8-r1",
+      "license": "GPL-2.0-only",
+      "origin": "alpine-baselayout"
+    },
+    {
+      "architecture": "amd64",
+      "package": "alpine-keys",
+      "version": "2.5-r0",
+      "license": "MIT",
+      "origin": "alpine-keys"
+    },
+    {
+      "architecture": "amd64",
+      "package": "alpine-release",
+      "version": "3.21.3-r0",
+      "license": "MIT",
+      "origin": "alpine-base"
+    },
+    {
+      "architecture": "amd64",
+      "package": "aom-libs",
+      "version": "3.11.0-r0",
+      "license": "BSD-2-Clause AND custom",
+      "origin": "aom"
+    },
+    {
+      "architecture": "amd64",
+      "package": "apk-tools",
+      "version": "2.14.6-r3",
+      "license": "GPL-2.0-only",
+      "origin": "apk-tools"
+    },
+    {
+      "architecture": "amd64",
+      "package": "brotli-libs",
+      "version": "1.1.0-r2",
+      "license": "MIT",
+      "origin": "brotli"
+    },
+    {
+      "architecture": "amd64",
+      "package": "busybox",
+      "version": "1.37.0-r12",
+      "license": "GPL-2.0-only",
+      "origin": "busybox"
+    },
+    {
+      "architecture": "amd64",
+      "package": "busybox-binsh",
+      "version": "1.37.0-r12",
+      "license": "GPL-2.0-only",
+      "origin": "busybox"
+    },
+    {
+      "architecture": "amd64",
+      "package": "c-ares",
+      "version": "1.34.5-r0",
+      "license": "MIT",
+      "origin": "c-ares"
+    },
+    {
+      "architecture": "amd64",
+      "package": "ca-certificates",
+      "version": "20241121-r1",
+      "license": "MPL-2.0 AND MIT",
+      "origin": "ca-certificates"
+    },
+    {
+      "architecture": "amd64",
+      "package": "ca-certificates-bundle",
+      "version": "20241121-r1",
+      "license": "MPL-2.0 AND MIT",
+      "origin": "ca-certificates"
+    },
+    {
+      "architecture": "amd64",
+      "package": "curl",
+      "version": "8.12.1-r1",
+      "license": "curl",
+      "origin": "curl"
+    },
+    {
+      "architecture": "amd64",
+      "package": "fontconfig",
+      "version": "2.15.0-r1",
+      "license": "MIT",
+      "origin": "fontconfig"
+    },
+    {
+      "architecture": "amd64",
+      "package": "freetype",
+      "version": "2.13.3-r0",
+      "license": "FTL OR GPL-2.0-or-later",
+      "origin": "freetype"
+    },
+    {
+      "architecture": "amd64",
+      "package": "geoip",
+      "version": "1.6.12-r5",
+      "license": "LGPL-2.1-or-later",
+      "origin": "geoip"
+    },
+    {
+      "architecture": "amd64",
+      "package": "gettext-envsubst",
+      "version": "0.22.5-r0",
+      "license": "GPL-3.0-or-later AND LGPL-2.1-or-later AND MIT",
+      "origin": "gettext"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libavif",
+      "version": "1.0.4-r0",
+      "license": "BSD-2-Clause",
+      "origin": "libavif"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libbsd",
+      "version": "0.12.2-r0",
+      "license": "BSD-3-Clause",
+      "origin": "libbsd"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libbz2",
+      "version": "1.0.8-r6",
+      "license": "bzip2-1.0.6",
+      "origin": "bzip2"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libcrypto3",
+      "version": "3.3.3-r0",
+      "license": "Apache-2.0",
+      "origin": "openssl"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libcurl",
+      "version": "8.12.1-r1",
+      "license": "curl",
+      "origin": "curl"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libdav1d",
+      "version": "1.5.0-r0",
+      "license": "BSD-2-Clause",
+      "origin": "dav1d"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libedit",
+      "version": "20240808.3.1-r0",
+      "license": "BSD-3-Clause",
+      "origin": "libedit"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libexpat",
+      "version": "2.7.0-r0",
+      "license": "MIT",
+      "origin": "expat"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgcrypt",
+      "version": "1.10.3-r1",
+      "license": "LGPL-2.1-or-later AND GPL-2.0-or-later",
+      "origin": "libgcrypt"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgd",
+      "version": "2.3.3-r9",
+      "license": "GD",
+      "origin": "gd"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libgpg-error",
+      "version": "1.51-r0",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "origin": "libgpg-error"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libice",
+      "version": "1.1.1-r6",
+      "license": "X11",
+      "origin": "libice"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libidn2",
+      "version": "2.3.7-r0",
+      "license": "GPL-2.0-or-later OR LGPL-3.0-or-later",
+      "origin": "libidn2"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libintl",
+      "version": "0.22.5-r0",
+      "license": "LGPL-2.1-or-later",
+      "origin": "gettext"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libjpeg-turbo",
+      "version": "3.0.4-r0",
+      "license": "BSD-3-Clause AND IJG AND Zlib",
+      "origin": "libjpeg-turbo"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libmd",
+      "version": "1.1.0-r0",
+      "license": "BSD-3-Clause AND BSD-2-Clause AND ISC AND Beerware AND Public Domain",
+      "origin": "libmd"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libncursesw",
+      "version": "6.5_p20241006-r3",
+      "license": "X11",
+      "origin": "ncurses"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libpng",
+      "version": "1.6.47-r0",
+      "license": "Libpng",
+      "origin": "libpng"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libpsl",
+      "version": "0.21.5-r3",
+      "license": "MIT",
+      "origin": "libpsl"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libsharpyuv",
+      "version": "1.4.0-r0",
+      "license": "BSD-3-Clause",
+      "origin": "libwebp"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libsm",
+      "version": "1.2.4-r4",
+      "license": "MIT",
+      "origin": "libsm"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libssl3",
+      "version": "3.3.3-r0",
+      "license": "Apache-2.0",
+      "origin": "openssl"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libunistring",
+      "version": "1.2-r0",
+      "license": "GPL-2.0-or-later OR LGPL-3.0-or-later",
+      "origin": "libunistring"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libuuid",
+      "version": "2.40.4-r1",
+      "license": "BSD-3-Clause",
+      "origin": "util-linux"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libwebp",
+      "version": "1.4.0-r0",
+      "license": "BSD-3-Clause",
+      "origin": "libwebp"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libx11",
+      "version": "1.8.10-r0",
+      "license": "X11",
+      "origin": "libx11"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxau",
+      "version": "1.0.11-r4",
+      "license": "MIT",
+      "origin": "libxau"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxcb",
+      "version": "1.16.1-r0",
+      "license": "MIT",
+      "origin": "libxcb"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxdmcp",
+      "version": "1.1.5-r1",
+      "license": "MIT",
+      "origin": "libxdmcp"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxext",
+      "version": "1.3.6-r2",
+      "license": "MIT",
+      "origin": "libxext"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxml2",
+      "version": "2.13.4-r5",
+      "license": "MIT",
+      "origin": "libxml2"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxpm",
+      "version": "3.5.17-r0",
+      "license": "X11",
+      "origin": "libxpm"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxslt",
+      "version": "1.1.42-r2",
+      "license": "X11",
+      "origin": "libxslt"
+    },
+    {
+      "architecture": "amd64",
+      "package": "libxt",
+      "version": "1.3.1-r0",
+      "license": "MIT",
+      "origin": "libxt"
+    },
+    {
+      "architecture": "amd64",
+      "package": "musl",
+      "version": "1.2.5-r9",
+      "license": "MIT",
+      "origin": "musl"
+    },
+    {
+      "architecture": "amd64",
+      "package": "musl-utils",
+      "version": "1.2.5-r9",
+      "license": "MIT AND BSD-2-Clause AND GPL-2.0-or-later",
+      "origin": "musl"
+    },
+    {
+      "architecture": "amd64",
+      "package": "ncurses-terminfo-base",
+      "version": "6.5_p20241006-r3",
+      "license": "X11",
+      "origin": "ncurses"
+    },
+    {
+      "architecture": "amd64",
+      "package": "nghttp2-libs",
+      "version": "1.64.0-r0",
+      "license": "MIT",
+      "origin": "nghttp2"
+    },
+    {
+      "architecture": "amd64",
+      "package": "nginx",
+      "version": "1.27.5-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx"
+    },
+    {
+      "architecture": "amd64",
+      "package": "nginx-module-geoip",
+      "version": "1.27.5-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx-module-geoip"
+    },
+    {
+      "architecture": "amd64",
+      "package": "nginx-module-image-filter",
+      "version": "1.27.5-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx-module-image-filter"
+    },
+    {
+      "architecture": "amd64",
+      "package": "nginx-module-njs",
+      "version": "1.27.5.0.8.10-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx-module-njs"
+    },
+    {
+      "architecture": "amd64",
+      "package": "nginx-module-xslt",
+      "version": "1.27.5-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx-module-xslt"
+    },
+    {
+      "architecture": "amd64",
+      "package": "pcre2",
+      "version": "10.43-r0",
+      "license": "BSD-3-Clause",
+      "origin": "pcre2"
+    },
+    {
+      "architecture": "amd64",
+      "package": "scanelf",
+      "version": "1.3.8-r1",
+      "license": "GPL-2.0-only",
+      "origin": "pax-utils"
+    },
+    {
+      "architecture": "amd64",
+      "package": "ssl_client",
+      "version": "1.37.0-r12",
+      "license": "GPL-2.0-only",
+      "origin": "busybox"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tiff",
+      "version": "4.7.0-r0",
+      "license": "libtiff",
+      "origin": "tiff"
+    },
+    {
+      "architecture": "amd64",
+      "package": "tzdata",
+      "version": "2025b-r0",
+      "license": "Public-Domain",
+      "origin": "tzdata"
+    },
+    {
+      "architecture": "amd64",
+      "package": "xz-libs",
+      "version": "5.6.3-r1",
+      "license": "GPL-2.0-or-later AND 0BSD AND Public-Domain AND LGPL-2.1-or-later",
+      "origin": "xz"
+    },
+    {
+      "architecture": "amd64",
+      "package": "zlib",
+      "version": "1.3.1-r2",
+      "license": "Zlib",
+      "origin": "zlib"
+    },
+    {
+      "architecture": "amd64",
+      "package": "zstd-libs",
+      "version": "1.5.6-r2",
+      "license": "BSD-3-Clause OR GPL-2.0-or-later",
+      "origin": "zstd"
+    },
+    {
+      "architecture": "arm64",
+      "package": "alpine-baselayout",
+      "version": "3.6.8-r1",
+      "license": "GPL-2.0-only",
+      "origin": "alpine-baselayout"
+    },
+    {
+      "architecture": "arm64",
+      "package": "alpine-baselayout-data",
+      "version": "3.6.8-r1",
+      "license": "GPL-2.0-only",
+      "origin": "alpine-baselayout"
+    },
+    {
+      "architecture": "arm64",
+      "package": "alpine-keys",
+      "version": "2.5-r0",
+      "license": "MIT",
+      "origin": "alpine-keys"
+    },
+    {
+      "architecture": "arm64",
+      "package": "alpine-release",
+      "version": "3.21.3-r0",
+      "license": "MIT",
+      "origin": "alpine-base"
+    },
+    {
+      "architecture": "arm64",
+      "package": "aom-libs",
+      "version": "3.11.0-r0",
+      "license": "BSD-2-Clause AND custom",
+      "origin": "aom"
+    },
+    {
+      "architecture": "arm64",
+      "package": "apk-tools",
+      "version": "2.14.6-r3",
+      "license": "GPL-2.0-only",
+      "origin": "apk-tools"
+    },
+    {
+      "architecture": "arm64",
+      "package": "brotli-libs",
+      "version": "1.1.0-r2",
+      "license": "MIT",
+      "origin": "brotli"
+    },
+    {
+      "architecture": "arm64",
+      "package": "busybox",
+      "version": "1.37.0-r12",
+      "license": "GPL-2.0-only",
+      "origin": "busybox"
+    },
+    {
+      "architecture": "arm64",
+      "package": "busybox-binsh",
+      "version": "1.37.0-r12",
+      "license": "GPL-2.0-only",
+      "origin": "busybox"
+    },
+    {
+      "architecture": "arm64",
+      "package": "c-ares",
+      "version": "1.34.5-r0",
+      "license": "MIT",
+      "origin": "c-ares"
+    },
+    {
+      "architecture": "arm64",
+      "package": "ca-certificates",
+      "version": "20241121-r1",
+      "license": "MPL-2.0 AND MIT",
+      "origin": "ca-certificates"
+    },
+    {
+      "architecture": "arm64",
+      "package": "ca-certificates-bundle",
+      "version": "20241121-r1",
+      "license": "MPL-2.0 AND MIT",
+      "origin": "ca-certificates"
+    },
+    {
+      "architecture": "arm64",
+      "package": "curl",
+      "version": "8.12.1-r1",
+      "license": "curl",
+      "origin": "curl"
+    },
+    {
+      "architecture": "arm64",
+      "package": "fontconfig",
+      "version": "2.15.0-r1",
+      "license": "MIT",
+      "origin": "fontconfig"
+    },
+    {
+      "architecture": "arm64",
+      "package": "freetype",
+      "version": "2.13.3-r0",
+      "license": "FTL OR GPL-2.0-or-later",
+      "origin": "freetype"
+    },
+    {
+      "architecture": "arm64",
+      "package": "geoip",
+      "version": "1.6.12-r5",
+      "license": "LGPL-2.1-or-later",
+      "origin": "geoip"
+    },
+    {
+      "architecture": "arm64",
+      "package": "gettext-envsubst",
+      "version": "0.22.5-r0",
+      "license": "GPL-3.0-or-later AND LGPL-2.1-or-later AND MIT",
+      "origin": "gettext"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libavif",
+      "version": "1.0.4-r0",
+      "license": "BSD-2-Clause",
+      "origin": "libavif"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libbsd",
+      "version": "0.12.2-r0",
+      "license": "BSD-3-Clause",
+      "origin": "libbsd"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libbz2",
+      "version": "1.0.8-r6",
+      "license": "bzip2-1.0.6",
+      "origin": "bzip2"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libcrypto3",
+      "version": "3.3.3-r0",
+      "license": "Apache-2.0",
+      "origin": "openssl"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libcurl",
+      "version": "8.12.1-r1",
+      "license": "curl",
+      "origin": "curl"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libdav1d",
+      "version": "1.5.0-r0",
+      "license": "BSD-2-Clause",
+      "origin": "dav1d"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libedit",
+      "version": "20240808.3.1-r0",
+      "license": "BSD-3-Clause",
+      "origin": "libedit"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libexpat",
+      "version": "2.7.0-r0",
+      "license": "MIT",
+      "origin": "expat"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgcrypt",
+      "version": "1.10.3-r1",
+      "license": "LGPL-2.1-or-later AND GPL-2.0-or-later",
+      "origin": "libgcrypt"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgd",
+      "version": "2.3.3-r9",
+      "license": "GD",
+      "origin": "gd"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libgpg-error",
+      "version": "1.51-r0",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "origin": "libgpg-error"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libice",
+      "version": "1.1.1-r6",
+      "license": "X11",
+      "origin": "libice"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libidn2",
+      "version": "2.3.7-r0",
+      "license": "GPL-2.0-or-later OR LGPL-3.0-or-later",
+      "origin": "libidn2"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libintl",
+      "version": "0.22.5-r0",
+      "license": "LGPL-2.1-or-later",
+      "origin": "gettext"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libjpeg-turbo",
+      "version": "3.0.4-r0",
+      "license": "BSD-3-Clause AND IJG AND Zlib",
+      "origin": "libjpeg-turbo"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libmd",
+      "version": "1.1.0-r0",
+      "license": "BSD-3-Clause AND BSD-2-Clause AND ISC AND Beerware AND Public Domain",
+      "origin": "libmd"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libncursesw",
+      "version": "6.5_p20241006-r3",
+      "license": "X11",
+      "origin": "ncurses"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libpng",
+      "version": "1.6.47-r0",
+      "license": "Libpng",
+      "origin": "libpng"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libpsl",
+      "version": "0.21.5-r3",
+      "license": "MIT",
+      "origin": "libpsl"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libsharpyuv",
+      "version": "1.4.0-r0",
+      "license": "BSD-3-Clause",
+      "origin": "libwebp"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libsm",
+      "version": "1.2.4-r4",
+      "license": "MIT",
+      "origin": "libsm"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libssl3",
+      "version": "3.3.3-r0",
+      "license": "Apache-2.0",
+      "origin": "openssl"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libunistring",
+      "version": "1.2-r0",
+      "license": "GPL-2.0-or-later OR LGPL-3.0-or-later",
+      "origin": "libunistring"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libuuid",
+      "version": "2.40.4-r1",
+      "license": "BSD-3-Clause",
+      "origin": "util-linux"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libwebp",
+      "version": "1.4.0-r0",
+      "license": "BSD-3-Clause",
+      "origin": "libwebp"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libx11",
+      "version": "1.8.10-r0",
+      "license": "X11",
+      "origin": "libx11"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxau",
+      "version": "1.0.11-r4",
+      "license": "MIT",
+      "origin": "libxau"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxcb",
+      "version": "1.16.1-r0",
+      "license": "MIT",
+      "origin": "libxcb"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxdmcp",
+      "version": "1.1.5-r1",
+      "license": "MIT",
+      "origin": "libxdmcp"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxext",
+      "version": "1.3.6-r2",
+      "license": "MIT",
+      "origin": "libxext"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxml2",
+      "version": "2.13.4-r5",
+      "license": "MIT",
+      "origin": "libxml2"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxpm",
+      "version": "3.5.17-r0",
+      "license": "X11",
+      "origin": "libxpm"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxslt",
+      "version": "1.1.42-r2",
+      "license": "X11",
+      "origin": "libxslt"
+    },
+    {
+      "architecture": "arm64",
+      "package": "libxt",
+      "version": "1.3.1-r0",
+      "license": "MIT",
+      "origin": "libxt"
+    },
+    {
+      "architecture": "arm64",
+      "package": "musl",
+      "version": "1.2.5-r9",
+      "license": "MIT",
+      "origin": "musl"
+    },
+    {
+      "architecture": "arm64",
+      "package": "musl-utils",
+      "version": "1.2.5-r9",
+      "license": "MIT AND BSD-2-Clause AND GPL-2.0-or-later",
+      "origin": "musl"
+    },
+    {
+      "architecture": "arm64",
+      "package": "ncurses-terminfo-base",
+      "version": "6.5_p20241006-r3",
+      "license": "X11",
+      "origin": "ncurses"
+    },
+    {
+      "architecture": "arm64",
+      "package": "nghttp2-libs",
+      "version": "1.64.0-r0",
+      "license": "MIT",
+      "origin": "nghttp2"
+    },
+    {
+      "architecture": "arm64",
+      "package": "nginx",
+      "version": "1.27.5-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx"
+    },
+    {
+      "architecture": "arm64",
+      "package": "nginx-module-geoip",
+      "version": "1.27.5-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx-module-geoip"
+    },
+    {
+      "architecture": "arm64",
+      "package": "nginx-module-image-filter",
+      "version": "1.27.5-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx-module-image-filter"
+    },
+    {
+      "architecture": "arm64",
+      "package": "nginx-module-njs",
+      "version": "1.27.5.0.8.10-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx-module-njs"
+    },
+    {
+      "architecture": "arm64",
+      "package": "nginx-module-xslt",
+      "version": "1.27.5-r1",
+      "license": "2-clause BSD-like license",
+      "origin": "nginx-module-xslt"
+    },
+    {
+      "architecture": "arm64",
+      "package": "pcre2",
+      "version": "10.43-r0",
+      "license": "BSD-3-Clause",
+      "origin": "pcre2"
+    },
+    {
+      "architecture": "arm64",
+      "package": "scanelf",
+      "version": "1.3.8-r1",
+      "license": "GPL-2.0-only",
+      "origin": "pax-utils"
+    },
+    {
+      "architecture": "arm64",
+      "package": "ssl_client",
+      "version": "1.37.0-r12",
+      "license": "GPL-2.0-only",
+      "origin": "busybox"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tiff",
+      "version": "4.7.0-r0",
+      "license": "libtiff",
+      "origin": "tiff"
+    },
+    {
+      "architecture": "arm64",
+      "package": "tzdata",
+      "version": "2025b-r0",
+      "license": "Public-Domain",
+      "origin": "tzdata"
+    },
+    {
+      "architecture": "arm64",
+      "package": "xz-libs",
+      "version": "5.6.3-r1",
+      "license": "GPL-2.0-or-later AND 0BSD AND Public-Domain AND LGPL-2.1-or-later",
+      "origin": "xz"
+    },
+    {
+      "architecture": "arm64",
+      "package": "zlib",
+      "version": "1.3.1-r2",
+      "license": "Zlib",
+      "origin": "zlib"
+    },
+    {
+      "architecture": "arm64",
+      "package": "zstd-libs",
+      "version": "1.5.6-r2",
+      "license": "BSD-3-Clause OR GPL-2.0-or-later",
+      "origin": "zstd"
+    }
+  ],
+  "copyrights": [
+    {
+      "source": "nginx",
+      "version": "1.27.5-r1",
+      "file": "nginx_COPYRIGHT",
+      "sha256": "4f72e2bccf0bcd839dd447ab6f359336f428caa1987a9afec2bc9ade5711658a",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/licenses/nginx/COPYRIGHT"
+    },
+    {
+      "source": "nginx-module-geoip",
+      "version": "1.27.5-r1",
+      "file": "nginx-module-geoip_COPYRIGHT",
+      "sha256": "4f72e2bccf0bcd839dd447ab6f359336f428caa1987a9afec2bc9ade5711658a",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/licenses/nginx-module-geoip/COPYRIGHT"
+    },
+    {
+      "source": "nginx-module-image-filter",
+      "version": "1.27.5-r1",
+      "file": "nginx-module-image-filter_COPYRIGHT",
+      "sha256": "4f72e2bccf0bcd839dd447ab6f359336f428caa1987a9afec2bc9ade5711658a",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/licenses/nginx-module-image-filter/COPYRIGHT"
+    },
+    {
+      "source": "nginx-module-njs",
+      "version": "1.27.5.0.8.10-r1",
+      "file": "nginx-module-njs_COPYRIGHT",
+      "sha256": "bf0746e75035cc2b9c3346feb08fd7aa414c088719c00e76734c6d7fe9c0647d",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/licenses/nginx-module-njs/COPYRIGHT"
+    },
+    {
+      "source": "nginx-module-xslt",
+      "version": "1.27.5-r1",
+      "file": "nginx-module-xslt_COPYRIGHT",
+      "sha256": "4f72e2bccf0bcd839dd447ab6f359336f428caa1987a9afec2bc9ade5711658a",
+      "origin": "digest-verified image (amd64+arm64 identical):/usr/share/licenses/nginx-module-xslt/COPYRIGHT"
+    }
+  ],
+  "common_licenses": []
+}

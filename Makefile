@@ -24,13 +24,13 @@ VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
 SSO_OUTPUT ?= $(VARIANT)/auth/ui/pingfederate.yml
-MONITOR_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' monitoring/.env.template)
+MONITOR_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' monitoring/.env.template)
 
 # Image references are read from the runtime environment templates.
-ZK_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' zk/.env.template)
-KRAFT_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' kraft/.env.template)
-EPC_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' epc/.env.template)
-ZK_MONITOR_IMAGES := $(shell awk -F= '/^[A-Z_]+_IMAGE=/{print $$2}' zk/monitoring/.env.template)
+ZK_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' zk/.env.template)
+KRAFT_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' kraft/.env.template)
+EPC_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' epc/.env.template)
+ZK_MONITOR_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' zk/monitoring/.env.template)
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 # RHEL needs buildx explicitly; on Debian it arrives as a docker-ce dependency.
 DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-extras docker-compose-plugin docker-buildx-plugin
@@ -242,11 +242,14 @@ bundle: offline-check
 >    cp "$$src_dir/kafbat.yml" "$$bundle_dir/kafbat.yml"
 >  fi
 >  cp "$$src_dir/nginx.conf" "$$bundle_dir/nginx.conf"
+>  # Krate's AGPL licence, and where the image components' corresponding source is
+>  # published, including the components it could not be obtained for.
+>  cp LICENSE LICENSE-SOURCES.md "$$bundle_dir/"
 >  if [[ "$$mode" != "zk" ]]; then
 >    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
 >    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py "$$bundle_dir/sso/"
->    cp sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md "$$bundle_dir/docs/"
+>    cp sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md "$$bundle_dir/docs/"
 >  fi
 >  # The CLI ships as ./krate everywhere except the frozen ZooKeeper edition,
 >  # whose published v5 bundle documents ./kafka.
@@ -261,8 +264,11 @@ bundle: offline-check
 >  # per variant. The frozen ZooKeeper edition is skipped.
 >  if [[ "$$mode" != "zk" && -d monitoring ]]; then
 >    mkdir -p "$$bundle_dir/monitoring"
->    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py "$$bundle_dir/monitoring/"
->    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/promtail "$$bundle_dir/monitoring/"
+>    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py monitoring/render.py "$$bundle_dir/monitoring/"
+>    cp monitoring/README.md "$$bundle_dir/monitoring/"
+>    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit monitoring/perses "$$bundle_dir/monitoring/"
+>    # Local test runs leave Python bytecode beside discovery.py; never ship it.
+>    find "$$bundle_dir/monitoring" -name __pycache__ -type d -prune -exec rm -rf {} +
 >    # Only the local default is copied: never stage site auth files or secrets.
 >    mkdir -p "$$bundle_dir/monitoring/auth"
 >    cp monitoring/auth/local.ini "$$bundle_dir/monitoring/auth/local.ini"
@@ -278,7 +284,7 @@ bundle: offline-check
 >
 >  # Environment templates select the tagged images stored in the archives.
 >  for env_template in "$$bundle_dir/.env.template" "$$bundle_dir/monitoring/.env.template"; do
->    awk -F '\t' 'NR==FNR { runtime[$$1]=$$2; next } /^[A-Z_]+_IMAGE=/ { split($$0, entry, "="); if (entry[2] in runtime) $$0=entry[1] "=" runtime[entry[2]] } { print }' "$$bundle_dir/images.lock.tsv" "$$env_template" > "$$env_template.tmp"
+>    awk -F '\t' 'NR==FNR { runtime[$$1]=$$2; next } /^[A-Z0-9_]+_IMAGE=/ { split($$0, entry, "="); if (entry[2] in runtime) $$0=entry[1] "=" runtime[entry[2]] } { print }' "$$bundle_dir/images.lock.tsv" "$$env_template" > "$$env_template.tmp"
 >    mv "$$env_template.tmp" "$$env_template"
 >  done
 >
@@ -626,3 +632,23 @@ clean:
 
 dist-clean:
 >rm -rf "$(DIST_DIR)" "$(DOCKER_OFFLINE_DIR)"
+
+# Corresponding source for the copyleft components in a package's container images
+# (see LICENSE-SOURCES.md). Uses the package's images.lock.tsv when it has been built,
+# otherwise the digest-pinned images in the edition's .env.template files.
+#   make sources MODE=kraft ARCH=amd64 VERSION=v1
+.PHONY: sources
+sources:
+>[[ "$(VERSION)" =~ ^v[0-9]+$$ ]] || { echo "VERSION must be in the form vN, e.g. VERSION=v1" >&2; exit 1; }
+>[[ "$(MODE)" =~ ^(zk|kraft|epc)$$ ]] || { echo "MODE must be kraft, epc or zk" >&2; exit 1; }
+>[[ "$(ARCH)" =~ ^(amd64|arm64)$$ ]] || { echo "ARCH must be amd64 or arm64" >&2; exit 1; }
+>bundle_name="krate-$(MODE)-$(VERSION)-$(ARCH)"
+>[[ "$(MODE)" != zk ]] || bundle_name="kafka-zk-$(VERSION)-$(ARCH)"
+>input=(--templates --arch "$(ARCH)")
+>for lock in "$(DIST_DIR)/$${bundle_name}.tar.gz.images.lock.tsv" \
+>            "$(DIST_DIR)/release/package-$(MODE)-$(VERSION)/$${bundle_name}.tar.gz.images.lock.tsv"; do
+>  if [[ -f "$$lock" ]]; then input=(--lock "$$lock"); break; fi
+>done
+>echo "==> Collecting corresponding source for $${bundle_name} ($${input[*]})"
+>python3 scripts/collect-sources.py --edition "$(MODE)" "$${input[@]}" \
+>  --out "$(DIST_DIR)/sources/$${bundle_name}" --archive "$(DIST_DIR)/$${bundle_name}-sources.tar"

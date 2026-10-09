@@ -1,0 +1,289 @@
+{
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "krate-capacity",
+    "project": "krate",
+    "tags": [
+      "krate"
+    ]
+  },
+  "spec": {
+    "display": {
+      "name": "Krate \u2014 Host & Disk"
+    },
+    "panels": {
+      "FilesystemUsedPercent": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Filesystem used %"
+          },
+          "plugin": {
+            "kind": "GaugeChart",
+            "spec": {
+              "calculation": "last-number",
+              "format": {
+                "unit": "percent"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "value": 80
+                  },
+                  {
+                    "value": 90
+                  }
+                ]
+              },
+              "max": 100,
+              "legend": {
+                "show": true
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "100 * (1 - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay\"})",
+                    "seriesNameFormat": "{{mountpoint}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "FreeSpaceByMount": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Free space by mount"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "bytes",
+                  "shortValues": true
+                }
+              },
+              "visual": {
+                "display": "line",
+                "lineWidth": 1,
+                "areaOpacity": 0.0,
+                "showPoints": "auto",
+                "connectNulls": false
+              },
+              "tooltip": {
+                "enablePinning": false
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay\"}",
+                    "seriesNameFormat": "{{mountpoint}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "ProjectedFreeSpace4h": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "Projected free space (4h linear)",
+            "description": "Negative means the mount is on track to fill within 4 hours."
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "bytes",
+                  "shortValues": true
+                }
+              },
+              "visual": {
+                "display": "line",
+                "lineWidth": 1,
+                "areaOpacity": 0.0,
+                "showPoints": "auto",
+                "connectNulls": false
+              },
+              "tooltip": {
+                "enablePinning": false
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "predict_linear(node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay\"}[1h], 4*3600)",
+                    "seriesNameFormat": "{{mountpoint}}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "CpuMemory": {
+        "kind": "Panel",
+        "spec": {
+          "display": {
+            "name": "CPU / memory"
+          },
+          "plugin": {
+            "kind": "TimeSeriesChart",
+            "spec": {
+              "legend": {
+                "position": "bottom",
+                "mode": "list"
+              },
+              "yAxis": {
+                "format": {
+                  "unit": "percent"
+                }
+              },
+              "visual": {
+                "display": "line",
+                "lineWidth": 1,
+                "areaOpacity": 0.0,
+                "showPoints": "auto",
+                "connectNulls": false
+              },
+              "tooltip": {
+                "enablePinning": false
+              }
+            }
+          },
+          "queries": [
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "A",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+                    "seriesNameFormat": "cpu busy %"
+                  }
+                }
+              }
+            },
+            {
+              "kind": "TimeSeriesQuery",
+              "spec": {
+                "name": "B",
+                "plugin": {
+                  "kind": "PrometheusTimeSeriesQuery",
+                  "spec": {
+                    "datasource": {
+                      "kind": "PrometheusDatasource",
+                      "name": "prometheus"
+                    },
+                    "query": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)",
+                    "seriesNameFormat": "memory used %"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "layouts": [
+      {
+        "kind": "Grid",
+        "spec": {
+          "items": [
+            {
+              "x": 0,
+              "y": 0,
+              "width": 8,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/FilesystemUsedPercent"
+              }
+            },
+            {
+              "x": 8,
+              "y": 0,
+              "width": 16,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/FreeSpaceByMount"
+              }
+            },
+            {
+              "x": 0,
+              "y": 8,
+              "width": 12,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/ProjectedFreeSpace4h"
+              }
+            },
+            {
+              "x": 12,
+              "y": 8,
+              "width": 12,
+              "height": 8,
+              "content": {
+                "$ref": "#/spec/panels/CpuMemory"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "duration": "6h",
+    "refreshInterval": "30s",
+    "timezone": "local"
+  }
+}

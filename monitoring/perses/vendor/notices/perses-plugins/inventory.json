@@ -1,0 +1,4361 @@
+{
+  "archives": [
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "plugin": "AlertManager",
+      "version": "0.1.1",
+      "sha256": "ef3cc340907a6d1cc471f2e38ec9a71115d1f0a78977b6f904cc1e35f7f4ce3d",
+      "image_path": "/etc/perses/plugins-archive/AlertManager-0.1.1.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/alertmanager/v0.1.1/AlertManager-0.1.1.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "plugin": "BarChart",
+      "version": "0.13.0",
+      "sha256": "886dfd9aa85899b987e6e2bc1897e4476f8405facdf2f2df6e5e40bab95ae585",
+      "image_path": "/etc/perses/plugins-archive/BarChart-0.13.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/barchart/v0.13.0/BarChart-0.13.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "plugin": "ClickHouse",
+      "version": "0.6.0",
+      "sha256": "6ddae5cd951e3aa64b70172d54118d6dde3ae567f435e14648ed92963598a8c5",
+      "image_path": "/etc/perses/plugins-archive/ClickHouse-0.6.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/clickhouse/v0.6.0/ClickHouse-0.6.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "plugin": "DatasourceVariable",
+      "version": "0.6.0",
+      "sha256": "e2d7ea864c4751db233eba415de7f36823a0d36ffba4e50809d0748bdca2a3e0",
+      "image_path": "/etc/perses/plugins-archive/DatasourceVariable-0.6.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/datasourcevariable/v0.6.0/DatasourceVariable-0.6.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "plugin": "FlameChart",
+      "version": "0.6.0",
+      "sha256": "a0b9f840dce6a83186ee2247315e3f0d51034ea83a8125de14c80cfa90b7c108",
+      "image_path": "/etc/perses/plugins-archive/FlameChart-0.6.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/flamechart/v0.6.0/FlameChart-0.6.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "plugin": "GaugeChart",
+      "version": "0.13.0",
+      "sha256": "74bb7b6103ab819f7c4c745c0ed6b0e5a1ae57ed4f1ed980e5913019f1150bfc",
+      "image_path": "/etc/perses/plugins-archive/GaugeChart-0.13.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/gaugechart/v0.13.0/GaugeChart-0.13.0.tar.gz",
+      "krate_offline_asset": true
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "plugin": "GreptimeDB",
+      "version": "0.1.0",
+      "sha256": "7fc07ccff1bc7a41342c3459f95c6802a3430655c4ef7485f27e85c7fb93f29a",
+      "image_path": "/etc/perses/plugins-archive/GreptimeDB-0.1.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/greptimedb/v0.1.0/GreptimeDB-0.1.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "plugin": "HeatMapChart",
+      "version": "0.5.0",
+      "sha256": "fabb620affdc0837e618542da8136e70621d410e81f63bcbaa92b834928d33a8",
+      "image_path": "/etc/perses/plugins-archive/HeatMapChart-0.5.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/heatmapchart/v0.5.0/HeatMapChart-0.5.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "plugin": "HistogramChart",
+      "version": "0.12.0",
+      "sha256": "beb02369487642257185482e85e15a928252735be6397d2315041d3ec1ce8ed8",
+      "image_path": "/etc/perses/plugins-archive/HistogramChart-0.12.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/histogramchart/v0.12.0/HistogramChart-0.12.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "plugin": "Jaeger",
+      "version": "0.1.0",
+      "sha256": "ee41b0fb3ed4f36f9b02b5522e84126742dc010b58dfb0947aef97b6e81083a3",
+      "image_path": "/etc/perses/plugins-archive/Jaeger-0.1.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/jaeger/v0.1.0/Jaeger-0.1.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "plugin": "LogExplorer",
+      "version": "0.1.0",
+      "sha256": "5e9fff912bbe498533a18b2241a42fb7b4389032acfb5e5faf151f8e72d57ed7",
+      "image_path": "/etc/perses/plugins-archive/LogExplorer-0.1.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/logexplorer/v0.1.0/LogExplorer-0.1.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "plugin": "LogsTable",
+      "version": "0.3.0",
+      "sha256": "1313bcc8ee1cb426e9839328ad5743d3627e24f9f0fe2c6353d5d520de53f075",
+      "image_path": "/etc/perses/plugins-archive/LogsTable-0.3.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/logstable/v0.3.0/LogsTable-0.3.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "plugin": "Loki",
+      "version": "0.6.0",
+      "sha256": "b4908eac7188b51f9ebbab4e0b3fc583af4e7c0b496d9e34aeb8c555e45fb339",
+      "image_path": "/etc/perses/plugins-archive/Loki-0.6.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/loki/v0.6.0/Loki-0.6.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "plugin": "Markdown",
+      "version": "0.12.0",
+      "sha256": "5feb24e2059c9c0a868c7ddb702ae66264f322cb7f2f9ebfdf3dc05d3b16ff0e",
+      "image_path": "/etc/perses/plugins-archive/Markdown-0.12.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/markdown/v0.12.0/Markdown-0.12.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "plugin": "OpenSearch",
+      "version": "0.1.0",
+      "sha256": "838711a18e0faaebd83e763e599470a0501a0150ad7fa16f03b6ccb0426ac7bc",
+      "image_path": "/etc/perses/plugins-archive/OpenSearch-0.1.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/opensearch/v0.1.0/OpenSearch-0.1.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "plugin": "PieChart",
+      "version": "0.14.0",
+      "sha256": "45c58516feaad114fe65e2669825efb9853c0a76e43c63f37c00618d1aa6fe4d",
+      "image_path": "/etc/perses/plugins-archive/PieChart-0.14.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/piechart/v0.14.0/PieChart-0.14.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "plugin": "Prometheus",
+      "version": "0.58.0",
+      "sha256": "3e8041e8e5d8b990092bc4d3ae0c8464440d59f94bcf278748005cdc247b2ed2",
+      "image_path": "/etc/perses/plugins-archive/Prometheus-0.58.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/prometheus/v0.58.0/Prometheus-0.58.0.tar.gz",
+      "krate_offline_asset": true
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "plugin": "Pyroscope",
+      "version": "0.6.0",
+      "sha256": "ac294b2e6c0662b82012d7868e883c15deba060690d7592d1f178782123001f0",
+      "image_path": "/etc/perses/plugins-archive/Pyroscope-0.6.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/pyroscope/v0.6.0/Pyroscope-0.6.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "plugin": "ScatterChart",
+      "version": "0.11.0",
+      "sha256": "8acaff59f34519c76b696ad6f4a837e4248bff4655e821b301a15a4533832b39",
+      "image_path": "/etc/perses/plugins-archive/ScatterChart-0.11.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/scatterchart/v0.11.0/ScatterChart-0.11.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "plugin": "Splunk",
+      "version": "0.1.0",
+      "sha256": "ffc4e4ad145ee5c38f42cff83cc1062b17b7eec8198ad6a2dfc5f223117b9eba",
+      "image_path": "/etc/perses/plugins-archive/Splunk-0.1.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/splunk/v0.1.0/Splunk-0.1.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "plugin": "StatChart",
+      "version": "0.13.0",
+      "sha256": "674d4b1a565ed9db43af0c69b287429993b0feaeb1ea49990ce6874f41dcd408",
+      "image_path": "/etc/perses/plugins-archive/StatChart-0.13.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/statchart/v0.13.0/StatChart-0.13.0.tar.gz",
+      "krate_offline_asset": true
+    },
+    {
+      "archive": "StaticListVariable-0.9.0.tar.gz",
+      "plugin": "StaticListVariable",
+      "version": "0.9.0",
+      "sha256": "36ecfee07e9dbb712eaadbe9c0bf23950762f9775a3b2fbcd23a57017fbc6826",
+      "image_path": "/etc/perses/plugins-archive/StaticListVariable-0.9.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/staticlistvariable/v0.9.0/StaticListVariable-0.9.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "plugin": "StatusHistoryChart",
+      "version": "0.13.0",
+      "sha256": "b5f79fb69e6e851767c8136707b1a7239c83bea1c0d6d57196c7abc0d5079ec9",
+      "image_path": "/etc/perses/plugins-archive/StatusHistoryChart-0.13.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/statushistorychart/v0.13.0/StatusHistoryChart-0.13.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "plugin": "Table",
+      "version": "0.13.0",
+      "sha256": "9e277eeef56e61f5cce006cb6b2178cd4d3fd3558431877f287b3467cd214166",
+      "image_path": "/etc/perses/plugins-archive/Table-0.13.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/table/v0.13.0/Table-0.13.0.tar.gz",
+      "krate_offline_asset": true
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "plugin": "Tempo",
+      "version": "0.59.0",
+      "sha256": "a24cd8afcf187c61014fbb7c7405773863b4168733c0041ff1c1a900ea7d416d",
+      "image_path": "/etc/perses/plugins-archive/Tempo-0.59.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/tempo/v0.59.0/Tempo-0.59.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "plugin": "TimeSeriesChart",
+      "version": "0.13.0",
+      "sha256": "ac1043c6393c601ffcf83602ff157f4a22f38ddf7c4a5c1188b55146b6311f17",
+      "image_path": "/etc/perses/plugins-archive/TimeSeriesChart-0.13.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/timeserieschart/v0.13.0/TimeSeriesChart-0.13.0.tar.gz",
+      "krate_offline_asset": true
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "plugin": "TimeSeriesTable",
+      "version": "0.12.0",
+      "sha256": "2ea262bce238dd708f6b45220771b1f33edf6037e4596848dda887f8c5d27fce",
+      "image_path": "/etc/perses/plugins-archive/TimeSeriesTable-0.12.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/timeseriestable/v0.12.0/TimeSeriesTable-0.12.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "plugin": "TraceTable",
+      "version": "0.11.0",
+      "sha256": "f8fa0c8867ca4c36a61908e8dec5d0801916e972937b5b53ad204150247ac450",
+      "image_path": "/etc/perses/plugins-archive/TraceTable-0.11.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/tracetable/v0.11.0/TraceTable-0.11.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "plugin": "TracingGanttChart",
+      "version": "0.13.0",
+      "sha256": "c780bc81cc75ffbf216400792f71c315daea88874278952d668891ed6ed6b666",
+      "image_path": "/etc/perses/plugins-archive/TracingGanttChart-0.13.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/tracingganttchart/v0.13.0/TracingGanttChart-0.13.0.tar.gz",
+      "krate_offline_asset": false
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "plugin": "VictoriaLogs",
+      "version": "0.4.0",
+      "sha256": "eafacacb0827a39a7495646e2229010c7ba711adb24762b86f294bbfd238ed2f",
+      "image_path": "/etc/perses/plugins-archive/VictoriaLogs-0.4.0.tar.gz",
+      "release_url": "https://github.com/perses/plugins/releases/download/victorialogs/v0.4.0/VictoriaLogs-0.4.0.tar.gz",
+      "krate_offline_asset": true
+    }
+  ],
+  "copyrights": [
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "AlertManager-0.1.1__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "AlertManager-0.1.1__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "LICENSE",
+      "file": "AlertManager-0.1.1__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/2218.7829c9d9.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__2218.7829c9d9.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/3540.96681482.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__3540.96681482.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/392.7e11dd69.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__392.7e11dd69.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/3981.84d12fdc.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__3981.84d12fdc.js.LICENSE.txt",
+      "sha256": "4d75daf2769b93c0c7da68b8ae639026a0561131c590368e2f858de3ef09c83c",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/4121.ec666be2.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__4121.ec666be2.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/430.74d85c4b.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__430.74d85c4b.js.LICENSE.txt",
+      "sha256": "22bd6e51ed423db2efc9b0ba2d93036ec10e4e26c6337d40753ba78d48cf6327",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 50.4
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/5038.269393e3.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__5038.269393e3.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/5481.cf6703fd.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__5481.cf6703fd.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/6274.8c77cb1a.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__6274.8c77cb1a.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/6390.3f6f279d.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__6390.3f6f279d.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/6594.b02adfd9.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__6594.b02adfd9.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/7283.8c1cb6ee.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__7283.8c1cb6ee.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/7984.163a6ddb.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__7984.163a6ddb.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/8470.2df0db71.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__8470.2df0db71.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/8711.c7dc09b8.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__8711.c7dc09b8.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/9040.94717f28.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__9040.94717f28.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/941.d3bc6208.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__941.d3bc6208.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/__federation_expose_AlertManagerAlertsExplorer.47ee46dc.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async____federation_expose_AlertManagerAlertsExplorer.47ee46dc.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/__federation_expose_AlertManagerDatasource.7ee7440a.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async____federation_expose_AlertManagerDatasource.7ee7440a.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/__federation_expose_AlertManagerSilencesExplorer.35860f1b.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async____federation_expose_AlertManagerSilencesExplorer.35860f1b.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/__federation_expose_AlertManagerSilencesQuery.52a24c9e.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async____federation_expose_AlertManagerSilencesQuery.52a24c9e.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/__federation_expose_SilenceTable.3fc487a4.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async____federation_expose_SilenceTable.3fc487a4.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "AlertManager-0.1.1.tar.gz",
+      "path": "__mf/js/async/lib-router.19f64904.js.LICENSE.txt",
+      "file": "AlertManager-0.1.1____mf__js__async__lib-router.19f64904.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "LICENSE",
+      "file": "BarChart-0.13.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/121.473596c1.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__121.473596c1.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/187.0c10a71e.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__187.0c10a71e.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/274.3b869914.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__274.3b869914.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/392.43a49d02.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__392.43a49d02.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/470.bbaeb6f6.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__470.bbaeb6f6.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/546.966246a4.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__546.966246a4.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/815.60db8972.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__815.60db8972.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/823.55761759.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__823.55761759.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/934.e8708047.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__934.e8708047.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/941.b9c9bdfe.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__941.b9c9bdfe.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/lib-router.9c050a7f.js.LICENSE.txt",
+      "file": "BarChart-0.13.0____mf__js__async__lib-router.9c050a7f.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "BarChart-0.13.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "BarChart-0.13.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "ClickHouse-0.6.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "ClickHouse-0.6.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "LICENSE",
+      "file": "ClickHouse-0.6.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/2043.13379b9d.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__2043.13379b9d.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/2386.56de292b.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__2386.56de292b.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/3181.f3124eab.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__3181.f3124eab.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/392.c8af2244.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__392.c8af2244.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/4121.b6afa425.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__4121.b6afa425.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/4233.abbba3f6.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__4233.abbba3f6.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/5440.898ddc2f.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__5440.898ddc2f.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/5481.223427f5.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__5481.223427f5.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/5562.d4359565.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__5562.d4359565.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/6155.1398a410.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__6155.1398a410.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/6274.22bd6f34.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__6274.22bd6f34.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/6688.abdc25f6.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__6688.abdc25f6.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/7984.549ad1a9.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__7984.549ad1a9.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/8470.3ae4fba1.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__8470.3ae4fba1.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/941.11ea3ddf.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__941.11ea3ddf.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/9754.9ea7778b.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async__9754.9ea7778b.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_ClickHouseDatasource.0e124aef.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async____federation_expose_ClickHouseDatasource.0e124aef.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_ClickHouseLogQuery.605ad0d2.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async____federation_expose_ClickHouseLogQuery.605ad0d2.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ClickHouse-0.6.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_ClickHouseTimeSeriesQuery.a7927056.js.LICENSE.txt",
+      "file": "ClickHouse-0.6.0____mf__js__async____federation_expose_ClickHouseTimeSeriesQuery.a7927056.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "LICENSE",
+      "file": "DatasourceVariable-0.6.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/perses/cue/LICENSE",
+      "file": "DatasourceVariable-0.6.0__cue.mod__pkg__github.com__perses__perses__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/plugins/loki/LICENSE",
+      "file": "DatasourceVariable-0.6.0__cue.mod__pkg__github.com__perses__plugins__loki__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/plugins/prometheus/LICENSE",
+      "file": "DatasourceVariable-0.6.0__cue.mod__pkg__github.com__perses__plugins__prometheus__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/plugins/pyroscope/LICENSE",
+      "file": "DatasourceVariable-0.6.0__cue.mod__pkg__github.com__perses__plugins__pyroscope__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/plugins/tempo/LICENSE",
+      "file": "DatasourceVariable-0.6.0__cue.mod__pkg__github.com__perses__plugins__tempo__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "DatasourceVariable-0.6.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "DatasourceVariable-0.6.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/103.7800bd8d.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__103.7800bd8d.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/121.68bd290a.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__121.68bd290a.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/187.977fd84e.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__187.977fd84e.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/274.4795acee.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__274.4795acee.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/392.31c57250.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__392.31c57250.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/43.8edbbe05.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__43.8edbbe05.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/470.e5b133c1.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__470.e5b133c1.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/546.2bd24011.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__546.2bd24011.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/83.6c1cb16d.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__83.6c1cb16d.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/941.bbf2224d.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__941.bbf2224d.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "DatasourceVariable-0.6.0.tar.gz",
+      "path": "__mf/js/async/lib-router.11ae5422.js.LICENSE.txt",
+      "file": "DatasourceVariable-0.6.0____mf__js__async__lib-router.11ae5422.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "LICENSE",
+      "file": "FlameChart-0.6.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/121.7241788e.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__121.7241788e.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/187.d2c3954d.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__187.d2c3954d.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/274.f1ae4a6c.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__274.f1ae4a6c.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/367.8beb758e.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__367.8beb758e.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/392.157fda9a.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__392.157fda9a.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/43.2eeeac07.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__43.2eeeac07.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/470.55030a0b.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__470.55030a0b.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/546.d47a49c6.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__546.d47a49c6.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/657.9473a80f.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__657.9473a80f.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/941.c00ae16d.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__941.c00ae16d.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "FlameChart-0.6.0.tar.gz",
+      "path": "__mf/js/async/lib-router.1a328ab9.js.LICENSE.txt",
+      "file": "FlameChart-0.6.0____mf__js__async__lib-router.1a328ab9.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "LICENSE",
+      "file": "GaugeChart-0.13.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/121.4c5f5798.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__121.4c5f5798.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/187.ba6fd686.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__187.ba6fd686.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/274.9badab92.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__274.9badab92.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/392.4807325b.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__392.4807325b.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/403.9db35877.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__403.9db35877.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/470.9e955be3.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__470.9e955be3.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/546.7850a553.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__546.7850a553.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/700.e028a93e.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__700.e028a93e.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/823.488b0ae9.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__823.488b0ae9.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/941.c6518e38.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__941.c6518e38.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/lib-router.f8568e8a.js.LICENSE.txt",
+      "file": "GaugeChart-0.13.0____mf__js__async__lib-router.f8568e8a.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GaugeChart-0.13.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "GaugeChart-0.13.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/1589.a4d4fad9.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__1589.a4d4fad9.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/2043.e37a8242.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__2043.e37a8242.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/2386.84002e8c.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__2386.84002e8c.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/3181.9e8e9ef5.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__3181.9e8e9ef5.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/392.614cab68.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__392.614cab68.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/3944.f35af5a7.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__3944.f35af5a7.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/4121.f8820bd7.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__4121.f8820bd7.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/4233.a3ff3ed2.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__4233.a3ff3ed2.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/5440.f8cb71c0.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__5440.f8cb71c0.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/5481.0c2e941f.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__5481.0c2e941f.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/5562.fc9fccc9.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__5562.fc9fccc9.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/6274.b682460a.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__6274.b682460a.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/7984.802dfa3c.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__7984.802dfa3c.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/8470.8d2d3f35.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__8470.8d2d3f35.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/941.6703c1a7.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async__941.6703c1a7.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_GreptimeDBDatasource.7d12e7b8.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async____federation_expose_GreptimeDBDatasource.7d12e7b8.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_GreptimeDBLogQuery.f7fa9b26.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async____federation_expose_GreptimeDBLogQuery.f7fa9b26.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_GreptimeDBTimeSeriesQuery.867c743e.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async____federation_expose_GreptimeDBTimeSeriesQuery.867c743e.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_GreptimeDBTraceQuery.a1f7328d.js.LICENSE.txt",
+      "file": "GreptimeDB-0.1.0____mf__js__async____federation_expose_GreptimeDBTraceQuery.a1f7328d.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "GreptimeDB-0.1.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "GreptimeDB-0.1.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "GreptimeDB-0.1.0.tar.gz",
+      "path": "LICENSE",
+      "file": "GreptimeDB-0.1.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "path": "LICENSE",
+      "file": "HeatMapChart-0.5.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "path": "__mf/js/async/121.c8aa4904.js.LICENSE.txt",
+      "file": "HeatMapChart-0.5.0____mf__js__async__121.c8aa4904.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "path": "__mf/js/async/392.97acdaa7.js.LICENSE.txt",
+      "file": "HeatMapChart-0.5.0____mf__js__async__392.97acdaa7.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "path": "__mf/js/async/470.c23991fd.js.LICENSE.txt",
+      "file": "HeatMapChart-0.5.0____mf__js__async__470.c23991fd.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "path": "__mf/js/async/695.a3b5a24f.js.LICENSE.txt",
+      "file": "HeatMapChart-0.5.0____mf__js__async__695.a3b5a24f.js.LICENSE.txt",
+      "sha256": "154fb4bff7edf6764de7bc451dc1130ba5d731b6e28b6a2e468d8e5229b9ab12",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 49.9
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "path": "__mf/js/async/941.86aff2f9.js.LICENSE.txt",
+      "file": "HeatMapChart-0.5.0____mf__js__async__941.86aff2f9.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "path": "__mf/js/async/980.03e0a41f.js.LICENSE.txt",
+      "file": "HeatMapChart-0.5.0____mf__js__async__980.03e0a41f.js.LICENSE.txt",
+      "sha256": "cc47e7e4f363c7a28d660e850a4db4a9292f5882906733590df13004ff7c6497",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 44.9
+    },
+    {
+      "archive": "HeatMapChart-0.5.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "HeatMapChart-0.5.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "path": "__mf/js/async/121.4fbaef7c.js.LICENSE.txt",
+      "file": "HistogramChart-0.12.0____mf__js__async__121.4fbaef7c.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "path": "__mf/js/async/392.76c75fd4.js.LICENSE.txt",
+      "file": "HistogramChart-0.12.0____mf__js__async__392.76c75fd4.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "path": "__mf/js/async/470.46eda164.js.LICENSE.txt",
+      "file": "HistogramChart-0.12.0____mf__js__async__470.46eda164.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "path": "__mf/js/async/892.f82ac287.js.LICENSE.txt",
+      "file": "HistogramChart-0.12.0____mf__js__async__892.f82ac287.js.LICENSE.txt",
+      "sha256": "154fb4bff7edf6764de7bc451dc1130ba5d731b6e28b6a2e468d8e5229b9ab12",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 49.9
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "path": "__mf/js/async/941.4dc35097.js.LICENSE.txt",
+      "file": "HistogramChart-0.12.0____mf__js__async__941.4dc35097.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "path": "__mf/js/async/953.5b6a6f54.js.LICENSE.txt",
+      "file": "HistogramChart-0.12.0____mf__js__async__953.5b6a6f54.js.LICENSE.txt",
+      "sha256": "cc47e7e4f363c7a28d660e850a4db4a9292f5882906733590df13004ff7c6497",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 44.9
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "HistogramChart-0.12.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "HistogramChart-0.12.0.tar.gz",
+      "path": "LICENSE",
+      "file": "HistogramChart-0.12.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/180.408393c7.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__180.408393c7.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/2043.0d36b74a.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__2043.0d36b74a.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/2386.ec11ed3c.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__2386.ec11ed3c.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/3181.10c6f34e.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__3181.10c6f34e.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/392.a2d9c768.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__392.a2d9c768.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/4121.fa351624.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__4121.fa351624.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/5481.6ca40b29.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__5481.6ca40b29.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/5562.e526c398.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__5562.e526c398.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/6155.64c16c37.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__6155.64c16c37.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/6274.ad64b12f.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__6274.ad64b12f.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/7350.ac8f43c9.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__7350.ac8f43c9.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/7984.6128b51a.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__7984.6128b51a.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/8187.15e7253c.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__8187.15e7253c.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/8470.ff1f7c4f.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__8470.ff1f7c4f.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/941.0672d3cb.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__941.0672d3cb.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_JaegerDatasource.4c90a4e5.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async____federation_expose_JaegerDatasource.4c90a4e5.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_JaegerTraceQuery.37d60eaf.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async____federation_expose_JaegerTraceQuery.37d60eaf.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "__mf/js/async/lib-router.41d17f6f.js.LICENSE.txt",
+      "file": "Jaeger-0.1.0____mf__js__async__lib-router.41d17f6f.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "Jaeger-0.1.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "Jaeger-0.1.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Jaeger-0.1.0.tar.gz",
+      "path": "LICENSE",
+      "file": "Jaeger-0.1.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "LICENSE",
+      "file": "LogExplorer-0.1.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/1629.362e7ce6.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__1629.362e7ce6.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/2043.9b38749d.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__2043.9b38749d.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/392.186a8d93.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__392.186a8d93.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/4121.fa36ad03.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__4121.fa36ad03.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/5440.4b68d7db.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__5440.4b68d7db.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/5481.20ec775a.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__5481.20ec775a.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/6155.de192e6a.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__6155.de192e6a.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/6274.684a77e6.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__6274.684a77e6.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/7984.27fe4273.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__7984.27fe4273.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/8187.33892c7e.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__8187.33892c7e.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/8470.ef582b4c.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__8470.ef582b4c.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogExplorer-0.1.0.tar.gz",
+      "path": "__mf/js/async/941.998a8cf0.js.LICENSE.txt",
+      "file": "LogExplorer-0.1.0____mf__js__async__941.998a8cf0.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "LICENSE",
+      "file": "LogsTable-0.3.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/1603.89bfb1ad.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__1603.89bfb1ad.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/2043.dba84aa4.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__2043.dba84aa4.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/3332.ab0338e8.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__3332.ab0338e8.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/392.5cb44640.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__392.5cb44640.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/4121.d4c9b3e3.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__4121.d4c9b3e3.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/6274.fe68ed99.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__6274.fe68ed99.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/7445.009cf084.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__7445.009cf084.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/8470.f0bbed7d.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__8470.f0bbed7d.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/8634.231e1601.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__8634.231e1601.js.LICENSE.txt",
+      "sha256": "60f5dd31286e57c918edc2c2c761cf3d3357da750271e4a3c6d4361e37ac6098",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/8964.3e308de6.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__8964.3e308de6.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/9126.a313fc37.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__9126.a313fc37.js.LICENSE.txt",
+      "sha256": "bdc77ae504b520a2a68adfc28ab9d4dcf99e56f2b2d54153397e0ed4e7d55aee",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/941.ad1062bb.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__941.ad1062bb.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "__mf/js/async/lib-router.c5e3aef3.js.LICENSE.txt",
+      "file": "LogsTable-0.3.0____mf__js__async__lib-router.c5e3aef3.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "LogsTable-0.3.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "LogsTable-0.3.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "Loki-0.6.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "Loki-0.6.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/2043.0ff4c02a.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__2043.0ff4c02a.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/2386.1b0adfcd.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__2386.1b0adfcd.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/3181.4dcea6c8.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__3181.4dcea6c8.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/392.a1adb03d.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__392.a1adb03d.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/4121.ef3f69d6.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__4121.ef3f69d6.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/5038.fefb4cd6.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__5038.fefb4cd6.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/5440.503766e1.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__5440.503766e1.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/5481.bdf21e1d.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__5481.bdf21e1d.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/6274.38489f83.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__6274.38489f83.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/6408.c7e5593b.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__6408.c7e5593b.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/6688.3f3f1940.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__6688.3f3f1940.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/7984.e691e288.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__7984.e691e288.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/8470.5b140cc3.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__8470.5b140cc3.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/8581.00cd949d.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__8581.00cd949d.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/9389.171b891f.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__9389.171b891f.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/941.ebf489fa.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__941.ebf489fa.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/9754.bdb338fe.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async__9754.bdb338fe.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_LokiDatasource.8b5aa41a.js.LICENSE.txt",
+      "file": "Loki-0.6.0____mf__js__async____federation_expose_LokiDatasource.8b5aa41a.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Loki-0.6.0.tar.gz",
+      "path": "LICENSE",
+      "file": "Loki-0.6.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/121.a9ac3871.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__121.a9ac3871.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/125.3fab3f86.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__125.3fab3f86.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/187.e36c4021.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__187.e36c4021.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/274.fa2aa111.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__274.fa2aa111.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/392.6999603c.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__392.6999603c.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/43.e1743b42.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__43.e1743b42.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/470.926a1541.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__470.926a1541.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/546.8bdb58c4.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__546.8bdb58c4.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/73.1d9051a3.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__73.1d9051a3.js.LICENSE.txt",
+      "sha256": "60f5dd31286e57c918edc2c2c761cf3d3357da750271e4a3c6d4361e37ac6098",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/935.ce92b5f1.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__935.ce92b5f1.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/941.4cd009e6.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__941.4cd009e6.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "__mf/js/async/lib-router.ad82c2bf.js.LICENSE.txt",
+      "file": "Markdown-0.12.0____mf__js__async__lib-router.ad82c2bf.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Markdown-0.12.0.tar.gz",
+      "path": "LICENSE",
+      "file": "Markdown-0.12.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "LICENSE",
+      "file": "OpenSearch-0.1.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "OpenSearch-0.1.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "OpenSearch-0.1.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/1708.dc7d4de1.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__1708.dc7d4de1.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/2043.c36d7dcd.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__2043.c36d7dcd.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/2386.f7bc8da4.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__2386.f7bc8da4.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/3181.bf89355f.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__3181.bf89355f.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/392.bc09f88a.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__392.bc09f88a.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/4121.6545741c.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__4121.6545741c.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/5440.e14cc3d1.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__5440.e14cc3d1.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/5481.02c09b35.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__5481.02c09b35.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/5562.51de064c.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__5562.51de064c.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/6155.79a84c54.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__6155.79a84c54.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/6274.4400cfba.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__6274.4400cfba.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/6688.7dd55176.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__6688.7dd55176.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/7984.9792eac7.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__7984.9792eac7.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/8187.a1b0bb00.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__8187.a1b0bb00.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/8470.3beff13c.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__8470.3beff13c.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/941.2a7569ab.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async__941.2a7569ab.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_OpenSearchDatasource.2866537e.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async____federation_expose_OpenSearchDatasource.2866537e.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "OpenSearch-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_OpenSearchLogQuery.bb9926b3.js.LICENSE.txt",
+      "file": "OpenSearch-0.1.0____mf__js__async____federation_expose_OpenSearchLogQuery.bb9926b3.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "LICENSE",
+      "file": "PieChart-0.14.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/121.61df50b5.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__121.61df50b5.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/187.65618c74.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__187.65618c74.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/274.5c1e13d7.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__274.5c1e13d7.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/376.196cec5c.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__376.196cec5c.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/392.281005cf.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__392.281005cf.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/470.0b301928.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__470.0b301928.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/546.b800e1ff.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__546.b800e1ff.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/554.507b3545.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__554.507b3545.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/576.9e075806.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__576.9e075806.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/941.b972dd8a.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__941.b972dd8a.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "__mf/js/async/lib-router.c182f4dd.js.LICENSE.txt",
+      "file": "PieChart-0.14.0____mf__js__async__lib-router.c182f4dd.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "PieChart-0.14.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "PieChart-0.14.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/perses/cue/LICENSE",
+      "file": "Prometheus-0.58.0__cue.mod__pkg__github.com__perses__perses__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "Prometheus-0.58.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "Prometheus-0.58.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/1605.a204b95c.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__1605.a204b95c.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/2043.d03e35cf.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__2043.d03e35cf.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/392.7bf830d9.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__392.7bf830d9.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/4121.c001d061.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__4121.c001d061.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/5440.62626c57.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__5440.62626c57.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/5481.07be8267.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__5481.07be8267.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/5808.77f58afb.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__5808.77f58afb.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/6274.404a3115.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__6274.404a3115.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/7509.2d179a30.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__7509.2d179a30.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/7984.f6cb549c.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__7984.f6cb549c.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/8470.b11a8957.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__8470.b11a8957.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "__mf/js/async/941.3020e9b0.js.LICENSE.txt",
+      "file": "Prometheus-0.58.0____mf__js__async__941.3020e9b0.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Prometheus-0.58.0.tar.gz",
+      "path": "LICENSE",
+      "file": "Prometheus-0.58.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/1836.dbb5b925.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__1836.dbb5b925.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/2043.75611a45.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__2043.75611a45.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/2218.1665bfef.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__2218.1665bfef.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/392.10de3429.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__392.10de3429.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/4121.98a68f27.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__4121.98a68f27.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/4295.2e3f5a62.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__4295.2e3f5a62.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/488.b1caf89d.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__488.b1caf89d.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/5440.355b1b8f.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__5440.355b1b8f.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/5481.8914a03c.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__5481.8914a03c.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/6274.9f6e8ebe.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__6274.9f6e8ebe.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/7984.70e177fc.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__7984.70e177fc.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/8470.d31004d7.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__8470.d31004d7.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/848.d4aeddd2.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__848.d4aeddd2.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/8975.0e48d29d.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__8975.0e48d29d.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/9320.431cee78.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__9320.431cee78.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/941.66435565.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__941.66435565.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/9595.4fcec1fe.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async__9595.4fcec1fe.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_PyroscopeDatasource.636458b8.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async____federation_expose_PyroscopeDatasource.636458b8.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_PyroscopeProfileQuery.97bd441b.js.LICENSE.txt",
+      "file": "Pyroscope-0.6.0____mf__js__async____federation_expose_PyroscopeProfileQuery.97bd441b.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "LICENSE",
+      "file": "Pyroscope-0.6.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "Pyroscope-0.6.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Pyroscope-0.6.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "Pyroscope-0.6.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "LICENSE",
+      "file": "ScatterChart-0.11.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/110.573b13ac.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__110.573b13ac.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/121.7043fdc2.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__121.7043fdc2.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/181.c91a9444.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__181.c91a9444.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/187.3665f1f9.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__187.3665f1f9.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/274.8816e34e.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__274.8816e34e.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/386.d928dbb2.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__386.d928dbb2.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/392.a606ee4e.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__392.a606ee4e.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/470.c3023e9e.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__470.c3023e9e.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/546.890eb713.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__546.890eb713.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/818.633d6b7a.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__818.633d6b7a.js.LICENSE.txt",
+      "sha256": "78e65d2126fea0a0b8d6a48a61a9d737296f60d1a0d64cb8ae71acc3dab81293",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 57.4
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/941.8c172b0a.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__941.8c172b0a.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_ScatterChart.17f79ad2.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async____federation_expose_ScatterChart.17f79ad2.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "ScatterChart-0.11.0.tar.gz",
+      "path": "__mf/js/async/lib-router.ebfbe288.js.LICENSE.txt",
+      "file": "ScatterChart-0.11.0____mf__js__async__lib-router.ebfbe288.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "LICENSE",
+      "file": "Splunk-0.1.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/116.9f39e2dc.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__116.9f39e2dc.js.LICENSE.txt",
+      "sha256": "22bd6e51ed423db2efc9b0ba2d93036ec10e4e26c6337d40753ba78d48cf6327",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 50.4
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/121.0ceb8113.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__121.0ceb8113.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/181.4d01713c.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__181.4d01713c.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/332.fc51c4d5.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__332.fc51c4d5.js.LICENSE.txt",
+      "sha256": "84322503b3ac1c91de3e51ba5b1273f05019830649c3ab5e6ad3046d6a57911a",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 62.2
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/386.da241588.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__386.da241588.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/470.e7f915b7.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__470.e7f915b7.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/756.8162c322.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__756.8162c322.js.LICENSE.txt",
+      "sha256": "974bf98fbee896474f37cacb03207f8be2f7dbbf7d2dfe89bfeb9dacaa91ab4b",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 58.7
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/941.693e183d.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__941.693e183d.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/982.e5647ac8.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__982.e5647ac8.js.LICENSE.txt",
+      "sha256": "868a59773551a788b70a85164df2bb450d30690fc9103335d3204e46fe940446",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_SplunkDatasource.b9438a9e.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async____federation_expose_SplunkDatasource.b9438a9e.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_SplunkLogQuery.8d011abe.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async____federation_expose_SplunkLogQuery.8d011abe.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_SplunkTimeSeriesQuery.264a58b9.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async____federation_expose_SplunkTimeSeriesQuery.264a58b9.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "__mf/js/async/lib-router.31611676.js.LICENSE.txt",
+      "file": "Splunk-0.1.0____mf__js__async__lib-router.31611676.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "Splunk-0.1.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Splunk-0.1.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "Splunk-0.1.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "StatChart-0.13.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/121.a33651ce.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__121.a33651ce.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/187.d7e6b2db.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__187.d7e6b2db.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/274.b762faf5.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__274.b762faf5.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/392.70b1a3c5.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__392.70b1a3c5.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/465.7c60371f.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__465.7c60371f.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/470.cc046da0.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__470.cc046da0.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/546.f27d00a1.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__546.f27d00a1.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/570.264704d1.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__570.264704d1.js.LICENSE.txt",
+      "sha256": "7df35e1fa41d018568690eba62aa2595f556d647f38c80e50b3543aba7bf9209",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/580.4076ee7b.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__580.4076ee7b.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/866.cb6cbc7a.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__866.cb6cbc7a.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/941.230549f5.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__941.230549f5.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/lib-router.6c58ccc7.js.LICENSE.txt",
+      "file": "StatChart-0.13.0____mf__js__async__lib-router.6c58ccc7.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatChart-0.13.0.tar.gz",
+      "path": "LICENSE",
+      "file": "StatChart-0.13.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "StaticListVariable-0.9.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/perses/cue/LICENSE",
+      "file": "StaticListVariable-0.9.0__cue.mod__pkg__github.com__perses__perses__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "StaticListVariable-0.9.0.tar.gz",
+      "path": "__mf/js/async/121.64329ef3.js.LICENSE.txt",
+      "file": "StaticListVariable-0.9.0____mf__js__async__121.64329ef3.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StaticListVariable-0.9.0.tar.gz",
+      "path": "__mf/js/async/274.6872dfa8.js.LICENSE.txt",
+      "file": "StaticListVariable-0.9.0____mf__js__async__274.6872dfa8.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StaticListVariable-0.9.0.tar.gz",
+      "path": "__mf/js/async/470.c267538a.js.LICENSE.txt",
+      "file": "StaticListVariable-0.9.0____mf__js__async__470.c267538a.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StaticListVariable-0.9.0.tar.gz",
+      "path": "__mf/js/async/797.57af7fe4.js.LICENSE.txt",
+      "file": "StaticListVariable-0.9.0____mf__js__async__797.57af7fe4.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StaticListVariable-0.9.0.tar.gz",
+      "path": "__mf/js/async/941.314aa63f.js.LICENSE.txt",
+      "file": "StaticListVariable-0.9.0____mf__js__async__941.314aa63f.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StaticListVariable-0.9.0.tar.gz",
+      "path": "LICENSE",
+      "file": "StaticListVariable-0.9.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "LICENSE",
+      "file": "StatusHistoryChart-0.13.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/121.4774256d.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__121.4774256d.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/187.e35200d2.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__187.e35200d2.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/189.50a773ab.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__189.50a773ab.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/274.00260b59.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__274.00260b59.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/392.6e9f16f1.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__392.6e9f16f1.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/464.d426dd00.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__464.d426dd00.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/470.d7ccfb94.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__470.d7ccfb94.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/525.9cf2cd99.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__525.9cf2cd99.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/644.51078a40.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__644.51078a40.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/941.8225ba98.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__941.8225ba98.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/981.5ec29a41.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__981.5ec29a41.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/lib-router.33e6a460.js.LICENSE.txt",
+      "file": "StatusHistoryChart-0.13.0____mf__js__async__lib-router.33e6a460.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "StatusHistoryChart-0.13.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "StatusHistoryChart-0.13.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "LICENSE",
+      "file": "Table-0.13.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/1589.124ce93d.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__1589.124ce93d.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/2043.1f09864b.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__2043.1f09864b.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/392.b6035b41.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__392.b6035b41.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/4014.cf88a118.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__4014.cf88a118.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/4121.e7df36d6.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__4121.e7df36d6.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/5481.6496fac9.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__5481.6496fac9.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/6274.8edae86d.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__6274.8edae86d.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/7984.a8edc213.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__7984.a8edc213.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/8470.b9762117.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__8470.b9762117.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/868.507e984c.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__868.507e984c.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/941.cc458a98.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__941.cc458a98.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "__mf/js/async/lib-router.3493bbf9.js.LICENSE.txt",
+      "file": "Table-0.13.0____mf__js__async__lib-router.3493bbf9.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/perses/cue/LICENSE",
+      "file": "Table-0.13.0__cue.mod__pkg__github.com__perses__perses__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Table-0.13.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "Table-0.13.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "Tempo-0.59.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "Tempo-0.59.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "LICENSE",
+      "file": "Tempo-0.59.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/1237.95d50243.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__1237.95d50243.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/2012.db13f55f.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__2012.db13f55f.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/2043.99dee7fc.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__2043.99dee7fc.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/2386.c576bcb3.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__2386.c576bcb3.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/2920.f42a16bb.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__2920.f42a16bb.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/3181.f35aa545.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__3181.f35aa545.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/3617.385082a9.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__3617.385082a9.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/392.20471ef7.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__392.20471ef7.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/4121.492e2b21.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__4121.492e2b21.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/4429.70e1937e.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__4429.70e1937e.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/4783.df93de1f.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__4783.df93de1f.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/5481.2fe3ce34.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__5481.2fe3ce34.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/6274.808dea3b.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__6274.808dea3b.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/6408.966da3ae.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__6408.966da3ae.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/7984.dcb922d5.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__7984.dcb922d5.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/8470.50062ded.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__8470.50062ded.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/941.5c992545.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__941.5c992545.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_TempoDatasource.21041fdf.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async____federation_expose_TempoDatasource.21041fdf.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "Tempo-0.59.0.tar.gz",
+      "path": "__mf/js/async/lib-router.8d677720.js.LICENSE.txt",
+      "file": "Tempo-0.59.0____mf__js__async__lib-router.8d677720.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/121.c3c0e54f.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__121.c3c0e54f.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/208.b9f374ad.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__208.b9f374ad.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/274.72dfa9c8.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__274.72dfa9c8.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/392.b9ba5bf2.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__392.b9ba5bf2.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/470.e09f33b7.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__470.e09f33b7.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/527.f97d1b86.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__527.f97d1b86.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/603.3b771310.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__603.3b771310.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/694.0fb9ee5a.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__694.0fb9ee5a.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/702.785cd635.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__702.785cd635.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/941.b89f8595.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__941.b89f8595.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/984.83bd5c6d.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__984.83bd5c6d.js.LICENSE.txt",
+      "sha256": "bdc77ae504b520a2a68adfc28ab9d4dcf99e56f2b2d54153397e0ed4e7d55aee",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/lib-router.319c02cd.js.LICENSE.txt",
+      "file": "TimeSeriesChart-0.13.0____mf__js__async__lib-router.319c02cd.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "TimeSeriesChart-0.13.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "TimeSeriesChart-0.13.0.tar.gz",
+      "path": "LICENSE",
+      "file": "TimeSeriesChart-0.13.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "LICENSE",
+      "file": "TimeSeriesTable-0.12.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/121.592e3064.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__121.592e3064.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/187.e7610888.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__187.e7610888.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/274.65444167.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__274.65444167.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/357.8ed888fe.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__357.8ed888fe.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/392.1ef58718.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__392.1ef58718.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/43.9749b9fd.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__43.9749b9fd.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/470.e310152e.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__470.e310152e.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/589.f808cb6d.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__589.f808cb6d.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/603.0e24b840.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__603.0e24b840.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/941.4bc4bec7.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__941.4bc4bec7.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/984.894a30f6.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__984.894a30f6.js.LICENSE.txt",
+      "sha256": "bdc77ae504b520a2a68adfc28ab9d4dcf99e56f2b2d54153397e0ed4e7d55aee",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "__mf/js/async/lib-router.03790637.js.LICENSE.txt",
+      "file": "TimeSeriesTable-0.12.0____mf__js__async__lib-router.03790637.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TimeSeriesTable-0.12.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "TimeSeriesTable-0.12.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/121.62d04480.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__121.62d04480.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/274.2fbf5089.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__274.2fbf5089.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/392.f7e636d7.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__392.f7e636d7.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/43.443bfb85.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__43.443bfb85.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/470.7e7da73a.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__470.7e7da73a.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/546.f03271fe.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__546.f03271fe.js.LICENSE.txt",
+      "sha256": "bdc77ae504b520a2a68adfc28ab9d4dcf99e56f2b2d54153397e0ed4e7d55aee",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/734.1ccadea5.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__734.1ccadea5.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/754.1dd7e770.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__754.1dd7e770.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/83.f5ee17c0.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__83.f5ee17c0.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/907.d8e1501d.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__907.d8e1501d.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/935.90127a37.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__935.90127a37.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/941.7e7c74aa.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__941.7e7c74aa.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "__mf/js/async/lib-router.3e3b0380.js.LICENSE.txt",
+      "file": "TraceTable-0.11.0____mf__js__async__lib-router.3e3b0380.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "LICENSE",
+      "file": "TraceTable-0.11.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "TraceTable-0.11.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "TraceTable-0.11.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "LICENSE",
+      "file": "TracingGanttChart-0.13.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/121.1fc97c57.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__121.1fc97c57.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/274.03fc3289.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__274.03fc3289.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/30.991f7ee4.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__30.991f7ee4.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/392.eb9b3bb9.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__392.eb9b3bb9.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/43.b9d7bc56.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__43.b9d7bc56.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/470.9743e21d.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__470.9743e21d.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/546.b40699cb.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__546.b40699cb.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/570.9d51e826.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__570.9d51e826.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/887.027eb62b.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__887.027eb62b.js.LICENSE.txt",
+      "sha256": "570afdaaf8729ce5ffcf2b7fa6eb965148687462bcb2f9416d69d7e6d550aec6",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/941.3d671d54.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__941.3d671d54.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "TracingGanttChart-0.13.0.tar.gz",
+      "path": "__mf/js/async/lib-router.5f492283.js.LICENSE.txt",
+      "file": "TracingGanttChart-0.13.0____mf__js__async__lib-router.5f492283.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/198.fbb67f8a.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__198.fbb67f8a.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/2043.b149adfd.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__2043.b149adfd.js.LICENSE.txt",
+      "sha256": "20191234ad632d600f6a9adfcdd863f45e2d1a9f4ececcd2edf4e07761a61beb",
+      "licensecheck_ids": [
+        "0BSD"
+      ],
+      "licensecheck_coverage": 94.4
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/2749.71c38fe0.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__2749.71c38fe0.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/392.c6e57bd8.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__392.c6e57bd8.js.LICENSE.txt",
+      "sha256": "3ff504710db2a990ae4d10449337a4a40692ccc523bb06ce247b831ff3946b92",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/3998.e9a3cf1a.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__3998.e9a3cf1a.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/4121.5468ac01.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__4121.5468ac01.js.LICENSE.txt",
+      "sha256": "80488d6de4db3169b1452b5b68c167a0f52143b7630ebb3aaa0c9d871bf3b6d1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/4225.744952e9.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__4225.744952e9.js.LICENSE.txt",
+      "sha256": "6354145f7683e1bd78c904d0908f7552025a0dbeffe2fdd4398368a96f07cba1",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/5405.004a286a.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__5405.004a286a.js.LICENSE.txt",
+      "sha256": "2d69892ab9a79ee0eec8f7aad6c06fb1d67575becd6a5c1d99fe39db91180b48",
+      "licensecheck_ids": [
+        "MIT"
+      ],
+      "licensecheck_coverage": 73.1
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/5440.7765ad14.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__5440.7765ad14.js.LICENSE.txt",
+      "sha256": "36dcf933a525cb72146aebfa2d85ad9e0e2ea453eb22eb37db88b6d237d192f8",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/5481.b7b48b8f.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__5481.b7b48b8f.js.LICENSE.txt",
+      "sha256": "6cc1fe93088718486eb67c3f2578891cdfd6b5bfa229521fac6340d068cc2d35",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/6274.0634d636.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__6274.0634d636.js.LICENSE.txt",
+      "sha256": "76f4a58f4698efba7c184fc3333267357bdbca6578f473df6b83870343090b1a",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/6408.2bc7e8f4.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__6408.2bc7e8f4.js.LICENSE.txt",
+      "sha256": "f84c2dfde561c862f777cf2532d37431676401e2db2671f01f4057728ecfe51c",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/6864.66bc6315.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__6864.66bc6315.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/7817.5e96b0dd.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__7817.5e96b0dd.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/7984.194982d6.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__7984.194982d6.js.LICENSE.txt",
+      "sha256": "18da93e2caeff5b4506decf4ba17236977b57740b6a4df1509b4c42f0a9610c0",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/8470.cb89de3b.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__8470.cb89de3b.js.LICENSE.txt",
+      "sha256": "82b0350b07b54de9ab34b276a0466b33ad8506d2ee0b098f529fe130a63c17ba",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/8787.c3298397.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__8787.c3298397.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/941.a44f722e.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async__941.a44f722e.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "__mf/js/async/__federation_expose_VictoriaLogsDatasource.807ae747.js.LICENSE.txt",
+      "file": "VictoriaLogs-0.4.0____mf__js__async____federation_expose_VictoriaLogsDatasource.807ae747.js.LICENSE.txt",
+      "sha256": "4f8f27a4ffe6fb282d9708019044a2cc39c8d8cf2683149e7e1f051d9245b298",
+      "licensecheck_ids": [],
+      "licensecheck_coverage": 0
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "LICENSE",
+      "file": "VictoriaLogs-0.4.0__LICENSE",
+      "sha256": "3f446da9450377d63dae9ee8ac69462be2f2fae8c7e6a97473bb547757e89d4c",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/shared/cue/LICENSE",
+      "file": "VictoriaLogs-0.4.0__cue.mod__pkg__github.com__perses__shared__cue__LICENSE",
+      "sha256": "192c4e04eacb8fe78a6b992fe41a6d0cf6dd19ccb2c791ddaeea3338186707e9",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    },
+    {
+      "archive": "VictoriaLogs-0.4.0.tar.gz",
+      "path": "cue.mod/pkg/github.com/perses/spec/cue/LICENSE",
+      "file": "VictoriaLogs-0.4.0__cue.mod__pkg__github.com__perses__spec__cue__LICENSE",
+      "sha256": "03355503c88722937960291ddbfee698f5195ca5cf9ef0c8b325518eebce7724",
+      "licensecheck_ids": [
+        "Apache-2.0"
+      ],
+      "licensecheck_coverage": 100
+    }
+  ],
+  "common_licenses": []
+}

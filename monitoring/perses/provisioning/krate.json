@@ -1,0 +1,101 @@
+[
+  {
+    "kind": "Project",
+    "metadata": {
+      "name": "krate"
+    },
+    "spec": {
+      "display": {
+        "name": "Krate"
+      }
+    }
+  },
+  {
+    "kind": "Datasource",
+    "metadata": {
+      "name": "prometheus",
+      "project": "krate"
+    },
+    "spec": {
+      "default": true,
+      "display": {
+        "name": "Prometheus"
+      },
+      "plugin": {
+        "kind": "PrometheusDatasource",
+        "spec": {
+          "proxy": {
+            "kind": "HTTPProxy",
+            "spec": {
+              "url": "http://prometheus:9090",
+              "allowedEndpoints": [
+                {
+                  "endpointPattern": "^/api/v1/(query|query_range|query_exemplars|series|labels|parse_query)$",
+                  "method": "GET"
+                },
+                {
+                  "endpointPattern": "^/api/v1/(query|query_range|query_exemplars|series|labels|parse_query)$",
+                  "method": "POST"
+                },
+                {
+                  "endpointPattern": "^/api/v1/label/[^/]+/values$",
+                  "method": "GET"
+                },
+                {
+                  "endpointPattern": "^/api/v1/label/[^/]+/values$",
+                  "method": "POST"
+                },
+                {
+                  "endpointPattern": "^/api/v1/(metadata|status/buildinfo)$",
+                  "method": "GET"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "kind": "Datasource",
+    "metadata": {
+      "name": "victorialogs",
+      "project": "krate"
+    },
+    "spec": {
+      "default": false,
+      "display": {
+        "name": "VictoriaLogs"
+      },
+      "plugin": {
+        "kind": "VictoriaLogsDatasource",
+        "spec": {
+          "proxy": {
+            "kind": "HTTPProxy",
+            "spec": {
+              "url": "http://victorialogs:9428",
+              "allowedEndpoints": [
+                {
+                  "endpointPattern": "^/select/logsql/query$",
+                  "method": "POST"
+                },
+                {
+                  "endpointPattern": "^/select/logsql/stats_query_range$",
+                  "method": "POST"
+                },
+                {
+                  "endpointPattern": "^/select/logsql/field_names$",
+                  "method": "POST"
+                },
+                {
+                  "endpointPattern": "^/select/logsql/field_values$",
+                  "method": "POST"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+]

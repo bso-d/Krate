@@ -6,6 +6,14 @@ global:
   external_labels:
     monitor: krate
 
+# Alerts also go to the parallel Alertmanager, which emails them. Grafana's
+# own alert rules and email keep working unchanged.
+alerting:
+  alertmanagers:
+    - api_version: v2
+      static_configs:
+        - targets: ["alertmanager:9093"]
+
 rule_files:
   - /etc/prometheus/alerts.yml
   - /tmp/krate-topology.yml

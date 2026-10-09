@@ -99,5 +99,43 @@ docker_note="not included"
   printf '\n'
 } > "$out_dir/${bundle}.notes.md"
 
+# Corresponding source for the copyleft components of every image in this package
+# (LICENSE-SOURCES.md). Inventories this package's own platform from its lock file and
+# writes <bundle>-sources.tar (split into .partNNN files below GitHub's 2 GiB asset limit
+# when larger) plus <bundle>-sources.tar.sha256. SKIP_SOURCES=1 skips it for local
+# experiments only; a release must carry it. The build fails if any component's source
+# could not be obtained (UNRESOLVED); SOURCES_STRICT=0 lists them instead, for local runs.
+if [[ "${SKIP_SOURCES:-0}" != 1 ]]; then
+  echo "==> Collecting corresponding source for $bundle"
+  sources_args=(--edition "$edition" --lock "$out_dir/${bundle}.tar.gz.images.lock.tsv"
+    --platforms input --out "dist/sources/${bundle}" --archive "$out_dir/${bundle}-sources.tar")
+  [[ "${SOURCES_STRICT:-1}" == 0 ]] || sources_args+=(--fail-on-unresolved)
+  python3 scripts/collect-sources.py "${sources_args[@]}"
+  manifest="dist/sources/${bundle}/${edition}/manifest.json"
+  src_bytes="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["totals"]["bytes"])' "$manifest")"
+  src_assets="\`${bundle}-sources.tar\`"
+  if compgen -G "$out_dir/${bundle}-sources.tar.part*" >/dev/null; then
+    src_assets="\`${bundle}-sources.tar.part*\` (reassemble: \`cat ${bundle}-sources.tar.part* > ${bundle}-sources.tar\`)"
+  fi
+  {
+    # shellcheck disable=SC2016  # backticks are Markdown code spans
+    printf -- '- Corresponding source (GPL/LGPL/MPL/EPL/... components of these images): %s, checksums in `%s-sources.tar.sha256`, %s bytes of source. See LICENSE-SOURCES.md.\n' \
+      "$src_assets" "$bundle" "$src_bytes"
+    # State plainly any component shipped without its source.
+    python3 - "$manifest" <<'PY'
+import json, sys
+missing = [c for c in json.load(open(sys.argv[1]))['components'] if c['status'] == 'unresolved']
+if not missing:
+    print('- Every copyleft component in these images has its corresponding source in that archive.')
+else:
+    print(f'- **{len(missing)} component(s) ship without corresponding source** (UNRESOLVED in SOURCES.md):')
+    for c in missing:
+        images = ', '.join(sorted({ref.split('@')[0] for ref in c.get('images', {})}))
+        print(f"  - `{c['key']}` ({c.get('licence') or 'licence not declared'}) in {images}: {c.get('reason', '')}")
+PY
+    printf '\n'
+  } >> "$out_dir/${bundle}.notes.md"
+fi
+
 echo "==> Release files in $out_dir:"
 ls -l "$out_dir"
