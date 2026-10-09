@@ -248,12 +248,35 @@ services:
     profiles: [sso]
     image: ${KEYCLOAK_DB_IMAGE}
     restart: unless-stopped
+    # Keycloak connects over TLS and verifies this server's certificate
+    # (KC_DB_TLS_MODE=verify-server), so PostgreSQL needs the key and certificate
+    # that `krate identity up` generates under auth/keycloak/db-tls/. The image's
+    # entrypoint starts as root and drops to postgres, so this wrapper first gives
+    # PostgreSQL private copies of the files: the bind-mounted directory keeps
+    # the host owner and mode (0700), which the postgres user cannot traverse,
+    # and PostgreSQL refuses a key that is not 0600 and owned by its user.
+    # The generated pg_hba.conf allows the local socket (pg_isready) and TLS
+    # connections with SCRAM; plaintext TCP connections are rejected.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        for f in server.key server.crt ca.crt pg_hba.conf; do
+          install -o postgres -g postgres -m 600 "/run/krate-db-tls/$$f" "/var/run/postgresql/$$f"
+        done
+        exec docker-entrypoint.sh postgres \
+          -c ssl=on \
+          -c ssl_cert_file=/var/run/postgresql/server.crt \
+          -c ssl_key_file=/var/run/postgresql/server.key \
+          -c ssl_ca_file=/var/run/postgresql/ca.crt \
+          -c hba_file=/var/run/postgresql/pg_hba.conf
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
       POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
     volumes:
       - keycloak_db_data:/var/lib/postgresql/data
+      - ./auth/keycloak/db-tls:/run/krate-db-tls:ro,z
     networks: [kafka-network]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
@@ -274,8 +297,16 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
-      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Encrypt the database connection and verify keycloak-db's certificate
+      # against the CA that `krate identity up` generated (PEM, as PostgreSQL
+      # requires).
+      KC_DB_TLS_MODE: verify-server
+      KC_DB_TLS_TRUST_STORE_FILE: /opt/keycloak/conf/db-tls/ca.crt
+      # No bootstrap admin here: `krate identity up` creates the master realm
+      # and a temporary admin with `kc.sh bootstrap-admin user` before the first
+      # start, replaces it with KEYCLOAK_ADMIN_USER and deletes it. (Keycloak
+      # rejects an empty KC_BOOTSTRAP_ADMIN_USERNAME, so the variables cannot
+      # be left in place for later starts.)
       KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL}
       KC_HTTP_ENABLED: "true"
       KC_HTTP_RELATIVE_PATH: /identity
@@ -286,6 +317,9 @@ services:
       KC_TRUSTSTORE_PATHS: /opt/keycloak/conf/truststores
       KEYCLOAK_KAFBAT_CLIENT_SECRET: ${KEYCLOAK_KAFBAT_CLIENT_SECRET}
       PING_KEYCLOAK_CLIENT_SECRET: ${PING_KEYCLOAK_CLIENT_SECRET}
+      # Service-account client used by `krate identity users`; the realm import
+      # substitutes the placeholder of the same name in krate-realm.json.
+      KEYCLOAK_CLI_CLIENT_SECRET: ${KEYCLOAK_CLI_CLIENT_SECRET}
     healthcheck:
       test: ["CMD", "bash", "-ec", "{ printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/127.0.0.1/9000"]
       interval: 5s
@@ -295,6 +329,7 @@ services:
     volumes:
       - ./auth/keycloak/krate-realm.json:/opt/keycloak/data/import/krate-realm.json:ro,z
       - ./auth/keycloak/truststores:/opt/keycloak/conf/truststores:ro,z
+      - ./auth/keycloak/db-tls/ca.crt:/opt/keycloak/conf/db-tls/ca.crt:ro,z
     networks: [kafka-network]
 
 # ─── Named Volumes ─────────────────────────────────────────────────────────────
