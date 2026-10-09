@@ -120,12 +120,11 @@ state persist in the `alertmanager_data` volume.
 ## Upgrading an existing installation
 
 1. In the **old installation**, run `./krate monitor down` (never `down -v`).
-2. Copy the site `monitoring/.env` into the new package. Keep existing ports,
-   SMTP, Grafana and token-file settings, and the existing data volumes. `krate`
-   updates the `*_IMAGE` lines to the new package's `monitoring/.env.template`
-   and generates an empty `PERSES_ADMIN_PASSWORD` on the next `monitor up`.
-3. Load the new package's images (`./krate install` or `./krate load-images`)
-   and run `./krate monitor up`.
+2. Run the new package's `./krate install`. It keeps `monitoring/.env` (taking it
+   over from an installation made before `/opt/krate`), updates its `*_IMAGE`
+   lines and fills new settings such as `PERSES_ADMIN_PASSWORD`; ports, SMTP,
+   Grafana and token-file settings and the data volumes stay.
+3. Run `./krate monitor up` in the installation directory.
 4. Check Grafana and Perses dashboards, Loki and VictoriaLogs for
    `job="containerlogs"`, and `./krate monitor status`.
 

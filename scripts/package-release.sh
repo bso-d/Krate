@@ -88,6 +88,9 @@ docker_note="not included"
   printf '```bash\nsha256sum -c %s.tar.gz.sha256\ntar -xzf %s.tar.gz\ncd %s\n./krate doctor\n./krate install\n```\n\n' \
     "$bundle" "$bundle" "$bundle"
   # shellcheck disable=SC2016  # backticks are Markdown code spans
+  printf -- '- Installs into `/opt/krate/%s`. Updating from an earlier package keeps its settings, passwords, certificates, SSO files and data; `./krate credentials` shows the logins.\n' \
+    "$edition"
+  # shellcheck disable=SC2016  # backticks are Markdown code spans
   printf -- '- SHA-256: `%s`\n' "$checksum"
   printf -- '- Docker packages: %s\n\n' "$docker_note"
   printf '| Image | Image ID | Platform |\n|---|---|---|\n'

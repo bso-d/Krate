@@ -20,6 +20,11 @@ REPO_DIR=""
 if [[ -f "$SCRIPT_DIR/../Makefile" && -f "$SCRIPT_DIR/../kafbat-ui/build.py" ]]; then
   REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
+# Where a package is installed. Its settings, passwords, certificates and SSO
+# files stay here across updates; each package only replaces the release files.
+KRATE_HOME="${KRATE_HOME:-/opt/krate/$KRATE_VARIANT}"
+# A broker container, whose labels tell where an earlier installation ran from.
+BROKER_CONTAINER="epc-broker-92"
 
 # ─── Compose binary detection (v2 plugin or v1 standalone) ───────────────────
 if docker compose version &>/dev/null 2>&1; then
@@ -175,13 +180,125 @@ fill_secrets() {
   done
 }
 
-# The Compose project name of this cluster (its directory name by default).
-compose_project() {
-  local project
-  project="$("${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config 2>/dev/null \
-    | awk '/^name:/ && !found { print $2; found = 1 }')"
-  [[ -n "$project" ]] || die "Cannot read the Compose project name from $COMPOSE_FILE."
-  echo "$project"
+# The Compose project, which names the cluster's network and data volumes. It
+# is fixed (krate-<edition>) so the data never depends on the directory a
+# package was unpacked to. Installations made before that were named after their
+# directory; prepare records that name as KRATE_PROJECT so their data stays in use.
+cluster_project() {
+  local project="${KRATE_PROJECT:-}"
+  [[ -n "$project" ]] || project="$(env_value KRATE_PROJECT)"
+  echo "${project:-krate-${KRATE_VARIANT}}"
+}
+
+# Compose projects holding a volume of the given name.
+volume_projects() {
+  docker volume ls --filter "label=com.docker.compose.volume=$1" \
+    --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | LC_ALL=C sort -u
+}
+
+# Compose projects other than the fixed one that hold this edition's data
+# volumes: installations from before the project name was fixed. KRaft keeps
+# Kafka data in volumes (the frozen ZooKeeper edition also has zookeeper-data);
+# EPC keeps it on the host and has only the Keycloak database volume.
+legacy_projects() {
+  local marker=kafka-92-data other=zookeeper-data
+  if [[ "$KRATE_VARIANT" == epc ]]; then
+    marker=keycloak_db_data other=kafka-92-data
+  fi
+  LC_ALL=C comm -23 <(volume_projects "$marker") <(volume_projects "$other") | grep -vx "krate-${KRATE_VARIANT}" || true
+}
+
+# Keep using the data volumes of an installation from before the fixed project
+# name, so an update never starts on empty storage.
+adopt_legacy_project() {
+  local legacy running
+  [[ -z "${KRATE_PROJECT:-}" && -z "$(env_value KRATE_PROJECT)" ]] || return 0
+  legacy="$(legacy_projects | xargs)"
+  # When this edition's containers exist, their project is the one being updated.
+  running="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$BROKER_CONTAINER" 2>/dev/null || true)"
+  if [[ -n "$running" && " $legacy " == *" $running "* ]]; then
+    legacy="$running"
+  fi
+  case "$legacy" in
+    "") return 0 ;;
+    *" "*) die "Several earlier installations hold data volumes: $legacy
+Choose the one this installation uses: krate config set KRATE_PROJECT=<name>" ;;
+  esac
+  set_env_file_value "$ENV_FILE" KRATE_PROJECT "$legacy"
+  ok "Using the existing data volumes of Compose project $legacy (KRATE_PROJECT in .env)"
+}
+
+# A package is being run from the directory it was extracted to, rather than
+# from the installation directory or a source checkout.
+is_package() {
+  [[ -z "$REPO_DIR" && -d "$IMAGES_DIR" && "$SCRIPT_DIR" != "$(cd "$KRATE_HOME" 2>/dev/null && pwd)" ]]
+}
+
+# Create the installation directory, owned by the user running krate.
+ensure_home_dir() {
+  if mkdir -p "$KRATE_HOME" 2>/dev/null && [[ -w "$KRATE_HOME" ]]; then
+    return 0
+  fi
+  local -a sudo_cmd=()
+  if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+    sudo_cmd=(sudo)
+  fi
+  info "Creating the installation directory $KRATE_HOME"
+  if ! { "${sudo_cmd[@]}" mkdir -p "$KRATE_HOME" && "${sudo_cmd[@]}" chown "$(id -u):$(id -g)" "$KRATE_HOME"; }; then
+    die "Could not create $KRATE_HOME. Create it, or install elsewhere: KRATE_HOME=/path ./krate install"
+  fi
+}
+
+# Copy the site files of an earlier installation, or ones made by hand in the
+# package directory, into the installation when it does not have them yet:
+# .env, monitoring/.env, certs/, SSO files under auth/ and monitoring/auth/,
+# and sso/site*.json. Existing files are never replaced.
+import_site_files() {
+  local src="$1" f
+  [[ -d "$src" && "$(cd "$src" && pwd)" != "$(cd "$KRATE_HOME" && pwd)" ]] || return 0
+  ( cd "$src" && { for f in .env monitoring/.env; do [[ -f "$f" ]] && echo "$f"; done
+      find certs auth monitoring/auth -type f 2>/dev/null
+      find sso -maxdepth 1 -type f -name 'site*.json' 2>/dev/null; } ) | while IFS= read -r f; do
+    [[ -e "$KRATE_HOME/$f" ]] && continue
+    mkdir -p "$KRATE_HOME/$(dirname "$f")"
+    cp -p "$src/$f" "$KRATE_HOME/$f"
+    echo "$f"
+  done
+}
+
+# Install this package's release files into KRATE_HOME, replacing the previous
+# release's. Site files are not part of a package and are never overwritten.
+# Images were loaded from the package and are not copied. On a first install,
+# site files come from --from DIR, the package directory or the directory the
+# running (or stopped) cluster was started from.
+deploy_release() {
+  local from="$1" taken previous
+  ensure_home_dir
+  ( cd "$SCRIPT_DIR" && tar -cf - --exclude=./images --exclude=./docker-offline --exclude=./.env \
+      --exclude=./certs --exclude=./auth --exclude=./monitoring/.env --exclude=./monitoring/auth \
+      --exclude='./sso/site*.json' . ) | ( cd "$KRATE_HOME" && tar -xf - ) \
+    || die "Could not copy the release files to $KRATE_HOME"
+  mkdir -p "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak/truststores"
+  cp "$SCRIPT_DIR/auth/ui/local.yml" "$KRATE_HOME/auth/ui/local.yml"
+  if [[ -f "$SCRIPT_DIR/monitoring/auth/local.ini" ]]; then
+    mkdir -p "$KRATE_HOME/monitoring/auth"
+    cp "$SCRIPT_DIR/monitoring/auth/local.ini" "$KRATE_HOME/monitoring/auth/local.ini"
+  fi
+  ok "Installed $(basename "$SCRIPT_DIR") into $KRATE_HOME"
+
+  if [[ -n "$from" ]]; then
+    [[ -f "$from/.env" ]] || die "--from $from has no .env"
+  elif [[ -f "$SCRIPT_DIR/.env" ]]; then
+    from="$SCRIPT_DIR"
+  elif [[ ! -f "$KRATE_HOME/.env" ]]; then
+    previous="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$BROKER_CONTAINER" 2>/dev/null || true)"
+    [[ -n "$previous" && -f "$previous/.env" ]] && from="$previous"
+  fi
+  [[ -n "$from" ]] || return 0
+  taken="$(import_site_files "$from" | xargs)"
+  if [[ -n "$taken" ]]; then
+    ok "Took over from $from: $taken"
+  fi
 }
 
 # Passwords and secrets of the cluster .env. Keycloak keeps its admin, database
@@ -190,7 +307,7 @@ compose_project() {
 # PingFederate; `krate auth apply` asks for it.
 generate_secrets() {
   local keys=(KAFKA_UI_PASSWORD) generated
-  if ! compose_volume_exists "$(compose_project)" keycloak_db_data; then
+  if ! compose_volume_exists "$(cluster_project)" keycloak_db_data; then
     keys+=(KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET)
   fi
   generated="$(fill_secrets "$ENV_FILE" 24 "${keys[@]}" | xargs)"
@@ -257,6 +374,7 @@ prepare() {
   fi
   chmod 600 "$ENV_FILE"
   sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
+  adopt_legacy_project
   generate_secrets
   if [[ -d "$MONITOR_DIR" ]]; then
     prepare_monitor_env
@@ -363,13 +481,13 @@ compose_cmd() {
     if [[ "${1:-}" == up ]]; then
       local auth_tools="$SCRIPT_DIR/sso"
       [[ -d "$auth_tools" ]] || auth_tools="$SCRIPT_DIR/../sso"
-      "${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile sso config --format json | python3 "$auth_tools/preflight.py" --directory "$SCRIPT_DIR" --mode runtime.yml
+      "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile sso config --format json | python3 "$auth_tools/preflight.py" --directory "$SCRIPT_DIR" --mode runtime.yml
       shift
       set -- up --pull never --no-build "$@"
     fi
     set -- --profile sso "$@"
   fi
-  "${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
 # The one secret that cannot be generated: PingFederate issues it for Keycloak.
@@ -654,20 +772,33 @@ port_in_use() {
 
 # ─── install ──────────────────────────────────────────────────────────────────
 cmd_install() {
-  step "Kafka Cluster Install"
+  local from=""
+  if [[ "${1:-}" == --from ]]; then
+    [[ -d "${2:-}" ]] || die "Usage: krate install [--from <earlier installation directory>]"
+    from="$(cd "$2" && pwd)"
+  fi
+  step "Krate install"
   echo ""
 
   # 1. Preflight — fail safe with guidance instead of half-applying
-  if ! cmd_doctor; then
+  if [[ -z "${KRATE_DEPLOYED:-}" ]]; then
+    if ! cmd_doctor; then
+      echo ""
+      die "Preflight checks failed — fix the issues above, then re-run: krate install"
+    fi
+    require_compose_file
     echo ""
-    die "Preflight checks failed — fix the issues above, then re-run: krate install"
   fi
-  require_compose_file
-  echo ""
 
-  # 2. Load images
-  cmd_load_images
-  echo ""
+  # 2. From an extracted package: load its images, install its release files
+  #    into KRATE_HOME and continue there, where the site's state lives.
+  if is_package; then
+    cmd_load_images
+    echo ""
+    deploy_release "$from"
+    echo ""
+    KRATE_DEPLOYED=1 exec "$KRATE_HOME/krate" install
+  fi
 
   # 3. Settings, passwords and certificate
   info "Preparing settings, passwords and the TLS certificate..."
@@ -689,8 +820,9 @@ cmd_install() {
   sep
   cmd_credentials
   echo ""
-  echo -e "  ${DIM}krate status     — check running services"
-  echo -e "  krate logs -f    — follow all logs${RESET}"
+  echo -e "  ${DIM}Installed in $SCRIPT_DIR; run its ./krate from now on, e.g.:"
+  echo -e "  $SCRIPT_DIR/krate status     — check running services"
+  echo -e "  $SCRIPT_DIR/krate logs -f    — follow all logs${RESET}"
   echo ""
 }
 
@@ -1235,13 +1367,19 @@ cmd_doctor() {
     err "docker-compose.yml missing in $SCRIPT_DIR"
     problems=$((problems + 1))
   fi
-  if [[ -f "$ENV_FILE" ]]; then
-    ok ".env present"
-  else
-    warn ".env missing — it will be created from template on 'krate install'"
+  # A package keeps the site's settings and certificate in its installation.
+  local site_dir="$SCRIPT_DIR"
+  if is_package; then
+    site_dir="$KRATE_HOME"
+    ok "installs into $KRATE_HOME"
   fi
-  if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
-    ok "TLS certificate present"
+  if [[ -f "$site_dir/.env" ]]; then
+    ok ".env present in $site_dir (kept)"
+  else
+    ok "no .env yet — install creates it with generated passwords"
+  fi
+  if [[ -f "$site_dir/certs/server.crt" && -f "$site_dir/certs/server.key" ]]; then
+    ok "TLS certificate present in $site_dir/certs (kept)"
   elif command -v openssl &>/dev/null; then
     ok "no TLS cert yet — will be generated with openssl on install"
   else
@@ -1743,7 +1881,7 @@ cmd_help() {
   echo "  krate <command> [options]"
   echo ""
   echo -e "${BOLD}COMMANDS${RESET}"
-  printf "  %-30s %s\n" "install"              "Package: checks, load images, setup, start"
+  printf "  %-30s %s\n" "install [--from DIR]" "Package: checks, load images, install into \$KRATE_HOME (/opt/krate/<edition>), start"
   printf "  %-30s %s\n" "start"                "Setup if needed, then start all services"
   printf "  %-30s %s\n" "setup"                "Create settings, passwords and certificate; build the UI image in a checkout"
   printf "  %-30s %s\n" "credentials"          "Show every login (Kafbat UI, Grafana, Perses, Keycloak)"
@@ -1798,6 +1936,18 @@ cmd_help() {
 # ─── dispatch ─────────────────────────────────────────────────────────────────
 CMD="${1:-help}"
 shift || true
+
+# In an extracted package, everything but install and the host checks runs the
+# installed copy, which holds the site's settings and certificates.
+if is_package; then
+  case "$CMD" in
+    install|doctor|docker-check|docker-install|load-images|help|--help|-h) ;;
+    *)
+      [[ -x "$KRATE_HOME/krate" ]] || die "Not installed yet. Run: ./krate install"
+      exec "$KRATE_HOME/krate" "$CMD" "$@"
+      ;;
+  esac
+fi
 
 case "$CMD" in
   install)        cmd_install "$@" ;;

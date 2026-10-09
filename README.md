@@ -196,13 +196,21 @@ If Docker is missing and you included its packages, run `./krate docker-install`
 ./krate install
 ```
 
-`doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images, does the same setup as `start` (settings, generated passwords, certificate), starts the cluster, waits for it to be healthy and prints every login. `./krate credentials` shows them again later.
+`doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images and installs the package into `/opt/krate/kraft` (`/opt/krate/epc` for EPC; set `KRATE_HOME` to choose another directory). There it does the same setup as `start` (settings, generated passwords, certificate), starts the cluster, waits for it to be healthy and prints every login. `credentials` shows them again later.
+
+The installation directory holds everything specific to the site: `.env`, `monitoring/.env`, the certificate in `certs/` and the SSO files under `auth/`. The cluster's Docker project is always `krate-kraft` (or `krate-epc`), whatever directory a package was unpacked to, so its data volumes keep the same names.
+
+### Update to a newer package
+
+Unpack the new package anywhere and run its `./krate install`, with the cluster running or stopped. It replaces only the release files in the installation directory and loads the new images. Settings, passwords, certificates, SSO files and stored messages stay; new image pins and settings are added automatically.
+
+Installations from before `/opt/krate` ran inside their package directory, and their Docker project and volumes were named after it. The first `install` of a newer package finds that installation through its containers, takes over its `.env`, `monitoring/.env`, certificate and SSO files, and keeps using its data volumes (recorded as `KRATE_PROJECT` in `.env`). If the old containers were already removed, name the old directory: `./krate install --from /path/to/krate-kraft-v1-amd64`.
 
 For a downloaded ZooKeeper package, use `./kafka`. For EPC, set `KAFKA_ADVERTISED_HOST` for clients on other machines and review the data directory before the first start.
 
 ## Everyday commands
 
-Run these inside the KRaft or EPC directory, or an extracted package:
+Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`) or a checkout's `kraft/` or `epc/`. Run from an extracted package, they act on the installation:
 
 | Command | What it does |
 | --- | --- |
