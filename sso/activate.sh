@@ -13,7 +13,7 @@ apply_auth() {
   mode="$(env_value KAFKA_UI_AUTH_CONFIG)"
   [[ "$mode" == runtime.yml || "$mode" == local.yml ]] || die "KAFKA_UI_AUTH_CONFIG must be runtime.yml or local.yml"
   if [[ "$mode" == runtime.yml ]] && ! identity_ready; then
-    die "Keycloak is not ready, and Kafbat's SSO login needs it. Start it first: krate identity up   (then: krate identity status)"
+    die "Keycloak is not ready. Run: krate identity up (then: krate identity status)"
   fi
   # Render into the validator's stdin: credentials never reach terminal output.
   compose_cmd config --format json | python3 "$sso_dir/preflight.py" --directory "$SCRIPT_DIR" --mode "$mode"
