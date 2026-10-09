@@ -8,18 +8,27 @@ Krate. The frozen ZooKeeper edition has no identity service.
 Phase 1 is the foundation only. Keycloak runs, holds local users in the realm
 `krate`, and is managed with `./krate identity`. Kafbat keeps its shared Admin
 login (`auth/ui/local.yml`) until Phase 2 switches it to `runtime.yml`.
-PingFederate brokering is unchanged and comes later.
+Phase 2 uses local Keycloak users only. PingFederate brokering is Phase 3.
 
 Operator flow, in order:
 
 1. `./krate setup` (or the first `./krate start`) creates `.env`, generates
-   passwords and secrets and the UI certificate.
-2. `./krate start` starts brokers, Kafbat and the nginx proxy.
+   passwords and secrets and the UI certificate. Set `KEYCLOAK_PUBLIC_URL`
+   now if the default (`https://localhost/identity`) is not the final address.
+2. `./krate start` starts brokers, Kafbat and the nginx proxy. Until
+   `identity up` has run, `start` prints
+   `Identity services skipped (run: krate identity up)` and leaves Keycloak
+   and its database out.
 3. `./krate identity up` generates the database TLS material and the realm
    plan, starts PostgreSQL and Keycloak, creates the permanent Keycloak admin
    and sets `KEYCLOAK_ENABLED=true`.
-4. Phase 2: `./krate auth configure` and `./krate auth apply` switch Kafbat to
-   Keycloak login. See [dual-login.md](dual-login.md).
+4. Phase 2: `./krate auth configure` writes `auth/ui/runtime.yml` and the
+   identity-provider plan `auth/keycloak/pingfederate-idp.json`; `./krate auth
+   apply` switches Kafbat to Keycloak login. The realm file
+   `auth/keycloak/krate-realm.json` stays owned by `identity up`. See
+   [dual-login.md](dual-login.md).
+5. Phase 3: the identity-provider plan is applied to the realm and PingFederate
+   brokering returns.
 
 Items marked **PROPOSED** are the lead's defaults. The owner confirms or
 changes them before Phase 2.
@@ -34,13 +43,20 @@ Two `.env` keys describe the identity mode:
 | --- | --- | --- | --- |
 | `false` | `local.yml` | Phase 0. Kafbat shared Admin only. | No |
 | `true` | `local.yml` | Phase 1. Keycloak runs with local users; Kafbat still uses the shared Admin login. | Yes |
-| `true` | `runtime.yml` | Phase 2. Kafbat offers Keycloak login. Local users only (no identity providers in the realm). | Yes |
-| `false` | `runtime.yml` | Transitional. `krate` still adds the `sso` profile; `auth apply` runs the `identity up` logic or stops and tells you to run it. **PROPOSED:** treat as "identity required" rather than as an error. | Yes |
+| `true` | `runtime.yml` | Phase 2. Kafbat offers Keycloak login with local Keycloak users only; the realm has no identity providers. PingFederate brokering is Phase 3. | Yes |
+| `false` | `runtime.yml` | Transitional. `krate` still adds the `sso` profile; `auth apply` stops and tells you to run `./krate identity up` when Keycloak is not ready. **PROPOSED:** treat as "identity required" rather than as an error. | Yes |
 
 Rules:
 
 - `krate` adds `--profile sso` to every Compose call when `KEYCLOAK_ENABLED=true`
   or `KAFKA_UI_AUTH_CONFIG=runtime.yml`.
+- Exception for `start` (and any other `up`): when the realm plan
+  `auth/keycloak/krate-realm.json` or `auth/keycloak/db-tls/ca.crt` is missing,
+  or the database state is pristine, `krate` prints
+  `Identity services skipped (run: krate identity up)` and runs that `up`
+  without the `sso` profile. Brokers never wait for identity. The
+  `runtime.yml` preflight still stops `start` when Kafbat needs Keycloak and
+  it is not ready.
 - `identity up` sets `KEYCLOAK_ENABLED=true`. `identity down` stops the two
   identity containers and changes nothing else.
 - "Local mode" means the realm has no `identityProviders`. Users exist only in
@@ -81,7 +97,9 @@ in ID token, access token and userinfo). Kafbat (Phase 2) reads it:
 | neither, or no claim | login denied; the customized Kafbat image rejects an OIDC login with no mapped role |
 
 Group names are written into the realm plan when the realm is first created.
-Changing `KEYCLOAK_*_GROUP` in `.env` later does not rename the realm groups.
+Changing `KEYCLOAK_*_GROUP` in `.env` later does not rename the realm groups;
+`identity up` regenerates the plan but reconciles only the `krate-ui` URLs
+(see "`./krate identity up`").
 
 ## Resource inventory
 
@@ -157,7 +175,8 @@ survives purge.
 | `nginx.conf` | `proxy` | read-only |
 | `auth/ui/` (`local.yml`, generated `runtime.yml`) | `kafka-ui` at `/etc/krate/auth` | read-only |
 | `kafbat.yml` (EPC) | `kafka-ui` | read-only |
-| `auth/keycloak/krate-realm.json` | `keycloak` at `/opt/keycloak/data/import/` | read-only; imported only when realm `krate` does not exist |
+| `auth/keycloak/krate-realm.json` | `keycloak` at `/opt/keycloak/data/import/` | read-only; regenerated from `.env` by every `identity up`; imported only when realm `krate` does not exist |
+| `auth/keycloak/pingfederate-idp.json` (Phase 2, from `auth configure`) | not mounted | identity-provider plan; applied to the realm in Phase 3 |
 | `auth/keycloak/truststores/` | `keycloak` at `/opt/keycloak/conf/truststores` | read-only; enterprise CA for PingFederate |
 | `auth/keycloak/db-tls/` (`ca.crt`, `ca.key`, `server.crt`, `server.key`, `pg_hba.conf`) | `keycloak-db` at `/run/krate-db-tls` | read-only; keys 600 |
 | `auth/keycloak/db-tls/ca.crt` | `keycloak` at `/opt/keycloak/conf/db-tls/ca.crt` | read-only |
@@ -180,8 +199,8 @@ the authoritative store wins and `./krate` fails to log in.
 | `KEYCLOAK_ADMIN_PASSWORD` | user `KEYCLOAK_ADMIN_USER` in realm `master` | `.env` | `./krate identity rotate KEYCLOAK_ADMIN_PASSWORD` |
 | `KEYCLOAK_CLI_CLIENT_SECRET` | client `krate-cli` in realm `krate`, once imported | `.env`, realm plan placeholder | `./krate identity rotate KEYCLOAK_CLI_CLIENT_SECRET` |
 | `KEYCLOAK_KAFBAT_CLIENT_SECRET` | client `krate-ui` in realm `krate`, once imported | `.env`, realm plan placeholder, `runtime.yml` (Phase 2) | `./krate identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET` |
-| `PING_KEYCLOAK_CLIENT_SECRET` | PingFederate (IAM) | `.env`, realm identity-provider entry (later phase) | value from IAM, `./krate config set`, then `auth apply` |
-| temporary `temp-admin` password | nowhere after the first start | held only by the `identity up` process while it runs `kc.sh bootstrap-admin user`; never written to `.env` | not applicable; the account is deleted |
+| `PING_KEYCLOAK_CLIENT_SECRET` | PingFederate (IAM) | `.env`, identity-provider plan `auth/keycloak/pingfederate-idp.json` (applied in Phase 3) | value from IAM, `./krate config set`, then `auth apply` |
+| temporary bootstrap admin password (`temp-admin`, or `temp-admin-<random>` from `recover-admin`) | nowhere after the command ends | held only by the `identity up` or `identity recover-admin` process while it runs `kc.sh bootstrap-admin user`; never written to `.env` | not applicable; the account is deleted |
 | `GRAFANA_PASSWORD` | Grafana's database in `grafana_data` after first start | `monitoring/.env` | Grafana UI or `grafana cli admin reset-admin-password`, then `./krate config set` |
 | `PERSES_ADMIN_PASSWORD`, `PERSES_ENCRYPTION_KEY`, `OAUTH2_PROXY_*`, `PERSES_SYNC_CLIENT_SECRET` | `monitoring/.env`, rendered by `monitoring-init` | rendered volumes | `./krate config set`, then `./krate monitor up` |
 | `certs/server.key` | host file | none | `./krate gen-cert` or your own certificate |
@@ -199,7 +218,7 @@ the preflight refuse.
 | --- | --- | --- |
 | Browser to `proxy` (443) | TLS with `certs/server.crt` | Users must trust the certificate's issuer |
 | `proxy` to `kafka-ui` (8080) | plain HTTP inside the Compose bridge network | Accepted boundary |
-| `proxy` to `keycloak` (8080) | plain HTTP inside the Compose bridge network; `KC_PROXY_HEADERS=xforwarded`, `KC_HOSTNAME=KEYCLOAK_PUBLIC_URL` | Accepted boundary. Only `/identity/realms/krate/` and `/identity/resources/` are forwarded; `/admin/`, `/realms/master/`, `/metrics`, `/health` are not reachable through the proxy |
+| `proxy` to `keycloak` (8080) | plain HTTP inside the Compose bridge network; `KC_PROXY_HEADERS=xforwarded`, `KC_HOSTNAME=KEYCLOAK_PUBLIC_URL` | Accepted boundary. Only `/identity/realms/krate/` and `/identity/resources/` are forwarded; `/admin/`, `/realms/master/`, `/metrics`, `/health` are not reachable through the proxy. `KC_PROXY_TRUSTED_ADDRESSES` is not set, so Keycloak accepts `X-Forwarded-*` from any peer on the network (residual risk below) |
 | `keycloak` to `keycloak-db` (5432) | TLS, `KC_DB_TLS_MODE=verify-server`, trust store `ca.crt`, server certificate SAN `DNS:keycloak-db` | Enforced. `pg_hba.conf` rejects plaintext TCP |
 | Keycloak management port 9000 | not published; the Docker healthcheck and `identity status` use it inside the container | Enforced |
 | `kcadm` administration | `docker exec` into the `keycloak` container against `http://localhost:8080/identity` | Host operator only |
@@ -272,32 +291,57 @@ running for any `identity` command. Each command takes the lock
 2. Fills empty or `REPLACE_ME` identity secrets in `.env` only when the
    database volume does not exist yet ("pristine"). On an existing database it
    never generates a secret.
-3. Generates the database TLS material when absent and the realm plan
-   `auth/keycloak/krate-realm.json` when absent. An existing realm file is kept.
+3. Generates the database TLS material when absent. Regenerates the realm
+   plan `auth/keycloak/krate-realm.json` from `.env` on every run; the file is
+   rewritten only when its content differs. Keycloak imports it only when
+   realm `krate` does not exist yet.
 4. Runs `sso/preflight.py --mode identity`. It checks `.env` mode 600, the
-   public URL, the five identity secrets (16+ characters, not placeholders,
-   all different), `KC_DB_TLS_MODE=verify-server`, the TLS files, the realm
-   file, and that neither identity service publishes a port.
+   public URL, `KEYCLOAK_ADMIN_USER` (lowercase, not starting with
+   `temp-admin`), the group names, the five identity secrets (16+ characters,
+   not placeholders, all different), `KC_DB_TLS_MODE=verify-server`, the TLS
+   files, the realm file, and that neither identity service publishes a port.
 5. Stops if the database state is unknown (Docker unavailable, or volumes
-   named `keycloak_db_data` in more than one project).
-6. Starts `keycloak-db` and waits for health. On a pristine database it then
-   runs Keycloak's own `kc.sh bootstrap-admin user --username temp-admin` in a
-   one-off container (the guide allows this "even before the first-ever start")
-   with a one-time random password passed through an environment variable.
-   That creates the master realm, so no bootstrap variables are ever needed in
-   the Compose file. Then it starts `keycloak`, which imports realm `krate`.
-7. Pristine only: with `kcadm` inside the container, logged in as `temp-admin`,
-   creates the permanent master user `KEYCLOAK_ADMIN_USER` with
+   named `keycloak_db_data` in more than one project; the other edition's
+   fixed project and `*-monitoring` projects are ignored).
+6. Starts `keycloak-db` and waits for health, then reads the database over
+   its local socket:
+   - no `realm` table or no `master` realm ("unbootstrapped"; a pristine
+     volume, or a volume whose first start never completed): stops `keycloak`
+     if it is running, because "all the Keycloak nodes need to be stopped
+     prior to using this command", then runs Keycloak's own
+     `kc.sh bootstrap-admin user --username temp-admin` in a one-off
+     container (the guide allows this "even before the first-ever start") with
+     a one-time random password passed through an environment variable. That
+     creates the master realm, so no bootstrap variables are ever needed in
+     the Compose file. Then it starts `keycloak`, which imports realm `krate`.
+   - `master` exists but has no user `KEYCLOAK_ADMIN_USER` ("no-admin"):
+     writes the journal line and stops with the hint
+     `krate identity recover-admin`. Nothing is recovered automatically.
+   - otherwise ("bootstrapped"): starts `keycloak` and continues.
+7. Unbootstrapped only: with `kcadm` inside the container, logged in as
+   `temp-admin`, creates the permanent master user `KEYCLOAK_ADMIN_USER` with
    `KEYCLOAK_ADMIN_PASSWORD` and realm role `admin`, verifies a login as that
    user, then deletes `temp-admin`.
-8. Every run: verifies a client-credentials login of `krate-cli` against realm
-   `krate`.
-9. Sets `KEYCLOAK_ENABLED=true`, writes the journal line and prints
-   `identity status`.
+8. Every run: verifies the admin login and a client-credentials login of
+   `krate-cli` against realm `krate`.
+9. Bootstrapped only: compares client `krate-ui` in the realm with the plan
+   and updates its `redirectUris`, `webOrigins` and
+   `post.logout.redirect.uris` when they differ (journal line
+   `up reconciled krate-ui urls`). Nothing else in the realm is reconciled:
+   groups, token lifetimes, session limits and the other clients keep the
+   values they were created with.
+10. Sets `KEYCLOAK_ENABLED=true`, writes the journal line and prints
+    `identity status`.
 
 A second run with nothing to do prints `No changes`. When an admin or
 `krate-cli` login fails on an existing database, the command stops with a
 recovery hint (see "Recovery").
+
+`KEYCLOAK_PUBLIC_URL` should be final before the first `identity up`. It can
+be changed later with `./krate config set`; the next `identity up` reconciles
+the `krate-ui` URLs and `auth apply` (Phase 2) rewrites `runtime.yml`. A
+changed `KEYCLOAK_*_GROUP` is not applied to an existing realm (owner
+decision 4).
 
 ### `./krate identity status`
 
@@ -318,7 +362,7 @@ All subcommands use `kcadm` with the `krate-cli` client credentials in realm
 
 | Command | Effect |
 | --- | --- |
-| `users list` | usernames, enabled flag, groups |
+| `users list` | one line per user: `USERNAME ENABLED EMAIL`; groups are shown by `users groups <username>` |
 | `users add <username> [--admin\|--viewer] [--email <addr>]` | creates the user in the chosen group, prints a one-time temporary password once, and sets required actions `UPDATE_PASSWORD` and `CONFIGURE_TOTP` |
 | `users disable <username>` / `users enable <username>` | toggles the account |
 | `users reset-password <username>` | new one-time temporary password, printed once, same required actions |
@@ -341,32 +385,60 @@ temporary password and enrols TOTP at first login.
 4. Verify (ready, login) and write the journal line.
 
 The new value is generated (24 characters) unless `--value` reads one from
-standard input. `./krate config set` refuses these four keys once the database
-exists and points to `rotate`.
+standard input; a supplied value must be 16 or more characters from
+`A-Z a-z 0-9 . _ -`. `./krate config set` accepts these four keys only while
+the database state is pristine; on any other state (`existing`, `unknown`) it
+stops, quotes the state line and points to `rotate`. Because that state comes
+from Docker, setting one of these keys needs a running Docker daemon.
 
 ### `./krate identity backup <file>`
 
-Runs `pg_dump -Fc` in `keycloak-db` and encrypts the stream with
-`openssl enc -aes-256-cbc -pbkdf2 -salt`. The passphrase comes from
-`KRATE_BACKUP_PASSPHRASE` or is asked twice on a terminal. The file is written
-with mode 600. Keycloak may stay running. Keep the passphrase with the backup
-under site policy; without it the backup cannot be read.
+Writes an encrypted archive that holds `db.dump` (`pg_dump -Fc` from
+`keycloak-db`) and `identity.env` with exactly four keys:
+`KEYCLOAK_ADMIN_USER`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`
+and `KEYCLOAK_KAFBAT_CLIENT_SECRET`. The archive is encrypted with
+`openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt`. The passphrase comes
+from `KRATE_BACKUP_PASSPHRASE` or is asked twice on a terminal. The file is
+written with mode 600. Keycloak may stay running. Keep the passphrase with the
+backup under site policy; without it the backup cannot be read.
+
+`KEYCLOAK_DB_PASSWORD` is not in the archive: it is a PostgreSQL role, and
+roles are not part of a single-database dump.
 
 ### `./krate identity restore <file>`
 
-Refuses while `keycloak` is running (`./krate identity down` first). Asks for
-the passphrase, runs `pg_restore --clean --if-exists` into the existing
-database, starts `keycloak`, and verifies readiness and the admin login.
-Secrets inside the backup must match the current `.env`; after a restore from
-before a `rotate`, the `.env` copy is newer than the store, and the next
-`identity up` fails with the recovery hint. Restore a backup taken after the
-last rotation, or rotate again.
+Refuses while `keycloak` is running (`./krate identity down` first) and when
+the database state is unknown. A missing volume is accepted (the "volume
+lost" case): `keycloak-db` then starts with a fresh database. Order:
+
+1. Takes the lock, asks for the passphrase, starts `keycloak-db`.
+2. Runs `pg_restore --clean --if-exists --single-transaction --no-owner` into
+   the `keycloak` database. If `pg_restore` fails, the command stops and says
+   that the database may be partially restored; run
+   `./krate identity restore <file>` again, or follow "Database volume lost".
+3. Writes the four keys from `identity.env` into `.env` where they differ
+   (atomic write; journal line `restore reconciled .env: KEY1 KEY2`, never a
+   value). `.env` then matches the restored store again.
+4. Starts `keycloak` and verifies readiness, the admin login and the
+   `krate-cli` login. Writes the journal line.
+
+The database password is kept as it is: the restored dump contains no roles,
+so a restore from before a `rotate KEYCLOAK_DB_PASSWORD` changes nothing about
+that password.
+
+### `./krate identity recover-admin`
+
+Recreates the permanent master admin from `.env` with Keycloak's
+bootstrap-admin recovery. Requires `keycloak` to be stopped. See "Recovery"
+below for what it does and when to use it.
 
 ### Relationship with `auth apply` (Phase 2)
 
-`./krate auth apply` no longer starts Keycloak. With
-`KAFKA_UI_AUTH_CONFIG=runtime.yml` it runs the `identity up` logic (or stops
-and tells you to run it), then recreates only `kafka-ui` and checks the proxy.
+`./krate auth apply` does not start Keycloak and does not run the
+`identity up` logic. With `KAFKA_UI_AUTH_CONFIG=runtime.yml` it checks that
+Keycloak is ready; when it is not, it stops with
+`Keycloak is not ready. Run: krate identity up (then: krate identity status)`.
+When Keycloak is ready it recreates only `kafka-ui` and checks the proxy.
 Brokers must be healthy for that recreation only.
 
 ## Recovery
@@ -374,54 +446,39 @@ Brokers must be healthy for that recreation only.
 ### Keycloak admin password lost or `.env` out of step
 
 Symptom: `identity up` or `rotate` stops with "login failed" on an existing
-database.
+database, or `identity up` stops with the hint `krate identity recover-admin`
+because realm `master` has no user `KEYCLOAK_ADMIN_USER`.
 
-Option A, restore: `./krate identity restore <backup>` with a backup taken
-when `.env` matched the store.
+Option A, restore: `./krate identity restore <backup>`. The archive carries
+the admin user, admin password and the two client secrets that were valid
+when it was taken, and `restore` writes them back into `.env`.
 
-Option B, Keycloak's bootstrap-admin recovery. Keycloak documents it: "For
-recovering lost admin access, use the dedicated command described in the
-sections below." "Bear in mind that all the Keycloak nodes need to be stopped
-prior to using this command." The account it creates "is temporary" and
-"needs to be removed manually".
+Option B, `./krate identity recover-admin`. It is an explicit operator action
+and is never run automatically. It uses Keycloak's bootstrap-admin recovery.
+Keycloak documents it: "For recovering lost admin access, use the dedicated
+command described in the sections below." "Bear in mind that all the Keycloak
+nodes need to be stopped prior to using this command." The account it creates
+"is temporary" and "needs to be removed manually".
 
-1. `./krate identity down` (Keycloak must be stopped; `keycloak-db` is stopped
-   too, so start it alone again: `docker compose --profile sso up -d keycloak-db`).
-2. Create a temporary admin with the stopped server's command, giving the
-   password through an environment variable, never on the command line:
+```bash
+./krate identity down
+./krate identity recover-admin
+```
 
-   ```bash
-   KC_TMP_PASSWORD="$(openssl rand -base64 18)" \
-   docker compose --profile sso run --rm -e KC_TMP_PASSWORD keycloak \
-     bootstrap-admin user --username temp-admin --password:env KC_TMP_PASSWORD
-   ```
+What it does: refuses while `keycloak` is running (run `./krate identity
+down` first); starts `keycloak-db`; runs
+`kc.sh bootstrap-admin user --username temp-admin-<random8> --password:env ...
+--no-prompt` in a one-off container, with a one-time random password passed
+through an environment variable; starts `keycloak`; logs in as that temporary
+user; creates `KEYCLOAK_ADMIN_USER` in realm `master` if it is absent, sets its
+password to the value `.env` holds and grants it realm role `admin`; verifies
+the permanent login; deletes the temporary user and any leftover `temp-admin`;
+verifies the `krate-cli` login; writes the journal line `recover-admin ok`.
+The temporary password is never printed or stored. The permanent admin gets
+the password that `.env` holds now; to change it afterwards, run
+`./krate identity rotate KEYCLOAK_ADMIN_PASSWORD`.
 
-   Keep that value for the next step only.
-3. Start Keycloak alone: `docker compose --profile sso up -d --no-deps keycloak`
-   (`./krate start` would start the whole cluster).
-4. Inside the container, log in as `temp-admin` and reset the permanent admin
-   to the value `.env` holds (`./krate credentials` shows it), then delete
-   `temp-admin`:
-
-   ```bash
-   docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh config credentials \
-     --config /tmp/kcadm.config --server http://localhost:8080/identity --realm master --user temp-admin
-   docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh set-password \
-     --config /tmp/kcadm.config -r master --username admin
-   docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh get users \
-     --config /tmp/kcadm.config -r master -q username=temp-admin --fields id
-   docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh delete users/<id> \
-     --config /tmp/kcadm.config -r master
-   docker compose --profile sso exec keycloak rm -f /tmp/kcadm.config
-   ```
-
-   `kcadm` prompts for each password. Use `KEYCLOAK_ADMIN_USER` in place of
-   `admin` if you changed it.
-5. `./krate identity up` to verify and journal the recovery.
-
-The exact `bootstrap-admin` flags come from the Keycloak 26.8.0 guide and were
-not exercised on the pinned image in this phase; check `kc.sh bootstrap-admin
-user --help` before relying on them.
+Afterwards run `./krate identity up` to confirm the state and journal it.
 
 ### `krate-cli` client secret lost
 
@@ -436,10 +493,62 @@ socket (no password needed), so it works even when `.env` is wrong.
 
 ### Database volume lost
 
-Start from a backup: `./krate identity up` creates a fresh database and realm
-from the plan, then `./krate identity down` and `./krate identity restore
-<backup>`. Without a backup, every local user is gone; `identity up` recreates
-the realm and the service accounts from the plan and `.env`.
+With a backup: `./krate identity down` (if anything is running), then
+`./krate identity restore <backup>`. `restore` accepts the missing volume,
+starts `keycloak-db` with a fresh database, restores the dump into it, writes
+the four keys from the archive back into `.env`, starts `keycloak` and
+verifies the logins. The database password stays the current `.env` value,
+because the fresh database was initialised with it. Without a backup, every
+local user is gone; `./krate identity up` recreates the realm and the service
+accounts from the plan and `.env`, and users are added again with
+`./krate identity users add`.
+
+## Upgrading from the previous Keycloak setup
+
+Symptom: an `identity` command stops with "This `.env` or Keycloak database
+predates `krate identity`" and points here. The installation has a
+`keycloak_db_data` volume that was created before `krate identity` existed:
+its realm `krate` has no `krate-cli` client, and `.env` has no
+`KEYCLOAK_CLI_CLIENT_SECRET` (and usually none of the other new identity
+keys). Phase 1 does not migrate such a database. Users, the PingFederate
+identity provider and the browser flow in it are not carried over.
+
+The preflight now also refuses a `KEYCLOAK_ADMIN_USER` outside
+`a-z 0-9 . _ @ -` (Keycloak stores usernames in lower case) or starting with
+`temp-admin`; rename it in `.env` before the first `identity up`.
+
+Procedure:
+
+1. With the old setup still running, back up its database with the previous
+   procedure (plain `pg_dump`, outside `krate`), and keep a copy of `.env`:
+
+   ```bash
+   docker compose -p krate-<edition> --env-file .env --profile sso \
+     exec -T keycloak-db pg_dump -Fc -U keycloak keycloak > keycloak-pre-identity.dump
+   chmod 600 keycloak-pre-identity.dump
+   ```
+
+   `<edition>` is `kraft` or `epc`. For an installation made before
+   `/opt/krate`, use the `KRATE_PROJECT` value from `.env` instead of
+   `krate-<edition>`.
+2. `./krate identity down`.
+3. Remove the old volume explicitly by name; nothing in `krate` removes it for
+   you:
+
+   ```bash
+   docker volume ls --filter label=com.docker.compose.volume=keycloak_db_data
+   docker volume rm krate-<edition>_keycloak_db_data
+   ```
+
+   This deletes every local Keycloak user and session of the old setup.
+4. `./krate identity up`. The database is pristine again: the missing identity
+   keys are filled in `.env`, the realm is created from the plan, and the
+   permanent admin is created.
+5. Recreate the local users with `./krate identity users add`.
+6. If Kafbat used Keycloak login (`KAFKA_UI_AUTH_CONFIG=runtime.yml`), run
+   `./krate auth configure <site.json>` and `./krate auth apply` again.
+   PingFederate brokering is not available in Phase 1 and Phase 2; it returns
+   in Phase 3, when the identity-provider plan is applied to the realm.
 
 ## Residual risks
 
@@ -457,9 +566,21 @@ the realm and the service accounts from the plan and `.env`.
   empty was tried and rejected by Keycloak 26.8.0 ("bootstrap-admin-username
   available only when bootstrap admin password is set"), so the master realm
   is created by `kc.sh bootstrap-admin user` in a one-off container instead.
-- The realm plan is imported once. Later changes to groups, token lifetimes or
-  session limits in `.env` do not reach an existing realm. Realm import
-  "is skipped" when the realm exists.
+- The realm plan is imported once. Realm import "is skipped" when the realm
+  exists. `identity up` reconciles only the `krate-ui` URLs afterwards; later
+  changes to groups, token lifetimes or session limits in `.env` do not reach
+  an existing realm.
+- Keycloak trusts `X-Forwarded-*` headers from any peer on the cluster
+  network: `KC_PROXY_HEADERS=xforwarded` is set and
+  `KC_PROXY_TRUSTED_ADDRESSES` is not. The 26.8.0 reverse proxy guide says:
+  "To ensure that proxy headers are used only from proxies you trust, set the
+  `proxy-trusted-addresses` option to a comma-separated list of IP
+  addresses", and "Without this restriction, clients could bypass the proxy
+  and send forged forwarded headers directly to Keycloak." Today the peers are
+  the cluster containers and `kafka-exporter`; Keycloak is not published on
+  the host, and the proxy overwrites the headers it forwards. Setting the
+  trusted addresses needs a fixed proxy address inside the Compose network,
+  which is part of owner decision 5.
 - The database TLS certificate is self-signed by a local CA with a fixed
   lifetime chosen at generation; nothing renews it automatically. The preflight
   warns within a day of expiry.
@@ -487,7 +608,9 @@ the realm and the service accounts from the plan and `.env`.
    the mismatch, or add a `krate identity` migration.
 5. Network separation: keep Keycloak and its database on the cluster network
    (current), or move them to an identity-only network in Phase 2 with the
-   proxy and Kafbat as the only peers.
+   proxy and Kafbat as the only peers. The same decision covers
+   `X-Forwarded-*` header trust: whether to give the proxy a fixed address and
+   set `KC_PROXY_TRUSTED_ADDRESSES` to it (see "Residual risks").
 6. Monitoring host ports 9090, 3100 and 3000 over plain HTTP: unchanged in
    Phase 1 pending the owner gate.
 7. Database TLS certificate lifetime and renewal procedure.

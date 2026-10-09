@@ -4,6 +4,8 @@ zk/.env
 kraft/.env
 zk/monitoring/.env
 epc/.env
+# temporary files of krate's atomic .env writes (six random characters; .env.template is longer)
+.env.??????
 
 # reference files not needed in repo
 docker-compose-ref.yml

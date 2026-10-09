@@ -46,7 +46,9 @@ make kafbat-ui ARCH=amd64
 ```
 
 The build pins the new image ID as `KAFKA_UI_IMAGE` in `kraft/.env.template`
-and `epc/.env.template`, and `./krate` carries that pin into `.env`.
+and `epc/.env.template`; the next `./krate` command that runs Compose (`start`,
+`status`, `health`, ...) carries that pin into `.env`. `config show`, `ui` and
+`help` do not touch `.env`.
 
 Use a connected build host with Python 3, Git, Docker, Node and npm. Upstream
 recommends Node 22. The builder pins upstream commit, pnpm and code generation

@@ -228,7 +228,7 @@ Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`)
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
 
-Settings live in `.env`. The `*_IMAGE` lines are the exception: each command resets them to the pins in `.env.template`, so a rebuilt Kafbat UI image or a newer package takes effect without editing `.env`. To use a different image, change `.env.template`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
+Settings live in `.env`. The `*_IMAGE` lines are the exception: every command that runs Docker Compose (`start`, `stop`, `status`, `health`, `logs`, `install`, `setup`, `identity ...`, `monitor up`, `auth apply`) first resets them to the pins in `.env.template`, so a rebuilt Kafbat UI image or a newer package takes effect without editing `.env`. Commands that only read or edit settings (`config`, `ui`, `credentials`, `help`) leave `.env` as it is. To use a different image, change `.env.template`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
 
 In the supplied KRaft and ZooKeeper setups, `uninstall --purge` deletes stored Kafka messages by removing their Docker storage volumes. EPC stores messages in host folders under `KAFKA_DATA_DIR` (default `/data`), so those messages remain after purge. Deleting EPC messages requires stopping the cluster and separately removing its broker folders. Purge is not part of the normal stop/start workflow.
 
@@ -242,17 +242,22 @@ operator flow is: `./krate setup` or `./krate start`, then
 
 `./krate identity up` generates the database TLS material and the realm, starts
 PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the
-`krate-cli` service account. `./krate identity users` manages local users;
-`./krate identity rotate`, `backup` and `restore` cover secrets and the
-database. The [identity foundation guide](sso/guides/identity-foundation.md)
-holds the inventory of projects, ports, volumes and credentials, the trust
-boundaries and every procedure.
+`krate-cli` service account. Until it has run, `./krate start` prints
+`Identity services skipped (run: krate identity up)` and starts the cluster
+without Keycloak. `./krate identity users` manages local users;
+`./krate identity rotate`, `backup`, `restore` and `recover-admin` cover
+secrets, the database and a lost admin login. The
+[identity foundation guide](sso/guides/identity-foundation.md) holds the
+inventory of projects, ports, volumes and credentials, the trust boundaries,
+every procedure and the upgrade steps for a Keycloak database from before
+`krate identity`.
 
 The SSO integration uses the same dark Kafbat login page for the shared Admin
 account and Keycloak SSO. Keycloak can connect to PingFederate; AD groups then
 determine Viewer and Admin access. SSO requires Compose 2.20.2 or newer.
 `./krate auth apply` validates the installation and reconciles only the UI
-service, using locally loaded images; it expects `identity up` to have run.
+service, using locally loaded images. It does not start Keycloak: when
+Keycloak is not ready it stops and tells you to run `./krate identity up`.
 Keycloak and PostgreSQL are included in both offline packages even when the
 SSO profile is inactive. See the
 [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and the
