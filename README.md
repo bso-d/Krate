@@ -97,15 +97,22 @@ The [releases page](https://github.com/bso-d/Krate/releases) holds two kinds of 
 | **Offline install package** | `package-kraft-vN`, `package-epc-vN` | `Offline install package` | A `.tar.gz` to copy to the VM, its `.sha256` checksum and the image lock file. Install it with `./krate install`. |
 | **Broker images** | `kraft-vX.Y.Z`, `zk-vX.Y.Z` | `Broker images` | References to container images on GHCR. Nothing to install on a VM; the default setups do not use these images. |
 
-Offline install packages published so far, all x86_64:
+Current offline install packages. Each includes Keycloak SSO and the Docker packages for its target OS:
+
+| Release | Edition | Packages |
+| --- | --- | --- |
+| [`package-kraft-v1`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v1) | KRaft, Ubuntu 24.04 | `krate-kraft-v1-amd64.tar.gz` (x86_64), `krate-kraft-v1-arm64.tar.gz` (ARM64) |
+| [`package-epc-v3`](https://github.com/bso-d/Krate/releases/tag/package-epc-v3) | EPC, RHEL 9 | `krate-epc-v3-amd64.tar.gz` (x86_64) |
+
+Earlier packages, published before the `package-` tags existed:
 
 | Release | Package |
 | --- | --- |
-| [`epc-v2`](https://github.com/bso-d/Krate/releases/tag/epc-v2) | RHEL/EPC with Keycloak SSO: `krate-epc-v2-amd64.tar.gz` |
-| [`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1) | RHEL/EPC: `kafka-epc-v1-amd64.tar.gz` |
-| [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | Archived ZooKeeper package: `kafka-zk-v5-amd64.tar.gz` |
+| [`epc-v2`](https://github.com/bso-d/Krate/releases/tag/epc-v2) | RHEL/EPC with Keycloak SSO, x86_64: `krate-epc-v2-amd64.tar.gz` |
+| [`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1) | RHEL/EPC, x86_64: `kafka-epc-v1-amd64.tar.gz` |
+| [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | Archived ZooKeeper package, x86_64: `kafka-zk-v5-amd64.tar.gz` |
 
-These were published before the `package-` tags existed. New KRaft and EPC packages are released as `package-kraft-vN` and `package-epc-vN`; see [Release an offline install package](#release-an-offline-install-package). Until a KRaft package is released, build it from source using the commands below. Existing downloads keep their original `kafka-*` names. New KRaft and EPC packages use `krate-*`; ZooKeeper keeps `kafka-zk-*`.
+New packages are released as `package-kraft-vN` and `package-epc-vN`; see [Release an offline install package](#release-an-offline-install-package). To target Ubuntu 22.04 or another combination, build a package from source using the commands below. Earlier downloads keep their original `kafka-*` names. KRaft and EPC packages use `krate-*`; ZooKeeper keeps `kafka-zk-*`.
 
 ## What you need
 
@@ -251,7 +258,7 @@ See the [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and
 For this checkout, build the customized image with `make kafbat-ui ARCH=amd64`
 before starting or bundling EPC or KRaft; see the [build notes](kafbat-ui/README.md).
 The resulting offline bundles include that image. EPC packages include SSO from
-`epc-v2`; KRaft packages include it from the first `package-kraft-vN` release.
+`epc-v2`, and KRaft packages from `package-kraft-v1`.
 
 ## Monitoring
 
