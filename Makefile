@@ -53,8 +53,9 @@ help:
 >zk edition.
 >
 >Targets:
->  make check                                     Run syntax, ShellCheck, Compose and offline-policy validation
+>  make check                                     Run syntax, ShellCheck, Compose, offline-policy and identity validation
 >  make offline-check                             Verify offline application defaults (Python 3 + Compose v2)
+>  make identity-check                            Verify the identity templates, realm plan and Compose wiring (Python 3 + Compose v2)
 >  make offline-smoke                             Test pinned Kafbat locally with networking disabled
 >  make sso-config VARIANT=epc SSO_SETTINGS=sso/site.json
 >                                                Generate opt-in SSO config (no activation)
@@ -87,7 +88,7 @@ help:
 >  VARIANT=kraft|epc       Which cluster the monitor-* targets act on
 >EOF
 
-.PHONY: offline-check
+.PHONY: offline-check identity-check
 .PHONY: sso-config
 .PHONY: dual-config kafbat-ui
 
@@ -100,10 +101,13 @@ dual-config:
 sso-config:
 >python3 sso/configure.py --app "$(SSO_APP)" --settings "$(SSO_SETTINGS)" --output "$(SSO_OUTPUT)"
 
-check: syntax lint compose-check offline-check
+check: syntax lint compose-check offline-check identity-check
 
 offline-check:
 >python3 scripts/check-offline.py
+
+identity-check:
+>python3 scripts/check-identity.py
 
 offline-smoke: offline-check
 >bash
@@ -252,8 +256,8 @@ bundle: offline-check
 >  if [[ "$$mode" != "zk" ]]; then
 >    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
->    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py "$$bundle_dir/sso/"
->    cp sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md "$$bundle_dir/docs/"
+>    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py sso/identity.py "$$bundle_dir/sso/"
+>    cp sso/guides/identity-foundation.md sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md "$$bundle_dir/docs/"
 >  fi
 >  # The CLI ships as ./krate everywhere except the frozen ZooKeeper edition,
 >  # whose published v5 bundle documents ./kafka.
