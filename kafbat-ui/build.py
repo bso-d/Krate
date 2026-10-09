@@ -19,7 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 REVISION = 'afc9c918e13c4422268a3a5b7933c7b448746c82'
 REPOSITORY = 'https://github.com/kafbat/kafka-ui.git'
 BASE_IMAGE = 'kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1'
-IMAGE = 'krate/kafka-ui:1.5.0-sso.4'
+# Runtime base: Temurin publishes its JDK source; upstream's Azul Zulu base does not.
+RUNTIME_IMAGE = 'eclipse-temurin:25-jre-alpine@sha256:3c0a9084927a221ccd1d007fcaf614465672c0af37aaa834c5184483afe56d61'
+RUNTIME_PACKAGES = ('gcompat', 'tzdata')  # upstream's apk add list
+IMAGE = 'krate/kafka-ui:1.5.0-sso.5'
 JDK_IMAGE = 'eclipse-temurin:25-jdk@sha256:119a3d18f160a3e7655a66034d0f43beee31cd7b3b9142d57a5de29772011de6'
 LOMBOK_SHA256 = '3488a4e9994c26596baaceebee58cad36a50e3bdaec5be72b5834d3c3b560306'
 AUTH_PATCH = ROOT / 'kafbat-ui/native-auth.patch'
@@ -61,6 +64,24 @@ def patch_jar(original, output, assets, classes):
     print('Verified: all entries outside the frontend and three patched authentication classes are unchanged.', flush=True)
 
 
+def fetch_runtime_packages(arch, directory):
+    """Download the upstream runtime packages the Temurin image lacks, for its own Alpine release."""
+    if directory.exists():
+        shutil.rmtree(directory)  # Only disposable output created by this builder.
+    directory.mkdir()
+    # Packages and dependencies apk would install or upgrade; ones already present are skipped.
+    script = ('set -eu; '
+              'names=$(apk add --simulate --no-cache "$@" | sed -nE "s/^[(][0-9]+[/][0-9]+[)] (Installing|Upgrading) ([^ ]+) .*/\\2/p"); '
+              'test -n "$names"; apk fetch --no-cache -o /out $names; chown -R "$OWNER" /out')
+    run('docker', 'run', '--rm', '--pull=never', '--platform', 'linux/' + arch, '--user', '0',
+        '-e', f'OWNER={os.getuid()}:{os.getgid()}', '-v', f'{directory.resolve()}:/out',
+        '--entrypoint', 'sh', RUNTIME_IMAGE, '-c', script, 'fetch', *RUNTIME_PACKAGES)
+    packages = sorted(directory.glob('*.apk'))
+    if not any(p.name.startswith('gcompat-') for p in packages):
+        raise ValueError('gcompat was not fetched for the runtime image')
+    return [{'file': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()} for p in packages]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch', choices=['amd64', 'arm64'], required=True)
@@ -85,6 +106,10 @@ def main():
                               '{{.Architecture}}'], capture_output=True, text=True)
     if inspect.returncode or inspect.stdout.strip() != args.arch:
         run('docker', 'pull', '--platform', 'linux/' + args.arch, BASE_IMAGE)
+    inspect = subprocess.run(['docker', 'image', 'inspect', RUNTIME_IMAGE, '--format',
+                              '{{.Architecture}}'], capture_output=True, text=True)
+    if inspect.returncode or inspect.stdout.strip() != args.arch:
+        run('docker', 'pull', '--platform', 'linux/' + args.arch, RUNTIME_IMAGE)
     frontend = source / 'frontend'
     schema = source / 'contract-typespec/api'
     run(*PNPM, 'install', '--frozen-lockfile', '--ignore-scripts', cwd=frontend)
@@ -153,11 +178,17 @@ def main():
         'Modifies login presentation and authentication to combine local login with native OIDC.\n')
     shutil.copyfile(PATCH, context / PATCH.name)
     shutil.copyfile(AUTH_PATCH, context / AUTH_PATCH.name)
+    if f'ARG KRATE_RUNTIME_IMAGE={RUNTIME_IMAGE}\n' not in (ROOT / 'kafbat-ui/Dockerfile').read_text():
+        raise ValueError('kafbat-ui/Dockerfile runtime image does not match RUNTIME_IMAGE')
+    runtime_packages = fetch_runtime_packages(args.arch, context / 'apk')
     (context / 'provenance.json').write_text(json.dumps({
         'upstream': REPOSITORY, 'revision': REVISION, 'base_image': BASE_IMAGE,
         'base_image_id': run('docker', 'image', 'inspect', BASE_IMAGE, '--format', '{{.Id}}', capture=True),
         'patch_sha256': hashlib.sha256(PATCH.read_bytes()).hexdigest(),
         'auth_patch_sha256': hashlib.sha256(AUTH_PATCH.read_bytes()).hexdigest(),
+        'runtime_image': RUNTIME_IMAGE,
+        'runtime_image_id': run('docker', 'image', 'inspect', RUNTIME_IMAGE, '--format', '{{.Id}}', capture=True),
+        'runtime_packages': runtime_packages,
         'jdk_image': JDK_IMAGE, 'lombok_sha256': LOMBOK_SHA256,
         'generator_sha256': GENERATOR_SHA256, 'architecture': args.arch,
         'node': run('node', '--version', capture=True), 'image': IMAGE,
