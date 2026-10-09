@@ -629,3 +629,23 @@ clean:
 
 dist-clean:
 >rm -rf "$(DIST_DIR)" "$(DOCKER_OFFLINE_DIR)"
+
+# Corresponding source for the copyleft components in a package's container images
+# (see LICENSE-SOURCES.md). Uses the package's images.lock.tsv when it has been built,
+# otherwise the digest-pinned images in the edition's .env.template files.
+#   make sources MODE=kraft ARCH=amd64 VERSION=v1
+.PHONY: sources
+sources:
+>[[ "$(VERSION)" =~ ^v[0-9]+$$ ]] || { echo "VERSION must be in the form vN, e.g. VERSION=v1" >&2; exit 1; }
+>[[ "$(MODE)" =~ ^(zk|kraft|epc)$$ ]] || { echo "MODE must be kraft, epc or zk" >&2; exit 1; }
+>[[ "$(ARCH)" =~ ^(amd64|arm64)$$ ]] || { echo "ARCH must be amd64 or arm64" >&2; exit 1; }
+>bundle_name="krate-$(MODE)-$(VERSION)-$(ARCH)"
+>[[ "$(MODE)" != zk ]] || bundle_name="kafka-zk-$(VERSION)-$(ARCH)"
+>input=(--templates --arch "$(ARCH)")
+>for lock in "$(DIST_DIR)/$${bundle_name}.tar.gz.images.lock.tsv" \
+>            "$(DIST_DIR)/release/package-$(MODE)-$(VERSION)/$${bundle_name}.tar.gz.images.lock.tsv"; do
+>  if [[ -f "$$lock" ]]; then input=(--lock "$$lock"); break; fi
+>done
+>echo "==> Collecting corresponding source for $${bundle_name} ($${input[*]})"
+>python3 scripts/collect-sources.py --edition "$(MODE)" "$${input[@]}" \
+>  --out "$(DIST_DIR)/sources/$${bundle_name}" --archive "$(DIST_DIR)/$${bundle_name}-sources.tar"
