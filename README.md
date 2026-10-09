@@ -95,7 +95,7 @@ The [releases page](https://github.com/bso-d/Krate/releases) holds two kinds of 
 
 | Kind | Tag | Title starts with | What you get |
 | --- | --- | --- | --- |
-| **Offline install package** | `package-kraft-vN`, `package-epc-vN` | `Offline install package` | A `.tar.gz` to copy to the VM, its `.sha256` checksum and the image lock file. Install it with `./krate install`. A `-sources.tar` beside each package holds the corresponding source of its copyleft components. |
+| **Offline install package** | `package-kraft-vN`, `package-epc-vN` | `Offline install package` | A `.tar.gz` to copy to the VM, its `.sha256` checksum and the image lock file. Install it with `./krate install`. From `package-kraft-v2` and `package-epc-v4` on, a `-sources.tar` beside each package holds the corresponding source of its copyleft components; earlier package releases have none. |
 | **Broker images** | `kraft-vX.Y.Z`, `zk-vX.Y.Z` | `Broker images` | References to container images on GHCR. Nothing to install on a VM; the default setups do not use these images. |
 
 Current offline install packages. Each includes Keycloak SSO, the Grafana and Perses monitoring paths, and the Docker packages for its target OS. Upgrade steps from the earlier packages are in each release's notes:
@@ -389,7 +389,7 @@ Krate is licensed under the [GNU Affero General Public License v3.0](LICENSE) (`
 
 The third-party software Krate runs and packages, listed under [Component credits](#component-credits), keeps its own license. Offline packages include `LICENSE`, `LICENSE-SOURCES.md` and the license and notice files for those components; see `monitoring/fluent-bit/vendor/` and `monitoring/perses/vendor/notices/`.
 
-Each KRaft and EPC package release also carries the complete corresponding source of the copyleft components in its container images, as a `-sources.tar` asset; see [LICENSE-SOURCES.md](LICENSE-SOURCES.md).
+From `package-kraft-v2` and `package-epc-v4` on, each KRaft and EPC package release also carries the complete corresponding source of the copyleft components in its container images, as a `-sources.tar` asset; see [LICENSE-SOURCES.md](LICENSE-SOURCES.md).
 
 **Exception: the frozen ZooKeeper edition.** Its upstream Confluent and Kafbat images contain six copyleft components whose source is not publicly available (two Azul Zulu JDKs, three old RHEL 8 packages and `confluent-docker-utils`). Krate does not rebuild those images, so a ZooKeeper package ships without the source of those six components. They are listed in [LICENSE-SOURCES.md](LICENSE-SOURCES.md#unresolved-components) and in every ZooKeeper source archive.
 

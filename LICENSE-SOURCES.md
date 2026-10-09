@@ -9,8 +9,9 @@ Kafka, Kafbat UI on Eclipse Temurin, Keycloak, PostgreSQL, nginx, Prometheus, Al
 Fluent Bit, Perses, VictoriaLogs, OAuth2 Proxy, node-exporter, kafka-exporter, the
 Python runtime for log discovery and, in the frozen ZooKeeper edition, Confluent
 Platform). Those images contain components under copyleft licences. For every one of
-them, each package release ships the **complete corresponding source** as a separate
-release asset. There is no written offer: the source is published next to the package.
+them, each package release from `package-kraft-v2` and `package-epc-v4` on ships the
+**complete corresponding source** as a separate release asset; earlier package releases
+did not include one. There is no written offer: the source is published next to the package.
 
 ## Where to find it
 
