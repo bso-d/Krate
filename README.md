@@ -222,6 +222,8 @@ Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`)
 | `./krate lag my-group` | Shows that backlog for one group |
 | `./krate stop` / `./krate start` | Stops or starts services, keeping stored messages |
 | `./krate down` | Removes containers while keeping stored messages |
+| `./krate identity up` | Starts the Keycloak identity service and its database, creates its admin on first start |
+| `./krate identity status` / `./krate identity users list` | Shows identity service health; lists local users |
 | `./krate help` | Lists the available commands |
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
@@ -230,17 +232,30 @@ Settings live in `.env`. The `*_IMAGE` lines are the exception: each command res
 
 In the supplied KRaft and ZooKeeper setups, `uninstall --purge` deletes stored Kafka messages by removing their Docker storage volumes. EPC stores messages in host folders under `KAFKA_DATA_DIR` (default `/data`), so those messages remain after purge. Deleting EPC messages requires stopping the cluster and separately removing its broker folders. Purge is not part of the normal stop/start workflow.
 
-## SSO for EPC and regular Krate
+## Identity and SSO for EPC and regular Krate
 
-The SSO integration uses the same dark Kafbat login page for the
-shared Admin account and Keycloak SSO. Keycloak connects to PingFederate.
-AD groups determine Viewer and Admin access. Keycloak and its database use
-the `sso` profile in each release's existing Compose file.
-SSO requires Compose 2.20.2 or newer. `./krate auth apply` validates the
-installation and reconciles only the identity/UI services, using locally loaded
-images. Keycloak and PostgreSQL are included in both offline packages even when
-the SSO profile is inactive.
-See the [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and
+Each edition includes Keycloak as a local identity service with a PostgreSQL
+database, both in the `sso` profile of the edition's Compose file. The
+operator flow is: `./krate setup` or `./krate start`, then
+`./krate identity up`, then (Phase 2) `./krate auth configure` and
+`./krate auth apply`.
+
+`./krate identity up` generates the database TLS material and the realm, starts
+PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the
+`krate-cli` service account. `./krate identity users` manages local users;
+`./krate identity rotate`, `backup` and `restore` cover secrets and the
+database. The [identity foundation guide](sso/guides/identity-foundation.md)
+holds the inventory of projects, ports, volumes and credentials, the trust
+boundaries and every procedure.
+
+The SSO integration uses the same dark Kafbat login page for the shared Admin
+account and Keycloak SSO. Keycloak can connect to PingFederate; AD groups then
+determine Viewer and Admin access. SSO requires Compose 2.20.2 or newer.
+`./krate auth apply` validates the installation and reconciles only the UI
+service, using locally loaded images; it expects `identity up` to have run.
+Keycloak and PostgreSQL are included in both offline packages even when the
+SSO profile is inactive. See the
+[IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and the
 [operator setup guide](sso/guides/dual-login.md).
 
 From a checkout, `./krate start` builds the customized Kafbat image when it is
@@ -326,7 +341,7 @@ make help
 make check
 ```
 
-`make check` checks Bash syntax, runs ShellCheck, and validates the Compose files. It needs GNU Make, Bash, ShellCheck, and the Docker Compose plugin. On macOS, run `gmake check`. `make test` and `make validate` are aliases for these same checks; they do not start a cluster.
+`make check` checks Bash syntax, runs ShellCheck, validates the Compose files, the offline defaults and the identity templates and realm plan. It needs GNU Make, Bash, ShellCheck, Python 3, and the Docker Compose plugin. On macOS, run `gmake check`. `make test` and `make validate` are aliases for these same checks; they do not start a cluster.
 
 The [broker CI workflow](.github/workflows/broker-ci.yml) separately builds the broker images and checks message delivery on GitHub Actions. Use the installation and operations guides for checks on your target host.
 

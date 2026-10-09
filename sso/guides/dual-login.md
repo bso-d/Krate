@@ -5,6 +5,12 @@ These steps apply to EPC and regular Krate. Both use their existing
 Kafbat uses Keycloak for SSO. Keycloak sends the user to PingFederate.
 The shared Admin login stays in Kafbat and does not use Keycloak.
 
+Keycloak itself is started and administered with `./krate identity`; the
+[identity foundation guide](identity-foundation.md) describes that service,
+its inventory, credentials and recovery. The order is: `./krate setup` or
+`./krate start`, then `./krate identity up`, then `./krate auth configure` and
+`./krate auth apply` as described here.
+
 ## Before you start
 
 SSO requires the Docker Compose plugin **2.20.2 or newer**. The packaged Ubuntu
@@ -33,9 +39,10 @@ it to check PingFederate TLS. Do not turn off certificate checks.
    `KEYCLOAK_PUBLIC_URL` (`public_url` plus `/identity`) in `.env`, and
    `KAFKA_UI_FQDN` to the `public_url` host when that is still blank.
 3. Nothing else needs setting by hand. `./krate` generates the shared Admin
-   password and the Keycloak admin, database and Kafbat client secrets (24
-   random characters each, all different) before Keycloak's database first
-   starts, and keeps `.env` at mode 600. `./krate auth apply` asks for the one
+   password and the Keycloak admin, database, Kafbat client and `krate-cli`
+   client secrets (24 random characters each, all different) before Keycloak's
+   database first starts, and keeps `.env` at mode 600. After that first start,
+   change a Keycloak secret only with `./krate identity rotate KEY`. `./krate auth apply` asks for the one
    value it cannot generate, the client secret PingFederate issued for
    Keycloak, or set it beforehand with
    `./krate config set PING_KEYCLOAK_CLIENT_SECRET=<secret-from-IAM>`.
@@ -45,17 +52,23 @@ it to check PingFederate TLS. Do not turn off certificate checks.
    mode first. Provision a matching TLS certificate and private key at
    `certs/server.crt` and `certs/server.key` (private key mode 600). The certificate must match
    `public_url` and remain valid for at least another day. Users must trust its
-   issuing CA. Then run `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml`.
+   issuing CA. Run `./krate identity up` if it has not run yet: it generates
+   the database TLS material, starts PostgreSQL and Keycloak, creates the
+   permanent Keycloak admin and sets `KEYCLOAK_ENABLED=true`. Check it with
+   `./krate identity status`. Then run
+   `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml`.
 6. Run `./krate auth apply`. Preflight verifies credentials, configuration, TLS,
    the Compose version, running brokers and locally available service images.
-   It starts PostgreSQL and waits for database health, starts Keycloak and waits
-   for its readiness endpoint, then recreates Kafbat and waits for Kafbat/nginx
-   health, then verifies HTTPS discovery through the public identity route. The
-   installation host must resolve and reach its own public application URL. Each service wait is bounded to 180 seconds; public discovery has a 15-second
-   deadline. It never pulls images, builds
-   assets, reconciles brokers or deletes volumes. On failure the command exits
-   nonzero; inspect `./krate status` and service logs before retrying. Avoid
-   sharing logs containing tokens or personal information.
+   It requires the identity service from `./krate identity up` (it runs that
+   logic itself when needed, or stops and tells you to run it), then recreates
+   Kafbat and waits for Kafbat/nginx health, then verifies HTTPS discovery
+   through the public identity route. The installation host must resolve and
+   reach its own public application URL. Each service wait is bounded to 180
+   seconds; public discovery has a 15-second deadline. It never pulls images,
+   builds assets, reconciles brokers or deletes volumes. On failure the command
+   exits nonzero; inspect `./krate status`, `./krate identity status` and
+   service logs before retrying. Avoid sharing logs containing tokens or
+   personal information.
 
 Keycloak health runs on its internal management port 9000 with metrics enabled
 for database readiness. No identity or database port is published on the host.
@@ -79,8 +92,12 @@ separators, limits identity requests per client address, and logs them
 without query strings.
 
 Administer Keycloak only from the installation host. Run these commands in the
-installation directory. Use the admin CLI in the Keycloak container. The CLI asks for the `KEYCLOAK_ADMIN_PASSWORD`; do not
-type it on the command line:
+installation directory. Local users in realm `krate` are managed with
+`./krate identity users list|add|disable|enable|reset-password|groups`; that
+is the supported path and it does not need the master admin. Use the admin CLI
+in the Keycloak container only for realm-level changes such as the ones below.
+The CLI asks for the `KEYCLOAK_ADMIN_PASSWORD`; do not type it on the command
+line:
 
 ```bash
 docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh config credentials \
@@ -106,8 +123,9 @@ docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh update rea
 ## Updates and recovery
 
 Keycloak stores users, broker links and sessions in the named PostgreSQL volume.
-Back up that volume with the approved database process. Realm import only
-creates a realm when it does not already exist. Editing the generated realm
+Back it up with `./krate identity backup <file>` (encrypted `pg_dump`) and
+restore with `./krate identity restore <file>`; see the identity foundation
+guide. Realm import only creates a realm when it does not already exist. Editing the generated realm
 file does not change an existing realm. Review changes with IAM and apply them
 through Keycloak administration or a controlled realm migration.
 
@@ -130,19 +148,18 @@ actual enterprise federation acceptance is performed on the production network.
 
 ## Backup, restore and upgrades
 
-Before an identity upgrade, take a PostgreSQL logical backup using the same
-manifest. Protect the backup as identity data and encrypt it under site policy:
-
-```bash
-umask 077
-docker compose --profile sso exec -T keycloak-db pg_dump -U keycloak -d keycloak > keycloak-backup.sql
-```
+Before an identity upgrade, take a backup. `./krate identity backup <file>`
+writes an encrypted `pg_dump` (AES-256, passphrase from
+`KRATE_BACKUP_PASSPHRASE` or prompted) with mode 600. Protect the backup and
+its passphrase as identity data under site policy.
 
 For recovery, use a separately provisioned recovery host with the same pinned
-PostgreSQL and Keycloak versions. Restore into its empty database with
-`docker compose --profile sso exec -T keycloak-db psql -U keycloak -d keycloak < keycloak-backup.sql`
-before starting Keycloak. Never restore over an active production database.
-Validate shared login, identity login and roles there before a cutover.
+PostgreSQL and Keycloak versions and the same `.env` secrets. Run
+`./krate identity up` there, then `./krate identity down` and
+`./krate identity restore <file>`; `restore` refuses to run while Keycloak is
+up and verifies readiness and the admin login afterwards. Never restore over
+an active production database. Validate shared login, identity login and roles
+there before a cutover.
 
 Realm imports do not update existing realms. Use the approved Keycloak admin
 procedure for group mappings, client changes and session-policy changes; back up
@@ -163,8 +180,9 @@ cd ../epc && ./krate package v3 amd64    # RHEL 9 Docker packages
 ```
 
 The builder verifies all Compose profile images are saved and recorded in
-`images.lock.tsv`, including Keycloak and PostgreSQL, and ships both activation
-helpers. Site `.env`, generated realm/runtime files, certificates and credentials
+`images.lock.tsv`, including Keycloak and PostgreSQL, and ships the activation
+and identity helpers (`sso/activate.sh`, `sso/preflight.py`, `sso/identity.py`)
+with this guide and the identity foundation guide under `docs/`. Site `.env`, generated realm/runtime files, certificates and credentials
 are excluded. Verify the package SHA-256 before extraction. Runtime SSO needs
 only these saved images; PingFederate is an external site service and is never
 packaged.
