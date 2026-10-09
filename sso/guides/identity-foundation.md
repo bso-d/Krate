@@ -208,9 +208,19 @@ the authoritative store wins and `./krate` fails to log in.
 | `KRATE_BACKUP_PASSPHRASE` | the operator | never stored | not applicable |
 
 Placeholders in `.env.template` are only empty or `REPLACE_ME`. `./krate`
-fills them before the database first starts. A value of `changeme` is never
-replaced silently: `setup`/`start` warn, and `identity up`, `auth apply` and
-the preflight refuse.
+fills them before the database first starts. The old template default
+`changeme` counts as a placeholder only while nothing uses it: `setup`/`start`
+replace it with a generated password as long as no Kafbat UI container exists,
+and `monitor up` does the same for Grafana while its volume does not exist.
+Once a value is live, `start` refuses to run with `changeme` until you set a
+password (or empty the key to have one generated), `monitor up` refuses until
+the Grafana admin password is changed in Grafana and recorded, and `identity
+up`, `auth apply` and the preflight refuse it as well. A live value is never
+replaced silently.
+
+`start`, `stop`, `restart`, `down`, `install` and `uninstall` take the identity
+lock once `KEYCLOAK_ENABLED=true` (or `runtime.yml` is selected), so they wait
+for a running `identity backup`, `restore`, `rotate` or `recover-admin`.
 
 ## Trust boundaries
 

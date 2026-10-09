@@ -323,6 +323,25 @@ deploy_release() {
   fi
 }
 
+# The old template default `changeme` is a placeholder only while nothing uses
+# it: Kafbat reads KAFKA_UI_PASSWORD at every container start, so once a UI
+# container exists the value is live and must be changed deliberately. Before
+# that, it is cleared so a password gets generated like any other placeholder.
+refuse_live_changeme() {
+  [[ "$(env_value KAFKA_UI_PASSWORD)" == changeme ]] || return 0
+  local existing
+  existing="$(docker ps -aq --filter "label=com.docker.compose.project=$(cluster_project)" \
+    --filter "label=com.docker.compose.service=kafka-ui")" || die "Cannot ask Docker whether the Kafbat UI exists; is the Docker daemon running?"
+  if [[ -n "$existing" ]]; then
+    die "KAFKA_UI_PASSWORD is changeme (insecure) and the Kafbat UI was started with it.
+Set a new password: krate config set KAFKA_UI_PASSWORD=<value>
+or empty it so krate generates one: krate config set KAFKA_UI_PASSWORD=
+then: krate start"
+  fi
+  set_env_file_value "$ENV_FILE" KAFKA_UI_PASSWORD ""
+  warn "KAFKA_UI_PASSWORD was the template default changeme; generating a password instead"
+}
+
 # Passwords and secrets of the cluster .env. Keycloak keeps its admin, database
 # and client secrets from its first start, so those are generated only while
 # its database is known to be pristine; when that cannot be told, the cluster
@@ -331,6 +350,7 @@ deploy_release() {
 # `krate auth apply`.
 generate_secrets() {
   local keys=(KAFKA_UI_PASSWORD) generated state
+  refuse_live_changeme
   state="$(identity_state)" || exit 1
   case "${state%% *}" in
     pristine) keys+=("${IDENTITY_KEYS[@]}") ;;
@@ -355,6 +375,12 @@ prepare_monitor_env() {
   chmod 600 "$env_file"
   sync_image_pins "$env_file" "$MONITOR_DIR/.env.template"
   if ! compose_volume_exists "krate-${KRATE_VARIANT}-monitoring" grafana_data; then
+    # No Grafana data yet: the old template default is not in use anywhere, so
+    # it is a placeholder and a password gets generated.
+    if [[ "$(env_value_file "$env_file" GRAFANA_PASSWORD)" == changeme ]]; then
+      set_env_file_value "$env_file" GRAFANA_PASSWORD ""
+      warn "GRAFANA_PASSWORD was the template default changeme; generating a password instead"
+    fi
     keys+=(GRAFANA_PASSWORD)
   else
     # Grafana keeps the password its volume was created with; .env cannot
@@ -638,6 +664,13 @@ require_sso_compose() {
 # Kafbat is in runtime.yml mode (its SSO login needs Keycloak).
 identity_profile_enabled() {
   [[ "$(env_value KEYCLOAK_ENABLED)" == true || "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml ]]
+}
+
+# Lifecycle commands reach the identity containers once the profile is on, so
+# they hold the identity lock: none of them can stop or recreate Keycloak or
+# its database while backup, restore, rotate or recover-admin is running.
+identity_lock_if_enabled() {
+  if [[ -f "$ENV_FILE" ]] && identity_profile_enabled; then identity_lock; fi
 }
 
 # Compose with the sso profile always on, so the identity services can be
@@ -1792,6 +1825,7 @@ port_in_use() {
 # ─── install ──────────────────────────────────────────────────────────────────
 cmd_install() {
   local from=""
+  identity_lock_if_enabled
   if [[ "${1:-}" == --from ]]; then
     [[ -d "${2:-}" ]] || die "Usage: krate install [--from <earlier installation directory>]"
     from="$(cd "$2" && pwd)"
@@ -1868,6 +1902,7 @@ cmd_load_images() {
 
 # ─── start ────────────────────────────────────────────────────────────────────
 cmd_start() {
+  identity_lock_if_enabled
   prepare
   ensure_data_dirs
   info "Starting cluster..."
@@ -1879,6 +1914,7 @@ cmd_start() {
 # ─── stop ─────────────────────────────────────────────────────────────────────
 cmd_stop() {
   require_compose; require_compose_file
+  identity_lock_if_enabled
   info "Stopping cluster (containers paused, data preserved)..."
   compose_cmd stop
   ok "Stopped"
@@ -1887,6 +1923,7 @@ cmd_stop() {
 # ─── restart ──────────────────────────────────────────────────────────────────
 cmd_restart() {
   require_compose; require_compose_file; require_env
+  identity_lock_if_enabled
   ensure_cert   # proxy won't start without a TLS cert (e.g. after a cert swap)
   local svc="${1:-}"
   if [[ -n "$svc" ]]; then
@@ -1902,6 +1939,7 @@ cmd_restart() {
 # ─── down ─────────────────────────────────────────────────────────────────────
 cmd_down() {
   require_compose; require_compose_file
+  identity_lock_if_enabled
   info "Removing containers (named volumes preserved)..."
   compose_cmd down
   ok "Containers removed. Run: krate start"
@@ -2119,6 +2157,7 @@ cmd_config() {
 # ─── uninstall ────────────────────────────────────────────────────────────────
 cmd_uninstall() {
   require_compose; require_compose_file
+  identity_lock_if_enabled
 
   local purge=false
   [[ "${1:-}" == "--purge" ]] && purge=true
@@ -2313,6 +2352,13 @@ env_value_file() {
 monitor_prepare() {
   local env_file="$MONITOR_DIR/.env"
   prepare_monitor_env
+  # prepare_monitor_env only warns here, because it also runs on cluster start;
+  # the monitoring stack itself does not start on the insecure default.
+  if [[ "$(env_value_file "$env_file" GRAFANA_PASSWORD)" == changeme ]]; then
+    die "GRAFANA_PASSWORD is changeme (insecure) and Grafana's volume exists with it.
+Change it in Grafana (docker exec <grafana container> grafana cli admin reset-admin-password <new>),
+record it with: krate config set GRAFANA_PASSWORD=<new>, then: krate monitor up"
+  fi
   mkdir -p "$MONITOR_DIR/auth/perses"
   python3 - "$env_file" <<'PY' || die "monitoring/.env is not ready for the Perses stack (see above)."
 import re, sys
