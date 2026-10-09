@@ -74,7 +74,15 @@ and icons and must be re-checked when Perses is upgraded.
 
 Switching modes: change `PERSES_AUTH_MODE` and run `./krate monitor up`. The CLI
 re-renders configuration and recreates the affected services. Grants from the
-previous mode are removed when the guard starts.
+previous mode are removed:
+
+- To `native` or `gateway`: the guard removes the local admin's grant and every
+  grant it manages when it starts, before it reports healthy.
+- To `local`: the CLI first removes OAuth2 Proxy and the guard; then the
+  `perses-seed` step removes the SSO role bindings, the guard's service binding
+  and the SSO users, including their place in project owner bindings. Perses
+  signs sessions with a key that does not change between modes, so a session
+  from an SSO mode stays signed-in but has no access left.
 
 ### Configuration and secrets
 

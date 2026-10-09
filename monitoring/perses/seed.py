@@ -6,6 +6,9 @@ edits stay until the shipped file changes. Perses provisioning overwrites
 on every interval, so dashboards are seeded instead: a missing dashboard is
 created, and an existing one is replaced only when its shipped file changed
 since the last seed. Runs as the one-shot perses-seed service.
+
+In local mode it first removes the access an earlier SSO mode left behind
+(see purge_sso).
 """
 import base64
 import hashlib
@@ -18,6 +21,9 @@ import time
 from urllib.parse import quote, urlencode
 
 PROJECT = 'krate'
+# Bindings the SSO access guard manages, and the guard's own service binding.
+MANAGED_BINDINGS = ('krate-admin-', 'krate-viewer-')
+SERVICE_BINDING = 'krate-sync'
 
 
 class Perses:
@@ -74,6 +80,68 @@ def wait_ready(perses, seconds=180):
     raise RuntimeError('Perses did not become ready')
 
 
+def expect(status, allowed, what):
+    if status not in allowed:
+        raise RuntimeError('%s failed with HTTP %d' % (what, status))
+
+
+def strip_users(perses, bindings, users, base):
+    """Remove users from each binding; delete a binding left without subjects."""
+    changed = 0
+    for binding in bindings or []:
+        subjects = binding.get('spec', {}).get('subjects') or []
+        remaining = [s for s in subjects if not (s.get('kind') == 'User' and s.get('name') in users)]
+        if len(remaining) == len(subjects):
+            continue
+        target = base + quote(binding['metadata']['name'], safe='')
+        if remaining:
+            binding['spec']['subjects'] = remaining
+            expect(perses.request('PUT', target, binding)[0], (200,), 'updating ' + target)
+        else:
+            expect(perses.request('DELETE', target)[0], (200, 204, 404), 'deleting ' + target)
+        changed += 1
+    return changed
+
+
+def purge_sso(perses):
+    """Local mode: remove every grant and user an SSO mode created.
+
+    Perses signs tokens with a key derived from its encryption key, which stays
+    the same across modes, so an SSO user's token is still valid after a switch
+    to local mode, where no gateway check runs. Such a token carries only the
+    access granted by role bindings, so the managed bindings, the guard's
+    service binding and the SSO users (and their place in any other binding,
+    including project owner bindings) are removed.
+    """
+    status, users = perses.request('GET', '/api/v1/users')
+    expect(status, (200,), 'listing users')
+    sso = {u['metadata']['name'] for u in users or [] if (u.get('spec') or {}).get('oauthProviders')}
+    status, bindings = perses.request('GET', '/api/v1/globalrolebindings')
+    expect(status, (200,), 'listing global role bindings')
+    removed, kept = 0, []
+    for binding in bindings or []:
+        name = binding['metadata']['name']
+        if name.startswith(MANAGED_BINDINGS) or name == SERVICE_BINDING:
+            target = '/api/v1/globalrolebindings/' + quote(name, safe='')
+            expect(perses.request('DELETE', target)[0], (200, 204, 404), 'deleting ' + target)
+            removed += 1
+        else:
+            kept.append(binding)
+    stripped = strip_users(perses, kept, sso, '/api/v1/globalrolebindings/')
+    status, projects = perses.request('GET', '/api/v1/projects')
+    expect(status, (200,), 'listing projects')
+    for project in projects or []:
+        base = '/api/v1/projects/%s/rolebindings' % quote(project['metadata']['name'], safe='')
+        status, project_bindings = perses.request('GET', base)
+        expect(status, (200,), 'listing ' + base)
+        stripped += strip_users(perses, project_bindings, sso, base + '/')
+    for user in sorted(sso):
+        target = '/api/v1/users/' + quote(user, safe='')
+        expect(perses.request('DELETE', target)[0], (200, 204, 404), 'deleting ' + target)
+    print('perses-seed: local mode removed %d SSO bindings, %d SSO users and SSO users from %d other bindings'
+          % (removed, len(sso), stripped))
+
+
 def seed(perses, directory, ledger_path):
     ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
     deadline = time.monotonic() + 120
@@ -108,14 +176,19 @@ def seed(perses, directory, ledger_path):
     print('perses-seed: %d created, %d updated from changed files, %d kept with any UI edits' % (created, updated, kept))
 
 
+def run(perses, mode, env, directory, ledger_path):
+    wait_ready(perses)
+    perses.login(mode, env)
+    if mode == 'local':
+        purge_sso(perses)
+    seed(perses, directory, ledger_path)
+
+
 def main():
     env = dict(os.environ)
     mode = env.get('PERSES_AUTH_MODE', 'local')
-    perses = Perses()
     try:
-        wait_ready(perses)
-        perses.login(mode, env)
-        seed(perses, '/etc/krate/perses/dashboards', Path('/var/lib/krate-perses-seed/seeded.json'))
+        run(Perses(), mode, env, '/etc/krate/perses/dashboards', Path('/var/lib/krate-perses-seed/seeded.json'))
     except (RuntimeError, KeyError, OSError, ValueError) as exc:
         print('perses-seed: ' + str(exc), file=sys.stderr)
         return 1

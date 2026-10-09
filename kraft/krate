@@ -654,6 +654,11 @@ cmd_monitor() {
       command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
       [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]] || die "Perses HTTPS needs $CERT_CRT and $CERT_KEY — run: krate gen-cert"
       monitor_prepare
+      # Compose leaves a dropped profile's services running. In local mode remove
+      # the SSO services first, so the previous mode's guard cannot act on Perses.
+      if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
+        monitor_compose rm -s -f oauth2-proxy perses-sync >/dev/null
+      fi
       monitor_compose up -d
       python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
       echo ""
