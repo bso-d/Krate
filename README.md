@@ -128,15 +128,14 @@ Choose the package for the target VM's processor: `amd64` means x86_64; `arm64` 
 
 ## Start on a connected machine
 
-1. Clone the repository and create the KRaft settings file.
+1. Clone the repository.
 
    ```bash
    git clone https://github.com/bso-d/Krate.git
    cd Krate/kraft
-   cp .env.template .env
    ```
 
-2. Edit `.env`. Set `KAFKA_UI_USER` and `KAFKA_UI_PASSWORD` to your own login details. Set `KAFKA_UI_FQDN` to the hostname you will use to open the UI. The default login is `admin` / `changeme`; replace it before exposing the UI.
+2. Optionally set the UI hostname, for example `./krate config set KAFKA_UI_FQDN=kafka.example.com`. Left blank, it is this machine's hostname.
 
 3. Start the cluster and check it.
 
@@ -147,7 +146,7 @@ Choose the package for the target VM's processor: `amd64` means x86_64; `arm64` 
    ./krate ui
    ```
 
-Docker downloads the images on this first run. When startup is complete, `health` should report healthy services. `ui` prints the address and login details; open that HTTPS address to view the four brokers in Kafbat UI.
+The first `start` creates `.env` from `.env.template` and generates the UI password and Keycloak secrets; nothing needs editing by hand. Docker downloads the images on this first run. When startup is complete, `health` should report healthy services. `ui` prints the address and login details; open that HTTPS address to view the four brokers in Kafbat UI.
 
 The generated certificate is self-signed, so the browser will show a trust warning. You can trust `certs/server.crt` or supply a certificate trusted by your browser.
 
@@ -206,10 +205,9 @@ Copy the package and its `.sha256` file to the VM. For the KRaft package built a
 sha256sum -c krate-kraft-v1-amd64.tar.gz.sha256
 tar -xzf krate-kraft-v1-amd64.tar.gz
 cd krate-kraft-v1-amd64
-cp .env.template .env
 ```
 
-The checksum should report `OK`. Edit `.env` to set your UI login and hostname, as in the connected setup.
+The checksum should report `OK`. `install` creates `.env` and generates the passwords, as in the connected setup.
 
 If Docker is missing and you included its packages, run `./krate docker-install` first. It needs administrator access. Then run:
 
@@ -220,7 +218,7 @@ If Docker is missing and you included its packages, run `./krate docker-install`
 ./krate ui
 ```
 
-`doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images, creates a UI certificate if needed, and starts the cluster.
+`doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, creates `.env` with generated passwords, loads the saved images, creates a UI certificate if needed, and starts the cluster. `ui` prints the login.
 
 For a downloaded ZooKeeper package, use `./kafka`. For EPC, set `KAFKA_ADVERTISED_HOST` for clients on other machines and review the data directory before the first start.
 
@@ -267,7 +265,7 @@ The resulting offline bundles include that image. EPC packages include SSO from
 
 Krate and EPC each include monitoring files in their package. Prometheus collects measurements and evaluates alert rules, and a host exporter supplies disk, CPU, and memory measurements. Fluent Bit collects container logs. Two dashboard and alerting paths run side by side: Grafana with Loki and Grafana email, and Perses (HTTPS) with VictoriaLogs and Alertmanager email. See the [monitoring guide](monitoring/README.md).
 
-Before starting it, copy `monitoring/.env.template` to `monitoring/.env`, change the Grafana login and set `PERSES_ADMIN_PASSWORD`. Perses uses the cluster certificate in `certs/`. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
+`monitor up` creates `monitoring/.env` and generates the Grafana and Perses admin passwords; `monitor ui` shows them. Perses uses the cluster certificate in `certs/`. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
 
 ```bash
 ./krate monitor up

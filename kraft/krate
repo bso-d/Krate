@@ -85,13 +85,9 @@ require_compose_file() {
 require_env() {
   if [[ ! -f "$ENV_FILE" ]]; then
     if [[ -f "$ENV_TEMPLATE" ]]; then
-      warn ".env not found — copying from template..."
       cp "$ENV_TEMPLATE" "$ENV_FILE"
-      echo ""
-      warn "Review credentials in $ENV_FILE before starting:"
-      echo "    nano $ENV_FILE"
-      echo ""
-      die "Edit .env, then run: krate install"
+      chmod 600 "$ENV_FILE"
+      ok "Created .env from template. Change settings with: krate config set KEY=VALUE"
     else
       die ".env not found and no .env.template available. Create $ENV_FILE with KAFKA_UI_USER and KAFKA_UI_PASSWORD."
     fi
@@ -123,6 +119,67 @@ sync_image_pins() {
   cat "$tmp" > "$env_file"
   rm -f "$tmp"
   warn "Updated $keys in $env_file to match ${template##*/}" >&2
+}
+
+# A random 24-character secret of letters and digits, which neither .env
+# quoting nor Compose interpolation alters.
+random_secret() {
+  local secret=""
+  while (( ${#secret} < 24 )); do
+    secret+="$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+  done
+  echo "${secret:0:24}"
+}
+
+# Set KEY=VALUE in an env file, replacing its line or appending one. Rewrites
+# in place so the file keeps its owner and mode.
+set_env_file_value() {
+  local file="$1" key="$2" value="$3" tmp
+  tmp="$(mktemp)"
+  awk -F= -v key="$key" -v value="$value" '
+    $1 == key { if (!done) print key "=" value; done = 1; next }
+    { print }
+    END { if (!done) print key "=" value }
+  ' "$file" > "$tmp" || { rm -f "$tmp"; die "Cannot update $key in $file"; }
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+# Whether a named volume of a Compose project exists.
+compose_volume_exists() {
+  [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$1" \
+    --filter "label=com.docker.compose.volume=$2" 2>/dev/null)" ]]
+}
+
+# Replace placeholder passwords and secrets in .env with generated ones, so an
+# install needs no hand-edited credentials; `krate ui` shows the UI login. Run
+# only before containers are (re)created, so .env and the services agree.
+# Keycloak keeps its admin, database and client secrets from its first start,
+# so those are generated only while its database volume does not exist yet.
+# PING_KEYCLOAK_CLIENT_SECRET is issued by PingFederate and left to the site.
+generate_secrets() {
+  [[ -f "$ENV_FILE" ]] || return 0
+  local key keycloak_new="" project generated=()
+  for key in KAFKA_UI_PASSWORD KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET; do
+    case "$(env_value "$key")" in
+      ""|changeme|REPLACE_ME) ;;
+      *) continue ;;
+    esac
+    if [[ "$key" == KEYCLOAK_* && -z "$keycloak_new" ]]; then
+      project="$("${COMPOSE_BIN[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config 2>/dev/null | awk '/^name:/ { print $2; exit }')"
+      [[ -n "$project" ]] || die "Cannot read the Compose project name to check for an existing Keycloak database."
+      keycloak_new=yes
+      if compose_volume_exists "$project" keycloak_db_data; then
+        keycloak_new=no
+      fi
+    fi
+    [[ "$key" == KEYCLOAK_* && "$keycloak_new" == no ]] && continue
+    set_env_file_value "$ENV_FILE" "$key" "$(random_secret)"
+    generated+=("$key")
+  done
+  (( ${#generated[@]} )) || return 0
+  chmod 600 "$ENV_FILE"
+  ok "Generated ${generated[*]} in $ENV_FILE (show the UI login: krate ui)"
 }
 
 # A source checkout pins the locally built Kafbat UI image (make kafbat-ui) as
@@ -179,6 +236,7 @@ cmd_auth() {
       ;;
     apply)
       [[ -f "$sso_dir/activate.sh" ]] || die "Missing packaged SSO activation helper"
+      generate_secrets
       # shellcheck disable=SC1091
       source "$sso_dir/activate.sh"
       apply_auth "$sso_dir"
@@ -307,10 +365,10 @@ cmd_install() {
   else
     [[ -f "$ENV_TEMPLATE" ]] || die ".env.template not found in $SCRIPT_DIR"
     cp "$ENV_TEMPLATE" "$ENV_FILE"
-    warn "Created .env from template with default credentials."
-    warn "To change them: krate config set KAFKA_UI_USER=youruser"
-    warn "                krate config set KAFKA_UI_PASSWORD=yourpass"
+    chmod 600 "$ENV_FILE"
+    ok "Created .env from template. Change settings with: krate config set KEY=VALUE"
   fi
+  generate_secrets
   echo ""
 
   # 3. Load images
@@ -362,6 +420,7 @@ cmd_load_images() {
 cmd_start() {
   require_compose; require_compose_file; require_env
   ensure_cert
+  generate_secrets
   info "Starting cluster..."
   compose_cmd up -d
   echo ""
@@ -671,7 +730,7 @@ This bundle was built without the observability stack."
   local env_file="$MONITOR_DIR/.env"
   if [[ ! -f "$env_file" ]]; then
     cp "$MONITOR_DIR/.env.template" "$env_file"
-    warn "Created monitoring/.env from template (default Grafana credentials)."
+    ok "Created monitoring/.env from template."
   fi
   sync_image_pins "$env_file" "$MONITOR_DIR/.env.template"
 
@@ -742,7 +801,8 @@ cmd_monitor() {
       echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
       echo "Perses:   https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
       if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
-        echo "User:     $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_USER admin)  (password: PERSES_ADMIN_PASSWORD in monitoring/.env)"
+        echo "User:     $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_USER admin)"
+        echo "Password: $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_PASSWORD)"
       else
         echo "Sign-in:  company SSO ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) mode)"
       fi
@@ -768,11 +828,16 @@ monitor_prepare() {
   local env_file="$MONITOR_DIR/.env"
   if [[ ! -f "$env_file" ]]; then
     cp "$MONITOR_DIR/.env.template" "$env_file"
-    warn "Created monitoring/.env from template (default Grafana credentials)."
+    ok "Created monitoring/.env from template."
   fi
   chmod 600 "$env_file"
   mkdir -p "$MONITOR_DIR/auth/perses"
-  python3 - "$env_file" <<'PY' || die "monitoring/.env is not ready for the Perses stack (see above)."
+  # Grafana keeps its admin password from its first start.
+  local grafana_new=yes
+  if compose_volume_exists "krate-${KRATE_VARIANT}-monitoring" grafana_data; then
+    grafana_new=no
+  fi
+  python3 - "$env_file" "$grafana_new" <<'PY' || die "monitoring/.env is not ready for the Perses stack (see above)."
 import re, secrets, string, sys
 path = sys.argv[1]
 text = open(path).read()
@@ -789,7 +854,14 @@ def assign(key, new):
         text += ('' if text.endswith('\n') else '\n') + key + '=' + new + '\n'
 
 alphabet = string.ascii_letters + string.digits
+placeholders = ('', 'changeme', 'REPLACE_ME')
 generated = []
+if value('PERSES_ADMIN_PASSWORD') in placeholders:
+    assign('PERSES_ADMIN_PASSWORD', ''.join(secrets.choice(alphabet) for _ in range(24)))
+    generated.append('PERSES_ADMIN_PASSWORD')
+if sys.argv[2] == 'yes' and value('GRAFANA_PASSWORD') in placeholders:
+    assign('GRAFANA_PASSWORD', ''.join(secrets.choice(alphabet) for _ in range(24)))
+    generated.append('GRAFANA_PASSWORD')
 if not value('PERSES_ENCRYPTION_KEY'):
     assign('PERSES_ENCRYPTION_KEY', ''.join(secrets.choice(alphabet) for _ in range(32)))
     generated.append('PERSES_ENCRYPTION_KEY')
@@ -800,9 +872,9 @@ if mode in ('native', 'gateway') and not value('OAUTH2_PROXY_COOKIE_SECRET'):
 if generated:
     with open(path, 'w') as stream:
         stream.write(text)
-    print('  Generated ' + ', '.join(generated) + ' in monitoring/.env')
+    print('  Generated ' + ', '.join(generated) + ' in monitoring/.env (show the logins: krate monitor ui)')
 if mode == 'local' and len(value('PERSES_ADMIN_PASSWORD')) < 12:
-    sys.exit('  Set PERSES_ADMIN_PASSWORD (12+ characters) in monitoring/.env for the Perses admin.')
+    sys.exit('  PERSES_ADMIN_PASSWORD in monitoring/.env is shorter than 12 characters; set a longer one or empty it to generate one.')
 if mode in ('native', 'gateway') and not value('OAUTH2_PROXY_CLIENT_SECRET'):
     sys.exit('  Set OAUTH2_PROXY_CLIENT_SECRET (the Perses OIDC client secret) in monitoring/.env.')
 if mode == 'native' and not value('PERSES_SYNC_CLIENT_SECRET'):

@@ -42,7 +42,7 @@ nothing is downloaded at runtime. Mapping details:
 
 | Mode | Who can sign in | Roles |
 | --- | --- | --- |
-| `local` (default) | `PERSES_ADMIN_USER` with `PERSES_ADMIN_PASSWORD` (12+ characters, required) | That user is a full Perses admin. |
+| `local` (default) | `PERSES_ADMIN_USER` with `PERSES_ADMIN_PASSWORD` (generated when empty; `krate monitor ui` shows it) | That user is a full Perses admin. |
 | `native` | Company SSO users in the Viewer or Admin IdP group | IdP groups become native Perses roles (recommended SSO mode). |
 | `gateway` | Company SSO users in the Viewer or Admin IdP group | The gateway enforces roles; Perses' own auth is off. |
 
@@ -120,10 +120,10 @@ state persist in the `alertmanager_data` volume.
 ## Upgrading an existing installation
 
 1. In the **old installation**, run `./krate monitor down` (never `down -v`).
-2. Copy the site `monitoring/.env` into the new package and set
-   `PERSES_ADMIN_PASSWORD`. Keep existing ports, SMTP, Grafana and token-file
-   settings, and the existing data volumes. `krate` updates the `*_IMAGE` lines
-   to the new package's `monitoring/.env.template` on the next `monitor` command.
+2. Copy the site `monitoring/.env` into the new package. Keep existing ports,
+   SMTP, Grafana and token-file settings, and the existing data volumes. `krate`
+   updates the `*_IMAGE` lines to the new package's `monitoring/.env.template`
+   and generates an empty `PERSES_ADMIN_PASSWORD` on the next `monitor up`.
 3. Load the new package's images (`./krate install` or `./krate load-images`)
    and run `./krate monitor up`.
 4. Check Grafana and Perses dashboards, Loki and VictoriaLogs for
