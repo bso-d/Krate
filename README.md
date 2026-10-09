@@ -83,7 +83,7 @@ Ubuntu and Red Hat Enterprise Linux (RHEL) are the target operating systems.
 | Edition | What it runs | Intended host | Command |
 | --- | --- | --- | --- |
 | **Krate (default)** | Four brokers; Kafka manages its own coordination | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `kraft/krate` |
-| **EPC** | Two brokers using KRaft, with message data stored under `/data` | Tailored for RHEL 9 on x86_64 | `epc/krate` |
+| **EPC** | Two brokers using KRaft, with message data stored under `/data` | Tailored for RHEL 9, x86_64 or ARM64 | `epc/krate` |
 
 These are the two active releases. Each package contains its own security features and monitoring files. The `zk/` directory is a frozen legacy package for existing users. EPC is the tailored RHEL deployment.
 
@@ -95,20 +95,22 @@ The [releases page](https://github.com/bso-d/Krate/releases) holds two kinds of 
 
 | Kind | Tag | Title starts with | What you get |
 | --- | --- | --- | --- |
-| **Offline install package** | `package-kraft-vN`, `package-epc-vN` | `Offline install package` | A `.tar.gz` to copy to the VM, its `.sha256` checksum and the image lock file. Install it with `./krate install`. |
+| **Offline install package** | `package-kraft-vN`, `package-epc-vN` | `Offline install package` | A `.tar.gz` to copy to the VM, its `.sha256` checksum and the image lock file. Install it with `./krate install`. From `package-kraft-v2` and `package-epc-v4` on, a `-sources.tar` beside each package holds the corresponding source of its copyleft components; earlier package releases have none. |
 | **Broker images** | `kraft-vX.Y.Z`, `zk-vX.Y.Z` | `Broker images` | References to container images on GHCR. Nothing to install on a VM; the default setups do not use these images. |
 
-Current offline install packages. Each includes Keycloak SSO and the Docker packages for its target OS:
+Current offline install packages. Each includes Keycloak SSO, the Grafana and Perses monitoring paths, and the Docker packages for its target OS. Upgrade steps from the earlier packages are in each release's notes:
 
 | Release | Edition | Packages |
 | --- | --- | --- |
-| [`package-kraft-v1`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v1) | KRaft, Ubuntu 24.04 | `krate-kraft-v1-amd64.tar.gz` (x86_64), `krate-kraft-v1-arm64.tar.gz` (ARM64) |
-| [`package-epc-v3`](https://github.com/bso-d/Krate/releases/tag/package-epc-v3) | EPC, RHEL 9 | `krate-epc-v3-amd64.tar.gz` (x86_64) |
+| [`package-kraft-v2`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v2) | KRaft, Ubuntu 24.04 | `krate-kraft-v2-amd64.tar.gz` (x86_64), `krate-kraft-v2-arm64.tar.gz` (ARM64) |
+| [`package-epc-v4`](https://github.com/bso-d/Krate/releases/tag/package-epc-v4) | EPC, RHEL 9 | `krate-epc-v4-amd64.tar.gz` (x86_64), `krate-epc-v4-arm64.tar.gz` (ARM64) |
 
-Earlier packages, published before the `package-` tags existed:
+Earlier packages:
 
 | Release | Package |
 | --- | --- |
+| [`package-kraft-v1`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v1) | KRaft with Keycloak SSO, Grafana monitoring only, x86_64 and ARM64: `krate-kraft-v1-<arch>.tar.gz` |
+| [`package-epc-v3`](https://github.com/bso-d/Krate/releases/tag/package-epc-v3) | RHEL/EPC with Keycloak SSO, Grafana monitoring only, x86_64: `krate-epc-v3-amd64.tar.gz` |
 | [`epc-v2`](https://github.com/bso-d/Krate/releases/tag/epc-v2) | RHEL/EPC with Keycloak SSO, x86_64: `krate-epc-v2-amd64.tar.gz` |
 | [`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1) | RHEL/EPC, x86_64: `kafka-epc-v1-amd64.tar.gz` |
 | [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | Archived ZooKeeper package, x86_64: `kafka-zk-v5-amd64.tar.gz` |
@@ -316,11 +318,11 @@ The [package release workflow](.github/workflows/package-release.yml) runs `scri
 
 ```bash
 # macOS: MAKE=gmake; Node 22 recommended
-scripts/package-release.sh kraft v2 amd64        # Docker packages: noble for kraft, rhel9 for epc
-scripts/package-release.sh epc v3 amd64 none     # without Docker packages
+scripts/package-release.sh kraft v3 amd64        # Docker packages: noble for kraft, rhel9 for epc
+scripts/package-release.sh epc v5 amd64 none     # without Docker packages
 ```
 
-Then start **Release offline install packages** from `main` in GitHub Actions with the same edition, version, processor and Docker package choice. The workflow creates the `package-<edition>-vN` tag and refuses a version that already exists. For EPC, it also refuses a version already released under the earlier `epc-vN` tags. Broker image releases use the separate [broker release workflow](.github/workflows/broker-release.yml) and `kraft-v*`/`zk-v*` tags.
+Then start **Release offline install packages** from `main` in GitHub Actions with the same edition, version, processor and Docker package choice. The workflow creates the `package-<edition>-vN` tag and refuses a version that already exists. For EPC, it also refuses a version already released under the earlier `epc-vN` tags. A KRaft package with the highest version becomes the repository's Latest release; EPC and broker image releases do not. Broker image releases use the separate [broker release workflow](.github/workflows/broker-release.yml) and `kraft-v*`/`zk-v*` tags.
 
 ## Limits to understand
 
@@ -387,7 +389,7 @@ Krate is licensed under the [GNU Affero General Public License v3.0](LICENSE) (`
 
 The third-party software Krate runs and packages, listed under [Component credits](#component-credits), keeps its own license. Offline packages include `LICENSE`, `LICENSE-SOURCES.md` and the license and notice files for those components; see `monitoring/fluent-bit/vendor/` and `monitoring/perses/vendor/notices/`.
 
-Each KRaft and EPC package release also carries the complete corresponding source of the copyleft components in its container images, as a `-sources.tar` asset; see [LICENSE-SOURCES.md](LICENSE-SOURCES.md).
+From `package-kraft-v2` and `package-epc-v4` on, each KRaft and EPC package release also carries the complete corresponding source of the copyleft components in its container images, as a `-sources.tar` asset; see [LICENSE-SOURCES.md](LICENSE-SOURCES.md).
 
 **Exception: the frozen ZooKeeper edition.** Its upstream Confluent and Kafbat images contain six copyleft components whose source is not publicly available (two Azul Zulu JDKs, three old RHEL 8 packages and `confluent-docker-utils`). Krate does not rebuild those images, so a ZooKeeper package ships without the source of those six components. They are listed in [LICENSE-SOURCES.md](LICENSE-SOURCES.md#unresolved-components) and in every ZooKeeper source archive.
 
