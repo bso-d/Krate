@@ -196,6 +196,9 @@ def oauth2_proxy_config(site, env):
         'cookie_refresh': '%dm' % minutes,
         'session_store_type': 'cookie',
         'set_xauthrequest': True,
+        # Returns the session's ID token to the guard, which requires it to be
+        # no older than the group-proof period (see perses_sync.Guard.proof).
+        'set_authorization_header': True,
         'upstreams': ['static://202'],
         'whitelist_domains': [host],
         'skip_auth_routes': [],
@@ -215,6 +218,8 @@ def sync_config(mode, site):
         # A user not seen with a current IdP proof for one proof period plus a
         # margin loses their grants; the next authenticated request restores them.
         'grant_ttl': bounded_int(site, 'group_proof_minutes', 15, 1, 60) * 60 + 120,
+        # Groups must come from an ID token issued within the proof period (plus clock skew).
+        'groups_max_age': bounded_int(site, 'group_proof_minutes', 15, 1, 60) * 60 + 60,
     }
     if mode == 'native':
         config.update({'service_client_id': site['service_client_id'],

@@ -166,6 +166,16 @@ def cookie_token(cookie_header):
     return payload + '.' + signature
 
 
+def jwt_claims(token):
+    """The claims of a JWT, unverified (only for tokens from a trusted service)."""
+    try:
+        payload = token.split('.')[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+        return claims if isinstance(claims, dict) else {}
+    except (IndexError, TypeError, ValueError):
+        return {}
+
+
 def jwt_expiry(token):
     try:
         payload = token.split('.')[1]
@@ -455,6 +465,15 @@ class Guard:
         groups = [g for g in header.get('x-auth-request-groups', '').split(',') if g]
         if not subject:
             raise Denied(403, 'session has no subject', cookies)
+        # OAuth2 Proxy keeps the previous ID token and its groups when the IdP's
+        # refresh response has none, so require groups from a recent ID token.
+        # Its signature was checked by OAuth2 Proxy; only the issue time is read.
+        authorization = header.get('authorization', '')
+        issued = jwt_claims(authorization[7:]).get('iat') if authorization[:7].lower() == 'bearer ' else None
+        if isinstance(issued, bool) or not isinstance(issued, (int, float)):
+            raise Denied(403, 'session check returned no ID token', cookies)
+        if time.time() - issued > self.settings['groups_max_age']:
+            raise Denied(401, 'groups are older than the group-proof period', cookies)
         return subject, set(groups), cookies
 
     def check(self, method, raw_uri, cookie):
@@ -546,12 +565,20 @@ class Guard:
             raise Denied(403, 'refresh returned no access token')
         name = self.reconciler.identity(token, subject)
         if name is None:
-            raise Denied(403, 'refreshed token was not accepted')
+            # The Perses session is unusable (for example, its user was deleted in
+            # local mode): 401 becomes 400, so the UI signs in again.
+            raise Denied(401, 'refreshed token was not accepted')
         self.reconciler.ensure(name, subject, role, token)
         return status, headers + [('Set-Cookie', c) for c in cookies], data
 
 
 RELAYED_COOKIES = 4
+# Deletes Perses' session cookies (as its logout does). The UI cannot: two are HttpOnly.
+CLEAR_PERSES_SESSION = [
+    'jwtPayload=; Path=/; Max-Age=0; Secure; SameSite=Lax',
+    'jwtSignature=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax',
+    'jwtRefreshToken=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax',
+]
 
 
 def relay(cookies):
@@ -569,14 +596,18 @@ def make_handler(guard):
             sys.stderr.write('perses-sync: ' + fmt % args + '\n')
 
         def send(self, status, headers=(), body=b''):
-            self.send_response(status)
-            for name, value in headers:
-                if name.lower() not in ('transfer-encoding', 'connection', 'content-length', 'date', 'server'):
-                    self.send_header(name, value)
-            self.send_header('Content-Length', str(len(body)))
-            self.send_header('Cache-Control', 'no-store')
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                for name, value in headers:
+                    if name.lower() not in ('transfer-encoding', 'connection', 'content-length', 'date', 'server'):
+                        self.send_header(name, value)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # nginx dropped the request (the browser cancelled it); nothing to answer.
+                self.close_connection = True
 
         def denied(self, exc):
             self.log_message('deny %s %s: %s', self.headers.get('X-Original-Method', self.command),
@@ -626,7 +657,12 @@ def make_handler(guard):
                 # makes it clear its tokens and return to sign-in, where the
                 # gateway sends the browser to the IdP.
                 self.log_message('deny refresh: %s', exc.reason)
-                self.send(400 if exc.status == 401 else exc.status, [('Set-Cookie', c) for c in exc.cookies])
+                if exc.status == 401:
+                    # The Perses session cannot continue: end it, so the UI signs in again.
+                    cookies = exc.cookies + CLEAR_PERSES_SESSION
+                    self.send(400, [('Set-Cookie', c) for c in cookies])
+                else:
+                    self.send(exc.status, [('Set-Cookie', c) for c in exc.cookies])
             except Exception as exc:
                 self.log_message('error: %r', exc)
                 self.send(403)
@@ -647,6 +683,7 @@ def load_settings(path):
             raise ValueError(key + ' must not contain a comma')
     settings.setdefault('verify_ttl', 30)
     settings.setdefault('grant_ttl', 900)
+    settings.setdefault('groups_max_age', 960)
     settings.setdefault('listen_port', 9091)
     return settings
 

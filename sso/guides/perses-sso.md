@@ -28,7 +28,10 @@ group cannot sign in.
    A user in both is an Admin.
 4. **Refresh tokens** for the Perses client, with an ID token returned on
    refresh. OAuth2 Proxy refreshes the session every `group_proof_minutes` to
-   bring current groups. If the IdP rotates refresh tokens, it must tolerate a
+   bring current groups. The guard accepts groups only from an ID token issued
+   within `group_proof_minutes` (plus one minute); if the IdP does not return
+   an ID token on refresh, users are sent through IdP sign-in again each
+   period instead. If the IdP rotates refresh tokens, it must tolerate a
    refresh token being used again within a few seconds: a browser makes
    parallel requests, and each can trigger a refresh with the same token. A
    strict reuse detection that revokes the session would sign users out.

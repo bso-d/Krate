@@ -63,7 +63,8 @@ guard checks every request:
   IdP session for `group_proof_minutes` plus two minutes are revoked, and a
   restart revokes all managed grants until users return.
 - The IdP session is refreshed every `group_proof_minutes` (default 15), which
-  brings current groups without signing out. A revoked IdP session ends at the
+  brings current groups without signing out. Groups from an ID token older than
+  that period (plus one minute) are not accepted. A revoked IdP session ends at the
   next refresh. Sessions last `session_hours` (default 8).
 - Any failure denies the request; nothing falls back to an earlier grant.
 
