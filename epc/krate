@@ -142,7 +142,9 @@ random_secret() {
 set_env_file_value() {
   local file="$1" key="$2" value="$3" tmp
   tmp="$(mktemp)"
-  awk -F= -v key="$key" -v value="$value" '
+  # Passed through the environment: awk -v would expand backslashes in values.
+  KRATE_KEY="$key" KRATE_VALUE="$value" awk -F= '
+    BEGIN { key = ENVIRON["KRATE_KEY"]; value = ENVIRON["KRATE_VALUE"] }
     $1 == key { if (!done) print key "=" value; done = 1; next }
     { print }
     END { if (!done) print key "=" value }
@@ -394,6 +396,23 @@ cmd_auth() {
       [[ $# -eq 2 ]] || die "Usage: krate auth configure <settings.json>"
       python3 "$sso_dir/configure-dual.py" --settings "$2" --output-dir "$SCRIPT_DIR/auth"
       mkdir -p "$SCRIPT_DIR/auth/keycloak/truststores"
+      # Derive the .env values that follow from public_url instead of asking for them.
+      require_env
+      local public_url
+      public_url="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["public_url"].rstrip("/"))' "$2")"
+      set_env_file_value "$ENV_FILE" KEYCLOAK_PUBLIC_URL "$public_url/identity"
+      ok "Set KEYCLOAK_PUBLIC_URL=$public_url/identity in .env"
+      if [[ -z "$(env_value KAFKA_UI_FQDN)" ]]; then
+        local host="${public_url#*://}"
+        host="${host%%[:/]*}"
+        set_env_file_value "$ENV_FILE" KAFKA_UI_FQDN "$host"
+        ok "Set KAFKA_UI_FQDN=$host in .env"
+      fi
+      local fqdn
+      fqdn="$(get_fqdn)"
+      if [[ -f "$CERT_CRT" ]] && ! openssl x509 -in "$CERT_CRT" -noout -checkhost "$fqdn" 2>/dev/null | grep -q 'does match'; then
+        warn "certs/server.crt does not cover $fqdn. Install the CA-issued certificate and key in certs/, or run: krate gen-cert"
+      fi
       ;;
     apply)
       [[ -f "$sso_dir/activate.sh" ]] || die "Missing packaged SSO activation helper"
@@ -627,10 +646,9 @@ port_in_use() {
   local port="$1"
   if command -v ss &>/dev/null; then
     ss -Hltn 2>/dev/null | awk '{print $4}' | sed 's/.*://' | grep -qx "$port"
-  elif command -v netstat &>/dev/null; then
-    netstat -ltn 2>/dev/null | awk 'NR>2{print $4}' | sed 's/.*://' | grep -qx "$port"
   else
-    ( exec 3<>"/dev/tcp/127.0.0.1/${port}" ) 2>/dev/null && { exec 3>&- 3<&-; return 0; } || return 1
+    # No ss (macOS, minimal hosts): a listener accepts a local connection.
+    ( exec 3<>"/dev/tcp/127.0.0.1/${port}" ) 2>/dev/null
   fi
 }
 
@@ -897,33 +915,35 @@ cmd_config() {
 
   case "$action" in
     show)
-      if [[ -f "$ENV_FILE" ]]; then
+      local file
+      for file in "$ENV_FILE" "$MONITOR_DIR/.env"; do
+        [[ -f "$file" ]] || continue
         sep
-        echo -e "${BOLD}  $ENV_FILE${RESET}"
+        echo -e "${BOLD}  $file${RESET}"
         sep
-        cat "$ENV_FILE"
-        sep
-      else
-        warn ".env not found. Template:"
-        cat "$ENV_TEMPLATE"
-      fi
+        cat "$file"
+      done
+      sep
+      [[ -f "$ENV_FILE" ]] || warn ".env does not exist yet; krate setup creates it."
       ;;
     set)
-      local kv="${1:-}"
-      [[ -z "$kv" ]] && die "Usage: krate config set KEY=VALUE"
+      local kv="${1:-}" file="$ENV_FILE" template="$ENV_TEMPLATE"
+      [[ "$kv" == *=* ]] || die "Usage: krate config set KEY=VALUE"
       local key="${kv%%=*}"
       local val="${kv#*=}"
       [[ "$key" =~ ^[A-Z0-9_]+_IMAGE$ ]] && die "Image pins come from .env.template; change $key there, or export it in the shell for one run."
-      [[ -f "$ENV_FILE" ]] || cp "$ENV_TEMPLATE" "$ENV_FILE"
-      if grep -qE "^${key}=" "$ENV_FILE"; then
-        # Use a temp file for portability (avoids sed -i differences)
-        local tmp
-        tmp=$(mktemp)
-        sed "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
-      else
-        echo "${key}=${val}" >> "$ENV_FILE"
+      # Monitoring keys live in monitoring/.env; everything else in .env.
+      if ! grep -qE "^${key}=" "$ENV_TEMPLATE" && [[ -f "$MONITOR_DIR/.env.template" ]] \
+          && grep -qE "^${key}=" "$MONITOR_DIR/.env.template"; then
+        file="$MONITOR_DIR/.env"
+        template="$MONITOR_DIR/.env.template"
       fi
-      ok "Set ${key}"
+      if [[ ! -f "$file" ]]; then
+        cp "$template" "$file"
+      fi
+      chmod 600 "$file"
+      set_env_file_value "$file" "$key" "$val"
+      ok "Set ${key} in ${file#"$SCRIPT_DIR"/}"
       ;;
     *)
       die "Usage: krate config [show | set KEY=VALUE]"
@@ -1040,6 +1060,20 @@ This bundle was built without the observability stack."
   "${COMPOSE_BIN[@]}" -p "krate-${KRATE_VARIANT}-monitoring" --env-file "$env_file" -f "$MONITOR_DIR/docker-compose.yml" "$@"
 }
 
+# Monitoring host ports that something other than the monitoring stack holds.
+monitor_port_conflicts() {
+  local own entry key port
+  own="$(docker ps --filter "label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring" --format '{{.Ports}}')"
+  for entry in GRAFANA_PORT:3000 PROM_PORT:9090 LOKI_PORT:3100 PERSES_PORT:3443; do
+    key="${entry%%:*}"
+    port="$(env_value_file "$MONITOR_DIR/.env" "$key" "${entry#*:}")"
+    [[ "$own" == *":${port}->"* ]] && continue
+    if port_in_use "$port"; then
+      echo "$key=$port"
+    fi
+  done
+}
+
 # Grafana and Perses addresses and logins.
 monitor_logins() {
   local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
@@ -1064,6 +1098,9 @@ cmd_monitor() {
       command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
       ensure_cert
       monitor_prepare
+      local conflicts
+      conflicts="$(monitor_port_conflicts | xargs)"
+      [[ -z "$conflicts" ]] || die "Host ports already in use: $conflicts. Choose free ones, e.g. krate config set GRAFANA_PORT=13000"
       # Compose leaves a dropped profile's services running. In local mode remove
       # the SSO services first, so the previous mode's guard cannot act on Perses.
       if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
@@ -1134,7 +1171,7 @@ note_smtp() {
   local en; en="$(env_value_file "$MONITOR_DIR/.env" GF_SMTP_ENABLED false)"
   if [[ "$en" != "true" ]]; then
     warn "Email delivery is off (GF_SMTP_ENABLED=false). Alerts still fire and show in Grafana."
-    warn "To enable: edit monitoring/.env and re-run 'krate monitor up'."
+    warn "To enable: krate config set GF_SMTP_ENABLED=true (and GF_SMTP_HOST, ALERT_EMAIL_TO, ...), then krate monitor up"
   fi
 }
 

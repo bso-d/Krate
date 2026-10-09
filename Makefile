@@ -48,6 +48,10 @@ help:
 >cat <<'EOF'
 >Krate offline bundle workflow
 >
+>Operators use ./krate in kraft/ or epc/ (start, setup, credentials, build,
+>package); it runs these targets. Call them directly only for CI or the frozen
+>zk edition.
+>
 >Targets:
 >  make check                                     Run syntax, ShellCheck, Compose and offline-policy validation
 >  make offline-check                             Verify offline application defaults (Python 3 + Compose v2)

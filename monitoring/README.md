@@ -13,16 +13,16 @@ Fluent Bit collector, which ships every selected container log to Loki and to
 VictoriaLogs through separate outputs and queues. See
 [collector behavior, limits and notices](fluent-bit/README.md).
 
-`./krate monitor up` starts everything; `./krate monitor ui` prints both
-addresses. Grafana, its SSO configuration, its dashboards and its email rules
+`./krate monitor up` starts everything; `./krate credentials` (or
+`./krate monitor ui`) prints both addresses and logins. Grafana, its SSO configuration, its dashboards and its email rules
 are not changed by the parallel path.
 
 ## Perses
 
 Perses v0.54.0 is reachable only through the `perses-gateway` nginx service on
 `PERSES_PORT`, which serves HTTPS with the cluster certificate
-(`certs/server.crt` and `certs/server.key`; create them with `./krate gen-cert`
-or install your own). Perses, VictoriaLogs, Alertmanager, OAuth2 Proxy and the
+(`certs/server.crt` and `certs/server.key`; `./krate` creates a self-signed pair
+when none exists, or install your own). Perses, VictoriaLogs, Alertmanager, OAuth2 Proxy and the
 access guard publish no host ports. Perses, the gateway, OAuth2 Proxy and the
 guard run on their own `perses` network, which Prometheus and VictoriaLogs join
 as Perses' datasources; Grafana and the other monitoring services cannot reach
