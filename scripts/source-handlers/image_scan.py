@@ -29,6 +29,9 @@ JAR_SUFFIXES = ('.jar', '.war', '.ear')
 def _inspect(ref, arch):
     proc = subprocess.run(['docker', 'image', 'inspect', '--platform', f'linux/{arch}', ref,
                            '--format', '{{json .}}'], capture_output=True, text=True)
+    if proc.returncode:  # Docker 28.0 and older have no --platform on image inspect
+        proc = subprocess.run(['docker', 'image', 'inspect', ref, '--format', '{{json .}}'],
+                              capture_output=True, text=True)
     if proc.returncode:
         return None
     data = json.loads(proc.stdout)
