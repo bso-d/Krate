@@ -1,64 +1,124 @@
-# Stable monitoring transition
+# Krate monitoring
 
-The shared KRaft/EPC stack keeps Grafana, Loki, Prometheus and the existing
-exporters. It replaces Promtail with Fluent Bit. The frozen ZooKeeper stack is
-unchanged. Grafana's dashboards, OIDC group-to-Viewer/Admin configuration and
-editable email contact point/rules remain in place.
+The shared KRaft/EPC monitoring stack runs two dashboard and alerting paths side
+by side. The frozen ZooKeeper stack is unchanged.
 
-## Operator cutover
+| Path | Dashboards | Logs | Alert delivery |
+| --- | --- | --- | --- |
+| Existing | Grafana on `GRAFANA_PORT` (3000), with its SSO and editable email rules | Loki | Grafana email |
+| Parallel | Perses on `PERSES_PORT` (3443, HTTPS) | VictoriaLogs | Alertmanager email |
 
-1. In the **old installation**, run `./krate monitor down` before replacing the
-   monitoring files. This stops the old collector and prevents duplicate
-   collectors under the same Compose project. Do not use `down -v`.
-2. Copy the new monitoring tree and merge the new `.env.template` into the site
-   `.env`, preserving ports, SMTP, Grafana credentials and auth/token-file
-   settings. Replace `PROMTAIL_IMAGE` with the new `FLUENT_BIT_IMAGE` and
-   `LOG_DISCOVERY_IMAGE` references
-   from the **same extracted offline bundle**; its saved runtime tag is what
-   the disconnected host can load. Keep existing `grafana_data`, `loki_data`
-   and `prometheus_data` volumes. Keep the old Promtail positions volume for
-   rollback; Fluent Bit does not import that positions file.
-3. Load the new bundle's saved images before running `./krate monitor up`.
-   The CLI still seeds the editable Grafana notification rules. Check Grafana
-   Explore for `job="containerlogs"` with the expected container labels and
-   check discovery health and collector logs for metadata, tail, storage or
-   output failures. Discovery scans metadata periodically; only selected
-   Krate/EPC files are exposed to the collector before any log payload is read.
+Both paths use the same Prometheus, exporters and alert rules, and the same
+Fluent Bit collector, which ships every selected container log to Loki and to
+VictoriaLogs through separate outputs and queues. See
+[collector behavior, limits and notices](fluent-bit/README.md).
 
-On the first Fluent Bit run, available files are replayed from the head, subject
-to the seven-day cutoff. Existing Loki lines can therefore be duplicated;
-the old and new offset formats are different. Subsequent starts reuse Fluent
-Bit's persistent offsets/chunks. Back up data/configuration before cutover.
-For rollback, stop the new monitoring project without deleting volumes and
-restore the old tree/image references; retain both collectors' state volumes.
+`./krate monitor up` starts everything; `./krate monitor ui` prints both
+addresses. Grafana, its SSO configuration, its dashboards and its email rules
+are not changed by the parallel path.
 
-See [collector behavior, limits and notices](fluent-bit/README.md). The migration
-does not establish lossless collection during abrupt termination of an unfinished
-multiline record, disk exhaustion, unreadable Docker metadata or source rotation
-before recovery. Verify the site's Docker `json-file` path, permissions and
-SELinux access on the target host; no automatic host relabeling is performed.
+## Perses
 
-## Proposal evaluation (2026-10-08)
+Perses v0.54.0 is reachable only through the `perses-gateway` nginx service on
+`PERSES_PORT`, which serves HTTPS with the cluster certificate
+(`certs/server.crt` and `certs/server.key`; create them with `./krate gen-cert`
+or install your own). Perses, VictoriaLogs, Alertmanager, OAuth2 Proxy and the
+access guard publish no host ports.
 
-| Proposal | Verified repository/source facts | Decision |
+Dashboards: **Krate — Cluster Overview**, **Consumer Groups**, **Host & Disk**
+(the Grafana dashboards with the same queries, units, thresholds and layout,
+in Perses' own styling) and **Container logs** (VictoriaLogs). They live in the
+`krate` project. The `perses-seed` step creates missing dashboards and replaces
+one only when its shipped file changed, so edits made in the UI persist across
+restarts, as with Grafana. All plugins are built into the pinned Perses image;
+nothing is downloaded at runtime. Mapping details:
+[dashboards/README.md](perses/dashboards/README.md).
+
+### Sign-in modes (`PERSES_AUTH_MODE` in `monitoring/.env`)
+
+| Mode | Who can sign in | Roles |
 | --- | --- | --- |
-| Keep Prometheus/exporters | `prometheus/prometheus.yml` scrapes Kafka, node and Prometheus; `alerts.yml` owns thresholds/pending periods. | Keep unchanged. |
-| Replace Grafana with Perses | Stable v0.54.0 supports OIDC but its released authentication documentation lacks automatic IdP role/group synchronization. v0.55.0-rc.0, published October 8, adds claim mappings; referenced roles must already exist, permissions are additive, and claims are retained through refresh. | Keep stable releases and Grafana until stable mapping is available and the revocation behavior is accepted/tested. |
-| Convert dashboards | Three dashboard JSON files contain 14 panels and 15 PromQL targets: two tables with organize/rename transformations, one gauge, four stats and seven time-series panels. | Conversion is deferred with the UI; count/query compatibility alone cannot certify table columns, units, thresholds, legends or visual fidelity. |
-| Replace Grafana notification delivery | `seed-alerting.py` provisions an email contact point and notification rules from Prometheus firing `ALERTS`; both edition CLIs invoke it. Prometheus has no Alertmanager target. | Retain current delivery. A future UI removal must add and exercise Alertmanager, migrate operator routes/recipients and avoid concurrent email paths. |
-| VictoriaLogs + Fluent Bit | VictoriaLogs documents Fluent Bit ingestion via Elasticsearch-compatible output; Perses has a VictoriaLogs plugin. Loki's LogQL and VictoriaLogs' LogsQL differ. | Retain Loki for this stage; plugin assets, queries, retention and existing log access require a separate verified migration. |
-| Replace EOL Promtail | Promtail reached EOL on March 2, 2026. Current shared config discovers names using Docker API and persists offsets but has no Java multiline or filesystem output spool. | Use the pinned stable Fluent Bit collector and document its replay/durability limits. |
-| Offline packages | The Makefile explicitly stages monitoring files and enumerates all `*_IMAGE` entries. `check-offline.py` verifies effective Grafana/Kafbat outbound-disabled defaults. | Bundle the collector, decoder and notices; require its runtime files in `check-bundle.py`; keep existing outbound policies. |
-| License priority | Perses, Alertmanager, VictoriaLogs and Fluent Bit upstream projects use Apache-2.0. The pinned Fluent Bit amd64/arm64 image layers contain the same 49 Debian packages, including LGPL libraries; exact-version notices and source-version inventory are bundled. Grafana/Loki remain in use for the accepted stable stage. | This stage is not an all-permissive monitoring distribution. Notice copies do not complete corresponding-source/relinking obligations; review/fulfill these before redistributing a release. |
+| `local` (default) | `PERSES_ADMIN_USER` with `PERSES_ADMIN_PASSWORD` (12+ characters, required) | That user is a full Perses admin. |
+| `native` | Company SSO users in the Viewer or Admin IdP group | IdP groups become native Perses roles (recommended SSO mode). |
+| `gateway` | Company SSO users in the Viewer or Admin IdP group | The gateway enforces roles; Perses' own auth is off. |
 
-Perses migration is best effort and does not migrate Grafana users or alerts.
-OpenSearch/Dashboards remains an alternative evaluation, with search-node/index
-management and host tuning costs. A reduced expression browser/log explorer
-would remove curated dashboards and is not the selected approach.
+For `native` and `gateway`, follow the [Perses SSO guide](../sso/guides/perses-sso.md).
+In both SSO modes, OAuth2 Proxy holds the IdP session and the `perses-sync`
+guard checks every request:
 
-Primary references: [Perses v0.54.0 authentication](https://github.com/perses/perses/blob/v0.54.0/docs/concepts/authentication.md),
-[v0.55.0-rc.0 claim/revocation behavior](https://github.com/perses/perses/blob/v0.55.0-rc.0/docs/concepts/authentication.md),
-[migration scope](https://perses.dev/perses/docs/migration/),
-[Prometheus alert delivery](https://prometheus.io/docs/alerting/latest/overview/),
-[VictoriaLogs ingestion](https://docs.victoriametrics.com/victorialogs/data-ingestion/fluentbit/),
-[Promtail EOL](https://grafana.com/docs/loki/latest/send-data/promtail/).
+- **Viewer** can read dashboards, datasources, variables and folders and run
+  queries through saved datasources (PromQL and LogsQL read endpoints only).
+  Every change, unsaved-datasource proxying and other proxy paths are refused.
+- **Admin** has full Perses access, including creating projects.
+- In `native` mode the guard keeps each user's native Perses role bindings equal
+  to their current groups and confirms the user's live permissions before a
+  request passes. Demotion or removal also revokes the owner grants Perses
+  creates for projects the user made. Grants of users not seen with a current
+  IdP session for `group_proof_minutes` plus two minutes are revoked, and a
+  restart revokes all managed grants until users return.
+- The IdP session is refreshed every `group_proof_minutes` (default 15), which
+  brings current groups without signing out. A revoked IdP session ends at the
+  next refresh. Sessions last `session_hours` (default 8).
+- Any failure denies the request; nothing falls back to an earlier grant.
+
+Perses' **Edit** button is visible to every signed-in user, as in upstream
+Perses; saving is refused unless the user is an Admin.
+
+Switching modes: change `PERSES_AUTH_MODE` and run `./krate monitor up`. The CLI
+re-renders configuration and recreates the affected services. Grants from the
+previous mode are removed when the guard starts.
+
+### Configuration and secrets
+
+The one-shot `monitoring-init` service renders each service's configuration
+into that service's own volume from `monitoring/.env` and the site settings in
+`monitoring/auth/perses/perses.json`. Secrets stay in `monitoring/.env`
+(mode 600): `./krate monitor up` generates `PERSES_ENCRYPTION_KEY` and, for SSO,
+`OAUTH2_PROXY_COOKIE_SECRET` when they are empty. A change to `.env`, the site
+settings or any shipped monitoring file recreates the services that use it.
+
+## VictoriaLogs
+
+VictoriaLogs v1.53.0 keeps `VICTORIALOGS_RETENTION` (default `7d`) of container
+logs in its own volume, with the same `job`, `container`, `container_id` and
+`stream` labels and exact message text as Loki. It receives only logs collected
+after it is added; existing Loki data is not imported. If VictoriaLogs is down,
+Fluent Bit keeps delivering to Loki and queues up to 1 GiB for VictoriaLogs.
+
+## Alertmanager
+
+Prometheus sends its alerts to Alertmanager v0.34.1, which emails them to
+`ALERT_EMAIL_TO` through the `GF_SMTP_*` relay, grouped by alert name, with a
+10 s group wait, 5 min group interval, 4 h repeat and resolved notices.
+`ALERTMANAGER_EMAIL_ENABLED` follows `GF_SMTP_ENABLED` unless set. While
+Grafana email is also enabled, recipients receive both emails.
+`ALERTMANAGER_SMTP_REQUIRE_TLS=true` (default) requires STARTTLS; port 465 uses
+implicit TLS; `GF_SMTP_SKIP_VERIFY` also applies. Silences and notification
+state persist in the `alertmanager_data` volume.
+
+## Upgrading an existing installation
+
+1. In the **old installation**, run `./krate monitor down` (never `down -v`).
+2. Merge the new `monitoring/.env.template` into the site `.env`: add the new
+   `*_IMAGE` lines from the **same extracted offline package**, and set
+   `PERSES_ADMIN_PASSWORD`. Keep existing ports, SMTP, Grafana and token-file
+   settings, and the existing data volumes.
+3. Load the new package's images (`./krate install` or `./krate load-images`)
+   and run `./krate monitor up`.
+4. Check Grafana and Perses dashboards, Loki and VictoriaLogs for
+   `job="containerlogs"`, and `./krate monitor status`.
+
+Fluent Bit replaces the end-of-life Promtail collector. Its first run replays
+available files from the head, subject to the seven-day cutoff, so recent Loki
+lines can be duplicated once; later starts reuse its persistent offsets. To
+roll back, stop the new monitoring project without deleting volumes and restore
+the previous files and image references.
+
+Verify the site's Docker `json-file` log path, permissions and SELinux access on
+the target host; no automatic relabelling is performed.
+
+## Licenses
+
+Krate is AGPL-3.0. The bundled images keep their own licenses; their notices
+and per-image inventories are in `fluent-bit/vendor/` and
+`perses/vendor/notices/` (see its README for copyleft components).

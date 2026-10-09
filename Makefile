@@ -246,7 +246,7 @@ bundle: offline-check
 >    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
 >    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py "$$bundle_dir/sso/"
->    cp sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md "$$bundle_dir/docs/"
+>    cp sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md "$$bundle_dir/docs/"
 >  fi
 >  # The CLI ships as ./krate everywhere except the frozen ZooKeeper edition,
 >  # whose published v5 bundle documents ./kafka.

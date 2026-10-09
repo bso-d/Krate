@@ -2,6 +2,11 @@
 
 Fluent Bit 5.1.3 replaces the EOL shared Promtail collector. The built-in Loki
 output keeps `job=containerlogs`, `container`, `container_id` and `stream` labels.
+A second Loki-protocol output sends the same records, labels and exact message
+text to VictoriaLogs (`/insert/loki/api/v1/push?disable_message_parsing=1`).
+Each output has its own bounded filesystem queue (1 GiB), so Loki delivery
+continues while VictoriaLogs is unavailable and the backlog is sent when it
+returns.
 The `log-discovery` helper scans only metadata every five seconds and exposes
 symlinks for names beginning `krate-` or `epc-` in the dedicated sources volume.
 Fluent Bit tails that allowlist, so unrelated containers' log payloads never

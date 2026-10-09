@@ -256,9 +256,9 @@ The resulting offline bundles include that image. EPC packages include SSO from
 
 ## Monitoring
 
-Krate and EPC each include monitoring files in their package. Prometheus collects measurements, Grafana displays dashboards and alerts, and Loki with Promtail collects container logs. A host exporter supplies disk, CPU, and memory measurements.
+Krate and EPC each include monitoring files in their package. Prometheus collects measurements and evaluates alert rules, and a host exporter supplies disk, CPU, and memory measurements. Fluent Bit collects container logs. Two dashboard and alerting paths run side by side: Grafana with Loki and Grafana email, and Perses (HTTPS) with VictoriaLogs and Alertmanager email. See the [monitoring guide](monitoring/README.md).
 
-Before starting it, copy `monitoring/.env.template` to `monitoring/.env` and change the Grafana login. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
+Before starting it, copy `monitoring/.env.template` to `monitoring/.env`, change the Grafana login and set `PERSES_ADMIN_PASSWORD`. Perses uses the cluster certificate in `certs/`. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
 
 ```bash
 ./krate monitor up
@@ -266,7 +266,7 @@ Before starting it, copy `monitoring/.env.template` to `monitoring/.env` and cha
 ./krate monitor ui
 ```
 
-The default Grafana address uses port `3000`; Prometheus uses `9090` and Loki uses `3100`. Email alerts require your own mail server and recipients; they are off by default.
+The default Grafana address uses port `3000`; Perses uses HTTPS on `3443`, Prometheus uses `9090` and Loki uses `3100`. Email alerts require your own mail server and recipients; they are off by default. When enabled, Grafana and Alertmanager both send them. Perses supports company SSO with native IdP-group roles; see the [Perses SSO guide](sso/guides/perses-sso.md).
 
 ZooKeeper has its own smaller stack: Kafka measurements, Prometheus, and Grafana, started with `./kafka monitor up`. It does not include Loki or host measurements.
 
@@ -355,6 +355,10 @@ Krate uses the projects below. Credit belongs to their owners, maintainers, and 
 | [Kafka Exporter](https://github.com/danielqsj/kafka_exporter) | danielqsj and contributors | Kafka measurements |
 | [Prometheus](https://prometheus.io/) and [Node Exporter](https://github.com/prometheus/node_exporter) | Prometheus maintainers and contributors; a CNCF project | Kafka and host measurements |
 | [Grafana](https://github.com/grafana/grafana), [Loki and Promtail](https://github.com/grafana/loki) | Grafana Labs and contributors | Dashboards and alerts; Promtail remains in the frozen ZooKeeper edition |
+| [Perses](https://github.com/perses/perses) and its [plugins](https://github.com/perses/plugins) | The Perses Authors | Parallel dashboards |
+| [VictoriaLogs](https://github.com/VictoriaMetrics/VictoriaLogs) | VictoriaMetrics and contributors | Parallel log storage |
+| [Alertmanager](https://github.com/prometheus/alertmanager) | Prometheus maintainers and contributors | Parallel alert email |
+| [OAuth2 Proxy](https://github.com/oauth2-proxy/oauth2-proxy) | OAuth2 Proxy maintainers and contributors | SSO session for Perses |
 | [Fluent Bit](https://github.com/fluent/fluent-bit), [dkjson](https://dkolf.de/dkjson-lua/) and [Python](https://www.python.org/) | Fluent Bit contributors, David Heiko Kolf, and the Python Software Foundation/contributors | Shared KRaft/EPC container log collection and metadata discovery; see [monitoring transition and notices](monitoring/README.md) |
 | [Ubuntu](https://ubuntu.com/) | Canonical and the Ubuntu community | Ubuntu targets and Docker package preparation |
 | [Red Hat Enterprise Linux](https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux) | Red Hat and contributors | RHEL target for the EPC edition |
