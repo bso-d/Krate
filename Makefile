@@ -242,6 +242,9 @@ bundle: offline-check
 >    cp "$$src_dir/kafbat.yml" "$$bundle_dir/kafbat.yml"
 >  fi
 >  cp "$$src_dir/nginx.conf" "$$bundle_dir/nginx.conf"
+>  # Krate's AGPL licence, and where the image components' corresponding source is
+>  # published, including the components it could not be obtained for.
+>  cp LICENSE LICENSE-SOURCES.md "$$bundle_dir/"
 >  if [[ "$$mode" != "zk" ]]; then
 >    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"

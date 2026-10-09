@@ -41,6 +41,9 @@ def main():
         required = set(subprocess.check_output(cmd, text=True).splitlines())
         if required - images:
             raise SystemExit('Compose images missing from package: ' + ', '.join(sorted(required - images)))
+    for name in ('LICENSE', 'LICENSE-SOURCES.md'):
+        if not (root / name).is_file():
+            raise SystemExit('Missing licence file: ' + name)
     for name in ('sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh',
                  'sso/preflight.py', 'sso/probe.py', 'auth/ui/local.yml', 'docs/dual-login.md'):
         if not (root / name).is_file():

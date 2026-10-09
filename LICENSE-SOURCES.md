@@ -5,7 +5,7 @@ Krate itself is licensed under the GNU Affero General Public License v3.0 (see
 offline package are that source.
 
 The offline install packages also redistribute third-party container images (Apache
-Kafka, Kafbat UI, Keycloak, PostgreSQL, nginx, Prometheus, Alertmanager, Grafana, Loki,
+Kafka, Kafbat UI on Eclipse Temurin, Keycloak, PostgreSQL, nginx, Prometheus, Alertmanager, Grafana, Loki,
 Fluent Bit, Perses, VictoriaLogs, OAuth2 Proxy, node-exporter, kafka-exporter, the
 Python runtime for log discovery and, in the frozen ZooKeeper edition, Confluent
 Platform). Those images contain components under copyleft licences. For every one of
@@ -76,21 +76,30 @@ The Red Hat OpenJDK in Keycloak is an RPM; its source is the `java-21-openjdk` S
 
 Anything whose corresponding source could not be obtained from an authoritative origin
 is listed under **UNRESOLVED** in `SOURCES.md` and `manifest.json` with the reason. It
-is never skipped silently. Known cases:
+is never skipped silently.
 
-- **Azul Zulu JDK** (Kafbat UI image; Confluent images in the ZooKeeper edition). Azul
-  does not publish source archives. Its third-party licence document offers the
-  complete source on request (azul_openJDK@azul.com, valid for three years). Until that
-  source is obtained and added, or the image is moved to a JDK whose source is
-  published, this is an open obligation.
-- **ZooKeeper edition, Confluent images** (`cp-kafka`, `cp-zookeeper` 7.6.1, frozen):
-  a few RHEL 8 packages that Confluent installed from the UBI repositories at build
-  time (for example `wget`, `libsemanage`, `python3x-pip`) are older builds that Red
-  Hat's public UBI repositories and UBI source containers no longer carry, and
-  Confluent's `confluent-docker-utils` is not published on PyPI. Red Hat provides
-  RHEL sources to customers through the Customer Portal; Confluent publishes the
-  utility on GitHub.
-- Any other entry in the release's `SOURCES.md`, with its specific reason.
+**KRaft and EPC:** no exceptions. Their Kafbat UI image runs on Eclipse Temurin, whose
+JDK source Adoptium publishes (see [kafbat-ui/README.md](kafbat-ui/README.md)). The
+release build fails if any component's source cannot be obtained, so a KRaft or EPC
+release never ships with an UNRESOLVED component; its release notes say that every
+copyleft component has its source in the archive.
+
+**ZooKeeper edition: known exceptions.** The ZooKeeper edition is frozen: its images
+are upstream images that Krate does not rebuild, so the following components ship
+**without** their corresponding source. They are an open obligation of that edition,
+and every ZooKeeper source archive lists them under UNRESOLVED.
+
+| Component | Licence | In image | Why the source is missing |
+| --- | --- | --- | --- |
+| Azul Zulu JDK 11 (`Zulu11.70+15-CA`) | GPL-2.0 with Classpath exception | `confluentinc/cp-kafka:7.6.1`, `confluentinc/cp-zookeeper:7.6.1` | Azul publishes no source archives; it supplies source only on request (azul_openJDK@azul.com). |
+| Azul Zulu JDK 25 (`Zulu25.32+21-CA`) | GPL-2.0 with Classpath exception | `kafbat/kafka-ui:v1.5.0` (upstream, unmodified) | As above. |
+| `wget-1.19.5-11.el8` | GPLv3+ (RPM licence field) | both Confluent images | This RHEL 8 build is no longer in Red Hat's public UBI repositories or UBI source images. |
+| `libsemanage-2.9-9.el8_6` | LGPLv2+ (RPM licence field) | both Confluent images | As above. |
+| `python3x-pip-20.2.4-8.module+el8.9.0+21344+82807453.1` | includes LGPLv2 and MPLv2.0 parts (RPM licence field) | both Confluent images | As above. |
+| `confluent-docker-utils 0.0.75` | not declared | both Confluent images | Not published on PyPI. |
+
+Red Hat supplies RHEL sources to its customers through the Customer Portal. Confluent
+publishes `confluent-docker-utils` on GitHub, without a release matching this version.
 
 ## Rebuilding the source archive
 
