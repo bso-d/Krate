@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate authentication activation before any service mutation."""
 import argparse
+import ipaddress
 import json
 from pathlib import Path
 import stat
@@ -20,6 +21,10 @@ OPTIONAL_SECRETS = ('PING_KEYCLOAK_CLIENT_SECRET',)
 INSECURE = ('', 'REPLACE_ME', 'changeme')
 TLS_DIR = 'auth/keycloak/db-tls'
 REALM_FILE = 'auth/keycloak/krate-realm.json'
+IDENTITY_NETWORK = 'identity'
+CLUSTER_NETWORK = 'kafka-network'
+# Warn this long before the database server certificate expires (seconds); refuse within one day.
+RENEW_WARNING = 30 * 86400
 
 
 class Preflight(ValueError):
@@ -84,6 +89,7 @@ def validate(root, mode, config):
     # A runtime.yml `up` renders the sso profile, so the database TLS contract applies here too.
     if kc.get('KC_DB_TLS_MODE') != 'verify-server':
         raise Preflight('keycloak must render KC_DB_TLS_MODE=verify-server')
+    validate_networks(config)
     validate_db_tls(root)
     # The bootstrap admin is exported only by `krate identity up` on a pristine database;
     # the permanent admin password lives in .env. The realm also carries the krate-cli secret.
@@ -145,7 +151,11 @@ def validate_db_tls(root):
         raise Preflight(f'{TLS_DIR}/pg_hba.conf differs from the generated policy; run krate identity up to restore it')
     server = str(tls / 'server.crt')
     if openssl('x509', '-in', server, '-checkend', '86400', '-noout').returncode:
-        raise Preflight(f'{TLS_DIR}/server.crt is unreadable or expires within a day')
+        raise Preflight(f'{TLS_DIR}/server.crt is unreadable or expires within a day; run krate identity renew-db-tls')
+    if openssl('x509', '-in', server, '-checkend', str(RENEW_WARNING), '-noout').returncode:
+        print(f'warning: {TLS_DIR}/server.crt expires within {RENEW_WARNING // 86400} days'
+              f' ({openssl("x509", "-in", server, "-noout", "-enddate").stdout.strip()}); run krate identity renew-db-tls',
+              file=sys.stderr)
     names = openssl('x509', '-in', server, '-noout', '-ext', 'subjectAltName').stdout
     if 'DNS:' + identity.DB_HOST not in names.replace(' ', ''):
         raise Preflight(f'{TLS_DIR}/server.crt must carry subjectAltName DNS:{identity.DB_HOST}')
@@ -155,6 +165,52 @@ def validate_db_tls(root):
     key_pub = openssl('pkey', '-in', str(tls / 'server.key'), '-pubout', '-passin', 'pass:').stdout
     if not cert_pub or cert_pub != key_pub:
         raise Preflight(f'{TLS_DIR}/server.crt and server.key do not match')
+
+
+def service_networks(service):
+    """Name -> attachment settings of a rendered service; Compose renders a mapping, a list is tolerated."""
+    networks = service.get('networks') or {}
+    if isinstance(networks, list):
+        return {name: {} for name in networks}
+    return {name: (settings or {}) for name, settings in networks.items()}
+
+
+def validate_networks(config):
+    """The identity network: internal, one subnet, the database on it alone, the proxy at the trusted address."""
+    networks = config.get('networks') or {}
+    identity_network = networks.get(IDENTITY_NETWORK)
+    if not isinstance(identity_network, dict):
+        raise Preflight(f'the Compose file must define the {IDENTITY_NETWORK} network')
+    if identity_network.get('internal') is not True:
+        raise Preflight(f'network {IDENTITY_NETWORK} must be internal: true')
+    subnets = [entry.get('subnet') for entry in (identity_network.get('ipam') or {}).get('config') or []
+               if isinstance(entry, dict) and entry.get('subnet')]
+    if len(subnets) != 1:
+        raise Preflight(f'network {IDENTITY_NETWORK} must have exactly one ipam subnet (KRATE_IDENTITY_SUBNET)')
+    try:
+        subnet = ipaddress.ip_network(subnets[0], strict=True)
+    except ValueError:
+        raise Preflight('KRATE_IDENTITY_SUBNET is not a valid CIDR network') from None
+    services = config['services']
+    if set(service_networks(services['keycloak-db'])) != {IDENTITY_NETWORK}:
+        raise Preflight(f'keycloak-db must be attached to the {IDENTITY_NETWORK} network only')
+    keycloak_networks = service_networks(services['keycloak'])
+    if CLUSTER_NETWORK in keycloak_networks or IDENTITY_NETWORK not in keycloak_networks:
+        raise Preflight(f'keycloak must be on the {IDENTITY_NETWORK} network and not on {CLUSTER_NETWORK}')
+    proxy_networks = service_networks(services['proxy'])
+    address = proxy_networks.get(IDENTITY_NETWORK, {}).get('ipv4_address')
+    if not address:
+        raise Preflight(f'proxy must have a fixed ipv4_address on the {IDENTITY_NETWORK} network (KRATE_IDENTITY_PROXY_IP)')
+    trusted = services['keycloak']['environment'].get('KC_PROXY_TRUSTED_ADDRESSES')
+    if trusted != address:
+        raise Preflight('KC_PROXY_TRUSTED_ADDRESSES must equal the proxy address on the identity network;'
+                        ' clear conflicting shell environment variables')
+    try:
+        proxy_ip = ipaddress.ip_address(address)
+    except ValueError:
+        raise Preflight('KRATE_IDENTITY_PROXY_IP is not a valid IP address') from None
+    if proxy_ip not in subnet or proxy_ip in (subnet.network_address, subnet.broadcast_address):
+        raise Preflight('KRATE_IDENTITY_PROXY_IP must be a host address inside KRATE_IDENTITY_SUBNET')
 
 
 def validate_realm(root, origin, secrets):
@@ -213,6 +269,7 @@ def validate_identity(root, config):
     for name in ('keycloak', 'keycloak-db'):
         if services[name].get('ports'):
             raise Preflight(f'{name} must not publish host ports')
+    validate_networks(config)
     validate_db_tls(root)
     validate_realm(root, origin, secrets)
 
@@ -231,8 +288,8 @@ def main():
     except (OSError, ValueError, KeyError, IndexError, TypeError, subprocess.SubprocessError):
         # Never print exception payloads: rendered configuration contains secrets.
         if args.mode == 'identity':
-            print('Identity preflight failed: check protected .env, the rendered keycloak/keycloak-db services, '
-                  'auth/keycloak/db-tls and auth/keycloak/krate-realm.json.', file=sys.stderr)
+            print('Identity preflight failed: check protected .env, the rendered keycloak/keycloak-db/proxy services '
+                  'and identity network, auth/keycloak/db-tls and auth/keycloak/krate-realm.json.', file=sys.stderr)
             return 1
         print('Authentication preflight failed: check protected .env, unique secrets (16+ characters), generated auth files, HTTPS URL and matching unexpired TLS certificate.', file=sys.stderr)
         return 1

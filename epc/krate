@@ -746,6 +746,46 @@ identity_state() {
   fi
 }
 
+# Refuse to create the identity network on an address range another Docker
+# network already covers: Docker would reject the second network, and the
+# proxy's fixed address (KC_PROXY_TRUSTED_ADDRESSES) would belong to someone
+# else. Networks of this Compose project are the ones Compose manages here and
+# are skipped; every other network counts (another project, Docker's own
+# bridge, networks made by hand). Dies naming the network and both .env keys.
+identity_network_clash() {
+  local subnet project listing clash
+  local -a ids=()
+  subnet="$(env_value KRATE_IDENTITY_SUBNET)"
+  subnet="${subnet:-172.29.250.0/24}"
+  project="$(cluster_project)"
+  listing="$(docker network ls -q)" || die "Cannot list Docker networks; is the Docker daemon running?"
+  [[ -n "$listing" ]] || return 0
+  mapfile -t ids <<< "$listing"
+  # One line per network: name, Compose project (or -), its IPAM subnets.
+  clash="$(docker network inspect -f '{{.Name}} {{or (index .Labels "com.docker.compose.project") "-"}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' "${ids[@]}" 2>/dev/null \
+    | python3 -c '
+import ipaddress, sys
+wanted = ipaddress.ip_network(sys.argv[1], strict=False)
+for line in sys.stdin:
+    name, owner, *subnets = line.split()
+    if owner == sys.argv[2]:
+        continue
+    for subnet in subnets:
+        try:
+            if wanted.overlaps(ipaddress.ip_network(subnet, strict=False)):
+                print(name, subnet, "(no Compose project)" if owner == "-" else "(Compose project " + owner + ")")
+                sys.exit(0)
+        except (ValueError, TypeError):
+            continue
+' "$subnet" "$project")" || die "Cannot inspect the Docker networks for a clash with the identity subnet $subnet"
+  [[ -n "$clash" ]] || return 0
+  identity_journal "${1:-up}" refused "identity subnet $subnet overlaps Docker network ${clash%% *}"
+  die "Docker network $clash overlaps the identity subnet $subnet (KRATE_IDENTITY_SUBNET).
+Choose a free range and set both keys together, then run the command again:
+  krate config set KRATE_IDENTITY_SUBNET=<cidr>
+  krate config set KRATE_IDENTITY_PROXY_IP=<an address inside it>"
+}
+
 # One identity command at a time: a directory lock (a rename is atomic on
 # every platform; macOS has no flock). The pid file is written into a private
 # directory first, which is then renamed to the lock, so the lock never exists
@@ -1124,6 +1164,7 @@ cmd_identity_up() {
   identity_compose config --format json | python3 "$(sso_dir)/preflight.py" --directory "$SCRIPT_DIR" --mode identity \
     || { identity_journal up refused "preflight failed"; die "Identity preflight failed (see above)."; }
   require_service_images keycloak-db keycloak
+  identity_network_clash up
 
   db="$(identity_container keycloak-db)"
   kc="$(identity_container keycloak)"
@@ -1587,6 +1628,108 @@ If that keeps failing, follow the volume-lost procedure in docs/identity-foundat
   ok "Identity database restored from $file"
 }
 
+# Wait until the identity service $1 reports healthy (IDENTITY_TIMEOUT); $2
+# names the command for the journal.
+identity_wait_healthy() {
+  local service="$1" command="$2" cid waited=0
+  cid="$(identity_container "$service")"
+  until [[ "$(container_health "$cid")" == healthy ]]; do
+    if (( waited >= IDENTITY_TIMEOUT )); then
+      identity_journal "$command" failed "$service not healthy within ${IDENTITY_TIMEOUT}s after restart"
+      die "Service $service did not become healthy within the ${IDENTITY_TIMEOUT}s timeout (IDENTITY_TIMEOUT). Check: krate logs $service"
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+}
+
+# Reissue keycloak-db's server key and certificate under the existing CA (398
+# days; the CA, Keycloak's trust store, is unchanged), then restart the
+# database alone so PostgreSQL loads them (the entrypoint wrapper copies the
+# files at container start). Keycloak's connections drop with that restart;
+# it is restarted only when it does not report ready again on its own.
+cmd_identity_renew_db_tls() {
+  prepare_identity_env; require_env
+  identity_lock
+  local state db kc renewed tries=0 keycloak_running=true
+  state="$(identity_state)" || exit 1
+  [[ "${state%% *}" == existing ]] || die "No identity database whose certificate could be renewed (state: $state). Run: krate identity up"
+  db="$(identity_container keycloak-db)"
+  [[ "$(container_status "$db")" == running ]] || die "keycloak-db is not running. Run: krate identity up"
+  kc="$(identity_container keycloak)"
+  [[ "$(container_status "$kc")" == running ]] || keycloak_running=false
+  renewed="$(python3 "$(sso_dir)/identity.py" db-tls --renew-server --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls")" \
+    || { identity_journal renew-db-tls failed "server certificate not reissued"; exit 1; }
+  ok "$renewed"
+  info "Restarting the identity database with the new certificate..."
+  identity_compose restart --no-deps keycloak-db
+  identity_wait_healthy keycloak-db renew-db-tls
+  if $keycloak_running; then
+    until identity_ready; do
+      tries=$((tries + 1))
+      if (( tries >= 10 )); then
+        info "Keycloak did not reconnect on its own; restarting it..."
+        identity_compose restart --no-deps keycloak
+        identity_wait_healthy keycloak renew-db-tls
+        break
+      fi
+      sleep 3
+    done
+    identity_verify_admin renew-db-tls
+  else
+    warn "Keycloak is not running; it uses the renewed certificate on its next start (krate identity up)"
+  fi
+  identity_journal renew-db-tls ok "server.crt reissued under the existing CA, ${renewed#renewed server certificate, }"
+  ok "Database TLS certificate renewed (${renewed#renewed server certificate, })"
+}
+
+# The logrotate drop-in for the identity journal, rendered from
+# sso/logrotate/krate-identity.conf with this installation's journal path.
+# Replacements are literal (no sed/awk metacharacters in the path matter).
+identity_logrotate_render() {
+  local template
+  template="$(sso_dir)/logrotate/krate-identity.conf"
+  [[ -f "$template" ]] || die "logrotate template not found: $template"
+  KRATE_JOURNAL="$SCRIPT_DIR/auth/identity-journal.log" KRATE_NAME="krate-identity-$KRATE_VARIANT" awk '
+    function repl(s, from, to,    out, i) {
+      out = ""
+      while ((i = index(s, from)) > 0) { out = out substr(s, 1, i - 1) to; s = substr(s, i + length(from)) }
+      return out s
+    }
+    { print repl(repl($0, "__JOURNAL__", ENVIRON["KRATE_JOURNAL"]), "__NAME__", ENVIRON["KRATE_NAME"]) }' "$template"
+}
+
+# Print the drop-in, or install it as /etc/logrotate.d/krate-identity-<edition>
+# (mode 644; sudo when not root, as ensure_home_dir does). logrotate then
+# rotates the journal monthly with copytruncate, so krate's append-only writer
+# needs no reopen; 12 rotations are kept, none older than 400 days.
+cmd_identity_logrotate() {
+  local target="/etc/logrotate.d/krate-identity-$KRATE_VARIANT" rendered
+  local -a sudo_cmd=()
+  case "${1:-}" in
+    "")
+      identity_logrotate_render
+      echo "" >&2
+      echo "Install it as $target with: krate identity logrotate --install" >&2
+      ;;
+    --install)
+      [[ "$SCRIPT_DIR" != *[[:space:]\"\'\\]* ]] || die "The installation path contains whitespace, quotes or a backslash, which the logrotate file cannot carry: $SCRIPT_DIR"
+      [[ -d /etc/logrotate.d ]] || die "/etc/logrotate.d not found; install logrotate first (apt-get install logrotate / dnf install logrotate)"
+      rendered="$(identity_logrotate_render)" || exit 1
+      identity_lock
+      if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+        sudo_cmd=(sudo)
+      fi
+      info "Installing $target"
+      printf '%s\n' "$rendered" | "${sudo_cmd[@]}" tee "$target" >/dev/null || die "Could not write $target (run as root, or with sudo available)"
+      "${sudo_cmd[@]}" chmod 644 "$target" || die "Could not set the mode of $target"
+      identity_journal logrotate installed "$target"
+      ok "Installed $target (monthly, 12 rotations kept, copytruncate). Dry run: sudo logrotate -d $target"
+      ;;
+    *) die "Usage: krate identity logrotate [--install]" ;;
+  esac
+}
+
 cmd_identity() {
   local sub="${1:-}"
   shift || true
@@ -1595,12 +1738,14 @@ cmd_identity() {
     status)        cmd_identity_status ;;
     down)          cmd_identity_down ;;
     recover-admin) cmd_identity_recover_admin ;;
+    renew-db-tls)  cmd_identity_renew_db_tls ;;
+    logrotate)     cmd_identity_logrotate "$@" ;;
     users)         cmd_identity_users "$@" ;;
     rotate)        cmd_identity_rotate "$@" ;;
     backup)        cmd_identity_backup "$@" ;;
     restore)       cmd_identity_restore "$@" ;;
     *)
-      echo "Usage: krate identity {up|status|down|recover-admin|users ...|rotate KEY [--value]|backup FILE|restore FILE}"
+      echo "Usage: krate identity {up|status|down|recover-admin|users ...|rotate KEY [--value]|backup FILE|restore FILE|renew-db-tls|logrotate [--install]}"
       return 1 ;;
   esac
 }
@@ -1885,7 +2030,8 @@ cmd_install() {
   echo ""
   echo -e "  ${DIM}Installed in $SCRIPT_DIR; run its ./krate from now on, e.g.:"
   echo -e "  $SCRIPT_DIR/krate status     — check running services"
-  echo -e "  $SCRIPT_DIR/krate logs -f    — follow all logs${RESET}"
+  echo -e "  $SCRIPT_DIR/krate logs -f    — follow all logs"
+  echo -e "  $SCRIPT_DIR/krate identity logrotate --install   — rotate the identity journal with the host's logrotate${RESET}"
   echo ""
 }
 
@@ -2201,12 +2347,15 @@ cmd_uninstall() {
 MONITOR_DIR="$SCRIPT_DIR/monitoring"
 [[ -d "$MONITOR_DIR" ]] || MONITOR_DIR="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)/monitoring"
 
-# The docker network the brokers are attached to.
+# The docker network the brokers are attached to, read from the running
+# broker container (container_name is fixed per edition). Only a broker is
+# asked: the proxy and Kafbat also sit on the identity network, which sorts
+# first in a container's network list and must not be handed to the exporter.
 monitor_network() {
-  local cid
-  cid="$(compose_cmd ps -q 2>/dev/null | head -1)"
-  [[ -n "$cid" ]] || return 1
-  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" 2>/dev/null \
+  local state
+  state="$(docker inspect -f '{{.State.Status}}' "$BROKER_CONTAINER" 2>/dev/null)" || return 1
+  [[ "$state" == running ]] || return 1
+  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$BROKER_CONTAINER" 2>/dev/null \
     | tr ' ' '\n' | grep -v '^$' | head -1
 }
 
@@ -2338,7 +2487,16 @@ cmd_monitor() {
       python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
       echo ""
       ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
-      ok "Prometheus: http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)"
+      # Prometheus (and Loki) answer on PROM_BIND/LOKI_BIND only, 127.0.0.1 by
+      # default: the address printed is the one that works.
+      local prom_bind prom_host
+      prom_bind="$(env_value_file "$MONITOR_DIR/.env" PROM_BIND 127.0.0.1)"
+      if [[ "$prom_bind" == 0.0.0.0 ]]; then
+        prom_host="$(hostname -f 2>/dev/null || hostname)"
+      else
+        prom_host="$prom_bind"
+      fi
+      ok "Prometheus: http://${prom_host}:$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)$([[ "$prom_bind" == 0.0.0.0 ]] || echo ' (this host only; PROM_BIND)')"
       ok "Perses:     https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443) ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) sign-in)"
       note_smtp
       ;;
@@ -3026,6 +3184,8 @@ cmd_help() {
   printf "  %-30s %s\n" "identity rotate KEY [--value]" "Rotate a Keycloak password/secret in Keycloak and .env (--value: from stdin)"
   printf "  %-30s %s\n" "identity backup FILE" "Encrypted dump of the identity database (KRATE_BACKUP_PASSPHRASE or prompt)"
   printf "  %-30s %s\n" "identity restore FILE" "Restore that dump with Keycloak stopped, then start and verify it"
+  printf "  %-30s %s\n" "identity renew-db-tls" "Reissue the database TLS server certificate (398 days) under the existing CA and reload it"
+  printf "  %-30s %s\n" "identity logrotate [--install]" "Print, or install under /etc/logrotate.d, the journal's logrotate rules"
   printf "  %-30s %s\n" "ui"                   "Show Kafbat UI URL and credentials"
   printf "  %-30s %s\n" "config"               "Show current .env config"
   printf "  %-30s %s\n" "config set KEY=VAL"   "Set a config value in .env"

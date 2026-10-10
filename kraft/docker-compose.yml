@@ -214,6 +214,7 @@ services:
       - ./auth/ui:/etc/krate/auth:ro,z
     networks:
       - kafka-network
+      - identity
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/actuator/health || exit 1"]
       interval: 10s
@@ -236,7 +237,13 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs:/etc/nginx/certs:ro
     networks:
-      - kafka-network
+      kafka-network: {}
+      # Fixed address: the one Keycloak trusts forwarded headers from
+      # (KC_PROXY_TRUSTED_ADDRESSES). The Compose specification requires the
+      # network to "have an `ipam` attribute with subnet configurations
+      # covering each static address" (see networks below).
+      identity:
+        ipv4_address: ${KRATE_IDENTITY_PROXY_IP:-172.29.250.10}
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 443 || exit 1"]
       interval: 10s
@@ -277,7 +284,8 @@ services:
     volumes:
       - keycloak_db_data:/var/lib/postgresql/data
       - ./auth/keycloak/db-tls:/run/krate-db-tls:ro,z
-    networks: [kafka-network]
+    # Reachable only from the identity network (Keycloak, proxy, Kafbat).
+    networks: [identity]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
       interval: 10s
@@ -311,6 +319,13 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HTTP_RELATIVE_PATH: /identity
       KC_PROXY_HEADERS: xforwarded
+      # Forwarded headers are accepted from the nginx proxy's fixed address on
+      # the identity network only. Keycloak's reverse proxy guide: "To ensure
+      # that proxy headers are used only from proxies you trust, set the
+      # `proxy-trusted-addresses` option"; "Without this restriction, clients
+      # could bypass the proxy and send forged forwarded headers directly to
+      # Keycloak." The address must be the proxy's ipv4_address below.
+      KC_PROXY_TRUSTED_ADDRESSES: ${KRATE_IDENTITY_PROXY_IP:-172.29.250.10}
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
       KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
@@ -330,7 +345,10 @@ services:
       - ./auth/keycloak/krate-realm.json:/opt/keycloak/data/import/krate-realm.json:ro,z
       - ./auth/keycloak/truststores:/opt/keycloak/conf/truststores:ro,z
       - ./auth/keycloak/db-tls/ca.crt:/opt/keycloak/conf/db-tls/ca.crt:ro,z
-    networks: [kafka-network]
+    # identity: the database, the proxy and Kafbat. identity-egress: Keycloak's
+    # own route out of the host for the Phase 3 identity provider (an internal
+    # network has no such route); nothing else joins it. Not on kafka-network.
+    networks: [identity, identity-egress]
 
 # ─── Named Volumes ─────────────────────────────────────────────────────────────
 volumes:
@@ -343,4 +361,20 @@ volumes:
 # ─── Networks ──────────────────────────────────────────────────────────────────
 networks:
   kafka-network:
+    driver: bridge
+  # Keycloak, its database, the proxy and Kafbat only. `internal: true` "lets
+  # you create an externally isolated network" (Compose specification): no
+  # route to the host or outside, and nothing from the monitoring project. The
+  # fixed subnet lets the proxy keep the static address Keycloak trusts; change
+  # KRATE_IDENTITY_SUBNET and KRATE_IDENTITY_PROXY_IP together in .env when the
+  # range is in use on this host (`krate identity up` checks for a clash).
+  identity:
+    driver: bridge
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: ${KRATE_IDENTITY_SUBNET:-172.29.250.0/24}
+  # Keycloak's egress for the Phase 3 identity provider; no other service.
+  identity-egress:
     driver: bridge

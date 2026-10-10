@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static checks for the Krate identity foundation (templates, realm plan, Compose, CLI parity)."""
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -25,7 +26,17 @@ TEMPLATE_VALUES = {
     'KEYCLOAK_SESSION_IDLE_MINUTES': '15',
     'KEYCLOAK_SESSION_MAX_HOURS': '8',
     'KAFKA_UI_AUTH_CONFIG': 'local.yml',
+    'KRATE_IDENTITY_SUBNET': '172.29.250.0/24',
+    'KRATE_IDENTITY_PROXY_IP': '172.29.250.10',
 }
+# The identity network as both editions must render it from the template defaults.
+IDENTITY_SUBNET = '172.29.250.0/24'
+IDENTITY_PROXY_IP = '172.29.250.10'
+# Monitoring services that answer without a login: bound to the loopback interface by default.
+LOOPBACK_SERVICES = {'prometheus': 9090, 'loki': 3100}
+LOGROTATE_FILE = 'sso/logrotate/krate-identity.conf'
+LOGROTATE_DIRECTIVES = ('monthly', 'rotate 12', 'maxage 400', 'copytruncate', 'missingok', 'notifempty',
+                        'compress', 'delaycompress')
 TEMPLATE_SECRETS = ('KAFKA_UI_PASSWORD', 'KEYCLOAK_ADMIN_PASSWORD', 'KEYCLOAK_DB_PASSWORD',
                     'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'PING_KEYCLOAK_CLIENT_SECRET', 'KEYCLOAK_CLI_CLIENT_SECRET')
 # Values that must never appear in any output; chosen so a leak is unambiguous.
@@ -230,6 +241,86 @@ def check_compose(checks):
         ui_dependencies = services.get('kafka-ui', {}).get('depends_on', {})
         e('keycloak' not in ui_dependencies and 'keycloak-db' not in ui_dependencies,
           f'{edition}/kafka-ui: must not depend_on keycloak services')
+        check_networks(checks, edition, json.loads(rendered))
+
+
+def networks_of(service):
+    """Name -> attachment settings of a rendered service (Compose renders a mapping)."""
+    networks = service.get('networks') or {}
+    if isinstance(networks, list):
+        return {name: {} for name in networks}
+    return {name: (settings or {}) for name, settings in networks.items()}
+
+
+def check_networks(checks, edition, config):
+    """The identity network: internal, the template subnet, and exactly the members the design names."""
+    e = checks.expect
+    networks = config.get('networks', {})
+    identity_net = networks.get('identity', {})
+    e(identity_net.get('internal') is True, f'{edition}: network identity must be internal: true')
+    subnets = [entry.get('subnet') for entry in identity_net.get('ipam', {}).get('config', [])]
+    e(subnets == [IDENTITY_SUBNET], f'{edition}: network identity must have the one ipam subnet {IDENTITY_SUBNET}; got {subnets}')
+    e('identity-egress' in networks and not networks['identity-egress'].get('internal'),
+      f'{edition}: network identity-egress must exist and not be internal')
+    services = config['services']
+    expected = {'keycloak-db': {'identity'}, 'keycloak': {'identity', 'identity-egress'},
+                'proxy': {'kafka-network', 'identity'}, 'kafka-ui': {'kafka-network', 'identity'}}
+    for name, wanted in expected.items():
+        attached = set(networks_of(services.get(name, {})))
+        e(attached == wanted, f'{edition}/{name}: must be attached to {sorted(wanted)}; got {sorted(attached)}')
+    for name, service in services.items():
+        if re.fullmatch(r'kafka-\d+', name):
+            e(set(networks_of(service)) == {'kafka-network'}, f'{edition}/{name}: brokers stay on kafka-network only')
+    proxy_ip = networks_of(services.get('proxy', {})).get('identity', {}).get('ipv4_address')
+    e(proxy_ip == IDENTITY_PROXY_IP, f'{edition}/proxy: ipv4_address on identity must be {IDENTITY_PROXY_IP}; got {proxy_ip!r}')
+    trusted = services.get('keycloak', {}).get('environment', {}).get('KC_PROXY_TRUSTED_ADDRESSES')
+    e(trusted == proxy_ip, f'{edition}/keycloak: KC_PROXY_TRUSTED_ADDRESSES must equal the proxy address; got {trusted!r}')
+    e(proxy_ip is not None and ipaddress.ip_address(proxy_ip) in ipaddress.ip_network(IDENTITY_SUBNET),
+      f'{edition}: the proxy address must lie inside {IDENTITY_SUBNET}')
+
+
+def check_monitoring_binds(checks):
+    """Prometheus and Loki publish on 127.0.0.1 from the template defaults; Grafana and Perses are unchanged."""
+    template = ROOT / 'monitoring/.env.template'
+    env = identity.read_env(template)
+    for key in ('PROM_BIND', 'LOKI_BIND'):
+        checks.expect(env.get(key) == '127.0.0.1', f'monitoring/.env.template: {key} must be 127.0.0.1; got {env.get(key)!r}')
+    result = subprocess.run(['docker', 'compose', '--env-file', str(template), '-f', str(ROOT / 'monitoring/docker-compose.yml'),
+                             'config', '--format', 'json'], cwd=ROOT, text=True, capture_output=True)
+    if not checks.expect(result.returncode == 0, 'monitoring: Compose rendering from the template failed'):
+        return
+    services = json.loads(result.stdout)['services']
+    for name, port in LOOPBACK_SERVICES.items():
+        ports = services.get(name, {}).get('ports', [])
+        checks.expect(len(ports) == 1 and ports[0].get('host_ip') == '127.0.0.1' and ports[0].get('published') == str(port)
+                      and ports[0].get('target') == port,
+                      f'monitoring/{name}: must publish only 127.0.0.1:{port}:{port} by default; got {ports}')
+    for name, port in (('grafana', 3000), ('perses-gateway', 3443)):
+        ports = services.get(name, {}).get('ports', [])
+        checks.expect(len(ports) == 1 and not ports[0].get('host_ip') and ports[0].get('published') == str(port),
+                      f'monitoring/{name}: must still publish {port} on every interface; got {ports}')
+
+
+def check_logrotate(checks):
+    """The logrotate drop-in ships with its placeholders and the decided directives, and is packaged."""
+    e = checks.expect
+    path = ROOT / LOGROTATE_FILE
+    if not e(path.is_file(), f'{LOGROTATE_FILE} is missing'):
+        return
+    text = path.read_text()
+    e(re.search(r'^__JOURNAL__ \{$', text, re.MULTILINE) is not None, f'{LOGROTATE_FILE}: the stanza must open with "__JOURNAL__ {{"')
+    e('__NAME__' in text, f'{LOGROTATE_FILE}: must carry the __NAME__ placeholder')
+    directives = [line.strip() for line in text.splitlines() if line.startswith('    ')]
+    e(directives == list(LOGROTATE_DIRECTIVES), f'{LOGROTATE_FILE}: directives must be {list(LOGROTATE_DIRECTIVES)}; got {directives}')
+    e(LOGROTATE_FILE in (ROOT / 'Makefile').read_text(), f'Makefile: the bundle must copy {LOGROTATE_FILE}')
+    e(f"'{LOGROTATE_FILE}'" in (ROOT / 'scripts/check-bundle.py').read_text(), f'scripts/check-bundle.py: must require {LOGROTATE_FILE}')
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        for needle in ('identity_network_clash up', 'renew-db-tls)  cmd_identity_renew_db_tls', 'logrotate)     cmd_identity_logrotate',
+                       '"$BROKER_CONTAINER" 2>/dev/null \\\n    | tr'):
+            e(needle in cli, f'{edition}/krate: missing {needle.splitlines()[0]!r}')
+        e('compose_cmd ps -q 2>/dev/null | head -1' not in cli,
+          f'{edition}/krate: monitor_network must read the broker container, not the first container of the project')
 
 
 def check_parity(checks):
@@ -286,11 +377,56 @@ def check_writers(checks):
         except identity.IncompleteMaterial as exc:
             checks.expect('server.crt' in str(exc), 'identity.db_tls: the incomplete-set error must name the missing file')
         checks.expect(not (tls / 'server.crt').exists(), 'identity.db_tls: must never regenerate over an incomplete set')
+        try:
+            identity.renew_server(tls)
+            checks.errors.append('identity.renew_server: an incomplete set must raise instead of issuing a certificate')
+        except identity.IncompleteMaterial:
+            pass
+        check_renewal(checks, Path(tmp) / 'renew')
         plan = Path(tmp) / 'realm.json'
         checks.expect(identity.write_if_changed(plan, '{}\n', 0o644) is True and mode(plan) == 0o644,
                       'identity.write_if_changed: realm plan must be created with mode 0644')
         checks.expect(identity.write_if_changed(plan, '{}\n', 0o644) is False, 'identity.write_if_changed: identical content must be a no-op')
         checks.expect(not plan.with_name('.realm.json.tmp').exists(), 'identity.write_if_changed: temporary file must not remain')
+
+
+def openssl(*args):
+    return subprocess.run(['openssl', *args], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+
+
+def days_left(certificate):
+    """Whole days until the certificate expires, from openssl's notAfter."""
+    import datetime
+    text = openssl('x509', '-in', str(certificate), '-noout', '-enddate').stdout.strip().partition('=')[2]
+    expiry = datetime.datetime.strptime(text, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=datetime.timezone.utc)
+    return (expiry - datetime.datetime.now(datetime.timezone.utc)).days
+
+
+def check_renewal(checks, tls):
+    """renew_server reissues key and certificate under the same CA (398 days) and leaves the CA and policy alone."""
+    e = lambda cond, msg: checks.expect(cond, 'identity.renew_server: ' + msg)  # noqa: E731
+    identity.db_tls(tls)
+    before = {name: (tls / name).read_bytes() for name in identity.TLS_FILES}
+    e(identity.SERVER_CERT_DAYS == 398 and identity.CA_CERT_DAYS == 1825, 'server certificates are issued for 398 days, the CA for 1825')
+    e(396 <= days_left(tls / 'server.crt') <= 398, f'a fresh server.crt must be valid for 398 days; got {days_left(tls / "server.crt")}')
+    e(1823 <= days_left(tls / 'ca.crt') <= 1825, f'a fresh ca.crt must be valid for 1825 days; got {days_left(tls / "ca.crt")}')
+    expiry = identity.renew_server(tls)
+    e(bool(re.fullmatch(r'[A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4} GMT', expiry)), f'returns the new notAfter; got {expiry!r}')
+    after = {name: (tls / name).read_bytes() for name in identity.TLS_FILES}
+    for name in ('ca.key', 'ca.crt', 'pg_hba.conf'):
+        e(after[name] == before[name], f'{name} must not change')
+    for name in ('server.key', 'server.crt'):
+        e(after[name] != before[name], f'{name} must be reissued')
+        e(mode(tls / name) == identity.TLS_MODES[name], f'{name} mode must stay {identity.TLS_MODES[name]:o}')
+    e(sorted(os.listdir(tls)) == sorted(identity.TLS_FILES), f'no .new or temporary files may remain; got {sorted(os.listdir(tls))}')
+    e(openssl('verify', '-CAfile', str(tls / 'ca.crt'), str(tls / 'server.crt')).returncode == 0, 'the new server.crt must chain to the same CA')
+    cert_pub = openssl('x509', '-in', str(tls / 'server.crt'), '-pubkey', '-noout').stdout
+    key_pub = openssl('pkey', '-in', str(tls / 'server.key'), '-pubout').stdout
+    e(bool(cert_pub) and cert_pub == key_pub, 'the new certificate must match the new key')
+    e('DNS:' + identity.DB_HOST in openssl('x509', '-in', str(tls / 'server.crt'), '-noout', '-ext', 'subjectAltName').stdout.replace(' ', ''),
+      'the new certificate must keep SAN DNS:keycloak-db')
+    e(396 <= days_left(tls / 'server.crt') <= 398, f'the renewed server.crt must be valid for 398 days; got {days_left(tls / "server.crt")}')
+    e(identity.db_tls(tls) == [], 'db-tls without the flag must leave the renewed set unchanged')
 
 
 def site_env(edition, **overrides):
@@ -350,6 +486,60 @@ def check_name_refusals(checks, edition, site, env, auth_mode, rendered):
     write_env(site, env)
 
 
+def network_mutations(rendered):
+    """(label, mutated rendered config) pairs that preflight must refuse in both Keycloak-backed modes."""
+    def mutate(label, change):
+        config = json.loads(rendered)
+        change(config)
+        return label, json.dumps(config)
+
+    def set_networks(config, service, networks):
+        config['services'][service]['networks'] = networks
+
+    def set_proxy_ip(config, address):
+        config['services']['proxy']['networks']['identity'] = {'ipv4_address': address}
+        config['services']['keycloak']['environment']['KC_PROXY_TRUSTED_ADDRESSES'] = address
+
+    return [
+        mutate('identity network not internal', lambda c: c['networks']['identity'].pop('internal')),
+        mutate('identity network without subnet', lambda c: c['networks']['identity'].pop('ipam')),
+        mutate('keycloak-db also on kafka-network', lambda c: set_networks(c, 'keycloak-db', {'identity': None, 'kafka-network': None})),
+        mutate('keycloak on kafka-network', lambda c: set_networks(c, 'keycloak', {'identity': None, 'kafka-network': None})),
+        mutate('proxy without a fixed address', lambda c: set_networks(c, 'proxy', {'identity': None, 'kafka-network': None})),
+        mutate('trusted address differs from the proxy address',
+               lambda c: c['services']['keycloak']['environment'].__setitem__('KC_PROXY_TRUSTED_ADDRESSES', '172.29.250.11')),
+        mutate('proxy address outside the subnet', lambda c: set_proxy_ip(c, '172.29.251.10')),
+        mutate('proxy address is the network address', lambda c: set_proxy_ip(c, '172.29.250.0')),
+    ]
+
+
+def check_network_refusals(checks, edition, site, auth_mode, rendered):
+    """preflight must refuse a rendered configuration whose identity network deviates from the design."""
+    for label, mutated in network_mutations(rendered):
+        result = preflight(site, auth_mode, mutated)
+        checks.expect(result.returncode == 1 and ('identity' in result.stderr or 'PROXY' in result.stderr),
+                      f'{edition}: preflight --mode {auth_mode} must refuse: {label}; got exit {result.returncode}: {result.stderr.strip()}')
+
+
+def check_renewal_warning(checks, edition, site, rendered):
+    """preflight warns 30 days before the database certificate expires and refuses within a day."""
+    tls = site / 'auth/keycloak/db-tls'
+    identity.renew_server(tls, days=10)
+    result = preflight(site, 'identity', rendered)
+    checks.expect(result.returncode == 0 and 'warning' in result.stderr and 'renew-db-tls' in result.stderr
+                  and 'expires within 30 days' in result.stderr,
+                  f'{edition}: preflight must pass with a warning naming krate identity renew-db-tls for a certificate with 10 days left;'
+                  f' got exit {result.returncode}: {result.stderr.strip()}')
+    identity.renew_server(tls, days=0)
+    result = preflight(site, 'identity', rendered)
+    checks.expect(result.returncode == 1 and 'expires within a day' in result.stderr and 'renew-db-tls' in result.stderr,
+                  f'{edition}: preflight must refuse a certificate expiring today; got exit {result.returncode}: {result.stderr.strip()}')
+    identity.renew_server(tls)
+    result = preflight(site, 'identity', rendered)
+    checks.expect(result.returncode == 0 and 'warning' not in result.stderr,
+                  f'{edition}: preflight must pass without a warning after renewal; got exit {result.returncode}: {result.stderr.strip()}')
+
+
 def check_plan_and_preflight(checks):
     for edition in EDITIONS:
         with tempfile.TemporaryDirectory() as tmp:
@@ -365,10 +555,13 @@ def check_plan_and_preflight(checks):
             if not checks.expect(code == 0, f'{edition}: Compose rendering of the synthetic site failed'):
                 continue
             result = preflight(site, 'identity', rendered)
-            checks.expect(result.returncode == 0, f'{edition}: preflight --mode identity refused a complete synthetic site: {result.stderr.strip()}')
+            checks.expect(result.returncode == 0 and not result.stderr.strip(),
+                          f'{edition}: preflight --mode identity refused or warned on a complete synthetic site: {result.stderr.strip()}')
             checks.expect(not any(secret in result.stdout + result.stderr for secret in SYNTHETIC_SECRETS),
                           f'{edition}: preflight output leaked a secret value')
             check_name_refusals(checks, edition, site, env, 'identity', rendered)
+            check_network_refusals(checks, edition, site, 'identity', rendered)
+            check_renewal_warning(checks, edition, site, rendered)
 
 
 def load_configure_dual():
@@ -422,6 +615,7 @@ def check_runtime_preflight(checks):
             checks.expect(not any(secret in result.stdout + result.stderr for secret in ALL_SECRETS),
                           f'{edition}: preflight --mode runtime.yml output leaked a secret value')
             check_name_refusals(checks, edition, site, env, 'runtime.yml', rendered)
+            check_network_refusals(checks, edition, site, 'runtime.yml', rendered)
 
 
 def check_backup_seal(checks):
@@ -463,9 +657,9 @@ def check_backup_seal(checks):
 
 def main():
     checks = Checks()
-    for check in (check_templates, check_realm_contract, check_names, check_compose, check_parity, check_zk_frozen,
-                  check_writers, check_backup_seal, check_plan_and_preflight, check_configure_dual,
-                  check_runtime_preflight):
+    for check in (check_templates, check_realm_contract, check_names, check_compose, check_monitoring_binds, check_logrotate,
+                  check_parity, check_zk_frozen, check_writers, check_backup_seal, check_plan_and_preflight,
+                  check_configure_dual, check_runtime_preflight):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others
@@ -473,8 +667,8 @@ def main():
     if checks.errors:
         print('Identity check failed:\n' + '\n'.join(checks.errors), file=sys.stderr)
         return 1
-    print('Identity foundation verified: templates, realm plan, names, Compose services, CLI parity, zk frozen, writers, '
-          'preflight (identity and runtime.yml), configure-dual.')
+    print('Identity foundation verified: templates, realm plan, names, Compose services and identity network, monitoring binds, '
+          'logrotate drop-in, CLI parity, zk frozen, writers and renewal, preflight (identity and runtime.yml), configure-dual.')
     return 0
 
 

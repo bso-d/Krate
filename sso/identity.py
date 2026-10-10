@@ -58,7 +58,12 @@ EVENTS = {
 
 DB_HOST = 'keycloak-db'
 CA_NAME = 'Krate identity CA'
-CERT_DAYS = 825
+# The CA lives as long as the installation's trust (Keycloak's trust store is
+# ca.crt); the server certificate is short-lived and reissued under it by
+# `krate identity renew-db-tls` (PostgreSQL 17: "The server reads these files at
+# server start and whenever the server configuration is reloaded").
+CA_CERT_DAYS = 1825
+SERVER_CERT_DAYS = 398
 TLS_FILES = ('ca.key', 'ca.crt', 'server.key', 'server.crt', 'pg_hba.conf')
 TLS_MODES = {'ca.key': 0o600, 'server.key': 0o600, 'ca.crt': 0o644, 'server.crt': 0o644, 'pg_hba.conf': 0o644}
 PG_HBA = ('local   all all                     trust\n'
@@ -299,29 +304,71 @@ def plan(env_file, output, show=False):
 
 # ─── Database TLS material ─────────────────────────────────────────────────────
 
-def _openssl(args, cwd):
+def _openssl(args, cwd, capture=False):
     result = subprocess.run(['openssl', *args], cwd=cwd, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if result.returncode:
         raise subprocess.SubprocessError(f'openssl {args[0]} failed (exit {result.returncode}); is OpenSSL 1.1.1 or newer installed?')
+    return result.stdout.decode() if capture else ''
+
+
+def issue_server(work, days=SERVER_CERT_DAYS):
+    """A new server key and certificate (SAN DNS:keycloak-db) signed by the CA files in `work`."""
+    work = Path(work)
+    (work / 'server.ext').write_text(SERVER_EXTENSIONS)
+    _openssl(['req', '-new', '-newkey', 'rsa:2048', '-nodes', '-sha256',
+              '-subj', '/CN=' + DB_HOST, '-keyout', 'server.key', '-out', 'server.csr'], work)
+    _openssl(['x509', '-req', '-sha256', '-days', str(days), '-in', 'server.csr',
+              '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial',
+              '-extfile', 'server.ext', '-out', 'server.crt'], work)
 
 
 def generate_material(work):
     """Create a private CA and a server certificate for keycloak-db in `work`."""
     work = Path(work)
-    (work / 'server.ext').write_text(SERVER_EXTENSIONS)
-    _openssl(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', str(CERT_DAYS),
+    _openssl(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', str(CA_CERT_DAYS),
               '-subj', '/CN=' + CA_NAME, '-keyout', 'ca.key', '-out', 'ca.crt',
               '-addext', 'basicConstraints=critical,CA:TRUE',
               '-addext', 'keyUsage=critical,keyCertSign,cRLSign'], work)
-    _openssl(['req', '-new', '-newkey', 'rsa:2048', '-nodes', '-sha256',
-              '-subj', '/CN=' + DB_HOST, '-keyout', 'server.key', '-out', 'server.csr'], work)
-    _openssl(['x509', '-req', '-sha256', '-days', str(CERT_DAYS), '-in', 'server.csr',
-              '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial',
-              '-extfile', 'server.ext', '-out', 'server.crt'], work)
+    issue_server(work)
     material = {name: (work / name).read_bytes() for name in TLS_FILES if name != 'pg_hba.conf'}
     material['pg_hba.conf'] = PG_HBA.encode()
     return material
+
+
+def not_after(certificate):
+    """The certificate's expiry as openssl prints it, e.g. 'Oct 10 12:00:00 2027 GMT'."""
+    text = _openssl(['x509', '-in', str(certificate), '-noout', '-enddate'], None, capture=True)
+    return text.strip().partition('=')[2]
+
+
+def renew_server(directory, days=SERVER_CERT_DAYS):
+    """Reissue server.key and server.crt under the existing CA; returns the new expiry.
+
+    Both files are written beside the current ones as `.new` and then moved into
+    place (key first, then certificate), so no reader ever sees a partial file.
+    The CA, Keycloak's trust store, is untouched.
+    """
+    directory = Path(directory)
+    missing = [name for name in TLS_FILES if not (directory / name).is_file()]
+    if missing:
+        raise IncompleteMaterial(f'{directory} is incomplete; missing ' + ', '.join(missing)
+                                 + '. Renewal needs the existing CA; restore the directory from a backup first.')
+    previous = os.umask(0o077)
+    try:
+        with tempfile.TemporaryDirectory(prefix='.renew-', dir=directory) as work:
+            work = Path(work)
+            for name in ('ca.crt', 'ca.key'):
+                (work / name).write_bytes((directory / name).read_bytes())
+            issue_server(work, days)
+            material = {name: (work / name).read_bytes() for name in ('server.key', 'server.crt')}
+    finally:
+        os.umask(previous)
+    for name in ('server.key', 'server.crt'):
+        write_file(directory / (name + '.new'), material[name], TLS_MODES[name])
+    for name in ('server.key', 'server.crt'):
+        os.replace(directory / (name + '.new'), directory / name)
+    return not_after(directory / 'server.crt')
 
 
 def db_tls(directory):
@@ -358,6 +405,9 @@ def cmd_plan(args):
 
 
 def cmd_db_tls(args):
+    if args.renew_server:
+        print(f'renewed server certificate, valid until {renew_server(args.output_dir)}')
+        return 0
     written = db_tls(args.output_dir)
     if written:
         print(f"Database TLS material: wrote {', '.join(written)} in {args.output_dir}")
@@ -433,6 +483,8 @@ def main():
     planner.set_defaults(func=cmd_plan)
     tls = commands.add_parser('db-tls', help='generate CA, server certificate and pg_hba.conf for keycloak-db')
     tls.add_argument('--output-dir', type=Path, required=True)
+    tls.add_argument('--renew-server', action='store_true',
+                     help=f'reissue server.key and server.crt under the existing CA ({SERVER_CERT_DAYS} days)')
     tls.set_defaults(func=cmd_db_tls)
     seal = commands.add_parser('backup-seal', help='append an HMAC-SHA256 tag to an openssl ciphertext (passphrase from env)')
     seal.add_argument('--input', type=Path, required=True)

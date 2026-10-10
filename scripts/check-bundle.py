@@ -45,8 +45,8 @@ def main():
         if not (root / name).is_file():
             raise SystemExit('Missing licence file: ' + name)
     for name in ('sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh',
-                 'sso/preflight.py', 'sso/probe.py', 'sso/identity.py', 'auth/ui/local.yml',
-                 'docs/dual-login.md', 'docs/identity-foundation.md'):
+                 'sso/preflight.py', 'sso/probe.py', 'sso/identity.py', 'sso/logrotate/krate-identity.conf',
+                 'auth/ui/local.yml', 'docs/dual-login.md', 'docs/identity-foundation.md'):
         if not (root / name).is_file():
             raise SystemExit('Missing authentication package file: ' + name)
     monitor_template = root / 'monitoring/.env.template'

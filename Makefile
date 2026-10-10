@@ -254,9 +254,11 @@ bundle: offline-check
 >  # published, including the components it could not be obtained for.
 >  cp LICENSE LICENSE-SOURCES.md "$$bundle_dir/"
 >  if [[ "$$mode" != "zk" ]]; then
->    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso" "$$bundle_dir/docs"
+>    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso/logrotate" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
 >    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py sso/identity.py "$$bundle_dir/sso/"
+>    # Rendered by `krate identity logrotate` with the installation's journal path.
+>    cp sso/logrotate/krate-identity.conf "$$bundle_dir/sso/logrotate/"
 >    cp sso/guides/identity-foundation.md sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md "$$bundle_dir/docs/"
 >  fi
 >  # The CLI ships as ./krate everywhere except the frozen ZooKeeper edition,

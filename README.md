@@ -224,6 +224,7 @@ Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`)
 | `./krate down` | Removes containers while keeping stored messages |
 | `./krate identity up` | Starts the Keycloak identity service and its database, creates its admin on first start |
 | `./krate identity status` / `./krate identity users list` | Shows identity service health; lists local users |
+| `./krate identity renew-db-tls` / `./krate identity logrotate --install` | Renews the identity database certificate; hands the identity journal to the host's logrotate |
 | `./krate help` | Lists the available commands |
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
@@ -246,7 +247,11 @@ PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the
 `Identity services skipped (run: krate identity up)` and starts the cluster
 without Keycloak. `./krate identity users` manages local users;
 `./krate identity rotate`, `backup`, `restore` and `recover-admin` cover
-secrets, the database and a lost admin login. The
+secrets, the database and a lost admin login; `renew-db-tls` reissues the
+database certificate and `logrotate --install` rotates the journal. Keycloak,
+its database, the proxy and Kafbat share a private `identity` Docker network
+on which the proxy has a fixed address that Keycloak trusts for forwarded
+headers (`KRATE_IDENTITY_SUBNET`, `KRATE_IDENTITY_PROXY_IP` in `.env`). The
 [identity foundation guide](sso/guides/identity-foundation.md) holds the
 inventory of projects, ports, volumes and credentials, the trust boundaries,
 every procedure and the upgrade steps for a Keycloak database from before
@@ -280,7 +285,7 @@ Its settings and passwords are prepared with the cluster's; `./krate credentials
 ./krate monitor ui
 ```
 
-The default Grafana address uses port `3000`; Perses uses HTTPS on `3443`, Prometheus uses `9090` and Loki uses `3100`. Email alerts require your own mail server and recipients; they are off by default. When enabled, Grafana and Alertmanager both send them. Perses supports company SSO with native IdP-group roles; see the [Perses SSO guide](sso/guides/perses-sso.md).
+The default Grafana address uses port `3000`; Perses uses HTTPS on `3443`. Prometheus (`9090`) and Loki (`3100`) have no login and are bound to `127.0.0.1` on the host (`PROM_BIND`, `LOKI_BIND` in `monitoring/.env`; set `0.0.0.0` to publish them). Email alerts require your own mail server and recipients; they are off by default. When enabled, Grafana and Alertmanager both send them. Perses supports company SSO with native IdP-group roles; see the [Perses SSO guide](sso/guides/perses-sso.md).
 
 ZooKeeper has its own smaller stack: Kafka measurements, Prometheus, and Grafana, started with `./kafka monitor up`. It does not include Loki or host measurements.
 

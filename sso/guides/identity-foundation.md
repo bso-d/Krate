@@ -1,4 +1,4 @@
-# Identity foundation (Keycloak first, Phase 1)
+# Identity foundation (Keycloak first, Phase 1 and the Phase 2 infrastructure)
 
 This guide describes the identity service that Krate runs beside the cluster:
 Keycloak 26.8.0 with a PostgreSQL 17 database, both in the `sso` Compose
@@ -10,6 +10,12 @@ Phase 1 is the foundation only. Keycloak runs, holds local users in the realm
 login (`auth/ui/local.yml`) until Phase 2 switches it to `runtime.yml`.
 Phase 2 uses local Keycloak users only. PingFederate brokering is Phase 3.
 
+The first Phase 2 commits implement the owner decisions 7, 8, 9 and 13 (see
+"Open owner decisions"): a private `identity` Compose network with a fixed
+proxy address that Keycloak trusts for forwarded headers, Prometheus and Loki
+bound to the loopback interface, `./krate identity renew-db-tls` for the
+database certificate, and `./krate identity logrotate` for the journal.
+
 Operator flow, in order:
 
 1. `./krate setup` (or the first `./krate start`) creates `.env`, generates
@@ -20,8 +26,11 @@ Operator flow, in order:
    `Identity services skipped (run: krate identity up)` and leaves Keycloak
    and its database out.
 3. `./krate identity up` generates the database TLS material and the realm
-   plan, starts PostgreSQL and Keycloak, creates the permanent Keycloak admin
-   and sets `KEYCLOAK_ENABLED=true`.
+   plan, checks that no other Docker network uses the identity subnet, starts
+   PostgreSQL and Keycloak, creates the permanent Keycloak admin and sets
+   `KEYCLOAK_ENABLED=true`. Optionally `./krate identity logrotate --install`
+   hands the journal to the host's logrotate (`./krate install` prints the
+   hint).
 4. Phase 2: `./krate auth configure` writes `auth/ui/runtime.yml` and the
    identity-provider plan `auth/keycloak/pingfederate-idp.json`; `./krate auth
    apply` switches Kafbat to Keycloak login. The realm file
@@ -119,10 +128,10 @@ Read from `kraft/docker-compose.yml`, `epc/docker-compose.yml` and
 | --- | --- | --- | --- | --- |
 | `kafka-92`..`kafka-95` (KRaft) | `krate-broker-9x` | default | `9092`-`9095`, `19092`-`19095` | PLAINTEXT listeners |
 | `kafka-92`, `kafka-93` (EPC) | `epc-broker-9x` | default | `KAFKA_BROKER_92_PORT` (9092), `KAFKA_BROKER_93_PORT` (9093) | PLAINTEXT listeners |
-| `kafka-ui` | `krate-kafbat` / `epc-kafbat` | default | none | Reached only through the proxy. Does not depend on `keycloak`. |
-| `proxy` | `krate-proxy` / `epc-proxy` | default | `KAFKA_UI_HTTP_PORT` (80), `KAFKA_UI_HTTPS_PORT` (443) | TLS from `certs/`; forwards only `/identity/realms/krate/` and `/identity/resources/` to Keycloak |
-| `keycloak-db` | Compose default (`<project>-keycloak-db-1`) | `sso` | none | PostgreSQL 17, TLS on, `pg_hba.conf` from `auth/keycloak/db-tls/` |
-| `keycloak` | Compose default (`<project>-keycloak-1`) | `sso` | none | HTTP 8080 and management 9000 stay inside the network |
+| `kafka-ui` | `krate-kafbat` / `epc-kafbat` | default | none | Reached only through the proxy. Does not depend on `keycloak`. Networks `kafka-network` and `identity` |
+| `proxy` | `krate-proxy` / `epc-proxy` | default | `KAFKA_UI_HTTP_PORT` (80), `KAFKA_UI_HTTPS_PORT` (443) | TLS from `certs/`; forwards only `/identity/realms/krate/` and `/identity/resources/` to Keycloak. Networks `kafka-network` and `identity`, with the fixed address `KRATE_IDENTITY_PROXY_IP` (172.29.250.10) on `identity` |
+| `keycloak-db` | Compose default (`<project>-keycloak-db-1`) | `sso` | none | PostgreSQL 17, TLS on, `pg_hba.conf` from `auth/keycloak/db-tls/`. Network `identity` only |
+| `keycloak` | Compose default (`<project>-keycloak-1`) | `sso` | none | HTTP 8080 and management 9000 stay inside the network. Networks `identity` and `identity-egress`; not on `kafka-network`. `KC_PROXY_TRUSTED_ADDRESSES` = the proxy address |
 
 ### Services and published host ports: monitoring
 
@@ -130,8 +139,8 @@ Read from `kraft/docker-compose.yml`, `epc/docker-compose.yml` and
 | --- | --- | --- | --- |
 | `kafka-exporter` | none | cluster network, `monitoring` | Joins the cluster's network to reach brokers by name |
 | `node-exporter` | none | `monitoring` | `pid: host`; mounts `/proc`, `/sys`, `/` read-only |
-| `prometheus` | `PROM_PORT` (9090) | `monitoring`, `perses` | HTTP, no authentication |
-| `loki` | `LOKI_PORT` (3100) | `monitoring` | HTTP, no authentication |
+| `prometheus` | `PROM_BIND:PROM_PORT` (127.0.0.1:9090) | `monitoring`, `perses` | HTTP, no authentication; loopback only by default. `PROM_BIND=0.0.0.0` publishes it on every interface |
+| `loki` | `LOKI_BIND:LOKI_PORT` (127.0.0.1:3100) | `monitoring` | HTTP, no authentication; loopback only by default. `LOKI_BIND=0.0.0.0` publishes it on every interface |
 | `log-discovery` | none | none | Reads `/var/lib/docker/containers` read-only |
 | `fluent-bit` | none | `monitoring` | Reads `/var/lib/docker/containers` read-only |
 | `grafana` | `GRAFANA_PORT` (3000) | `monitoring` | HTTP, Grafana login |
@@ -142,17 +151,45 @@ Read from `kraft/docker-compose.yml`, `epc/docker-compose.yml` and
 | `perses-gateway` | `PERSES_PORT` (3443) | `perses` | HTTPS with the cluster certificate (`PERSES_CERTS_DIR`) |
 | `oauth2-proxy`, `perses-sync` | none | `perses` | profile `perses-sso` |
 
-Prometheus, Loki and Grafana are published over plain HTTP. Changing that is an
-owner decision (see "Open owner decisions"); Phase 1 leaves the ports as they
-are.
+Prometheus and Loki answer without any login, so since owner decision 8 they
+are bound to the host's loopback interface (`PROM_BIND`, `LOKI_BIND` in
+`monitoring/.env`, default `127.0.0.1`): the Compose short port syntax
+`[HOST:]CONTAINER` with `HOST` = `[IP:]port`; when the IP "is not set, it
+binds to all network interfaces (`0.0.0.0`)" (Compose specification [S2]).
+`./krate monitor up` prints the Prometheus address with that bind. Grafana
+(3000) keeps its own login and stays on every interface over plain HTTP until
+Phase 4; Perses (3443) uses the cluster certificate.
 
 ### Networks
 
 | Network | Driver | Members |
 | --- | --- | --- |
-| `<project>_kafka-network` | bridge | all cluster services, including `keycloak` and `keycloak-db`; `kafka-exporter` from the monitoring project joins it as an external network |
+| `<project>_kafka-network` | bridge | brokers, `kafka-ui`, `proxy`; `kafka-exporter` from the monitoring project joins it as an external network. `keycloak` and `keycloak-db` are no longer on it |
+| `<project>_identity` | bridge, `internal: true`, subnet `KRATE_IDENTITY_SUBNET` (172.29.250.0/24) | `keycloak-db`, `keycloak`, `proxy` (fixed address `KRATE_IDENTITY_PROXY_IP`, 172.29.250.10), `kafka-ui`. No route to the host or outside; nothing from the monitoring project |
+| `<project>_identity-egress` | bridge | `keycloak` only: its route out of the host for the Phase 3 identity provider (an internal network has none) |
 | `<monitoring project>_monitoring` | bridge | exporters, Prometheus, Loki, Fluent Bit, Grafana, VictoriaLogs, Alertmanager |
 | `<monitoring project>_perses` | bridge | Prometheus, VictoriaLogs, Perses, its gateway, seed and SSO helpers |
+
+`./krate identity up` refuses to continue when a Docker network outside this
+Compose project (another project, Docker's own `bridge`, a hand-made network)
+already covers the identity subnet; it names the network and the two keys to
+change together (`KRATE_IDENTITY_SUBNET`, `KRATE_IDENTITY_PROXY_IP`). The
+preflight checks the rendered configuration: `identity` is `internal: true`
+with one subnet, `keycloak-db` is attached to `identity` only, `keycloak` is
+not on `kafka-network`, the proxy has a fixed `ipv4_address` on `identity`
+equal to `KC_PROXY_TRUSTED_ADDRESSES`, and that address is a host address
+inside the subnet. The Compose specification: `internal`, "when set to `true`,
+lets you create an externally isolated network"; `ipv4_address` lets you
+"Specify a static IP address for a service container when joining the
+network", and the network "must have an `ipam` attribute with subnet
+configurations covering each static address" [S2].
+
+To reach `keycloak-db` from the host for an ad-hoc `psql`, use the container
+itself (`docker exec -it <project>-keycloak-db-1 psql -U keycloak -d keycloak`,
+local socket, no password) or join the identity network with a one-off
+container: `docker run --rm -it --network <project>_identity <KEYCLOAK_DB_IMAGE
+from .env> psql "host=keycloak-db sslmode=verify-full sslrootcert=..."`. No
+other network reaches it.
 
 ### Named volumes
 
@@ -204,7 +241,8 @@ the authoritative store wins and `./krate` fails to log in.
 | `GRAFANA_PASSWORD` | Grafana's database in `grafana_data` after first start | `monitoring/.env` | Grafana UI or `grafana cli admin reset-admin-password`, then `./krate config set` |
 | `PERSES_ADMIN_PASSWORD`, `PERSES_ENCRYPTION_KEY`, `OAUTH2_PROXY_*`, `PERSES_SYNC_CLIENT_SECRET` | `monitoring/.env`, rendered by `monitoring-init` | rendered volumes | `./krate config set`, then `./krate monitor up` |
 | `certs/server.key` | host file | none | `./krate gen-cert` or your own certificate |
-| `auth/keycloak/db-tls/ca.key`, `server.key` | host files | none | delete the directory and run `./krate identity up` while Keycloak is stopped (see "Database TLS material") |
+| `auth/keycloak/db-tls/server.key` | host file | copied into `keycloak-db` at start | `./krate identity renew-db-tls` (new key and certificate under the same CA) |
+| `auth/keycloak/db-tls/ca.key` | host file | none | delete the directory and run `./krate identity up` while Keycloak is stopped (see "Database TLS material") |
 | `KRATE_BACKUP_PASSPHRASE` | the operator | never stored | not applicable |
 
 Placeholders in `.env.template` are only empty or `REPLACE_ME`. `./krate`
@@ -228,13 +266,15 @@ for a running `identity backup`, `restore`, `rotate` or `recover-admin`.
 | --- | --- | --- |
 | Browser to `proxy` (443) | TLS with `certs/server.crt` | Users must trust the certificate's issuer |
 | `proxy` to `kafka-ui` (8080) | plain HTTP inside the Compose bridge network | Accepted boundary |
-| `proxy` to `keycloak` (8080) | plain HTTP inside the Compose bridge network; `KC_PROXY_HEADERS=xforwarded`, `KC_HOSTNAME=KEYCLOAK_PUBLIC_URL` | Accepted boundary. Only `/identity/realms/krate/` and `/identity/resources/` are forwarded; `/admin/`, `/realms/master/`, `/metrics`, `/health` are not reachable through the proxy. `KC_PROXY_TRUSTED_ADDRESSES` is not set, so Keycloak accepts `X-Forwarded-*` from any peer on the network (residual risk below) |
+| `proxy` to `keycloak` (8080) | plain HTTP inside the internal `identity` network; `KC_PROXY_HEADERS=xforwarded`, `KC_PROXY_TRUSTED_ADDRESSES` = the proxy's fixed address, `KC_HOSTNAME=KEYCLOAK_PUBLIC_URL` | Accepted boundary. Only `/identity/realms/krate/` and `/identity/resources/` are forwarded; `/admin/`, `/realms/master/`, `/metrics`, `/health` are not reachable through the proxy. Forwarded headers are used only when they arrive from the proxy address (owner decision 7) |
 | `keycloak` to `keycloak-db` (5432) | TLS, `KC_DB_TLS_MODE=verify-server`, trust store `ca.crt`, server certificate SAN `DNS:keycloak-db` | Enforced. `pg_hba.conf` rejects plaintext TCP |
 | Keycloak management port 9000 | not published; the Docker healthcheck and `identity status` use it inside the container | Enforced |
 | `kcadm` administration | `docker exec` into the `keycloak` container against `http://localhost:8080/identity` | Host operator only |
 | PostgreSQL local socket | `local all all trust` in `pg_hba.conf`; used by `pg_isready`, `identity rotate`, `backup` and `restore` through `docker exec` | Accepted: only the `postgres` process and `docker exec` (host operator) can use the socket |
-| Any container on the cluster network to `keycloak:8080` | plain HTTP; the admin API answers there and is protected by credentials only | Residual risk (see below) |
-| Monitoring web endpoints 9090, 3100, 3000 | plain HTTP on the host | Unchanged; owner decision |
+| `kafka-ui` (and `proxy`) to `keycloak:8080` | plain HTTP inside the `identity` network; the admin API answers there and is protected by credentials only | Accepted: those two are the only other members; brokers and the monitoring project's `kafka-exporter` have no route to Keycloak or its database any more |
+| `keycloak` to the outside (Phase 3 identity provider) | `identity-egress` bridge network, Keycloak only | Enforced membership; the identity provider's TLS is checked against `auth/keycloak/truststores/` |
+| Prometheus 9090 and Loki 3100 | plain HTTP, bound to `127.0.0.1` on the host (`PROM_BIND`, `LOKI_BIND`) | Enforced by default; an operator may open them with `0.0.0.0` |
+| Grafana 3000 | plain HTTP on every interface, Grafana login | Unchanged until Phase 4 (owner decision 8, option D) |
 
 Why the sources say so:
 
@@ -245,6 +285,21 @@ Why the sources say so:
 - Keycloak reverse proxy: "You should not proxy port 9000 because health checks
   and metrics use that port directly". "Exposed admin paths lead to an
   unnecessary attack vector." (Keycloak 26.8.0 `reverseproxy.adoc`.)
+- Keycloak trusted proxies: "To ensure that proxy headers are used only from
+  proxies you trust, set the `proxy-trusted-addresses` option to a
+  comma-separated list of IP addresses"; "Without this restriction, clients
+  could bypass the proxy and send forged forwarded headers directly to
+  Keycloak."; and the limit, "Note that this is only weak protection because
+  IP addresses can be spoofed." (Keycloak 26.8.0 `reverseproxy.adoc` [S1].)
+  That is why the proxy holds a fixed address on a network that nothing but
+  the four identity members can join.
+- Prometheus: "It is presumed that untrusted users have access to the
+  Prometheus HTTP endpoint and logs. They have access to all time series
+  information contained in the database"; its endpoints "should not be exposed
+  to publicly accessible networks like the internet" [S3]. Loki: "Grafana Loki
+  does not come with any included authentication layer. You must run an
+  authenticating reverse proxy in front of your services." [S4]. Hence the
+  loopback binds.
 - PostgreSQL key file: "the permissions on `server.key` must disallow any
   access to world or group; achieve this by the command `chmod 0600
   server.key`." The `keycloak-db` entrypoint wrapper copies the key with
@@ -276,16 +331,21 @@ Why the sources say so:
 
 | File | Mode | Purpose |
 | --- | --- | --- |
-| `ca.crt` | 644 | private CA; Keycloak's trust store |
+| `ca.crt` | 644 | private CA, valid 1825 days; Keycloak's trust store |
 | `ca.key` | 600 | signs `server.crt` |
-| `server.crt` | 644 | SAN `DNS:keycloak-db` |
+| `server.crt` | 644 | SAN `DNS:keycloak-db`, valid 398 days; renewed with `./krate identity renew-db-tls` |
 | `server.key` | 600 | copied into the container as `postgres` 600 at every start |
 | `pg_hba.conf` | 644 | the rules above |
 
-Existing files are kept. To renew: `./krate identity down`, move the directory
-away, `./krate identity up`. The preflight refuses a `server.crt` that is not
-signed by `ca.crt`, lacks the SAN, or expires within a day. Keycloak and
-PostgreSQL both read the files at start, so a renewal needs a restart of both.
+Existing files are kept. The preflight refuses a `server.crt` that is not
+signed by `ca.crt`, lacks the SAN, or expires within a day, and prints a
+warning (the command continues) when it expires within 30 days:
+`warning: auth/keycloak/db-tls/server.crt expires within 30 days (...); run
+krate identity renew-db-tls`. The renewal reissues the server key and
+certificate under the same CA, so Keycloak's trust store does not change (see
+"`./krate identity renew-db-tls`"). To replace the CA itself: `./krate
+identity down`, move the directory away, `./krate identity up`; Keycloak and
+PostgreSQL both read their files at start.
 
 ## Operator procedures
 
@@ -293,10 +353,11 @@ Run every command in the installation directory (`/opt/krate/kraft` or
 `/opt/krate/epc`) or a checkout's `kraft/` or `epc/`. Brokers do not need to be
 running for any `identity` command. Every command that changes something
 (`up`, `down`, `users add|enable|disable|reset-password`, `rotate`, `backup`,
-`restore`, `recover-admin`) takes the lock `auth/.identity.lock/` and appends
-one line to `auth/identity-journal.log`: `<ISO8601> <command> <outcome>
-<detail>`, never a secret. The read-only commands `status`, `users list` and
-`users groups` take no lock and write no journal line.
+`restore`, `recover-admin`, `renew-db-tls`, `logrotate --install`) takes the
+lock `auth/.identity.lock/` and appends one line to
+`auth/identity-journal.log`: `<ISO8601> <command> <outcome> <detail>`, never a
+secret. The read-only commands `status`, `users list`, `users groups` and
+`logrotate` (without `--install`) take no lock and write no journal line.
 
 ### `./krate identity up`
 
@@ -312,7 +373,13 @@ one line to `auth/identity-journal.log`: `<ISO8601> <command> <outcome>
    public URL, `KEYCLOAK_ADMIN_USER` (lowercase, not starting with
    `temp-admin`), the group names, the five identity secrets (16+ characters,
    not placeholders, all different), `KC_DB_TLS_MODE=verify-server`, the TLS
-   files, the realm file, and that neither identity service publishes a port.
+   files, the realm file, that neither identity service publishes a port, and
+   the identity network (internal, one subnet, members, the proxy's fixed
+   address equal to `KC_PROXY_TRUSTED_ADDRESSES` and inside the subnet). It
+   warns when the database certificate expires within 30 days.
+   Then it lists every Docker network and stops when one outside this Compose
+   project overlaps `KRATE_IDENTITY_SUBNET`, naming it and the two keys to
+   change (`KRATE_IDENTITY_SUBNET`, `KRATE_IDENTITY_PROXY_IP`).
 5. Stops if the database state is unknown (Docker unavailable, or volumes
    named `keycloak_db_data` in more than one project; the other edition's
    fixed project and `*-monitoring` projects are ignored).
@@ -449,6 +516,68 @@ Recreates the permanent master admin from `.env` with Keycloak's
 bootstrap-admin recovery. Requires `keycloak` to be stopped. See "Recovery"
 below for what it does and when to use it.
 
+### `./krate identity renew-db-tls`
+
+Reissues `auth/keycloak/db-tls/server.key` and `server.crt` under the existing
+CA for 398 days and puts them into use. Requires an existing identity database
+with `keycloak-db` running. Order:
+
+1. Takes the lock. `sso/identity.py db-tls --renew-server` checks that the
+   full set of five files exists (an incomplete directory is refused: the CA
+   is needed), issues the new key and certificate in a private temporary
+   directory, writes them as `server.key.new` (600) and `server.crt.new`
+   (644) and moves them into place, key first, then certificate. It prints
+   `renewed server certificate, valid until <date>`. `ca.crt`, `ca.key` and
+   `pg_hba.conf` do not change.
+2. Restarts `keycloak-db` alone (`docker compose restart --no-deps`, "Don't
+   restart dependent services" [S17]) and waits for its health. The container's
+   entrypoint wrapper copies the files at start, which is how PostgreSQL loads
+   them: "The server reads these files at server start and whenever the
+   server configuration is reloaded" [S8]. Keycloak's open database
+   connections drop with that restart.
+3. Waits up to 30 seconds for Keycloak to report ready again (its readiness
+   includes the database); when it does not, restarts `keycloak` with
+   `--no-deps` and waits for its health. Then verifies the admin login.
+   When `keycloak` was not running at the start, it is left stopped and uses
+   the new files on its next start.
+4. Writes the journal line `renew-db-tls ok <new expiry>`.
+
+Run it when the preflight warns about the 30-day window, or on a site
+schedule. Nothing renews the certificate automatically.
+
+### `./krate identity logrotate [--install]`
+
+Renders `sso/logrotate/krate-identity.conf` with this installation's absolute
+journal path (`<installation>/auth/identity-journal.log`) and, without
+`--install`, prints it. With `--install` it writes the result to
+`/etc/logrotate.d/krate-identity-<edition>` with mode 644 (through `sudo`
+when not root, as the installation directory is created), takes the lock and
+writes the journal line `logrotate installed <path>`. `./krate install` prints
+the command as a hint. The rules:
+
+```text
+<installation>/auth/identity-journal.log {
+    monthly
+    rotate 12
+    maxage 400
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}
+```
+
+logrotate(8) [S14]: `copytruncate` means "Truncate the original log file to
+zero size in place after creating a copy", so krate's append-only writer needs
+no reopen; `rotate 12`: "Log files are rotated count times before being
+removed"; `maxage 400`: "Remove rotated logs older than <count> days";
+`notifempty`: "Do not rotate the log if it is empty"; `delaycompress`:
+"Postpone compression of the previous log file to the next rotation cycle".
+Check the file with `sudo logrotate -d /etc/logrotate.d/krate-identity-<edition>`.
+The installation path must not contain whitespace, quotes or backslashes
+(logrotate's file syntax); `--install` refuses otherwise.
+
 ### Relationship with `auth apply` (Phase 2)
 
 `./krate auth apply` does not start Keycloak and does not run the
@@ -567,14 +696,52 @@ Procedure:
    PingFederate brokering is not available in Phase 1 and Phase 2; it returns
    in Phase 3, when the identity-provider plan is applied to the realm.
 
+## Upgrading an installation to the Phase 2 network and ports
+
+The next `./krate start` (or any `up`) after this release recreates
+`keycloak`, `keycloak-db`, `kafka-ui` and `proxy`, because their network
+attachments changed; Compose creates `<project>_identity` and
+`<project>_identity-egress` first. The brokers are not touched: their
+configuration is unchanged, and `kafka-network` keeps its settings. Expect a
+short Kafbat and Keycloak interruption; the Keycloak database volume and all
+realm data stay. `.env` files from before this release lack
+`KRATE_IDENTITY_SUBNET` and `KRATE_IDENTITY_PROXY_IP`; the Compose defaults
+(172.29.250.0/24, 172.29.250.10) apply until you set them. If that range is in
+use on the host, `./krate identity up` stops and names the clashing network
+before anything is recreated; set both keys with `./krate config set`, then
+run it again. If you change the subnet after the identity network exists,
+remove the old network first (`./krate down`, then `docker network rm
+<project>_identity`), since Compose does not change the IPAM of an existing
+network.
+
+From then on the identity containers are unreachable from the monitoring
+project: `kafka-exporter` sits on `kafka-network`, and `keycloak` and
+`keycloak-db` are not. Nothing in the monitoring stack scraped them. For an
+ad-hoc `psql` see "Networks".
+
+`./krate monitor up` publishes Prometheus and Loki on `127.0.0.1` only from
+this release. An existing `monitoring/.env` without `PROM_BIND`/`LOKI_BIND`
+gets the loopback default. If something outside the host read those endpoints
+(nothing shipped by Krate does), set `./krate config set PROM_BIND=0.0.0.0`
+and `LOKI_BIND=0.0.0.0` and run `./krate monitor up` again.
+
+The database certificate issued by an earlier `identity up` keeps its 825-day
+lifetime; the preflight warns 30 days before it expires, and
+`./krate identity renew-db-tls` replaces it with a 398-day one at any time.
+
 ## Residual risks
 
-- Any container on the cluster network can reach `keycloak:8080`, including
-  the admin API and the `master` realm, over plain HTTP. Credentials still
-  protect it. `kafka-exporter` from the monitoring project is on that network.
-  A separate identity network is a Phase 2 candidate.
-- Any container on the cluster network can reach `keycloak-db:5432`. TLS and
-  SCRAM are required; the password is in `.env` and the Keycloak container.
+- `kafka-ui` and `proxy` can reach `keycloak:8080`, including the admin API
+  and the `master` realm, over plain HTTP inside the `identity` network.
+  Credentials still protect it. No other container has a route there any
+  more (owner decision 7, implemented).
+- `kafka-ui` and `proxy` can reach `keycloak-db:5432`. TLS and SCRAM are
+  required; the password is in `.env` and the Keycloak container.
+- `KC_PROXY_TRUSTED_ADDRESSES` is the proxy's fixed address, and Keycloak's
+  guide notes that "this is only weak protection because IP addresses can be
+  spoofed" [S1]. The address can only be claimed by a container attached to
+  the internal `identity` network, which Compose limits to the four members;
+  a host operator with Docker access could attach another container to it.
 - The local socket in `keycloak-db` is `trust`. Only processes inside that
   container reach it, which means the host operator through `docker exec`.
 - `ssl_ca_file` is set but client certificates are not required
@@ -587,30 +754,26 @@ Procedure:
   exists. `identity up` reconciles only the `krate-ui` URLs afterwards; later
   changes to groups, token lifetimes or session limits in `.env` do not reach
   an existing realm.
-- Keycloak trusts `X-Forwarded-*` headers from any peer on the cluster
-  network: `KC_PROXY_HEADERS=xforwarded` is set and
-  `KC_PROXY_TRUSTED_ADDRESSES` is not. The 26.8.0 reverse proxy guide says:
-  "To ensure that proxy headers are used only from proxies you trust, set the
-  `proxy-trusted-addresses` option to a comma-separated list of IP
-  addresses", and "Without this restriction, clients could bypass the proxy
-  and send forged forwarded headers directly to Keycloak." Today the peers are
-  the cluster containers and `kafka-exporter`; Keycloak is not published on
-  the host, and the proxy overwrites the headers it forwards. Setting the
-  trusted addresses needs a fixed proxy address inside the Compose network,
-  which is part of owner decision 5.
-- The database TLS certificate is self-signed by a local CA with a fixed
-  lifetime chosen at generation; nothing renews it automatically. The preflight
-  warns within a day of expiry.
+- The database TLS server certificate (398 days) is not renewed
+  automatically. The preflight warns 30 days before expiry and refuses within
+  a day; `./krate identity renew-db-tls` is an operator action. The CA (1825
+  days) has no renewal command: replacing it means regenerating the directory
+  with Keycloak stopped (see "Database TLS material").
 - Backups are only as safe as their passphrase. A lost passphrase means a lost
   backup.
 - `monitoring/docker-compose.yml` still falls back to `changeme` when
   `GRAFANA_PASSWORD` is empty and `krate` did not generate one (manual Compose
   runs). `./krate monitor up` generates the password before the Grafana volume
   exists.
-- Prometheus (9090), Loki (3100) and Grafana (3000) remain plain HTTP on the
-  host; Perses (3443) uses the cluster certificate.
+- Grafana (3000) remains plain HTTP on every host interface with its own
+  login until Phase 4; Prometheus and Loki are loopback-only unless an
+  operator sets `PROM_BIND`/`LOKI_BIND` to `0.0.0.0`; Perses (3443) uses the
+  cluster certificate. A process on the host itself still reaches Prometheus
+  and Loki without a login.
 - The identity journal is a plain append-only file owned by the operator. It
-  is not tamper-evident.
+  is not tamper-evident. Rotation is in place only after
+  `./krate identity logrotate --install` ran on the host; the file is small
+  (one line per identity operation) but unbounded otherwise.
 
 ## Open owner decisions
 
@@ -620,8 +783,9 @@ Quotes are from the sources listed at the end of this section.
 
 **Decided 2026-10-10 (owner):** items 1 to 4 confirmed; for items 5 to 13 the
 recommended option was accepted. Items 7 (B), 8 (B), 9 (B) and 13 (B) are the
-first Phase 2 commits; item 6 (B) is revisited when Phase 2 adds the Kafbat
-side; item 8 (D) belongs to Phase 4.
+first Phase 2 commits and are implemented on this branch (each item below
+says what landed); item 6 (B) is revisited when Phase 2 adds the Kafbat side;
+item 8 (D) belongs to Phase 4.
 
 ### 1. Local mode (confirm)
 
@@ -717,6 +881,16 @@ you create an externally isolated network" [S2]) avoids that. C is not
 recommended now: the hop is inside one Docker host and the certificate
 lifecycle for a second internal CA adds operations without a changed threat.
 
+**Decided: B, implemented.** Both Compose files define `identity`
+(`internal: true`, `ipam` subnet `KRATE_IDENTITY_SUBNET`) and
+`identity-egress`; `keycloak-db` is on `identity` only, `keycloak` on
+`identity` and `identity-egress`, `proxy` and `kafka-ui` on `kafka-network`
+and `identity`, the proxy with `ipv4_address: KRATE_IDENTITY_PROXY_IP` and
+Keycloak with `KC_PROXY_TRUSTED_ADDRESSES` set to the same value. `identity
+up` checks for a subnet clash; the preflight and `scripts/check-identity.py`
+assert the rendered wiring in both editions. See "Networks" and "Upgrading an
+installation to the Phase 2 network and ports".
+
 ### 8. Monitoring host ports 9090, 3100, 3000 over plain HTTP
 
 Options: (A) unchanged; (B) bind Prometheus and Loki to `127.0.0.1` on the
@@ -738,6 +912,13 @@ network with a two-line change and no new component; Grafana keeps its login
 and the dashboards stay reachable. Who needs remote Prometheus or Loki access
 (none is known) decides whether C is needed before Phase 4.
 
+**Decided: B, implemented.** `monitoring/docker-compose.yml` publishes
+`${PROM_BIND:-127.0.0.1}:${PROM_PORT:-9090}:9090` and
+`${LOKI_BIND:-127.0.0.1}:${LOKI_PORT:-3100}:3100`; `monitoring/.env.template`
+ships `PROM_BIND=127.0.0.1` and `LOKI_BIND=127.0.0.1`; `./krate monitor up`
+prints the Prometheus address with the bind; `scripts/check-identity.py`
+asserts the rendered binds. Grafana (3000) and Perses (3443) are unchanged.
+
 ### 9. Database TLS certificate lifetime and renewal
 
 Options: (A) private CA, 825-day server certificate, manual renewal (current);
@@ -754,6 +935,15 @@ re-reads the files on reload ("The server reads these files at server start
 and whenever the server configuration is reloaded" [S8]), so B can be done
 without downtime for the database. C is right only when the site runs an
 internal CA with automation; it adds an external dependency to a private hop.
+
+**Decided: B, implemented.** New installs get a 398-day server certificate
+and a 1825-day CA (`sso/identity.py`: `SERVER_CERT_DAYS`, `CA_CERT_DAYS`).
+`./krate identity renew-db-tls` reissues the server pair under the existing
+CA and restarts `keycloak-db` alone; the preflight warns 30 days before
+expiry. The restart (not a reload) was chosen because the container's
+entrypoint wrapper copies the key into the container at start, so a reload
+would still see the old copy; the database is down for the seconds of the
+restart and Keycloak reconnects. See "`./krate identity renew-db-tls`".
 
 ### 10. Backups
 
@@ -814,6 +1004,12 @@ by one line per identity operation, so volume is small, but an unbounded
 file on the installation disk is still an operational risk, and logrotate is
 present on Ubuntu and RHEL without a new component. C depends on Phase 4.
 
+**Decided: B, implemented.** `sso/logrotate/krate-identity.conf` ships in
+the package (`sso/logrotate/` in a bundle); `./krate identity logrotate`
+renders it with the installation's journal path and `--install` writes
+`/etc/logrotate.d/krate-identity-<edition>`; `./krate install` prints the
+hint. See "`./krate identity logrotate [--install]`".
+
 ### Sources
 
 - [S1] Keycloak 26.8.0, "Using a reverse proxy":
@@ -846,3 +1042,5 @@ present on Ubuntu and RHEL without a new component. C depends on Phase 4.
   <https://github.com/keycloak/keycloak/blob/26.8.0/docs/guides/server/importExport.adoc>
 - [S16] Keycloak 26.8.0 Admin REST API:
   <https://www.keycloak.org/docs-api/26.8.0/rest-api/index.html>
+- [S17] Docker Compose CLI reference, `docker compose restart`:
+  <https://docs.docker.com/reference/cli/docker/compose/restart/>

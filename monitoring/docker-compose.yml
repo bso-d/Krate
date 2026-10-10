@@ -81,8 +81,12 @@ services:
     image: ${PROMETHEUS_IMAGE}
     container_name: ${MONITOR_PROJECT:-krate-monitoring}-prometheus
     restart: unless-stopped
+    # Bound to the loopback interface by default: the endpoint has no login and
+    # anyone reaching it "has access to all time series information contained
+    # in the database" (Prometheus security model). PROM_BIND=0.0.0.0 publishes
+    # it on every interface.
     ports:
-      - "${PROM_PORT:-9090}:9090"
+      - "${PROM_BIND:-127.0.0.1}:${PROM_PORT:-9090}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro,z
@@ -119,8 +123,10 @@ services:
     image: ${LOKI_IMAGE}
     container_name: ${MONITOR_PROJECT:-krate-monitoring}-loki
     restart: unless-stopped
+    # Loopback only by default: Loki "does not come with any included
+    # authentication layer". LOKI_BIND=0.0.0.0 publishes it on every interface.
     ports:
-      - "${LOKI_PORT:-3100}:3100"
+      - "${LOKI_BIND:-127.0.0.1}:${LOKI_PORT:-3100}:3100"
     volumes:
       - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro,z
       - loki_data:/loki
