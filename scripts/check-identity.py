@@ -1240,6 +1240,7 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     expect_refusal('a 600 PKCS12 file', 'enterprise-ca.p12 must be world-readable')
     (trust / 'enterprise-ca.p12').unlink()
     (trust / 'ca').mkdir()
+    (trust / 'ca').chmod(0o755)  # explicit: the gate runner runs under umask 077, and a 700 directory is refused first
     truststore_pem(site, name='ca/root.pem')
     expect_pass('a PEM in a sub-directory')
     (trust / 'ca/root.pem').chmod(0o600)
