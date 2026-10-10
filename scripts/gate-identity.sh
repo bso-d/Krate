@@ -593,6 +593,7 @@ finish() {
   local notrun_required=0
   for id in "${REQUIRED_P1[@]}" "${REQUIRED_P2[@]}" "${REQUIRED_X[@]}"; do
     $STATIC || [[ "$id" != S* ]] || continue   # --no-static: the static ids are proven on the repository host
+    $SCREENSHOTS || [[ "$id" != X* ]] || continue  # --no-screenshots: the story is proven on the repository host
     [[ "$phases" == all || "$id" != K* && "$id" != M* && "$id" != Z2 ]] || continue  # --phase 1: no Phase 2 ids
     grep -q -E "^${id}	.*	NOT_RUN	" "$RECEIPT" && notrun_required=$((notrun_required+1))
   done

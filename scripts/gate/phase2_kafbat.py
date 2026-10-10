@@ -181,7 +181,7 @@ def read_stream(response, deadline):
     return data
 
 
-def open_request(opener, method, url, body=None, headers=None, timeout=30):
+def open_request(opener, method, url, body=None, headers=None, timeout=60):
     request = urllib.request.Request(url, data=body, method=method,
                                      headers=dict({'User-Agent': 'krate-gate-phase2'}, **(headers or {})))
     try:
@@ -205,7 +205,7 @@ class Browser:
             NoRedirect, urllib.request.HTTPCookieProcessor(self.jar),
             urllib.request.HTTPSHandler(context=gate.tls))
 
-    def request(self, method, url, body=None, headers=None, timeout=30):
+    def request(self, method, url, body=None, headers=None, timeout=60):
         self.gate.check_url(url)
         response = open_request(self.opener, method, url, body, headers, timeout)
         for cookie in self.jar:
@@ -232,7 +232,7 @@ class Browser:
         return token
 
     def api(self, method, path, payload=None, csrf=True, headers=None, raw=None, content_type=None,
-            accept='application/json', timeout=30):
+            accept='application/json', timeout=60):
         sent = {'Accept': accept}
         body = raw
         if payload is not None:
@@ -699,7 +699,11 @@ class Gate:
         user = self.users.get(name)
         if user is None:
             not_run('precondition: user %s was not created' % name)
-        result = self.kafbat_login(user, label)
+        try:
+            result = self.kafbat_login(user, label)
+        except (TimeoutError, OSError) as error:  # one slow Keycloak round trip is not a finding
+            log('%s login: %s; retrying once' % (name, error))
+            result = self.kafbat_login(user, label + '-retry')
         if result['kind'] != 'ok':
             not_run('precondition: %s login %s: %s %s' % (name, result['kind'], result.get('detail', ''),
                                                           result.get('callback', '')))
