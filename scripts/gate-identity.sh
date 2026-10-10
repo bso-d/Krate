@@ -130,9 +130,8 @@ if [[ -n "$REPO_ARG" ]]; then
   resolved="$(git -C "$REPO_ARG" rev-parse --verify --quiet "${CANDIDATE_ARG}^{commit}" 2>/dev/null)" \
     || { echo "--candidate $CANDIDATE_ARG is not one commit of --repo $REPO_ARG" >&2; exit 2; }
   [[ "$resolved" == "$repo_head" ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG ($resolved)" >&2; exit 2; }
-  CANDIDATE_ARG="$resolved"
   TOPLEVEL="$REPO_ARG"
-  CANDIDATE="${CANDIDATE%% *} (stated; edition files bound by digest; static block on --repo at $repo_head)"
+  CANDIDATE="$resolved (stated as $CANDIDATE_ARG and resolved in --repo; edition files bound by digest; static block on that checkout)"
   DIRTY="edition: unknown (no git); --repo: $(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"
 fi
 RUNNER_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo 'no git')"

@@ -1925,8 +1925,9 @@ def main():
     print('Identity foundation verified: templates, realm plan, Kafbat runtime plan, names, Compose services and identity network, '
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
           'runtime.yml incl. refusals), configure-dual, proxy environment and edge rules, release permissions, RPM dependency '
-          'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock.'
-          + ('' if not RENDER_IMAGE_NOTE else ' [' + '; '.join(RENDER_IMAGE_NOTE) + ']'))
+          'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock.')
+    if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
+        print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0
 
 

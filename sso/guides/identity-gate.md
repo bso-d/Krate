@@ -22,8 +22,10 @@ Two invocations exist for a bundle host. The reduced one, `--no-static
 --no-screenshots --candidate <sha>`, leaves S1–S4 and X1 out of the inventory
 (NOT_RUN: not validated on that host, only on the host whose receipt has them
 PASS); run it when the prerequisites below are not on the host, because
-without the two skip flags those rows do not become NOT_RUN, they FAIL (no
-Makefile, no git metadata, no browser image). The full one adds `--repo DIR`:
+without the two skip flags the rows stay inside the inventory and the verdict
+can never be PASS: S1 is NOT_RUN without a Makefile and S3 without the
+shellcheck image (INCOMPLETE), S2 (no git metadata), S4 (no `scripts/`) and X1
+(no browser image) FAIL. The full one adds `--repo DIR`:
 the static block (S1–S4) runs against a checkout whose HEAD is the
 `--candidate` commit. The bundle's edition directory itself carries no git
 metadata (the receipt binds it by file digests); the full inventory needs, in
