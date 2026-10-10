@@ -90,6 +90,7 @@ RAW="$OUT/.raw.log"; : > "$RAW"; chmod 600 "$RAW"
 RECEIPT="$OUT/receipt.tsv"; printf 'id\tphase\tcriterion\tresult\tevidence\n' > "$RECEIPT"
 STATE="$OUT/.state"; mkdir -p "$STATE"; chmod 700 "$STATE"
 declare -a SECRETS=()
+declare -a TEMP_SECRETS=()
 declare -A SEEN=()
 PASSES=0; FAILS=0; NOTRUN=0
 
@@ -162,7 +163,7 @@ add_secret() { # a value seen outside .env (temporary passwords): redacted and s
   local s
   [[ -n "$1" ]] || return 0
   for s in "${SECRETS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
-  SECRETS+=("$1")
+  SECRETS+=("$1"); TEMP_SECRETS+=("$1")
 }
 add_user() { # name [--viewer|--admin] → temp password in TEMP_PW
   cap "$KRATE" identity users add "$@" || return 1
@@ -434,7 +435,7 @@ EOF
   mkdir -p "$ED/auth/.identity.lock"; sleep 600 & holder=$!; echo "$holder" > "$ED/auth/.identity.lock/pid"
   cap "$KRATE" identity users add gatelock --viewer; rc=$?; ev="$(printf '%s' "$CAP" | grep -o -E 'Another krate identity command is running[^.]*' | head -1)"
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
-  cap "$KRATE" identity users add gatelock --viewer; after=$?; names="$(printf '%s' "$CAP" | grep -o -E 'Removing the stale identity lock[^"]*' | head -1)"
+  cap "$KRATE" identity users add gatelock --viewer; after=$?; add_secret "$(temp_password "$CAP")"; names="$(printf '%s' "$CAP" | grep -o -E 'Removing the stale identity lock[^"]*' | head -1)"
   [[ $rc -ne 0 && -n "$ev" && $after -eq 0 && -n "$names" ]]; st=$?; ok_if E6 1 E "$st" "lock held by a live process: '$ev' (exit $rc); after that process died: '$names' and the command proceeds (exit $after)"
   mkdir -p "$ED/auth/.identity.lock"; sleep 600 & holder=$!; echo "$holder" > "$ED/auth/.identity.lock/pid"
   set_env_raw KEYCLOAK_ENABLED false
@@ -443,6 +444,7 @@ EOF
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; set_env_raw KEYCLOAK_ENABLED true; rm -rf "$ED/auth/.identity.lock"
   [[ $rc -ne 0 && -n "$ev" && "$names" == *keycloak-db* && "$names" == *"keycloak "* ]]; st=$?; ok_if E8 1 E "$st" "'krate stop' while an identity command holds the lock and KEYCLOAK_ENABLED is still false: '$ev' (exit $rc); identity services untouched [$names]"
   ( "$KRATE" identity users add gateraceA --viewer >"$STATE/raceA" 2>&1 ) & ( "$KRATE" identity users add gateraceB --viewer >"$STATE/raceB" 2>&1 ) & wait
+  add_secret "$(temp_password "$(cat "$STATE/raceA")")"; add_secret "$(temp_password "$(cat "$STATE/raceB")")"
   ev="refusals=$(cat "$STATE/raceA" "$STATE/raceB" | grep -c 'Another krate identity command is running') created=$(cat "$STATE/raceA" "$STATE/raceB" | grep -c 'created')"
   record E7 1 E PASS "two simultaneous mutating commands: $ev (either one refused or they serialised; deterministic proof is E6)"
   # readiness failure must not restart Keycloak
@@ -500,10 +502,12 @@ run_screenshots() {
   local gateway
   gateway="$(docker run --rm --add-host host.docker.internal:host-gateway "$PG_IMAGE" sh -c 'getent ahostsv4 host.docker.internal | awk "{print \$1; exit}"' 2>/dev/null | tr -d '[:space:]')"
   [[ -n "$gateway" ]] || { record X1 1 X NOT_RUN "cannot resolve the Docker host gateway (host.docker.internal) from a container"; return; }
+  export GATE_TEMP_PASSWORD="$shot_pw" GATE_DISABLED_PASSWORD="$shotd_pw"
   cap docker run --rm --add-host host.docker.internal:host-gateway -v "$OUT/screenshots:/out" -v "$GATE_DIR:/gate:ro" \
-    -e GATE_TEMP_PASSWORD="$shot_pw" -e GATE_DISABLED_PASSWORD="$shotd_pw" -e PW_MODULES=/usr/lib/node_modules \
+    -e GATE_TEMP_PASSWORD -e GATE_DISABLED_PASSWORD -e PW_MODULES=/usr/lib/node_modules \
     krate-harness/playwright:1.60.0 node /gate/screenshots.mjs --base "$BASE" --out /out --user gateshot --disabled-user gateshotd --resolve-to "$gateway"
-  ok_if X1 1 X $? "$(find "$OUT/screenshots" -name '*.png' | wc -l | tr -d ' ') screenshots in $OUT/screenshots (manifest.json has the captions): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
+  st=$?; unset GATE_TEMP_PASSWORD GATE_DISABLED_PASSWORD
+  ok_if X1 1 X "$st" "$(find "$OUT/screenshots" -name '*.png' | wc -l | tr -d ' ') screenshots in $OUT/screenshots (manifest.json has the captions): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
 }
 
 # ═══════════════════════════ phase 2 ═══════════════════════════
@@ -556,11 +560,16 @@ leak_scan() {
   local hits=0 s where
   local kc_logs="$STATE/kc.log" db_logs="$STATE/db.log"
   docker logs "$(cid keycloak)" > "$kc_logs" 2>&1 || true; docker logs "$(cid keycloak-db)" > "$db_logs" 2>&1 || true
+  local raw_without_display="$STATE/raw-without-display.log" t is_temp where_raw
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display"
   for s in "${SECRETS[@]}"; do
-    for where in "$RAW" "$JOURNAL" "$kc_logs" "$db_logs"; do [[ -f "$where" ]] && grep -qF -- "$s" "$where" && { hits=$((hits+1)); log "LEAK: a secret value appears in $where"; }; done
+    is_temp=false; for t in "${TEMP_SECRETS[@]}"; do [[ "$t" == "$s" ]] && is_temp=true; done
+    if $is_temp; then where_raw="$raw_without_display"; else where_raw="$RAW"; fi
+    for where in "$where_raw" "$JOURNAL" "$kc_logs" "$db_logs"; do [[ -f "$where" ]] && grep -qF -- "$s" "$where" && { hits=$((hits+1)); log "LEAK: a secret value appears in ${where##*/}"; }; done
     grep -rqF -- "$s" "$ED/auth/keycloak/" 2>/dev/null && { hits=$((hits+1)); log "LEAK: a secret value appears under auth/keycloak/"; }
   done
-  [[ $hits -eq 0 ]]; ok_if "$1" "$2" Z $? "${#SECRETS[@]} distinct secret values (every .env password/secret seen during the run, the backup passphrase) searched in the raw log, journal, plan files, keycloak and keycloak-db logs: $hits hits"
+  rm -f "$raw_without_display"
+  [[ $hits -eq 0 ]]; st=$?; ok_if "$1" "$2" Z "$st" "${#SECRETS[@]} distinct secret values (every .env password/secret seen during the run, the backup passphrase, ${#TEMP_SECRETS[@]} temporary passwords) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, keycloak and keycloak-db logs: $hits hits"
 }
 teardown() {
   section "teardown"
