@@ -136,6 +136,10 @@ def validate(root, mode, config):
     # The realm file is the local plan written by `krate identity up`; identity providers are
     # applied to the running realm separately, so their absence here is expected.
     validate_realm(root, origin, secrets)
+    # Ping mode: the broker plan exists, so the secret it needs, its endpoints, its group
+    # mappers and the trust material Keycloak reads at start are checked here too.
+    if (root / identity.BROKER_PLAN).is_file():
+        validate_broker(root, site, origin, secrets)
     validate_ui_mount(root, services['kafka-ui'])
     host = urlsplit(origin).hostname or ''
     if not host:
@@ -383,7 +387,8 @@ def validate_realm(root, origin, secrets):
     if not isinstance(realm, dict) or realm.get('realm') != identity.REALM:
         raise Preflight(f'{REALM_FILE} must describe realm {identity.REALM}')
     if realm.get('identityProviders'):
-        raise Preflight(f'{REALM_FILE} must not define identityProviders in local mode')
+        raise Preflight(f'{REALM_FILE} must not define identityProviders: the realm plan is local-only; PingFederate is applied'
+                        f' from {identity.BROKER_PLAN} by krate auth apply')
     clients = {client.get('clientId'): client for client in realm.get('clients', []) if isinstance(client, dict)}
     for client_id, placeholder in ((identity.UI_CLIENT, identity.UI_SECRET), (identity.CLI_CLIENT, identity.CLI_SECRET)):
         if client_id not in clients:
@@ -398,6 +403,76 @@ def validate_realm(root, origin, secrets):
     if ui.get('attributes') != identity.ui_client_attributes(origin):
         raise Preflight(f'{REALM_FILE}: krate-ui attributes must be PKCE S256, the exact post-logout URIs and OIDC back-channel logout'
                         ' to Kafbat; regenerate the plan with krate identity up')
+
+
+def authority(url):
+    """host[:port] of an https URL, lower-case, the default port omitted: what a certificate must cover."""
+    parts = urlsplit(url)
+    host = (parts.hostname or '').lower()
+    return f'{host}:{parts.port}' if parts.port and parts.port != 443 else host
+
+
+def validate_truststores(root, required):
+    """auth/keycloak/truststores as Keycloak loads it: directories traversable (755), every file a readable (644)
+    PEM or PKCS12; with `required`, at least one such file must exist."""
+    trust = root / identity.TRUSTSTORES_DIR
+    if trust.is_dir():
+        for directory in [trust] + [path for path in trust.rglob('*') if path.is_dir()]:
+            if stat.S_IMODE(directory.stat().st_mode) & 0o055 != 0o055:
+                label = identity.TRUSTSTORES_DIR if directory == trust else f'{identity.TRUSTSTORES_DIR}/{directory.relative_to(trust)}'
+                raise Preflight(f'{label} must have mode 755 (Keycloak lists it as its own user)')
+    elif required:
+        raise Preflight(f'{identity.TRUSTSTORES_DIR} must exist with mode 755 (run krate identity up, or chmod 755 it)')
+    files = identity.truststore_files(trust)
+    for path in files:
+        name = path.relative_to(trust)
+        if path.suffix not in identity.TRUSTSTORE_SUFFIXES:
+            raise Preflight(f'{identity.TRUSTSTORES_DIR}/{name} is not a truststore file; Keycloak loads only PEM (.crt, .pem) and PKCS12'
+                            ' (.p12, .pfx, .pkcs12) files from that directory: remove it')
+        if stat.S_IMODE(path.stat().st_mode) & 0o044 != 0o044:
+            raise Preflight(f'{identity.TRUSTSTORES_DIR}/{name} must be world-readable (chmod 644): Keycloak reads it as its own user')
+    if required and not files:
+        raise Preflight(f'{identity.TRUSTSTORES_DIR} holds no truststore file (.crt, .pem, .p12, .pfx, .pkcs12): place the CA certificate'
+                        " that issued the identity provider's TLS certificate there (mode 644); Keycloak loads it at start"
+                        ' (a publicly trusted certificate: set "idp_truststore": "system" in the site file)')
+
+
+def validate_broker(root, env, origin, secrets):
+    """Ping mode (the broker plan exists): the secret, https endpoints, the two group mappers and the trust material.
+
+    runtime.yml needs no separate hint check here: validate_runtime already refuses any document
+    that differs from the plan, and the plan never carries kc_idp_hint.
+    """
+    plan_file = root / identity.BROKER_PLAN
+    try:
+        plan = identity.broker_plan(plan_file)
+    except ValueError as exc:  # broker_plan's messages name keys and aliases, never a value
+        raise Preflight(f'{exc}; regenerate it: remove auth/ui/runtime.yml and {identity.BROKER_PLAN}, then krate auth configure <site.json>') from None
+    if identity.BROKER_SECRET_KEY not in secrets:
+        raise Preflight(f'{identity.BROKER_PLAN} exists but {identity.BROKER_SECRET_KEY} is not set in .env;'
+                        f' krate auth apply asks for it on a terminal, otherwise: krate identity rotate {identity.BROKER_SECRET_KEY} --value (reads it from stdin)')
+    text = plan_file.read_text()
+    if any(value in text for value in secrets.values()):
+        raise Preflight(f'{identity.BROKER_PLAN} embeds a secret value; it must carry the {identity.BROKER_SECRET} placeholder only')
+    viewer_group, admin_group = identity.group_names(env)
+    groups = sorted(mapper['config'].get('group') for mapper in plan['identityProviderMappers'])
+    if groups != sorted(['/' + viewer_group, '/' + admin_group]):
+        raise Preflight(f'{identity.BROKER_PLAN}: the two mappers must target the realm groups /{viewer_group} and /{admin_group}'
+                        ' (KEYCLOAK_VIEWER_GROUP, KEYCLOAK_ADMIN_GROUP); regenerate the plan with krate auth configure <site.json>')
+    for mapper in plan['identityProviderMappers']:
+        if mapper.get('identityProviderMapper') != 'oidc-advanced-group-idp-mapper' or mapper['config'].get('syncMode') != 'FORCE':
+            raise Preflight(f'{identity.BROKER_PLAN}: mapper {mapper.get("name")!r} must be an oidc-advanced-group-idp-mapper with syncMode FORCE'
+                            ' (group removal at the identity provider takes effect at the next sign-in)')
+    # Keycloak checks the identity provider's TLS against auth/keycloak/truststores (loaded at
+    # start) and the JVM default truststore. A provider on another host:port than the public one
+    # needs a CA file there unless the site declared a publicly trusted chain (truststore: system).
+    config = plan['identityProviders'][0]['config']
+    elsewhere = {authority(config[key]) for key in identity.BROKER_ENDPOINTS} - {authority(origin)}
+    mode = plan.get('truststore', 'local')
+    validate_truststores(root, required=bool(elsewhere) and mode == 'local')
+    if elsewhere and mode == 'system':
+        print(f"note: {identity.BROKER_PLAN} declares truststore \"system\": the identity provider's TLS chain is checked against the"
+              f' JVM default truststore (and any file in {identity.TRUSTSTORES_DIR}); no CA file is required', file=sys.stderr)
 
 
 def validate_identity(root, config):

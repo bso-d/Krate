@@ -291,8 +291,14 @@ every procedure and the upgrade steps for a Keycloak database from before
 
 With `KAFKA_UI_AUTH_CONFIG=runtime.yml` Kafbat signs users in through Keycloak
 only (`./krate auth configure` plans it from `.env`; no shared form login; the
-realm groups decide Viewer and Admin access). Keycloak can connect to
-PingFederate in Phase 3. SSO requires Compose 2.20.2 or newer.
+realm groups decide Viewer and Admin access). With a site file,
+`./krate auth configure site.json` also writes the PingFederate plan
+`auth/keycloak/pingfederate-idp.json`, which `./krate auth apply` applies to
+the realm: every login then goes to PingFederate, brokered users are created
+without linking to local accounts, and local users sign in only by appending
+`&kc_idp_hint=` (empty) to the realm's authorization URL after pressing Kafbat's
+"Log in with Keycloak" button (the break-glass procedure in the operator
+guide). SSO requires Compose 2.20.2 or newer.
 `./krate auth apply` validates the installation and reconciles only the UI
 service, using locally loaded images. It does not start Keycloak: when
 Keycloak is not ready it stops and tells you to run `./krate identity up`.

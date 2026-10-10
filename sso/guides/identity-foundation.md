@@ -425,13 +425,30 @@ secret. The read-only commands `status`, `users list`, `users groups` and
    `up reconciled krate-ui urls and attributes`). It then compares the realm's
    `otpPolicyLookAheadWindow` with the plan (1) and sets it when it differs
    (`kcadm.sh update realms/krate -s otpPolicyLookAheadWindow=1`; journal line
-   `up reconciled realm policy`). A realm created before these settings were
-   planned receives them on the next `identity up`: an older realm has a
-   look-ahead window of 0, which refuses a TOTP code typed across the
-   30-second boundary. Nothing else in the realm is reconciled:
-   groups, token lifetimes, session limits and the other clients keep the
-   values they were created with.
-10. Sets `KEYCLOAK_ENABLED=true`, writes the journal line and prints
+   `up reconciled realm policy`), and each planned required action's
+   `enabled`/`defaultAction` with the realm: a realm from Phase 1 still has
+   `CONFIGURE_TOTP` as a default action, which a user PingFederate brokers in
+   would be asked for; it is read with `GET authentication/required-actions/
+   CONFIGURE_TOTP`, changed in that full representation and `PUT` back (never
+   a partial `-n` update, which replaces the representation and wipes alias
+   and name; journal line `up reconciled required action CONFIGURE_TOTP`).
+   A realm created before these settings were planned receives them on the
+   next `identity up`: an older realm has a look-ahead window of 0, which
+   refuses a TOTP code typed across the 30-second boundary. Nothing else in
+   the realm is reconciled: groups, token lifetimes, session limits and the
+   other clients keep the values they were created with.
+10. With the PingFederate plan `auth/keycloak/pingfederate-idp.json` present
+    and `PING_KEYCLOAK_CLIENT_SECRET` set, applies the plan to the realm
+    exactly as `auth apply` does (flows, provider, mappers, browser flow;
+    journal line `up reconciled identity provider pingfederate: ...`, or
+    `No changes`); with the secret unset it says so and leaves the realm
+    alone; with the plan file absent and the provider present it removes the
+    provider, its mappers and flows and rebinds the `browser` flow. Before
+    all this, right after the realm plan, it records the truststore digest
+    `KRATE_TRUSTSTORE_SHA` in `.env`, so step 6 recreates Keycloak when a
+    PEM in `auth/keycloak/truststores/` changed. See
+    [dual-login.md](dual-login.md), "Company SSO through PingFederate".
+11. Sets `KEYCLOAK_ENABLED=true`, writes the journal line and prints
     `identity status`.
 
 A second run with nothing to do prints `No changes`. When an admin or
@@ -465,7 +482,7 @@ All subcommands use `kcadm` with the `krate-cli` client credentials in realm
 | Command | Effect |
 | --- | --- |
 | `users list` | one line per user: `USERNAME ENABLED EMAIL`; groups are shown by `users groups <username>` |
-| `users add <username> [--admin\|--viewer] [--email <addr>]` | creates the user in the chosen group, prints a one-time temporary password once, and sets required actions `UPDATE_PASSWORD` and `CONFIGURE_TOTP` |
+| `users add <username> [--admin\|--viewer] [--email <addr>]` | creates the user in the chosen group, prints a one-time temporary password once, and sets the user's `requiredActions` to `CONFIGURE_TOTP` and `UPDATE_PASSWORD` (`identity.USER_REQUIRED_ACTIONS`); neither is a realm default action, so a user PingFederate brokers in is never asked for them |
 | `users disable <username>` / `users enable <username>` | toggles the account |
 | `users reset-password <username>` | new one-time temporary password, printed once, same required actions |
 | `users groups <username>` | shows group membership |
@@ -488,7 +505,24 @@ temporary password and enrols TOTP at first login.
 
 The new value is generated (24 characters) unless `--value` reads one from
 standard input; a supplied value must be 16 or more characters from
-`A-Z a-z 0-9 . _ -`. `./krate config set` accepts these four keys only while
+`A-Z a-z 0-9 . _ -`.
+
+Phase 3 adds `PING_KEYCLOAK_CLIENT_SECRET`, with `--value` required (the
+value is issued by PingFederate, never generated, and accepted as issued: 16 or
+more printable ASCII characters without whitespace, quotes, backslash, backtick
+or `$`): `.env` is written first,
+then, when the identity provider `pingfederate` exists in the realm, the
+provider is `PUT` from the plan with the new secret (`Identity provider
+pingfederate: secret updated`; journal `rotate PING_KEYCLOAK_CLIENT_SECRET
+applied to identity provider pingfederate`); without the provider only `.env`
+changes (`Identity provider pingfederate: not applied yet (krate auth
+apply)`). The provider is never removed, so the users' federated-identity
+links survive; `keycloak` is recreated once because the key is part of its
+Compose environment. This is also the non-terminal way to set the secret the first
+time (`auth apply` asks for it on a terminal). See
+[dual-login.md](dual-login.md), "Rotating the PingFederate client secret".
+
+`./krate config set` accepts these four keys only while
 the database state is pristine; on any other state (`existing`, `unknown`) it
 stops, quotes the state line and points to `rotate`. Because that state comes
 from Docker, setting one of these keys needs a running Docker daemon.
@@ -652,6 +686,14 @@ sends OIDC back-channel logout requests to
 `identity` network, so a Keycloak logout or admin sign-out ends the Kafbat
 session; disabling a user does not end an existing session (see
 [dual-login.md](dual-login.md), "Revocation and session behaviour").
+
+Phase 3: with the PingFederate plan `auth/keycloak/pingfederate-idp.json`
+present, `auth apply` also takes the identity lock, records the truststore
+digest `KRATE_TRUSTSTORE_SHA` and runs `up -d` for `keycloak` (recreated
+exactly when a PEM in `auth/keycloak/truststores/` changed), then applies
+the plan to the realm with `kcadm`; `identity up` re-applies it. Both are
+described in [dual-login.md](dual-login.md), "Company SSO through
+PingFederate (Phase 3)".
 
 ## Recovery
 
@@ -888,9 +930,14 @@ whose viewer reads messages without that opt-in. Source: the handover
 
 ### 4. MFA and session defaults (confirm)
 
-Implemented: TOTP enrolment forced at first login for every local user;
-access token 5 minutes; session idle 15 minutes; session maximum 8 hours; no
-self-registration, no e-mail password reset, no offline tokens. Why: NIST
+Implemented: TOTP enrolment forced at first login for every local user
+(assigned per user by `identity users add`, together with the password
+change; `CONFIGURE_TOTP` is enabled in the realm but not a realm default
+action since Phase 3, decision D1 in [dual-login.md](dual-login.md): a
+default would also apply to users PingFederate brokers in, whose MFA is the
+enterprise identity provider's); access token 5 minutes; session idle 15
+minutes; session maximum 8 hours; no self-registration, no e-mail password
+reset, no offline tokens. Why: NIST
 SP 800-63B requires two factors at AAL2 ("Proof of possession and control of
 two distinct authentication factors is required") and reauthentication "at
 least once per 12 hours" and "following any period of inactivity lasting 30

@@ -291,6 +291,10 @@ services:
       KC_METRICS_ENABLED: "true"
       KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
       KC_TRUSTSTORE_PATHS: /opt/keycloak/conf/truststores
+      # Digest of the PEM set in auth/keycloak/truststores, written by krate: a
+      # changed set changes the environment, so `up` recreates Keycloak, which
+      # reads KC_TRUSTSTORE_PATHS at start only.
+      KRATE_TRUSTSTORE_SHA: ${KRATE_TRUSTSTORE_SHA:-}
       KEYCLOAK_KAFBAT_CLIENT_SECRET: ${KEYCLOAK_KAFBAT_CLIENT_SECRET}
       PING_KEYCLOAK_CLIENT_SECRET: ${PING_KEYCLOAK_CLIENT_SECRET}
       # Service-account client used by `krate identity users`; the realm import
