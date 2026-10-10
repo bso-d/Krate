@@ -175,6 +175,12 @@ def secure(value):
     return len(value) >= 16 and value not in INSECURE
 
 
+def ping_secret_shape(value):
+    """The PingFederate-issued secret as the CLI stores it: 16+ printable ASCII characters, none of the
+    characters .env quoting, Compose interpolation ($) or the shell would alter (same rule as `krate`)."""
+    return len(value) >= 16 and all('!' <= c <= '~' for c in value) and not any(c in '\\$"\'`' for c in value)
+
+
 def identity_secrets(env):
     """Secret values that identity services depend on; refuses placeholders and reuse."""
     secrets = {}
@@ -185,6 +191,9 @@ def identity_secrets(env):
         if not secure(value):
             raise Preflight(f'Set {key} to a unique secret of at least 16 characters (changeme and REPLACE_ME are refused): '
                             f'krate identity rotate {key}, or krate config set {key}=... before the first start')
+        if key == identity.BROKER_SECRET_KEY and not ping_secret_shape(value):
+            raise Preflight(f'{key} must be at least 16 printable ASCII characters without spaces, quotes, backslash, backtick or $'
+                            f' (as issued by PingFederate); set it with: krate identity rotate {key} --value')
         secrets[key] = value
     if len(set(secrets.values())) != len(secrets):
         raise Preflight('Identity secrets must all be different from each other')
@@ -413,14 +422,16 @@ def authority(url):
 
 
 def validate_truststores(root, required):
-    """auth/keycloak/truststores as Keycloak loads it: directories traversable (755), every file a readable (644)
-    PEM or PKCS12; with `required`, at least one such file must exist."""
+    """auth/keycloak/truststores as Keycloak loads it: directories 755 (traversable by Keycloak's user, writable by
+    the owner only), every file a 644 PEM or PKCS12 (readable, writable by the owner only: another local user must
+    not be able to add or change trust material); with `required`, at least one such file must exist."""
     trust = root / identity.TRUSTSTORES_DIR
     if trust.is_dir():
         for directory in [trust] + [path for path in trust.rglob('*') if path.is_dir()]:
-            if stat.S_IMODE(directory.stat().st_mode) & 0o055 != 0o055:
+            mode = stat.S_IMODE(directory.stat().st_mode)
+            if mode & 0o055 != 0o055 or mode & 0o022:
                 label = identity.TRUSTSTORES_DIR if directory == trust else f'{identity.TRUSTSTORES_DIR}/{directory.relative_to(trust)}'
-                raise Preflight(f'{label} must have mode 755 (Keycloak lists it as its own user)')
+                raise Preflight(f'{label} must have mode 755 (Keycloak lists it as its own user; group and others must not write to it): chmod 755')
     elif required:
         raise Preflight(f'{identity.TRUSTSTORES_DIR} must exist with mode 755 (run krate identity up, or chmod 755 it)')
     files = identity.truststore_files(trust)
@@ -429,16 +440,21 @@ def validate_truststores(root, required):
         if path.suffix not in identity.TRUSTSTORE_SUFFIXES:
             raise Preflight(f'{identity.TRUSTSTORES_DIR}/{name} is not a truststore file; Keycloak loads only PEM (.crt, .pem) and PKCS12'
                             ' (.p12, .pfx, .pkcs12) files from that directory: remove it')
-        if stat.S_IMODE(path.stat().st_mode) & 0o044 != 0o044:
-            raise Preflight(f'{identity.TRUSTSTORES_DIR}/{name} must be world-readable (chmod 644): Keycloak reads it as its own user')
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o044 != 0o044 or mode & 0o022:
+            raise Preflight(f'{identity.TRUSTSTORES_DIR}/{name} must be world-readable and writable by its owner only (chmod 644):'
+                            ' Keycloak reads it as its own user; group and others must not change it')
     if required and not files:
         raise Preflight(f'{identity.TRUSTSTORES_DIR} holds no truststore file (.crt, .pem, .p12, .pfx, .pkcs12): place the CA certificate'
                         " that issued the identity provider's TLS certificate there (mode 644); Keycloak loads it at start"
                         ' (a publicly trusted certificate: set "idp_truststore": "system" in the site file)')
 
 
-def validate_broker(root, env, origin, secrets):
+def validate_broker(root, env, origin, secrets, require_secret=True):
     """Ping mode (the broker plan exists): the secret, https endpoints, the two group mappers and the trust material.
+
+    `krate identity up` applies the same plan, so identity mode runs this too (require_secret=False: the
+    secret may still be unset there, in which case identity up leaves the provider alone).
 
     runtime.yml needs no separate hint check here: validate_runtime already refuses any document
     that differs from the plan, and the plan never carries kc_idp_hint.
@@ -448,7 +464,7 @@ def validate_broker(root, env, origin, secrets):
         plan = identity.broker_plan(plan_file)
     except ValueError as exc:  # broker_plan's messages name keys and aliases, never a value
         raise Preflight(f'{exc}; regenerate it: remove auth/ui/runtime.yml and {identity.BROKER_PLAN}, then krate auth configure <site.json>') from None
-    if identity.BROKER_SECRET_KEY not in secrets:
+    if require_secret and identity.BROKER_SECRET_KEY not in secrets:
         raise Preflight(f'{identity.BROKER_PLAN} exists but {identity.BROKER_SECRET_KEY} is not set in .env;'
                         f' krate auth apply asks for it on a terminal, otherwise: krate identity rotate {identity.BROKER_SECRET_KEY} --value (reads it from stdin)')
     text = plan_file.read_text()
@@ -508,6 +524,10 @@ def validate_identity(root, config):
     validate_networks(config)
     validate_db_tls(root)
     validate_realm(root, origin, secrets)
+    # The broker plan is applied by `krate identity up` too (when its secret is set), so its shape,
+    # endpoints, mappers and trust material are checked in identity mode as well.
+    if (root / identity.BROKER_PLAN).is_file():
+        validate_broker(root, env, origin, secrets, require_secret=False)
 
 
 def main():

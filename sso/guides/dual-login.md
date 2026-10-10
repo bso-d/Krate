@@ -363,8 +363,11 @@ controlled realm migration.
 
 To switch Kafbat back to the shared login, set
 `KAFKA_UI_AUTH_CONFIG=local.yml` with `./krate config set` and run
-`./krate auth apply`. The same command recreates only the UI and checks the
-proxy. Identity services and their database are retained for recovery. Do not
+`./krate auth apply`. In `local.yml` mode the command recreates only the UI
+and checks the proxy; in `runtime.yml` mode it also recreates Keycloak when its
+trust material or service definition changed and reconciles the PingFederate
+plan (see "Company SSO through PingFederate"). Identity services and their
+database are retained for recovery. Do not
 use `down -v` on a live cluster.
 
 Both image references are fixed by version and SHA-256 digest in

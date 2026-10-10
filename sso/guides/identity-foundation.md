@@ -118,7 +118,10 @@ in Kafbat is the OIDC `sub`:
 Group names are written into the realm plan when the realm is first created.
 Changing `KEYCLOAK_*_GROUP` in `.env` later does not rename the realm groups;
 `identity up` regenerates the plan but reconciles only the `krate-ui` client
-settings and the realm's OTP look-ahead window (see "`./krate identity up`").
+settings, the realm's OTP look-ahead window, the default required actions and,
+when the PingFederate plan exists and its secret is set, the identity provider
+(see "`./krate identity up`"; the identity preflight validates the plan's
+shape, endpoints, mappers and trust material even while the secret is unset).
 
 ## Resource inventory
 

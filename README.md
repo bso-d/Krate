@@ -299,9 +299,14 @@ without linking to local accounts, and local users sign in only by appending
 `&kc_idp_hint=` (empty) to the realm's authorization URL after pressing Kafbat's
 "Log in with Keycloak" button (the break-glass procedure in the operator
 guide). SSO requires Compose 2.20.2 or newer.
-`./krate auth apply` validates the installation and reconciles only the UI
-service, using locally loaded images. It does not start Keycloak: when
-Keycloak is not ready it stops and tells you to run `./krate identity up`.
+`./krate auth apply` validates the installation and reconciles the UI service
+and the proxy, using locally loaded images. It never bootstraps Keycloak: when
+the realm is not ready it stops and tells you to run `./krate identity up`.
+In `runtime.yml` mode it does recreate the running Keycloak container when the
+trust material in `auth/keycloak/truststores` or its Compose definition
+changed (ending Keycloak sessions), then applies or removes the PingFederate
+plan in the realm; `./krate identity rotate PING_KEYCLOAK_CLIENT_SECRET
+--value` recreates it once as well.
 Keycloak and PostgreSQL are included in both offline packages even when the
 SSO profile is inactive. See the
 [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and the

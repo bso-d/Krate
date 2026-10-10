@@ -1213,6 +1213,10 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     expect_refusal('PING_KEYCLOAK_CLIENT_SECRET not set', 'PING_KEYCLOAK_CLIENT_SECRET')
     write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET=env['KEYCLOAK_CLI_CLIENT_SECRET']))
     expect_refusal('PING_KEYCLOAK_CLIENT_SECRET equal to another identity secret', 'different')
+    # PR #41 review: `config set` bypasses the CLI's prompt/rotate validation, so preflight checks the shape too.
+    for label, value in (('a space', 'has a space 1234567890'), ('a dollar sign', 'abc$defghijklmnopq'), ('a double quote', 'abc"defghijklmnopq')):
+        write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET=value))
+        expect_refusal(f'PING_KEYCLOAK_CLIENT_SECRET with {label}', 'printable ASCII')
     write_env(site, env)
     for label, mutation, needle in (
             ('an http token endpoint', lambda p: p['identityProviders'][0]['config'].__setitem__('tokenUrl', 'http://ping.example.internal/as/token.oauth2'), 'https'),
@@ -1229,6 +1233,8 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     pem = trust / 'enterprise-ca.pem'
     pem.chmod(0o600)
     expect_refusal('a 600 PEM in the truststores', 'chmod 644')
+    pem.chmod(0o666)
+    expect_refusal('a group/other-writable PEM (666)', 'writable by its owner only')
     pem.chmod(0o644)
     pem.unlink()
     expect_refusal('no PEM while the identity provider is on another host', 'holds no truststore file')
@@ -1236,7 +1242,21 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     expect_pass('a .crt PEM instead of .pem')
     trust.chmod(0o700)
     expect_refusal('a 700 truststores directory', '755')
+    trust.chmod(0o777)
+    expect_refusal('a group/other-writable truststores directory (777)', 'must not write')
     trust.chmod(0o755)
+    # PR #41 review: `krate identity up` applies the plan too, so identity mode validates it (a mutated plan is
+    # refused there as well) while an unset secret only skips the application.
+    mutated_plan(lambda p: p['identityProviderMappers'][0]['config'].__setitem__('group', '/OTHER'))
+    outcome = preflight(site, 'identity', rendered)
+    checks.expect(outcome.returncode == 1 and 'realm groups' in outcome.stderr,
+                  f'{edition}: identity-mode preflight must refuse a plan whose mapper targets another realm group; got exit {outcome.returncode}: {outcome.stderr.strip()}')
+    identity.write_file(plan_file, plan_original, 0o644)
+    write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET='REPLACE_ME'))
+    outcome = preflight(site, 'identity', rendered)
+    checks.expect(outcome.returncode == 0,
+                  f'{edition}: identity-mode preflight must accept the plan while PING_KEYCLOAK_CLIENT_SECRET is unset (identity up skips the application); got exit {outcome.returncode}: {outcome.stderr.strip()}')
+    write_env(site, env)
     (trust / 'enterprise-ca.crt').unlink()
     # Keycloak scans the directory recursively and loads PEM and PKCS12 files; anything else is refused by name.
     truststore_pem(site, name='enterprise-ca.p12')
@@ -2549,9 +2569,15 @@ identity_rotate_ping_secret
               f'{edition}/krate: ensure_ping_secret names identity rotate --value as the non-terminal path')
             # Review NEW1: a PingFederate-issued secret is accepted as issued (base64 and punctuation included);
             # only whitespace and the characters .env quoting, Compose interpolation and the shell alter are refused.
-            ping_rule = 'if [[ "$key" == PING_KEYCLOAK_CLIENT_SECRET ]]; then\n      if [[ ${#value} -lt 16 ]] || printf \'%s\' "$value" | LC_ALL=C grep -q -E \'[^!-~]|[\\\\$"\'"\'"\'`]\'; then'
+            ping_rule = 'if [[ "$key" == PING_KEYCLOAK_CLIENT_SECRET ]]; then\n      ping_secret_valid "$value" || die "$key $PING_SECRET_RULE"\n    else'
             e(ping_rule in rotate_body and rotate_body.index(ping_rule) < rotate_body.index('[[ "$value" =~ ^[A-Za-z0-9._-]{16,}$ ]]'),
-              f'{edition}/krate: identity rotate takes a PingFederate secret as issued (printable ASCII, 16+, no whitespace/quotes/backslash/backtick/$) and keeps the generated-value rule for the other keys')
+              f'{edition}/krate: identity rotate validates a PingFederate secret through ping_secret_valid and keeps the generated-value rule for the other keys')
+            validator = function_body(cli, 'ping_secret_valid')
+            e('[[ ${#1} -ge 16 ]] || return 1' in validator and "grep -q -E '[^!-~]|[\\\\$\"'\"'\"'`]'" in validator,
+              f'{edition}/krate: ping_secret_valid = 16+ printable ASCII, none of whitespace, quotes, backslash, backtick or $')
+            # PR #41 review: the interactive prompt stores the secret through the same validator (no short or dotenv-sensitive value reaches .env).
+            e('ping_secret_valid "$secret" || die "PING_KEYCLOAK_CLIENT_SECRET $PING_SECRET_RULE"' in function_body(cli, 'ensure_ping_secret'),
+              f'{edition}/krate: ensure_ping_secret validates the prompted secret with ping_secret_valid before writing .env')
 
 
 def _dict_diff(a, b):
@@ -2683,7 +2709,14 @@ def check_broker_docs(checks):
     sso = (ROOT / 'sso/guides/pingfederate-sso.md').read_text()
     e('kc_idp_hint=' in sso and 'krate browser' in sso, 'sso/guides/pingfederate-sso.md must describe the realm flow and the break-glass hint')
     e('PING_KEYCLOAK_CLIENT_SECRET' in foundation and 'identity rotate' in foundation, 'sso/guides/identity-foundation.md must list PING_KEYCLOAK_CLIENT_SECRET under identity rotate')
-
+    # PR #41 review: the README/guide overview must not claim apply never touches Keycloak (it recreates it on
+    # trust-material or service changes and reconciles the plan).
+    readme = (ROOT / 'README.md').read_text()
+    checks.expect('reconciles only the UI' not in readme and 'It does not start Keycloak' not in readme and 'trust material in `auth/keycloak/truststores`' in readme,
+                  'README.md: the auth apply overview must describe the Keycloak recreation and plan reconcile, not "reconciles only the UI"')
+    dual = (ROOT / 'sso/guides/dual-login.md').read_text()
+    checks.expect('In `local.yml` mode the command recreates only the UI' in dual,
+                  'dual-login.md: the switch-back paragraph must scope "recreates only the UI" to local.yml mode')
 
 def check_health(checks):
     """N4: health names the Compose service of a crash-looping container (RestartCount, Restarting) and survives a vanished one."""

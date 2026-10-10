@@ -611,6 +611,15 @@ compose_cmd() {
   "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+# The shape of the client secret PingFederate issues: taken as issued, except
+# for whitespace and the characters .env quoting, Compose interpolation ($) and
+# the shell would alter. Every path that stores the secret goes through it.
+ping_secret_valid() {
+  [[ ${#1} -ge 16 ]] || return 1
+  ! printf '%s' "$1" | LC_ALL=C grep -q -E '[^!-~]|[\\$"'"'"'`]'
+}
+PING_SECRET_RULE="must be at least 16 printable ASCII characters without spaces, quotes, backslash, backtick or \$ (as issued by PingFederate)"
+
 # The one secret that cannot be generated: PingFederate issues it for Keycloak.
 # Ask for it when SSO is applied interactively; otherwise say how to set it.
 ensure_ping_secret() {
@@ -622,7 +631,7 @@ ensure_ping_secret() {
   [[ -t 0 ]] || die "Set the client secret PingFederate issued for Keycloak without a terminal: krate identity rotate PING_KEYCLOAK_CLIENT_SECRET --value (reads it from stdin)"
   read -rsp "  Client secret PingFederate issued for Keycloak: " secret
   echo ""
-  [[ -n "$secret" ]] || die "No secret entered."
+  ping_secret_valid "$secret" || die "PING_KEYCLOAK_CLIENT_SECRET $PING_SECRET_RULE"
   set_env_file_value "$ENV_FILE" PING_KEYCLOAK_CLIENT_SECRET "$secret"
   ok "Saved PING_KEYCLOAK_CLIENT_SECRET in .env"
 }
@@ -1971,9 +1980,7 @@ cmd_identity_rotate() {
     # by PingFederate is taken as issued, except for whitespace and the
     # characters .env quoting, Compose interpolation ($) and the shell alter.
     if [[ "$key" == PING_KEYCLOAK_CLIENT_SECRET ]]; then
-      if [[ ${#value} -lt 16 ]] || printf '%s' "$value" | LC_ALL=C grep -q -E '[^!-~]|[\\$"'"'"'`]'; then
-        die "$key must be at least 16 printable ASCII characters without spaces, quotes, backslash, backtick or \$ (as issued by PingFederate)"
-      fi
+      ping_secret_valid "$value" || die "$key $PING_SECRET_RULE"
     else
       [[ "$value" =~ ^[A-Za-z0-9._-]{16,}$ ]] || die "$key must be at least 16 characters of letters, digits, . _ or -"
     fi
