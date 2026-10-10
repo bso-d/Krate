@@ -970,12 +970,12 @@ class Gate:
                 gone = admin.api('GET', '%s/topics/%s' % (c, topic), timeout=15).status
             except (TimeoutError, OSError):
                 gone = 'timeout'
-            if gone not in (200, 'timeout'):
+            if gone == 404:  # deleted; any other answer keeps polling until the budget ends
                 break
             time.sleep(0.5)
         deleting = time.monotonic() - deleting
-        if gone in (200, 'timeout'):
-            bad.append('topic still present (or Kafbat still blocking its GET) %.0fs after delete' % deleting)
+        if gone != 404:
+            bad.append('topic not gone %.0fs after delete (last GET=%s)' % (deleting, gone))
         self.cleanup_groups.discard(f['group_del'])
         core_ok = sum(1 for item in seen[:len(core)] if item.split('=')[1].startswith('2'))
         text = 'admin1 core %d/%d 2xx (%s); not 403: %s; deleted topic GET=%s after %.1fs; fixture topic created in %s' % (
