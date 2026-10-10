@@ -203,6 +203,12 @@ request.
   recreates `kafka-ui` only when the applied auth file or the image changed
   (Compose compares the file digest `KRATE_UI_AUTH_SHA` it writes to `.env`);
   an unchanged re-apply prints `Kafbat UI unchanged ... user sessions kept`.
+  The proxy follows the same rule: `krate start`, `krate install` and
+  `krate auth apply` write `KRATE_PROXY_CONF_SHA` (a digest of `nginx.conf`
+  and `certs/server.{crt,key}`) and `KRATE_PROXY_PUBLIC_HOST` to `.env`, both
+  part of the proxy's environment, so the proxy is recreated exactly when the
+  release's `nginx.conf`, the certificate or the public host changed. A plain
+  `krate restart proxy` reloads files but keeps the old environment.
 
 ## CSRF and logout
 
@@ -223,6 +229,21 @@ request.
   learns the `end_session_endpoint` from `runtime.yml`
   (`custom-params.end-session-uri`, written by `krate auth configure`); the
   preflight refuses a `runtime.yml` without it.
+- In this mode the proxy serves one host name only: the host of
+  `KEYCLOAK_PUBLIC_URL` (`KRATE_PROXY_PUBLIC_HOST`, case-insensitive, any
+  port). A request for any other name (another DNS alias, an IP address
+  that is not the public host, a forged `Host` header) is closed without a response (nginx 444),
+  so no client can make Kafbat build its redirect and logout URLs from a
+  host of its choice; Keycloak's exact redirect allowlist would refuse such a
+  login anyway. Use the `KEYCLOAK_PUBLIC_URL` origin in the browser
+  (`./krate ui` prints it). In `local.yml` mode every name is served.
+- The proxy refuses (400) any path with a path parameter (`;`, raw or
+  encoded `%3B`) on every route: nginx normalises dot segments and
+  percent-encoding before it matches a location, but not `;`, so this keeps
+  the 404 routes below independent of Kafbat's own firewall. Dot segments
+  within a name and encoded slashes stay allowed outside `/identity/`: Kafka
+  topic names may contain `..`, and Kafbat sends schema subjects
+  path-encoded.
 - The proxy forwards only its own `X-Forwarded-For`, `X-Forwarded-Proto` and
   `X-Forwarded-Host` (host and port as the browser sent them) and drops a
   client's `Forwarded`, `X-Forwarded-Prefix`, `X-Forwarded-Ssl` and
@@ -308,10 +329,23 @@ Keycloak stores users, broker links and sessions in the named PostgreSQL volume.
 Back it up with `./krate identity backup <file>` (encrypted `pg_dump`) and
 restore with `./krate identity restore <file>`; see the identity foundation
 guide. Realm import only creates a realm when it does not already exist.
-`./krate identity up` regenerates the realm file from `.env` and reconciles
-only the `krate-ui` client (redirect URIs, web origins and the PKCE,
-post-logout and back-channel logout attributes) in an existing realm; editing
-the file by hand is overwritten and does not change the realm. Review other
+`./krate identity up` (and `./krate identity restore`) regenerate the realm
+file from `.env` and reconcile only the `krate-ui` client (redirect URIs, web
+origins, `frontchannelLogout` off, and the PKCE, post-logout and back-channel
+logout attributes) and the realm's `otpPolicyLookAheadWindow` (1) in an
+existing realm. A realm created before these were planned, or restored from
+an older backup, therefore gets them at the next `identity up`; an older realm
+has a look-ahead window of 0, which refuses a TOTP code typed across the
+30-second boundary. The journal records `up reconciled realm policy` when the
+window changed. The same by hand:
+
+```bash
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh update realms/krate \
+  --config /tmp/kcadm.config -s otpPolicyLookAheadWindow=1
+```
+
+Editing the realm file by hand is overwritten and does not change the realm. Review other
 changes with IAM and apply them through Keycloak administration or a
 controlled realm migration.
 

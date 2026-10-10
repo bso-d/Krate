@@ -117,8 +117,8 @@ in Kafbat is the OIDC `sub`:
 
 Group names are written into the realm plan when the realm is first created.
 Changing `KEYCLOAK_*_GROUP` in `.env` later does not rename the realm groups;
-`identity up` regenerates the plan but reconciles only the `krate-ui` URLs
-(see "`./krate identity up`").
+`identity up` regenerates the plan but reconciles only the `krate-ui` client
+settings and the realm's OTP look-ahead window (see "`./krate identity up`").
 
 ## Resource inventory
 
@@ -417,13 +417,18 @@ secret. The read-only commands `status`, `users list`, `users groups` and
 8. Every run: verifies the admin login and a client-credentials login of
    `krate-cli` against realm `krate`.
 9. Bootstrapped only: compares client `krate-ui` in the realm with the plan
-   and updates its `redirectUris`, `webOrigins` and client attributes
+   and updates its `redirectUris`, `webOrigins`, `frontchannelLogout` (off:
+   logout reaches Kafbat over the back channel only) and client attributes
    (`pkce.code.challenge.method`, `post.logout.redirect.uris`,
    `backchannel.logout.url`, `backchannel.logout.session.required`,
    `backchannel.logout.revoke.offline.tokens`) when they differ (journal line
-   `up reconciled krate-ui urls and attributes`). A realm created before the
-   back-channel attributes existed receives them on the next `identity up`.
-   Nothing else in the realm is reconciled:
+   `up reconciled krate-ui urls and attributes`). It then compares the realm's
+   `otpPolicyLookAheadWindow` with the plan (1) and sets it when it differs
+   (`kcadm.sh update realms/krate -s otpPolicyLookAheadWindow=1`; journal line
+   `up reconciled realm policy`). A realm created before these settings were
+   planned receives them on the next `identity up`: an older realm has a
+   look-ahead window of 0, which refuses a TOTP code typed across the
+   30-second boundary. Nothing else in the realm is reconciled:
    groups, token lifetimes, session limits and the other clients keep the
    values they were created with.
 10. Sets `KEYCLOAK_ENABLED=true`, writes the journal line and prints
@@ -521,7 +526,13 @@ lost" case): `keycloak-db` then starts with a fresh database. Order:
    (atomic write; journal line `restore reconciled .env: KEY1 KEY2`, never a
    value). `.env` then matches the restored store again.
 4. Starts `keycloak` and verifies readiness, the admin login and the
-   `krate-cli` login. Writes the journal line.
+   `krate-cli` login.
+5. Regenerates the realm plan from this installation's `.env` and reconciles
+   the `krate-ui` client and the realm's `otpPolicyLookAheadWindow` with it,
+   as `identity up` does (journal lines `restore reconciled krate-ui urls and
+   attributes` and `restore reconciled realm policy` when something changed):
+   the dump carries the backup host's URLs and an older backup the older
+   policy. Writes the journal line `restore ok <file>`.
 
 The database password is kept as it is: the restored dump contains no roles,
 so a restore from before a `rotate KEYCLOAK_DB_PASSWORD` changes nothing about
@@ -542,10 +553,12 @@ CA is renewed with it (1825 days). Requires an existing identity database with
 
 1. Takes the lock. `sso/identity.py db-tls --renew-server` checks that the
    full set of five files exists (an incomplete directory is refused: the CA
-   is needed), removes work directories a killed earlier run left behind,
-   issues the new material in a private temporary directory, keeps the files
-   it replaces as `*.prev` and moves the new ones into place (`*.new`, then
-   rename), key first, then certificate. It prints `renewed server
+   is needed), removes work directories and `*.prev` files a killed earlier
+   run left behind (so a rollback restores exactly this renewal's set, never
+   an older CA beside a server certificate from the new one), issues the new
+   material in a private temporary directory, keeps the files it replaces as
+   `*.prev` and moves the new ones into place (`*.new`, then rename), key
+   first, then certificate. It prints `renewed server
    certificate, valid until <date>` or `renewed CA and server certificate,
    valid until <date>`. `pg_hba.conf` does not change.
 2. Restarts `keycloak-db` alone (`docker compose restart --no-deps`, "Don't
@@ -557,13 +570,21 @@ CA is renewed with it (1825 days). Requires an existing identity database with
    healthy, the command restores the `*.prev` files (`db-tls --rollback`),
    restarts the database again, writes `renew-db-tls rolled back` to the
    journal and exits 1; the previous certificate is in service.
-3. On success removes the `*.prev` files. When the CA was renewed and
-   `keycloak` is running, restarts `keycloak` with `--no-deps` (its trust
-   store is the mounted `ca.crt`, read at start) and verifies the admin
-   login. Otherwise waits up to 30 seconds for Keycloak to report ready again
+3. When the CA was renewed and `keycloak` is running, the `*.prev` files are
+   kept until Keycloak has proven it trusts the new CA: the database's
+   healthcheck does not exercise Keycloak's TLS chain. The command restarts
+   `keycloak` with `--no-deps` (its trust store is the mounted `ca.crt`, read
+   at start), waits for its health and logs in as the admin (both read the
+   database over the new chain), and only then removes the `*.prev` files.
+   When Keycloak does not come back healthy or refuses the login, the command
+   restores the `*.prev` files, restarts `keycloak-db` and then `keycloak` on
+   them, writes `renew-db-tls rolled back` and exits 1.
+   With the same CA, it removes the `*.prev` files once the database is
+   healthy, then waits up to 30 seconds for Keycloak to report ready again
    (its readiness includes the database); when it does not, restarts
    `keycloak` and verifies the admin login. When `keycloak` was not running
-   at the start, it is left stopped and uses the new files on its next start.
+   at the start, the `*.prev` files are removed, Keycloak is left stopped and
+   uses the new files on its next start.
 4. Writes the journal line `renew-db-tls ok <what was renewed, new expiry>`.
 
 Run it when the preflight warns about the 30-day window, or on a site
@@ -799,9 +820,10 @@ the CA with it when the CA would expire first.
   available only when bootstrap admin password is set"), so the master realm
   is created by `kc.sh bootstrap-admin user` in a one-off container instead.
 - The realm plan is imported once. Realm import "is skipped" when the realm
-  exists. `identity up` reconciles only the `krate-ui` URLs afterwards; later
-  changes to groups, token lifetimes or session limits in `.env` do not reach
-  an existing realm.
+  exists. `identity up` (and `restore`) reconcile only the `krate-ui` client
+  settings and the realm's OTP look-ahead window afterwards; later changes to
+  groups, token lifetimes or session limits in `.env` do not reach an
+  existing realm.
 - The database TLS server certificate (398 days) is not renewed
   automatically. The preflight warns 30 days before expiry and refuses within
   a day; `./krate identity renew-db-tls` is an operator action. The CA (1825

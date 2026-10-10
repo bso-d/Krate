@@ -38,14 +38,28 @@ IDENTITY_MEMBERS = {'keycloak-db', 'keycloak', 'proxy', 'kafka-ui'}
 EGRESS_NETWORK = 'identity-egress'
 
 
+# Column-0 lines kafbat.yml may contain: blank, a comment, the document marker and the kafka: key.
+KAFBAT_YML_TOP = re.compile(r'(\s*|#.*|---\s*|kafka:\s*(#.*)?)')
+
+
 def validate_kafbat_yml(root):
-    """EPC's kafbat.yml is merged into the same Spring configuration; it may configure clusters only."""
+    """EPC's kafbat.yml is merged into the same Spring configuration; it may configure clusters only.
+
+    Every line that starts in column 0 opens a top-level node, whatever its spelling (a quoted
+    key, a flow mapping, a second document's key), so each one must be blank, a comment, `---`
+    or `kafka:`; anything else is refused without trying to parse it.
+    """
     path = root / 'kafbat.yml'
     if not path.is_file():
         return
-    keys = re.findall(r'^([A-Za-z_][A-Za-z0-9_.-]*):', path.read_text(), re.M)
-    if set(keys) != {'kafka'}:
-        raise Preflight(f'kafbat.yml may define the kafka: section only (clusters); found top-level keys {sorted(set(keys))}')
+    lines = path.read_text().splitlines()
+    others = [str(number) for number, line in enumerate(lines, 1)
+              if not line.startswith(' ') and not KAFBAT_YML_TOP.fullmatch(line)]
+    if others:
+        raise Preflight('kafbat.yml may define the kafka: section only (clusters); other top-level content on line(s) '
+                        + ', '.join(others[:5]))
+    if not any(line.startswith('kafka:') for line in lines):
+        raise Preflight('kafbat.yml may define the kafka: section only (clusters); it has no kafka: section')
 
 
 def validate(root, mode, config):
@@ -99,12 +113,19 @@ def validate(root, mode, config):
     host = urlsplit(origin).hostname or ''
     if not host:
         raise Preflight('KEYCLOAK_PUBLIC_URL has no hostname')
-    # openssl exits 1 on a mismatch (3.x), so the status is read, not raised.
-    match = subprocess.run(['openssl', 'x509', '-in', str(cert), '-checkhost', host, '-noout'],
+    # openssl exits 1 on a mismatch (3.x), so the status is read, not raised. Browsers accept an
+    # IP-literal host only through an iPAddress SAN: -checkhost would also match DNS:<ip>.
+    try:
+        ipaddress.ip_address(host)
+        check = '-checkip'
+    except ValueError:
+        check = '-checkhost'
+    match = subprocess.run(['openssl', 'x509', '-in', str(cert), check, host, '-noout'],
                            text=True, capture_output=True, stdin=subprocess.DEVNULL)
     if match.returncode or 'does match certificate' not in match.stdout:
         raise Preflight(f'certs/server.crt does not cover the public hostname {host} (KEYCLOAK_PUBLIC_URL);'
-                        ' run krate gen-cert (it covers that name, the host FQDN and localhost) and krate restart proxy')
+                        ' run krate gen-cert (it covers that name, the host FQDN and localhost), then this command again'
+                        ' (krate start or krate auth apply recreates the proxy with the new certificate)')
     kc = services['keycloak']['environment']
     if kc.get('KC_HOSTNAME') != origin + '/identity':
         raise Preflight('Rendered KC_HOSTNAME differs from KEYCLOAK_PUBLIC_URL in .env; clear conflicting shell environment variables')

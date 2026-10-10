@@ -309,7 +309,8 @@ def render(data):
 
 
 def summary(data, path, outcome):
-    """Human-readable description of a realm plan; it never touches a credential field."""
+    """Human-readable description of a realm plan; it receives a copy without credential keys."""
+    data = without_credentials(data)
     clients = {client['clientId']: client for client in data['clients']}
     ui = clients[UI_CLIENT]
     lines = [
@@ -519,14 +520,14 @@ def issue_server(work, days=SERVER_CERT_DAYS):
               '-extfile', 'server.ext', '-out', 'server.crt'], work)
 
 
-def generate_material(work):
-    """Create a private CA and a server certificate for keycloak-db in `work`."""
+def generate_material(work, days=SERVER_CERT_DAYS):
+    """Create a private CA and a server certificate (valid `days`) for keycloak-db in `work`."""
     work = Path(work)
     _openssl(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', str(CA_CERT_DAYS),
               '-subj', '/CN=' + CA_NAME, '-keyout', 'ca.key', '-out', 'ca.crt',
               '-addext', 'basicConstraints=critical,CA:TRUE',
               '-addext', 'keyUsage=critical,keyCertSign,cRLSign'], work)
-    issue_server(work)
+    issue_server(work, days)
     material = {name: (work / name).read_bytes() for name in TLS_FILES if name != 'pg_hba.conf'}
     material['pg_hba.conf'] = PG_HBA.encode()
     return material
@@ -558,8 +559,11 @@ def renew_server(directory, days=SERVER_CERT_DAYS):
     The CA is renewed as well when it would expire before the new server
     certificate (Keycloak then needs a restart to trust it). The replaced files
     stay beside the new ones as `.prev` until rollback() or discard_previous():
-    the caller restarts the database and decides. New files are written as
-    `.new` and moved into place, so no reader ever sees a partial file.
+    the caller restarts the database and decides. `.prev` files a killed earlier
+    renewal left behind are discarded first, so a rollback restores exactly this
+    renewal's set (never an older CA beside a server certificate from the new one).
+    New files are written as `.new` and moved into place, so no reader ever sees
+    a partial file.
     """
     directory = Path(directory)
     missing = [name for name in TLS_FILES if not (directory / name).is_file()]
@@ -567,6 +571,7 @@ def renew_server(directory, days=SERVER_CERT_DAYS):
         raise IncompleteMaterial(f'{directory} is incomplete; missing ' + ', '.join(missing)
                                  + '. Renewal needs the existing CA; restore the directory from a backup first.')
     remove_stale_work(directory)
+    discard_previous(directory)
     renew_ca = seconds_left(directory / 'ca.crt') < days * 86400
     names = ('ca.key', 'ca.crt', 'server.key', 'server.crt') if renew_ca else ('server.key', 'server.crt')
     previous = os.umask(0o077)
@@ -574,7 +579,7 @@ def renew_server(directory, days=SERVER_CERT_DAYS):
         with tempfile.TemporaryDirectory(prefix='.renew-', dir=directory) as work:
             work = Path(work)
             if renew_ca:
-                generate_material(work)
+                generate_material(work, days)
             else:
                 for name in ('ca.crt', 'ca.key'):
                     (work / name).write_bytes((directory / name).read_bytes())

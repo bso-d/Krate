@@ -184,6 +184,15 @@ services:
     ports:
       - "${KAFKA_UI_HTTP_PORT:-80}:80"
       - "${KAFKA_UI_HTTPS_PORT:-443}:443"
+    environment:
+      # nginx.conf is mounted as a template that the image renders into conf.d at
+      # start; only the KRATE_PROXY_* variables are substituted, never nginx's own.
+      NGINX_ENVSUBST_FILTER: "^KRATE_PROXY_"
+      # Kept in .env by krate: the one host served in runtime.yml mode (empty: every
+      # name), and a digest of nginx.conf and certs/server.{crt,key} so a changed
+      # file recreates the proxy on the next up.
+      KRATE_PROXY_PUBLIC_HOST: ${KRATE_PROXY_PUBLIC_HOST:-}
+      KRATE_PROXY_CONF_SHA: ${KRATE_PROXY_CONF_SHA:-}
     volumes:
       # ':z' = shared SELinux label; both files are read-only config.
       - ./nginx.conf:/etc/nginx/templates/default.conf.template:ro,z

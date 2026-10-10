@@ -248,15 +248,27 @@ Acceptance of the identity work is decided by the executable gate
 
 The certificate `./krate gen-cert` (or the first start) writes covers the host
 FQDN, the host of `KEYCLOAK_PUBLIC_URL` and `localhost`, so `./krate auth apply`
-passes its hostname check on a fresh install; after changing
-`KEYCLOAK_PUBLIC_URL` run `./krate gen-cert` and `./krate restart proxy`.
+passes its hostname check on a fresh install (an IP address as the host gets
+an IP entry, which browsers require for an IP host). After changing
+`KEYCLOAK_PUBLIC_URL`, run `./krate gen-cert` and then `./krate start` or
+`./krate auth apply`: the proxy's Compose environment carries a digest of
+`nginx.conf` and the certificate (`KRATE_PROXY_CONF_SHA`) and, in Keycloak
+sign-in mode, the one host name it serves (`KRATE_PROXY_PUBLIC_HOST`), so
+those commands recreate it exactly when one of them changed. In Keycloak
+sign-in mode a request for any other host name is closed without a response;
+open the UI at the `KEYCLOAK_PUBLIC_URL` origin (`./krate ui` prints it).
 
 Offline Docker RPMs: `make docker-rpms` downloads the Docker CE packages plus the
-base-OS dependencies a minimal host may lack (`container-selinux`, `nftables`)
-into `optional/`, from the builder image `RHEL_BUILDER_IMAGE` (default
-`rockylinux:9`); `krate docker-install` adds only the bundled packages `dnf`
-names as missing on that host and otherwise tells you which package to take
-from the OS media. The whole flow was proven offline on a Rocky Linux 9.8 VM
+base-OS dependencies a minimal host may lack (`container-selinux`, `nftables`
+and the libraries nftables needs: `libnftnl`, `jansson`, `libmnl`) into
+`optional/`, from the builder image `RHEL_BUILDER_IMAGE` (default: the Rocky
+Linux project's maintained `rockylinux/rockylinux:9`, pinned by digest; the
+Docker Official Image `rockylinux:9` is no longer updated). `krate
+docker-install` (and the bundled `docker-offline/install-docker.sh`, which uses
+the same selection) adds only the bundled packages that provide a capability
+`dnf` names as missing on that host, over up to three rounds (an added package
+can name its own missing library), and otherwise tells you which capability to
+take from the OS media. The whole flow was proven offline on a Rocky Linux 9.8 VM
 with SELinux enforcing (see `sso/guides/identity-gate.md`).
 
 `./krate identity up` generates the database TLS material and the realm, starts
@@ -401,7 +413,7 @@ Krate uses the projects below. Credit belongs to their owners, maintainers, and 
 | [Fluent Bit](https://github.com/fluent/fluent-bit), [dkjson](https://dkolf.de/dkjson-lua/) and [Python](https://www.python.org/) | Fluent Bit contributors, David Heiko Kolf, and the Python Software Foundation/contributors | Shared KRaft/EPC container log collection and metadata discovery; see [monitoring transition and notices](monitoring/README.md) |
 | [Ubuntu](https://ubuntu.com/) | Canonical and the Ubuntu community | Ubuntu targets and Docker package preparation |
 | [Red Hat Enterprise Linux](https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux) | Red Hat and contributors | RHEL target for the EPC edition |
-| [AlmaLinux](https://almalinux.org/) | AlmaLinux OS Foundation and community | Default container used to prepare RHEL packages |
+| [Rocky Linux](https://rockylinux.org/) | Rocky Enterprise Software Foundation and community | Default container used to prepare RHEL packages |
 | [Alpine Linux](https://www.alpinelinux.org/) | Alpine Linux contributors | Base system used by some upstream containers |
 | [Bash](https://www.gnu.org/software/bash/) and [GNU Make](https://www.gnu.org/software/make/) | GNU project, Free Software Foundation, and contributors | Command scripts and package builds |
 | [Git](https://git-scm.com/) | Git maintainers and contributors | Source checkout |

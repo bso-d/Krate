@@ -14,11 +14,14 @@ RHEL_VERSION ?= 9
 # for a RHEL target.
 TARGET_OS ?= $(UBUNTU_VERSION)
 # Builder for the RHEL-family RPM set. Its distro supplies the optional/ packages
-# (container-selinux, nftables); Rocky tracks the RHEL minor releases, so the
-# bundled container-selinux matches a current RHEL/Rocky 9 host. For a target whose
+# (container-selinux, nftables and its libraries). This is the Rocky Linux project's
+# own image (the Docker Official Image rockylinux:9 is no longer updated), pinned by
+# digest like every other build input; its packages resolve from Rocky's current
+# repositories, which follow the RHEL 9 minor releases. For a target whose
 # selinux-policy is older or newer, build with that target's own distro image or let
-# `krate docker-install` name the package to take from the OS media.
-RHEL_BUILDER_IMAGE ?= rockylinux:9
+# `krate docker-install` name the package to take from the OS media. To move the pin:
+# docker buildx imagetools inspect rockylinux/rockylinux:9 (the index Digest line).
+RHEL_BUILDER_IMAGE ?= rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f
 INCLUDE_DOCKER ?= 0
 NO_PULL ?= 0
 
@@ -42,11 +45,13 @@ DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-
 # Base-OS dependencies a minimal or cloud host may lack go to optional/, never to
 # the main set: containerd.io requires container-selinux (coupled to the host's
 # selinux-policy minor version: a newer build FAILS on an older host that was fine),
-# and docker-ce 29 requires nftables. `krate docker-install` adds an optional
-# package only when dnf names it as missing on that host. Build with
-# RHEL_BUILDER_IMAGE=rockylinux:9 (or the target's own distro image) so the
-# optional builds match the target's policy; otherwise install them from the OS media.
-DOCKER_RPM_OPTIONAL := container-selinux nftables libnftnl
+# and docker-ce 29 requires nftables, which requires libnftnl and jansson (libnftnl
+# in turn libmnl). `krate docker-install` and the bundled install-docker.sh add an
+# optional package only when it provides a capability dnf names as missing on that
+# host. Build with the default RHEL_BUILDER_IMAGE (or the target's own distro image)
+# so the optional builds match the target's policy; otherwise install them from the
+# OS media.
+DOCKER_RPM_OPTIONAL := container-selinux nftables libnftnl jansson libmnl
 
 .PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft bundle-epc docker-debs docker-rpms monitor-up monitor-down monitor-status monitor-logs clean dist-clean
 .SILENT: help
@@ -510,9 +515,10 @@ docker-rpms:
 >    dnf install -y -q dnf-plugins-core
 >    # Make the builder resemble a real RHEL host before resolving. The builder
 >    # image is minimal, so without this dnf treats base OS packages as missing
->    # and downloads AlmaLinux builds of selinux-policy, policycoreutils,
->    # iptables and friends — which would replace Red Hat'"'"'s own packages on the
->    # target VM, at a different minor version. A RHEL host already has these.
+>    # and downloads the builder distro'"'"'s builds of selinux-policy,
+>    # policycoreutils, iptables and friends — which would replace Red Hat'"'"'s own
+>    # packages on the target VM, at a different minor version. A RHEL host
+>    # already has these.
 >    dnf install -y -q policycoreutils selinux-policy-targeted iptables-nft nftables diffutils
 >    # No --resolve on the main set: take exactly the named Docker packages, so
 >    # the bundle can never carry a base OS package built by another distro.
@@ -591,20 +597,73 @@ docker-rpms:
 >  exit 1
 >fi
 >
+># dnf names what the host lacks ("nothing provides <capability> needed by
+># <package>"). Only the optional/ packages that provide a named capability are
+># added, round by round (an added package can name its own missing dependency),
+># so a host that already has them never gets another distro's build. Same
+># selection as `krate docker-install` (epc/krate); the two functions below are
+># kept identical to its copies (scripts/check-identity.py compares them).
+>rpm_missing_capabilities() {
+>  sed -n 's/.*nothing provides \([^ ]*\).*/\1/p' "$$1" | sort -u
+>}
+>
+>rpm_providers_of() {
+>  local need="$$1" file listing
+>  shift
+>  for file in "$$@"; do
+>    if [[ "$$need" == /* ]]; then
+>      listing="$$(rpm -qpl "$$file" 2>/dev/null)" || continue
+>    else
+>      listing="$$(rpm -qp --provides "$$file" 2>/dev/null | awk '{print $$1}')" || continue
+>    fi
+>    if [[ $$'\n'"$$listing"$$'\n' == *$$'\n'"$$need"$$'\n'* ]]; then echo "$$file"; fi
+>  done
+>}
+>
 >echo "==> Installing Docker CE from $${#pkgs[@]} bundled packages..."
->if ! run "$$installer" install -y --allowerasing --disablerepo='*' "$${pkgs[@]}"; then
->  # containerd.io requires container-selinux. Any RHEL host that has run
->  # containers already has it; a minimal one may not. Retry with the bundled
->  # copy, which is kept out of the main set because the newest build wants a
->  # newer selinux-policy than RHEL 9.6 ships.
->  if [[ $${#optional[@]} -gt 0 ]]; then
->    echo ""
->    echo "==> Retrying with bundled optional dependencies..."
->    run "$$installer" install -y --allowerasing --disablerepo='*' "$${pkgs[@]}" "$${optional[@]}"
->  else
->    echo "Install failed and no optional/ dependencies are bundled." >&2
->    exit 1
+>attempt_log="$$(mktemp)"
+>wanted=()
+>missing=()
+>unresolved=()
+>installed=0
+>for round in 0 1 2 3; do
+>  rc=0
+>  # stderr goes to the file and is printed after dnf has exited, so the file is
+>  # complete when it is read.
+>  run "$$installer" install -y --allowerasing --disablerepo='*' "$${pkgs[@]}" "$${wanted[@]}" 2>"$$attempt_log" || rc=$$?
+>  cat "$$attempt_log" >&2
+>  if [[ "$$rc" -eq 0 ]]; then
+>    installed=1
+>    break
 >  fi
+>  [[ "$$round" -lt 3 ]] || break
+>  mapfile -t missing < <(rpm_missing_capabilities "$$attempt_log")
+>  added=()
+>  unresolved=()
+>  for need in "$${missing[@]}"; do
+>    mapfile -t providers < <(rpm_providers_of "$$need" "$${optional[@]}")
+>    if [[ $${#providers[@]} -eq 0 ]]; then
+>      unresolved+=("$$need")
+>      continue
+>    fi
+>    for file in "$${providers[@]}"; do
+>      [[ " $${wanted[*]} $${added[*]} " == *" $$file "* ]] || added+=("$$file")
+>    done
+>  done
+>  [[ $${#added[@]} -gt 0 ]] || break
+>  echo ""
+>  echo "==> Adding the bundled dependencies this host lacks: $${added[*]##*/}"
+>  wanted+=("$${added[@]}")
+>done
+>rm -f "$$attempt_log"
+>if [[ "$$installed" -ne 1 ]]; then
+>  if [[ $${#wanted[@]} -eq 0 ]]; then
+>    echo "Offline install failed: this host lacks $${missing[*]:-a dependency dnf did not name}, and the bundle has no package for it." >&2
+>  else
+>    echo "Offline install failed even with the bundled dependencies ($${wanted[*]##*/})$${unresolved[*]:+; no bundled package provides $${unresolved[*]}}." >&2
+>  fi
+>  echo "Install it from your RHEL media or Satellite (container-selinux must match this host's selinux-policy build), then re-run." >&2
+>  exit 1
 >fi
 >
 ># ── Service + group ──────────────────────────────────────────────────────────

@@ -295,18 +295,30 @@ import_site_files() {
 # site files come from --from DIR, the package directory or the directory the
 # running (or stopped) cluster was started from.
 deploy_release() {
-  local from="$1" taken previous
+  local from="$1" taken previous work
   ensure_home_dir
-  ( cd "$SCRIPT_DIR" && tar -cf - --exclude=./images --exclude=./docker-offline --exclude=./.env \
+  work="$(mktemp -d)" || die "Cannot create a temporary directory"
+  # The release archive is written once, listed, then extracted: the listing is exactly
+  # what was copied. Site files and the temporary .env copies an interrupted krate run
+  # leaves beside .env (.env.XXXXXX, mode 600, full .env contents) are not release files.
+  if ! ( cd "$SCRIPT_DIR" && tar -cf - --exclude=./images --exclude=./docker-offline --exclude=./.env \
       --exclude=./certs --exclude=./auth --exclude=./monitoring/.env --exclude=./monitoring/auth \
-      --exclude='./sso/site*.json' . ) | ( cd "$KRATE_HOME" && tar -xf - ) \
-    || die "Could not copy the release files to $KRATE_HOME"
+      --exclude='./sso/site*.json' --exclude='./.env.??????' --exclude='./monitoring/.env.??????' \
+      --exclude='.identity-backup.*' . ) > "$work/release.tar" \
+    || ! tar -tf "$work/release.tar" > "$work/release.list" \
+    || ! ( cd "$KRATE_HOME" && tar -xf "$work/release.tar" ); then
+    rm -rf "$work"
+    die "Could not copy the release files to $KRATE_HOME"
+  fi
   # The container users (kafkaui, nginx, grafana) read these files through bind mounts:
-  # an operator umask of 077 or 027 at extraction would leave them unreadable. Secret
-  # paths (.env, certs, auth/keycloak, site files) keep their modes.
-  ( cd "$KRATE_HOME" && find . \( -path ./.env -o -path ./certs -o -path ./auth -o -path ./monitoring/.env \
-      -o -path ./monitoring/auth -o -path ./images -o -path ./docker-offline -o -name 'site*.json' \) -prune -o -print0 \
-    | xargs -0 chmod go+rX ) || die "Could not set read permissions on the release files in $KRATE_HOME"
+  # an operator umask of 077 or 027 at extraction would leave them unreadable. Only the
+  # paths the release archive contained are widened (an allow-list): site files, secrets
+  # and anything else in KRATE_HOME (an identity backup, a leftover temporary) keep their modes.
+  if ! ( cd "$KRATE_HOME" && tr '\n' '\0' < "$work/release.list" | xargs -0 chmod go+rX ); then
+    rm -rf "$work"
+    die "Could not set read permissions on the release files in $KRATE_HOME"
+  fi
+  rm -rf "$work"
   mkdir -p "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak/truststores"
   chmod go+rx "$KRATE_HOME/auth" "$KRATE_HOME/auth/ui"
   cp "$SCRIPT_DIR/auth/ui/local.yml" "$KRATE_HOME/auth/ui/local.yml"
@@ -453,6 +465,7 @@ prepare() {
     prepare_monitor_env
   fi
   ensure_cert
+  sync_proxy_env "$(env_value KAFKA_UI_AUTH_CONFIG)"
   ensure_ui_image
 }
 
@@ -512,7 +525,7 @@ cmd_credentials() {
   if identity_profile_enabled; then
     echo -e "${BOLD}  Keycloak admin${RESET}"
     sep
-    echo "  URL       $(env_value KEYCLOAK_PUBLIC_URL)/admin/"
+    echo "  Console   not published: the proxy answers 404 for $(env_value KEYCLOAK_PUBLIC_URL)/admin/ (use krate identity ... or kcadm from the host)"
     echo "  Username  $(env_value KEYCLOAK_ADMIN_USER)"
     echo "  Password  $(env_value KEYCLOAK_ADMIN_PASSWORD)"
     sep
@@ -1230,27 +1243,29 @@ identity_bootstrap_master() {
 }
 
 # The krate-ui client follows .env: when the realm plan and Keycloak differ in
-# redirectUris, webOrigins or the client attributes (PKCE, the post-logout
-# URIs, OIDC back-channel logout to Kafbat), Keycloak is updated from the
-# plan. Nothing else is reconciled.
+# redirectUris, webOrigins, frontchannelLogout (off: back-channel logout only)
+# or the client attributes (PKCE, the post-logout URIs, OIDC back-channel
+# logout to Kafbat), Keycloak is updated from the plan. Nothing else of the
+# client is reconciled; the realm policy has identity_reconcile_realm_policy.
 identity_reconcile_ui_urls() {
   local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" id wanted keys current
   wanted="$(python3 -c '
 import json, sys
 client = next(c for c in json.load(open(sys.argv[1]))["clients"] if c["clientId"] == "krate-ui")
 print(json.dumps({"redirectUris": sorted(client["redirectUris"]), "webOrigins": sorted(client["webOrigins"]),
-                  "attributes": client["attributes"]}, sort_keys=True))' "$plan")" \
+                  "frontchannelLogout": client["frontchannelLogout"], "attributes": client["attributes"]}, sort_keys=True))' "$plan")" \
     || die "Cannot read the krate-ui client from $plan"
   keys="$(python3 -c 'import json, sys; print(",".join(sorted(json.loads(sys.argv[1])["attributes"])))' "$wanted")"
   kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
   id="$(kcadm_client_id "$IDENTITY_REALM" krate-ui)" || die "Keycloak query failed"
   [[ -n "$id" ]] || die "Client krate-ui not found in realm $IDENTITY_REALM"
-  current="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" --fields redirectUris,webOrigins,"attributes($keys)" \
+  current="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" --fields redirectUris,webOrigins,frontchannelLogout,"attributes($keys)" \
     | python3 -c '
 import json, sys
 client = json.load(sys.stdin)
 attributes = client.get("attributes") or {}
 print(json.dumps({"redirectUris": sorted(client.get("redirectUris", [])), "webOrigins": sorted(client.get("webOrigins", [])),
+                  "frontchannelLogout": client.get("frontchannelLogout"),
                   "attributes": {key: attributes.get(key, "") for key in sys.argv[1].split(",")}}, sort_keys=True))' "$keys")" \
     || die "Keycloak query failed"
   if [[ "$current" != "$wanted" ]]; then
@@ -1258,7 +1273,30 @@ print(json.dumps({"redirectUris": sorted(client.get("redirectUris", [])), "webOr
       || die "Keycloak refused the krate-ui client update"
     identity_journal "${1:-up}" reconciled "krate-ui urls and attributes"
     IDENTITY_CHANGED=true
-    ok "krate-ui client URLs and logout attributes updated from the realm plan"
+    ok "krate-ui client URLs and logout settings updated from the realm plan"
+  fi
+  kcadm_logout
+}
+
+# Realm policy the plan states and Keycloak's import never revisits (an import
+# only creates a realm; a backup restores the old realm): otpPolicyLookAheadWindow.
+# A realm created before the plan stated it keeps the class default 0, which
+# refuses a TOTP code typed across the 30-second boundary. $1 names the command
+# for the journal.
+identity_reconcile_realm_policy() {
+  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" wanted current
+  wanted="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["otpPolicyLookAheadWindow"])' "$plan")" \
+    || die "Cannot read otpPolicyLookAheadWindow from $plan"
+  [[ "$wanted" =~ ^[0-9]+$ ]] || die "$plan: otpPolicyLookAheadWindow must be a whole number"
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+  current="$(kcadm -- get "realms/$IDENTITY_REALM" --fields otpPolicyLookAheadWindow --format csv --noquotes)" \
+    || die "Keycloak query failed"
+  if [[ "$current" != "$wanted" ]]; then
+    kcadm -- update "realms/$IDENTITY_REALM" -s "otpPolicyLookAheadWindow=$wanted" \
+      || die "Keycloak refused the realm policy update"
+    identity_journal "${1:-up}" reconciled "realm policy"
+    IDENTITY_CHANGED=true
+    ok "Realm $IDENTITY_REALM: OTP look-ahead window set to $wanted step(s) from the realm plan"
   fi
   kcadm_logout
 }
@@ -1319,6 +1357,7 @@ cmd_identity_up() {
   else
     identity_verify_admin up
     identity_reconcile_ui_urls
+    identity_reconcile_realm_policy up
   fi
   identity_verify_cli up
   if [[ "$(env_value KEYCLOAK_ENABLED)" != true ]]; then
@@ -1757,6 +1796,7 @@ If that keeps failing, follow the volume-lost procedure in docs/identity-foundat
   # follow this installation's plan before the restore is reported complete.
   prepare_identity_files restore
   identity_reconcile_ui_urls restore
+  identity_reconcile_realm_policy restore
   identity_journal restore ok "$file"
   ok "Identity database restored from $file"
 }
@@ -1781,11 +1821,31 @@ identity_wait_healthy() {
   die "Service $service did not become healthy within the ${IDENTITY_TIMEOUT}s timeout (IDENTITY_TIMEOUT). Check: krate logs $service"
 }
 
+# Put the database TLS files of the last renewal back (.prev) and restart the
+# given services on them, in order, then stop: $1 is the reason for the journal.
+identity_tls_rollback() {
+  local reason="$1" service
+  shift
+  warn "$reason; restoring the previous certificate files"
+  python3 "$(sso_dir)/identity.py" db-tls --rollback --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" \
+    || die "Rollback failed: restore auth/keycloak/db-tls from a backup. Check: krate logs keycloak-db"
+  for service in "$@"; do
+    if ! identity_compose restart --no-deps "$service" || ! identity_health_wait "$service"; then
+      warn "$service is not healthy after the rollback. Check: krate logs $service"
+    fi
+  done
+  identity_journal renew-db-tls "rolled back" "$reason; previous files restored"
+  die "Database TLS renewal rolled back; the previous certificate is in place. Check: krate logs $*"
+}
+
 # Reissue keycloak-db's server key and certificate under the existing CA (398
 # days; the CA, Keycloak's trust store, is unchanged), then restart the
 # database alone so PostgreSQL loads them (the entrypoint wrapper copies the
 # files at container start). Keycloak's connections drop with that restart;
-# it is restarted only when it does not report ready again on its own.
+# it is restarted only when it does not report ready again on its own. When
+# the CA had to be renewed too, Keycloak is restarted, and the previous files
+# are discarded only once it is healthy and accepts the admin login; a failure
+# at either restart rolls both files and services back.
 cmd_identity_renew_db_tls() {
   prepare_identity_env; require_env
   identity_lock
@@ -1802,22 +1862,27 @@ cmd_identity_renew_db_tls() {
   local ca_renewed=false
   [[ "$renewed" != "renewed CA and"* ]] || ca_renewed=true
   info "Restarting the identity database with the new certificate..."
+  # The previous files stay beside the new ones (.prev) until the services that
+  # depend on them have proven they work with the new ones.
   if ! identity_compose restart --no-deps keycloak-db || ! identity_health_wait keycloak-db; then
-    # The previous key and certificate are kept beside the new ones until this point.
-    warn "keycloak-db did not come back healthy with the new certificate; restoring the previous one"
-    python3 "$(sso_dir)/identity.py" db-tls --rollback --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" \
-      || die "Rollback failed: restore auth/keycloak/db-tls from a backup. Check: krate logs keycloak-db"
-    identity_compose restart --no-deps keycloak-db || true
-    identity_journal renew-db-tls "rolled back" "keycloak-db unhealthy with the renewed certificate; previous files restored"
-    die "Database TLS renewal rolled back; the previous certificate is in place. Check: krate logs keycloak-db"
+    identity_tls_rollback "keycloak-db unhealthy with the renewed certificate" keycloak-db
   fi
-  python3 "$(sso_dir)/identity.py" db-tls --discard-previous --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" >/dev/null
   if $keycloak_running && $ca_renewed; then
+    # The database's healthcheck never exercises Keycloak's trust in the new CA: Keycloak
+    # must come back healthy and accept the admin login (both read the database over the
+    # new chain) before the previous CA is discarded. Otherwise both roll back.
     info "The CA changed; restarting Keycloak so it trusts the new one..."
-    identity_compose restart --no-deps keycloak
-    identity_wait_healthy keycloak renew-db-tls
-    identity_verify_admin renew-db-tls
+    if ! identity_compose restart --no-deps keycloak || ! identity_health_wait keycloak \
+        || ! kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)"; then
+      kcadm_logout
+      identity_tls_rollback "keycloak did not accept the renewed CA" keycloak-db keycloak
+    fi
+    kcadm_logout
+    python3 "$(sso_dir)/identity.py" db-tls --discard-previous --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" >/dev/null
+    ok "Admin login as $(env_value KEYCLOAK_ADMIN_USER) verified"
   elif $keycloak_running; then
+    # Same CA: Keycloak's trust is unchanged, the database's health settles it.
+    python3 "$(sso_dir)/identity.py" db-tls --discard-previous --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" >/dev/null
     until identity_ready; do
       tries=$((tries + 1))
       if (( tries >= 10 )); then
@@ -1830,6 +1895,7 @@ cmd_identity_renew_db_tls() {
     done
     identity_verify_admin renew-db-tls
   else
+    python3 "$(sso_dir)/identity.py" db-tls --discard-previous --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" >/dev/null
     warn "Keycloak is not running; it uses the renewed certificate on its next start (krate identity up)"
   fi
   identity_journal renew-db-tls ok "$renewed"
@@ -1966,6 +2032,17 @@ get_fqdn() {
   echo "$f"
 }
 
+# A subjectAltName entry for a name: IP: for an IPv4 or IPv6 literal (brackets dropped),
+# since browsers match an IP host only against an iPAddress SAN; DNS: otherwise.
+san_entry() {
+  local name="${1#[}"; name="${name%]}"
+  if python3 -c 'import ipaddress, sys; ipaddress.ip_address(sys.argv[1])' "$name" 2>/dev/null; then
+    echo "IP:$name"
+  else
+    echo "DNS:$name"
+  fi
+}
+
 # Generate a self-signed TLS cert (CN/SAN = FQDN, plus the host IP) for nginx.
 cmd_gen_cert() {
   command -v openssl &>/dev/null || die "openssl not found — needed to generate the TLS certificate."
@@ -1976,12 +2053,13 @@ cmd_gen_cert() {
   # The browser-facing name is KEYCLOAK_PUBLIC_URL's host (default localhost); the
   # certificate covers it together with the host FQDN so a fresh install passes the
   # authentication preflight without a second gen-cert.
-  public_host="$(env_value KEYCLOAK_PUBLIC_URL)"; public_host="${public_host#*://}"; public_host="${public_host%%/*}"; public_host="${public_host%%:*}"
-  san="DNS:${fqdn}"
-  [[ -z "$public_host" || "$public_host" == "$fqdn" ]] || san="${san},DNS:${public_host}"
+  public_host="$(public_url_host)"
+  san="$(san_entry "$fqdn")"
+  [[ -z "$public_host" || "$public_host" == "$fqdn" ]] || san="${san},$(san_entry "$public_host")"
   [[ "$fqdn" == localhost || "$public_host" == localhost ]] || san="${san},DNS:localhost"
-  [[ -n "$ip" ]] && san="${san},IP:${ip}"
-  info "Generating self-signed TLS certificate (CN=${fqdn}; names ${san//DNS:/}${ip:+})..."
+  [[ -z "$ip" || ",${san}," == *",IP:${ip},"* ]] || san="${san},IP:${ip}"
+  local san_names="${san//DNS:/}"
+  info "Generating self-signed TLS certificate (CN=${fqdn}; names ${san_names//IP:/})..."
   openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
     -keyout "$CERT_KEY" -out "$CERT_CRT" \
     -subj "/CN=${fqdn}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \
@@ -1997,6 +2075,39 @@ ensure_cert() {
   fi
   warn "No TLS certificate found — generating a self-signed one."
   cmd_gen_cert
+}
+
+# The host of KEYCLOAK_PUBLIC_URL, as nginx's $host spells it: lower case, without
+# the port, an IPv6 literal kept in brackets. Empty when the URL has no host.
+public_url_host() {
+  local host
+  host="$(env_value KEYCLOAK_PUBLIC_URL)"; host="${host#*://}"; host="${host%%/*}"
+  if [[ "$host" == \[* ]]; then host="${host%%]*}]"; else host="${host%%:*}"; fi
+  printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+# The proxy's Compose environment follows its inputs, so `up` recreates it exactly when
+# one changed. KRATE_PROXY_CONF_SHA digests nginx.conf and certs/server.{crt,key}: a new
+# release replaces nginx.conf (a new inode the running proxy, bound to the old one, never
+# sees) and nginx reads the certificate only at start, while Compose recreates a container
+# only when its configuration or image changes. KRATE_PROXY_PUBLIC_HOST is the one host
+# name the proxy serves in Keycloak sign-in mode (runtime.yml): KEYCLOAK_PUBLIC_URL's host,
+# the only one Keycloak accepts redirects for. Empty in local.yml mode: every name is served.
+# $1: the authentication mode to plan for (empty: KAFKA_UI_AUTH_CONFIG in .env).
+sync_proxy_env() {
+  local mode="${1:-}" sha host=""
+  [[ -n "$mode" ]] || mode="$(env_value KAFKA_UI_AUTH_CONFIG)"
+  sha="$(python3 -c '
+import hashlib, sys
+digest = hashlib.sha256()
+for name in sys.argv[1:]:
+    data = open(name, "rb").read()
+    digest.update(b"%d\n" % len(data) + data)
+print(digest.hexdigest()[:32])' "$SCRIPT_DIR/nginx.conf" "$CERT_CRT" "$CERT_KEY")" \
+    || die "Cannot read nginx.conf, certs/server.crt and certs/server.key for the proxy digest"
+  [[ "$mode" != runtime.yml ]] || host="$(public_url_host)"
+  [[ "$(env_value KRATE_PROXY_CONF_SHA)" == "$sha" ]] || set_env_file_value "$ENV_FILE" KRATE_PROXY_CONF_SHA "$sha"
+  [[ "$(env_value KRATE_PROXY_PUBLIC_HOST)" == "$host" ]] || set_env_file_value "$ENV_FILE" KRATE_PROXY_PUBLIC_HOST "$host"
 }
 
 # Human-readable size from a kilobyte count.
@@ -2139,7 +2250,6 @@ port_in_use() {
 # ─── install ──────────────────────────────────────────────────────────────────
 cmd_install() {
   local from=""
-  identity_lock_if_enabled
   if [[ "${1:-}" == --from ]]; then
     [[ -d "${2:-}" ]] || die "Usage: krate install [--from <earlier installation directory>]"
     from="$(cd "$2" && pwd)"
@@ -2167,6 +2277,9 @@ cmd_install() {
     echo ""
     KRATE_DEPLOYED=1 exec "$KRATE_HOME/krate" install
   fi
+  # Taken here, in the installation: from a package the exec above replaces this
+  # process (and its exit trap), so a lock taken earlier would stay behind.
+  identity_lock_if_enabled
 
   # 3. Settings, passwords and certificate
   info "Preparing settings, passwords and the TLS certificate..."
@@ -2353,24 +2466,32 @@ cmd_health() {
 
   while IFS= read -r cid; do
     [[ -z "$cid" ]] && continue
-    local name status health
-    name=$(docker inspect --format='{{.Name}}' "$cid" | sed 's|^/||')
-    status=$(docker inspect --format='{{.State.Status}}' "$cid")
-    health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")
+    local name status health restarting restarts service state label
+    # One inspect per container; one that vanished since `ps` reads as gone instead of
+    # stopping the report (errexit).
+    state="$(docker inspect --format '{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.Restarting}}|{{.RestartCount}}|{{index .Config.Labels "com.docker.compose.service"}}' "$cid" 2>/dev/null || true)"
+    if [[ -z "$state" ]]; then
+      printf "  %-35s %b\n" "${cid:0:12}" "${RED}gone${RESET}"
+      all_ok=false
+      continue
+    fi
+    IFS='|' read -r name status health restarting restarts service <<< "$state"
+    name="${name#/}"
 
-    local label
     if [[ "$health" == "healthy" ]]; then
       label="${GREEN}healthy${RESET}"
-    elif [[ "$health" == "none" && "$status" == "running" ]]; then
+    elif [[ "$health" == "none" && "$status" == "running" && "$restarting" != true ]]; then
       label="${GREEN}running${RESET}"
-    elif [[ "$health" == "starting" ]]; then
+    elif [[ "$health" == "starting" && "$restarting" != true && "$restarts" == 0 ]]; then
       label="${YELLOW}starting${RESET}"
       all_ok=false
     else
-      label="${RED}${health:-$status}${RESET}"
+      if [[ "$restarting" == true ]]; then label="${RED}restarting${RESET}"; else label="${RED}${health/none/$status}${RESET}"; fi
       all_ok=false
-      # krate logs takes the Compose service name, not the container name.
-      [[ "$status" != restarting && "$status" != exited ]] || crashing+=" $(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$cid")"
+      # A container its restart policy restarted (RestartCount), or is restarting, is
+      # crash-looping, also when sampled while starting. krate logs takes the Compose
+      # service name, not the container name.
+      if [[ "$restarting" == true || "$restarts" != 0 || "$status" == exited ]]; then crashing+=" ${service:-$name}"; fi
     fi
 
     printf "  %-35s %b\n" "$name" "$label"
@@ -2381,7 +2502,7 @@ cmd_health() {
     ok "All services healthy"
   else
     if [[ -n "$crashing" ]]; then
-      warn "Not healthy:$crashing keeps restarting or exited. Check: krate logs${crashing}"
+      warn "Not healthy:$crashing keeps restarting (restarted by its restart policy) or exited. Check: krate logs${crashing}"
     elif $wait && (( $(health_pending_count "$container_ids") > 0 )); then
       warn "Still starting after ${waited}s of ${timeout}s — the cluster may just need longer."
       warn "Retry with a longer wait: krate health --timeout $(( timeout * 2 ))"
@@ -2394,7 +2515,7 @@ cmd_health() {
 
 # ─── ui ───────────────────────────────────────────────────────────────────────
 cmd_ui() {
-  local user pass fqdn hp port_suffix=""
+  local user pass fqdn hp port_suffix="" public
   user="$(env_value KAFKA_UI_USER)"
   pass="$(env_value KAFKA_UI_PASSWORD)"
   fqdn="$(get_fqdn)"
@@ -2404,10 +2525,13 @@ cmd_ui() {
   sep
   echo -e "${BOLD}  Kafbat UI${RESET}"
   sep
-  echo "  URL       https://${fqdn}${port_suffix}/"
   if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
+    # In Keycloak sign-in mode the proxy serves KEYCLOAK_PUBLIC_URL's host only.
+    public="$(env_value KEYCLOAK_PUBLIC_URL)"
+    echo "  URL       ${public%/identity}/"
     echo "  Sign-in   Keycloak (realm krate) — manage users with krate identity users"
   else
+    echo "  URL       https://${fqdn}${port_suffix}/"
     [[ -n "$user" ]] && echo "  Username  $user"
     [[ -n "$pass" ]] && echo "  Password  $pass"
   fi
@@ -3064,6 +3188,29 @@ $rebuild_hint"
   ok "Docker installed successfully."
 }
 
+# The capabilities dnf reported missing in its output file $1, one per line:
+# "nothing provides libnftnl.so.11()(64bit) needed by nftables-..." names
+# libnftnl.so.11()(64bit); "nothing provides container-selinux >= 2:2.74 needed
+# by ..." names container-selinux (the version constraint is dnf's to check).
+rpm_missing_capabilities() {
+  sed -n 's/.*nothing provides \([^ ]*\).*/\1/p' "$1" | sort -u
+}
+
+# The RPM files among $2... that provide capability $1: by capability name
+# (rpm -qp --provides, version ignored) or, for a file path, by contents.
+rpm_providers_of() {
+  local need="$1" file listing
+  shift
+  for file in "$@"; do
+    if [[ "$need" == /* ]]; then
+      listing="$(rpm -qpl "$file" 2>/dev/null)" || continue
+    else
+      listing="$(rpm -qp --provides "$file" 2>/dev/null | awk '{print $1}')" || continue
+    fi
+    if [[ $'\n'"$listing"$'\n' == *$'\n'"$need"$'\n'* ]]; then echo "$file"; fi
+  done
+}
+
 # RHEL family. dnf resolves install order and inter-package deps itself, so the
 # whole set goes in one transaction. --disablerepo='*' keeps it strictly offline:
 # every dependency must already be on the box or in the bundle, and we fail
@@ -3100,33 +3247,50 @@ docker_install_rpm() {
 
   info "Installing Docker CE from ${#rpms[@]} bundled RPM packages..."
   echo ""
-  local attempt_log
+  # dnf names what the host lacks ("nothing provides <capability> needed by <package>").
+  # Base-OS dependencies a minimal host may miss (container-selinux, nftables and the
+  # libraries nftables needs) travel in optional/; only the bundled packages that
+  # provide a named capability are added, so a host that already has them never gets
+  # another distro's build. An added package can name its own missing dependency, so
+  # this repeats for up to three rounds.
+  local attempt_log round rc need file
+  local -a wanted=() added=() missing=() providers=() unresolved=()
   attempt_log="$(mktemp)" || die "Cannot create a temporary file"
-  if sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" 2> >(tee "$attempt_log" >&2); then
-    rm -f "$attempt_log"
-    return 0
-  fi
-  # dnf names what the host lacks ("nothing provides X needed by Y"). Base-OS
-  # dependencies a minimal host may miss (container-selinux, nftables) travel in
-  # optional/; only the bundled packages that provide a named requirement are
-  # added, so a host that already has them never gets another distro's build.
-  local -a missing=() wanted=()
-  local need rpm_file
-  mapfile -t missing < <(grep -o -E 'nothing provides [^ ]+' "$attempt_log" | awk '{print $3}' | sed -E 's/\(.*//' | sort -u)
-  rm -f "$attempt_log"
-  for need in "${missing[@]}"; do
-    for rpm_file in "${optional[@]}"; do
-      [[ "${rpm_file##*/}" == "$need"-[0-9]* ]] && wanted+=("$rpm_file")
+  for round in 0 1 2 3; do
+    rc=0
+    # dnf's stderr goes to the file and is printed after dnf has exited, so the
+    # file is complete when it is read (a process substitution would race it).
+    sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" "${wanted[@]}" 2>"$attempt_log" || rc=$?
+    cat "$attempt_log" >&2
+    if (( rc == 0 )); then
+      rm -f "$attempt_log"
+      return 0
+    fi
+    (( round < 3 )) || break
+    mapfile -t missing < <(rpm_missing_capabilities "$attempt_log")
+    added=()
+    unresolved=()
+    for need in "${missing[@]}"; do
+      mapfile -t providers < <(rpm_providers_of "$need" "${optional[@]}")
+      if [[ ${#providers[@]} -eq 0 ]]; then
+        unresolved+=("$need")
+        continue
+      fi
+      for file in "${providers[@]}"; do
+        [[ " ${wanted[*]} ${added[*]} " == *" $file "* ]] || added+=("$file")
+      done
     done
+    [[ ${#added[@]} -gt 0 ]] || break
+    echo ""
+    info "Adding the bundled dependencies this host lacks: ${added[*]##*/}"
+    wanted+=("${added[@]}")
   done
+  rm -f "$attempt_log"
   if [[ ${#wanted[@]} -eq 0 ]]; then
     die "Offline install failed: this host lacks ${missing[*]:-a dependency dnf did not name}, and the bundle has no package for it.
 Install it from your RHEL media or Satellite, then re-run: krate docker-install"
   fi
-  echo ""
-  info "Adding the bundled dependencies this host lacks: ${wanted[*]##*/}"
-  sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" "${wanted[@]}" \
-    || die "Offline install failed even with the bundled dependencies (${missing[*]}).
+  die "Offline install failed even with the bundled dependencies (${wanted[*]##*/})${unresolved[*]:+; no bundled package provides ${unresolved[*]}}.
 container-selinux must match this host's selinux-policy build; install it from your
 RHEL media or Satellite (dnf install container-selinux), then re-run: krate docker-install"
 }
