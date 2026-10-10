@@ -451,16 +451,20 @@ EOF
 run_screenshots() {
   section "X: end-user screenshot story (real browser through the proxy)"
   if ! $SCREENSHOTS; then record X1 1 X NOT_RUN "--no-screenshots"; return; fi
-  if [[ "$HTTPS_PORT" != 443 ]]; then record X1 1 X NOT_RUN "the story shares the proxy's network namespace and needs port 443"; return; fi
   if ! docker image inspect krate-harness/playwright:1.60.0 >/dev/null 2>&1; then
     printf 'FROM mcr.microsoft.com/playwright:v1.60.0-noble\nRUN npm i -g playwright@1.60.0\nENV NODE_PATH=/usr/lib/node_modules\n' | docker build -q -t krate-harness/playwright:1.60.0 - >/dev/null 2>&1 \
       || { record X1 1 X NOT_RUN "harness image krate-harness/playwright:1.60.0 could not be built (network needed once)"; return; }
   fi
   add_user gateshot --viewer || { record X1 1 X FAIL "could not create the story user"; return; }
   local shot_pw="$TEMP_PW"; add_user gateshotd --viewer; local shotd_pw="$TEMP_PW"; cap "$KRATE" identity users disable gateshotd
-  cap docker run --rm --network "container:$(cid proxy)" -v "$OUT/screenshots:/out" -v "$GATE_DIR:/gate:ro" \
+  # Chromium inside the container maps "localhost" to the Docker host gateway, so the
+  # published proxy port is reached the way a browser on the host reaches it.
+  local gateway
+  gateway="$(docker run --rm --add-host host.docker.internal:host-gateway "$PG_IMAGE" sh -c 'getent hosts host.docker.internal | cut -d" " -f1' 2>/dev/null | tr -d '[:space:]')"
+  [[ -n "$gateway" ]] || { record X1 1 X NOT_RUN "cannot resolve the Docker host gateway (host.docker.internal) from a container"; return; }
+  cap docker run --rm --add-host host.docker.internal:host-gateway -v "$OUT/screenshots:/out" -v "$GATE_DIR:/gate:ro" \
     -e GATE_TEMP_PASSWORD="$shot_pw" -e GATE_DISABLED_PASSWORD="$shotd_pw" -e NODE_PATH=/usr/lib/node_modules \
-    krate-harness/playwright:1.60.0 node /gate/screenshots.mjs --base https://localhost --out /out --user gateshot --disabled-user gateshotd
+    krate-harness/playwright:1.60.0 node /gate/screenshots.mjs --base "$BASE" --out /out --user gateshot --disabled-user gateshotd --resolve-to "$gateway"
   ok_if X1 1 X $? "$(find "$OUT/screenshots" -name '*.png' | wc -l | tr -d ' ') screenshots in $OUT/screenshots (manifest.json has the captions): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
 }
 

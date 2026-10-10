@@ -505,6 +505,10 @@ def check_exposure(checks):
         for path in ('/metrics', '/actuator/', '/logout/connect/'):
             block = nginx.find('    location ^~ ' + path + ' {\n        return 404;')
             e(0 <= block < public, f'{edition}/nginx.conf: {path} must return 404 before the catch-all location /')
+        e('X-Forwarded-Port $server_port' not in nginx, f'{edition}/nginx.conf: must not forward the container listening port as X-Forwarded-Port (the client port is in X-Forwarded-Host)')
+        for header in ('Forwarded', 'X-Forwarded-Prefix', 'X-Forwarded-Ssl', 'X-Forwarded-Port'):
+            e(nginx.count(f'proxy_set_header {header} "";') == nginx.count('proxy_set_header X-Forwarded-Host $http_host;') == 4,
+              f'{edition}/nginx.conf: every proxied location must clear the client-supplied {header} header')
         cli = (ROOT / edition / 'krate').read_text()
         prepare = cli[cli.index('\nprepare() {'):cli.index('\n}', cli.index('\nprepare() {'))]
         e('identity_network_clash' in prepare and prepare.index('identity_network_clash') < prepare.index('generate_secrets'),

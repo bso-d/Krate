@@ -1,8 +1,9 @@
 // End-user screenshot story for the identity gate (Phase 1). Runs inside the harness
-// Playwright container with the nginx proxy's network namespace, so https://localhost
-// is the proxy exactly as an end user on the VM would see it.
+// Playwright container; `--resolve-to IP` maps the name `localhost` to the Docker host
+// gateway inside Chromium (--host-resolver-rules), so https://localhost[:port] reaches
+// the published proxy port exactly as an end user's browser on the host does.
 //
-//   node screenshots.mjs --base https://localhost --out /out --user U --disabled-user D
+//   node screenshots.mjs --base https://localhost:8443 --out /out --user U --disabled-user D --resolve-to 192.168.65.254
 // Passwords come from the environment: GATE_TEMP_PASSWORD (U's temporary password),
 // GATE_DISABLED_PASSWORD (D's). Nothing secret is printed or written.
 //
@@ -54,7 +55,9 @@ async function shot(page, slug, caption) {
   console.log(`${file}\t${caption}`);
 }
 
-const browser = await chromium.launch();
+const resolveTo = args['resolve-to'];
+const launchArgs = resolveTo ? [`--host-resolver-rules=MAP localhost ${resolveTo}`] : [];
+const browser = await chromium.launch({ args: launchArgs });
 const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
 const page = await ctx.newPage();
 const account = `${BASE}/identity/realms/krate/account`;

@@ -219,6 +219,19 @@ request.
   learns the `end_session_endpoint` from `runtime.yml`
   (`custom-params.end-session-uri`, written by `krate auth configure`); the
   preflight refuses a `runtime.yml` without it.
+- The proxy forwards only its own `X-Forwarded-For`, `X-Forwarded-Proto` and
+  `X-Forwarded-Host` (host and port as the browser sent them) and drops a
+  client's `Forwarded`, `X-Forwarded-Prefix`, `X-Forwarded-Ssl` and
+  `X-Forwarded-Port`: Kafbat (`server.forward-headers-strategy=framework`)
+  would otherwise honour them for its redirects. It does not send
+  `X-Forwarded-Port` itself because that would carry the container's
+  listening port (443), not `KAFKA_UI_HTTPS_PORT`; with a non-443 port Spring
+  then built `post_logout_redirect_uri` without the port and Keycloak refused
+  the logout (found by the Phase 2 gate, case K24). Containers on the Docker
+  networks (brokers, the monitoring exporter) can still reach `kafka-ui:8080`
+  with their own headers; they are trusted infrastructure of this deployment,
+  and the identity side is protected independently by
+  `KC_PROXY_TRUSTED_ADDRESSES`.
 - The proxy answers 404 for Kafbat's unauthenticated `/metrics`, `/actuator/`
   and `/logout/connect/` paths; metrics per cluster are read through the
   signed-in API (`/api/clusters/<name>/metrics`, viewer permission).
