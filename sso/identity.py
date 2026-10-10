@@ -23,6 +23,8 @@ SERVICE_ACCOUNT = 'service-account-' + CLI_CLIENT
 CLI_ROLES = ['manage-users', 'view-users', 'query-users', 'query-groups']
 UI_SECRET = '${KEYCLOAK_KAFBAT_CLIENT_SECRET}'
 CLI_SECRET = '${KEYCLOAK_CLI_CLIENT_SECRET}'
+# The .env keys the plan refers to by placeholder; named here for the summary only.
+PLAN_PLACEHOLDER_KEYS = ('KEYCLOAK_CLI_CLIENT_SECRET', 'KEYCLOAK_KAFBAT_CLIENT_SECRET')
 GROUPS_CLAIM = 'groups'
 # Default client scopes without offline_access: no client may mint offline tokens.
 DEFAULT_SCOPES = ['profile', 'email', 'roles', 'web-origins', 'basic']
@@ -222,7 +224,7 @@ def render(data):
 
 
 def summary(data, path, outcome):
-    """Human-readable, secret-free description of a realm plan."""
+    """Human-readable description of a realm plan; it never touches a credential field."""
     clients = {client['clientId']: client for client in data['clients']}
     ui = clients[UI_CLIENT]
     lines = [
@@ -233,7 +235,7 @@ def summary(data, path, outcome):
                                  for name, client in clients.items()),
         f"  access token {data['accessTokenLifespan']} s, session idle {data['ssoSessionIdleTimeout']} s,"
         f" session max {data['ssoSessionMaxLifespan']} s",
-        '  secrets: placeholders ' + ', '.join(sorted(client['secret'] for client in clients.values())),
+        '  placeholders for: ' + ', '.join(PLAN_PLACEHOLDER_KEYS) + ' (values stay in .env)',
         f'  {path}: {outcome}',
     ]
     return '\n'.join(lines)

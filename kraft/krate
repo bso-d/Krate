@@ -963,7 +963,7 @@ identity_bootstrap_admin() {
 # realm plan (a pure function of .env, regenerated on every run). $1 = identity
 # state.
 prepare_identity() {
-  local state="$1" generated key missing=""
+  local state="$1" command="${2:-up}" generated key missing=""
   if [[ "$state" == pristine ]]; then
     generated="$(fill_secrets "$ENV_FILE" 24 "${IDENTITY_KEYS[@]}" | xargs)"
     if [[ -n "$generated" ]]; then
@@ -979,7 +979,7 @@ This .env or Keycloak database predates \`krate identity\`. See
 'Upgrading from the previous Keycloak setup' in docs/identity-foundation.md (sso/guides/ in a checkout).
 Otherwise restore the .env of this installation, or a backup: krate identity restore <file>"
   fi
-  prepare_identity_files
+  prepare_identity_files "$command"
 }
 
 # The database TLS material (generated when absent, never over an incomplete
@@ -1119,7 +1119,7 @@ cmd_identity_up() {
   if [[ "$state" == pristine && "$(env_value KEYCLOAK_ADMIN_USER)" == temp-admin ]]; then
     die "KEYCLOAK_ADMIN_USER must not be temp-admin (the temporary bootstrap admin). Set another name: krate config set KEYCLOAK_ADMIN_USER=admin"
   fi
-  prepare_identity "$state"
+  prepare_identity "$state" up
   # Render into the validator's stdin: credentials never reach terminal output.
   identity_compose config --format json | python3 "$(sso_dir)/preflight.py" --directory "$SCRIPT_DIR" --mode identity \
     || { identity_journal up refused "preflight failed"; die "Identity preflight failed (see above)."; }
@@ -1199,7 +1199,7 @@ cmd_identity_recover_admin() {
   case "$(env_value KEYCLOAK_ADMIN_PASSWORD)" in
     ""|REPLACE_ME|changeme) die "KEYCLOAK_ADMIN_PASSWORD is not set in .env; the recovered admin takes its password from there" ;;
   esac
-  prepare_identity_files
+  prepare_identity_files recover-admin
   require_service_images keycloak-db keycloak
   info "Starting the identity database..."
   identity_up_service keycloak-db
@@ -1546,7 +1546,7 @@ cmd_identity_restore() {
   case "$(env_value KEYCLOAK_DB_PASSWORD)" in
     ""|REPLACE_ME) [[ "$state" == pristine ]] || die "The identity database exists but .env lacks KEYCLOAK_DB_PASSWORD (a database role, not part of a backup). Restore the .env of this installation first." ;;
   esac
-  prepare_identity "$state"
+  prepare_identity "$state" restore
   cid="$(identity_container keycloak-db)"
   if [[ "$(container_health "$cid")" != healthy ]]; then
     require_service_images keycloak-db
