@@ -301,11 +301,21 @@ deploy_release() {
       --exclude=./certs --exclude=./auth --exclude=./monitoring/.env --exclude=./monitoring/auth \
       --exclude='./sso/site*.json' . ) | ( cd "$KRATE_HOME" && tar -xf - ) \
     || die "Could not copy the release files to $KRATE_HOME"
+  # The container users (kafkaui, nginx, grafana) read these files through bind mounts:
+  # an operator umask of 077 or 027 at extraction would leave them unreadable. Secret
+  # paths (.env, certs, auth/keycloak, site files) keep their modes.
+  ( cd "$KRATE_HOME" && find . \( -path ./.env -o -path ./certs -o -path ./auth -o -path ./monitoring/.env \
+      -o -path ./monitoring/auth -o -path ./images -o -path ./docker-offline -o -name 'site*.json' \) -prune -o -print0 \
+    | xargs -0 chmod go+rX ) || die "Could not set read permissions on the release files in $KRATE_HOME"
   mkdir -p "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak/truststores"
+  chmod go+rx "$KRATE_HOME/auth" "$KRATE_HOME/auth/ui"
   cp "$SCRIPT_DIR/auth/ui/local.yml" "$KRATE_HOME/auth/ui/local.yml"
+  chmod 644 "$KRATE_HOME/auth/ui/local.yml"
   if [[ -f "$SCRIPT_DIR/monitoring/auth/local.ini" ]]; then
     mkdir -p "$KRATE_HOME/monitoring/auth"
+    chmod go+rx "$KRATE_HOME/monitoring" "$KRATE_HOME/monitoring/auth"
     cp "$SCRIPT_DIR/monitoring/auth/local.ini" "$KRATE_HOME/monitoring/auth/local.ini"
+    chmod 644 "$KRATE_HOME/monitoring/auth/local.ini"
   fi
   ok "Installed $(basename "$SCRIPT_DIR") into $KRATE_HOME"
 
@@ -2206,7 +2216,7 @@ cmd_health() {
   sep
   echo ""
 
-  local all_ok=true
+  local all_ok=true crashing=""
 
   while IFS= read -r cid; do
     [[ -z "$cid" ]] && continue
@@ -2226,6 +2236,7 @@ cmd_health() {
     else
       label="${RED}${health:-$status}${RESET}"
       all_ok=false
+      [[ "$status" != restarting && "$status" != exited ]] || crashing+=" $name"
     fi
 
     printf "  %-35s %b\n" "$name" "$label"
@@ -2235,8 +2246,10 @@ cmd_health() {
   if $all_ok; then
     ok "All services healthy"
   else
-    if $wait && (( $(health_pending_count "$container_ids") > 0 )); then
-      warn "Still starting after ${timeout}s — the cluster may just need longer."
+    if [[ -n "$crashing" ]]; then
+      warn "Not healthy:$crashing keeps restarting or exited. Check: krate logs${crashing}"
+    elif $wait && (( $(health_pending_count "$container_ids") > 0 )); then
+      warn "Still starting after ${waited}s of ${timeout}s — the cluster may just need longer."
       warn "Retry with a longer wait: krate health --timeout $(( timeout * 2 ))"
     else
       warn "Some services not ready. Run: krate logs <service>"
