@@ -255,9 +255,10 @@ an IP entry, which browsers require for an IP host). After changing
 `nginx.conf` and the certificate (`KRATE_PROXY_CONF_SHA`) and, in Keycloak
 sign-in mode, the one `Host` value it serves (`KRATE_PROXY_PUBLIC_HOST`: the
 public host, plus `:port` unless 443), so those commands recreate it exactly when
-one of them changed. In Keycloak sign-in mode a request with any other `Host`
-header (name or port) is closed without a response;
-open the UI at the `KEYCLOAK_PUBLIC_URL` origin (`./krate ui` prints it).
+one of them changed. In Keycloak sign-in mode an HTTPS request with any other
+`Host` header (name or port) is closed without a response, and the plain-HTTP
+port only redirects to the public origin; open the UI at the
+`KEYCLOAK_PUBLIC_URL` origin (`./krate ui` prints it).
 
 Offline Docker RPMs: `make docker-rpms` downloads the Docker CE packages plus the
 base-OS dependencies a minimal host may lack (`container-selinux`, `nftables`

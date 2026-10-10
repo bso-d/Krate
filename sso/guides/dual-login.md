@@ -237,8 +237,11 @@ request.
   a response (nginx 444) before any location, so the upstreams only ever see
   that one authority as `Host` and `X-Forwarded-Host` and no client can make
   Kafbat build its redirect and logout URLs from an authority of its choice;
-  Keycloak's exact redirect allowlist would refuse such a login anyway. Use the `KEYCLOAK_PUBLIC_URL` origin in the browser
-  (`./krate ui` prints it). In `local.yml` mode every name is served.
+  Keycloak's exact redirect allowlist would refuse such a login anyway. The
+  plain-HTTP port does not check `Host` (a plain-HTTP header never carries the
+  HTTPS port): it only answers a redirect to the public origin. Use the
+  `KEYCLOAK_PUBLIC_URL` origin in the browser (`./krate ui` prints it). In
+  `local.yml` mode every name is served and the redirect keeps the name used.
 - The proxy refuses (400) any path with a path parameter (`;`, raw or
   encoded `%3B`) on every route: nginx normalises dot segments and
   percent-encoding before it matches a location, but not `;`, so this keeps

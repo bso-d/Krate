@@ -1397,7 +1397,6 @@ def check_nginx_edge(checks):
         tls = servers[-1]
         head = tls[:tls.index('    location ')]
         e('    if ($krate_foreign_host) { return 444; }' in head, f'{label}: the HTTPS server must close a foreign-host request (444) before any location')
-        head = tls[:tls.index('    location ')]
         e('    if ($krate_path_parameter) { return 400; }' in head, f'{label}: the HTTPS server must refuse a path parameter before any location')
         e(head.index('return 444') < head.index('return 400'), f'{label}: the host check comes first')
 
