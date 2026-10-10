@@ -322,8 +322,11 @@ deploy_release() {
     die "Could not set read permissions on the release files in $KRATE_HOME"
   fi
   rm -rf "$work"
-  if ! { cp "$SCRIPT_DIR/.env.template" "$KRATE_HOME/.env.template" && chmod 644 "$KRATE_HOME/.env.template"; }; then
-    die "Could not copy .env.template to $KRATE_HOME"
+  # The templates are release files that the .env.* exclusion above also matched.
+  if ! { cp "$SCRIPT_DIR/.env.template" "$KRATE_HOME/.env.template" && chmod 644 "$KRATE_HOME/.env.template" \
+      && mkdir -p "$KRATE_HOME/monitoring" && cp "$SCRIPT_DIR/monitoring/.env.template" "$KRATE_HOME/monitoring/.env.template" \
+      && chmod 644 "$KRATE_HOME/monitoring/.env.template"; }; then
+    die "Could not copy the .env templates to $KRATE_HOME"
   fi
   mkdir -p "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak/truststores"
   chmod go+rx "$KRATE_HOME/auth" "$KRATE_HOME/auth/ui"

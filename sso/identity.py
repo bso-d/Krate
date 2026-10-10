@@ -573,8 +573,9 @@ def renew_server(directory, days=SERVER_CERT_DAYS):
     remove_stale_work(directory)
     if any((directory / (name + '.prev')).exists() for name in TLS_FILES) and not chain_verifies(directory):
         raise IncompleteMaterial(f'{directory} holds .prev files of an interrupted renewal and server.crt does not verify '
-                                 'against ca.crt: the current set is mixed. Put the previous set back first '
-                                 '(identity.py db-tls --rollback) instead of renewing on top of it.')
+                                 'against ca.crt: the current set is mixed. Put the previous set back first (move each '
+                                 '.prev file over its current file, or restore auth/keycloak/db-tls from a backup) '
+                                 'instead of renewing on top of it.')
     discard_previous(directory)
     renew_ca = seconds_left(directory / 'ca.crt') < days * 86400
     names = ('ca.key', 'ca.crt', 'server.key', 'server.crt') if renew_ca else ('server.key', 'server.crt')
@@ -600,12 +601,15 @@ def renew_server(directory, days=SERVER_CERT_DAYS):
 
 
 def chain_verifies(directory):
-    """True when server.crt chains to ca.crt (openssl verify; expiry is not the question, a renewal fixes that)."""
-    try:
-        _openssl(['verify', '-no_check_time', '-CAfile', 'ca.crt', 'server.crt'], directory, capture=True)
-    except subprocess.SubprocessError:
-        return False
-    return True
+    """True when server.crt chains to ca.crt. Expiry is not the question (a renewal fixes that), so
+    openssl's time errors (X509_V_ERR 9 not yet valid, 10 expired) count as a verified chain; no
+    option such as -no_check_time is used because LibreSSL's verify does not know it."""
+    result = subprocess.run(['openssl', 'verify', '-CAfile', 'ca.crt', 'server.crt'], cwd=directory, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if result.returncode == 0:
+        return True
+    errors = re.findall(r'error (\d+) at \d+ depth lookup', result.stdout)
+    return bool(errors) and all(code in ('9', '10') for code in errors)
 
 
 def rollback(directory):

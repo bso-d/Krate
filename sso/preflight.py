@@ -42,7 +42,7 @@ EGRESS_NETWORK = 'identity-egress'
 # marker only before the first content line (a later `---` opens a second document, whose root
 # mapping may be indented, so it would never reach column 0).
 KAFBAT_YML_BLANK = re.compile(r'\s*(#.*)?')
-KAFBAT_YML_KAFKA = re.compile(r'kafka:\s*(#.*)?')
+KAFBAT_YML_KAFKA = re.compile(r'kafka:(\s+#.*)?\s*')
 
 
 def validate_kafbat_yml(root):
@@ -57,13 +57,19 @@ def validate_kafbat_yml(root):
     path = root / 'kafbat.yml'
     if not path.is_file():
         return
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding='utf-8-sig').splitlines()
+    while lines and KAFBAT_YML_BLANK.fullmatch(lines[-1]):
+        lines.pop()
+    if lines and re.fullmatch(r'\.\.\.\s*(#.*)?', lines[-1]):
+        lines.pop()  # a document end marker as the last content line is plain YAML
     offending = []
     seen_kafka = False
     seen_content = False
     for number, line in enumerate(lines, 1):
         if KAFBAT_YML_BLANK.fullmatch(line):
             continue
+        if not seen_content and re.fullmatch(r'%(YAML|TAG)\s.*', line):
+            continue  # directives belong before the first document marker
         if not seen_content and re.fullmatch(r'---\s*(#.*)?', line):
             seen_content = True
             continue

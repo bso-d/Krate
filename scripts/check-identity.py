@@ -777,7 +777,7 @@ def check_renewal(checks, tls):
             identity.renew_server(short)
             e(False, 'a renewal over a mixed set (.prev present, server.crt not chaining to ca.crt) must be refused')
         except ValueError as error:
-            e('.prev' in str(error) and 'rollback' in str(error), f'the refusal names the .prev files and the rollback; got {error}')
+            e('.prev' in str(error) and 'Put the previous set back' in str(error), f'the refusal names the .prev files and how to put the previous set back; got {error}')
         e(sorted(identity.rollback(short)) == ['server.crt', 'server.key'], 'the rollback puts the previous server files back')
         e({name: (short / name).read_bytes() for name in identity.TLS_FILES} == good, 'after the rollback the set is the good one again')
         # A killed CA renewal leaves ca.*.prev behind; a later server-only renewal must discard them first,
@@ -1096,12 +1096,17 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
             ('an indented root before kafka:', ' management:\n   endpoints: x\nkafka:\n  clusters: []\n'),
             ('a document end marker', 'kafka:\n  clusters: []\n...\nauth: {}\n'),
             ('an indented document marker', 'kafka:\n  clusters: []\n  ---\n  auth: {}\n'),
+            ('kafka: glued to a comment', 'kafka:#x\n  clusters: []\n'),
+            ('a second document after a final marker', 'kafka:\n  clusters: []\n...\n---\nauth: {}\n'),
             ('no kafka: section', '# clusters elsewhere\n')):
         kafbat.write_text(text)
         expect_refusal(f'kafbat.yml with {label}', 'kafbat.yml')
-    kafbat.write_text('# Kafbat clusters\n---\nkafka:   # the only section\n  clusters:\n    - name: x\n\n    # - name: y\n')
-    result = preflight(site, 'runtime.yml', rendered)
-    checks.expect(result.returncode == 0, f'{edition}: preflight must accept a kafbat.yml with only the kafka: section; got exit {result.returncode}: {result.stderr.strip()}')
+    for label, text in (('comments, a document marker and nested lists', '# Kafbat clusters\n---\nkafka:   # the only section\n  clusters:\n    - name: x\n\n    # - name: y\n'),
+                        ('a BOM, a %YAML directive and a final document end marker', '\ufeff%YAML 1.2\n---\nkafka:\n  clusters:\n    - name: x\n...\n'),
+                        ('CRLF line ends', 'kafka:\r\n  clusters:\r\n    - name: x\r\n')):
+        kafbat.write_text(text)
+        result = preflight(site, 'runtime.yml', rendered)
+        checks.expect(result.returncode == 0, f'{edition}: preflight must accept a kafbat.yml with {label}; got exit {result.returncode}: {result.stderr.strip()}')
     kafbat.unlink()
     # The opt-in makes the same messages_read grant acceptable, and only then.
     write_env(site, dict(env, KAFKA_UI_VIEWER_MESSAGES='true'))
@@ -1384,11 +1389,14 @@ def check_nginx_edge(checks):
             e(got == refused, f'{label}: $krate_path_parameter for {uri!r} must be {refused}; got {got}')
         servers = re.split(r'^server \{', nginx, flags=re.M)[1:]
         e(len(servers) == 2, f'{label}: expected the port-80 and port-443 servers')
-        for server in servers:
-            head = server[:server.find('    location ') if '    location ' in server else len(server)]
-            e('    if ($krate_foreign_host) { return 444; }' in head,
-              f'{label}: every server must close a foreign-host request (444) before any location: {server.strip()[:30]!r}')
+        plain = servers[0]
+        e('return 301 https://$krate_redirect_authority$request_uri;' in plain and 'krate_foreign_host' not in plain and 'location' not in plain,
+          f'{label}: the port-80 server only redirects to the public authority (a plain-HTTP Host never carries the HTTPS port)')
+        e('map "${KRATE_PROXY_PUBLIC_HOST}" $krate_redirect_authority {\n    "" $host;\n    default "${KRATE_PROXY_PUBLIC_HOST}";\n}' in nginx,
+          f'{label}: $krate_redirect_authority is the public authority when set, else $host')
         tls = servers[-1]
+        head = tls[:tls.index('    location ')]
+        e('    if ($krate_foreign_host) { return 444; }' in head, f'{label}: the HTTPS server must close a foreign-host request (444) before any location')
         head = tls[:tls.index('    location ')]
         e('    if ($krate_path_parameter) { return 400; }' in head, f'{label}: the HTTPS server must refuse a path parameter before any location')
         e(head.index('return 444') < head.index('return 400'), f'{label}: the host check comes first')
@@ -1418,12 +1426,12 @@ def check_nginx_render(checks):
                 result = subprocess.run(['docker', 'run', '--rm', '-v', f'{ROOT / edition / "nginx.conf"}:/etc/nginx/templates/default.conf.template:ro',
                                          '-v', f'{certs}:/etc/nginx/certs:ro', '-e', 'NGINX_ENVSUBST_FILTER=^KRATE_PROXY_',
                                          '-e', f'KRATE_PROXY_PUBLIC_HOST={public_host}', '-e', 'KRATE_PROXY_CONF_SHA=check', image, 'nginx', '-T'],
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)  # a cold image pull is included
                 label = f'{edition}/nginx.conf rendered with KRATE_PROXY_PUBLIC_HOST={public_host!r}'
                 if e(result.returncode == 0 and 'syntax is ok' in result.stderr and 'test is successful' in result.stderr,
                      f'{label}: nginx -t must pass; exit {result.returncode}: {result.stderr.strip()[-300:]}'):
-                    e(f'map "$http_host {public_host}" $krate_foreign_host' in result.stdout,
-                      f'{label}: the rendered map must carry the public host literally')
+                    e(f'map "$http_host {public_host}" $krate_foreign_host' in result.stdout and f'map "{public_host}" $krate_redirect_authority' in result.stdout,
+                      f'{label}: the rendered maps must carry the public host literally')
                     e('${KRATE_PROXY_' not in result.stdout, f'{label}: no template variable may survive the render')
 
 
@@ -1465,7 +1473,7 @@ deploy_release ""
             (home / name).chmod(0o600)
         result = run_bash(script, package, home)
         e(result.returncode == 0, f'the extraction must succeed; got {result.returncode}: {result.stderr.strip()[:200]}')
-        for name in ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'monitoring/docker-compose.yml', 'sso/identity.py'):
+        for name in ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'monitoring/docker-compose.yml', 'monitoring/.env.template', 'sso/identity.py'):
             e((home / name).is_file() and mode(home / name) & 0o044 == 0o044, f'release file {name} must be group/world-readable after a umask-077 install')
         e(mode(home / 'krate') & 0o011 == 0o011, 'krate must stay executable for group/others (X)')
         for name in ('monitoring', 'sso'):

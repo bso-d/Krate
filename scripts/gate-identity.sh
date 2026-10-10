@@ -120,11 +120,14 @@ RUNNER_DIRTY="$(git -C "$REPO" status --porcelain --untracked-files=no -- script
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 [[ -n "$OUT" ]] || OUT="$REPO/harness/gate-receipts/${EDITION}-${CANDIDATE:0:7}-${STAMP}"
-if ! { mkdir -p "$OUT" "$OUT/screenshots" && chmod 700 "$OUT"; }; then echo "cannot create $OUT" >&2; exit 2; fi
-RAW="$OUT/.raw.log"; : > "$RAW"; chmod 600 "$RAW" || exit 2
-RECEIPT="$OUT/receipt.tsv"; printf 'id\tphase\tcriterion\tresult\tevidence\n' > "$RECEIPT"
-STATE="$OUT/.state"; mkdir -p "$STATE" && chmod 700 "$STATE" || exit 2
-SECRETS_FILE="$STATE/secrets.txt"; : > "$SECRETS_FILE"; chmod 600 "$SECRETS_FILE"
+RAW="$OUT/.raw.log"; RECEIPT="$OUT/receipt.tsv"; STATE="$OUT/.state"; SECRETS_FILE="$STATE/secrets.txt"
+open_receipt() { # the receipt folder exists only once the host accepted the run (a refused run leaves nothing behind)
+  if ! { mkdir -p "$OUT" "$OUT/screenshots" && chmod 700 "$OUT"; }; then echo "cannot create $OUT" >&2; exit 2; fi
+  : > "$RAW"; chmod 600 "$RAW" || exit 2
+  printf 'id\tphase\tcriterion\tresult\tevidence\n' > "$RECEIPT"
+  mkdir -p "$STATE" && chmod 700 "$STATE" || exit 2
+  : > "$SECRETS_FILE"; chmod 600 "$SECRETS_FILE"
+}
 declare -a SECRETS=()
 declare -a TEMP_SECRETS=()
 declare -a HOLDERS=()
@@ -136,6 +139,7 @@ J7_REQUIRED=false
 
 # ── required inventory (declared before anything runs; a missing row fails the gate) ──
 REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 G7 G8 A1 A2 A3 A4 A5 B1 B2 B3 B4 B5 B6 B7 C1 C2 C3 C4 C5 C6 I1 I2 I3 I4 I5 D1 D2 D3 D4 D5 D6 D7 E1 E2 E3 E4 E5 E6 E7 E8 J1 J2 J3 J4 J5 J6 J7 Z1)
+as_root() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 if { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v logrotate >/dev/null 2>&1; then J7_REQUIRED=true; fi
 REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K31 K32 K33 K34 M1 M2 Z2)
 REQUIRED_X=(X1)
@@ -557,9 +561,9 @@ EOF
   cap "$KRATE" identity logrotate; rc=$?; ev="$(printf '%s' "$CAP" | grep -F "$JOURNAL" | head -1 | xargs) $(printf '%s' "$CAP" | grep -E '^\s*(rotate|maxage|copytruncate)' | xargs)"
   [[ $rc -eq 0 && "$ev" == *"$JOURNAL"* ]]; st=$?; ok_if J6 1 J "$st" "logrotate render names this journal: $ev"
   if $J7_REQUIRED; then
-    cap sudo "$KRATE" identity logrotate --install; rc=$?; cap sudo logrotate -d "/etc/logrotate.d/krate-identity-$EDITION"; st=$?
+    cap as_root "$KRATE" identity logrotate --install; rc=$?; cap as_root logrotate -d "/etc/logrotate.d/krate-identity-$EDITION"; st=$?
     [[ $rc -eq 0 && $st -eq 0 ]]; st=$?; ok_if J7 1 J "$st" "logrotate --install (exit $rc) and 'logrotate -d' dry run accepted; the installed drop-in is removed again by the gate"
-    sudo rm -f "/etc/logrotate.d/krate-identity-$EDITION"
+    as_root rm -f "/etc/logrotate.d/krate-identity-$EDITION"
   else
     record J7 1 J NOT_RUN "needs root (or sudo) and a logrotate binary: outside the inventory on this host; decided by the Linux VM receipt"
   fi
@@ -626,8 +630,9 @@ run_phase2() {
   ok_if K27 2 K $rc "public proxy, paths as-is:$ev (metrics/actuator/back-channel 404; path parameters 400; API redirects anonymous callers to login)"
   # K33: a foreign Host is refused with 444 (connection closed without a response) in Keycloak sign-in mode.
   after="$(curl -sk --max-time 20 -H 'Host: evil.example.test' -o /dev/null -w '%{http_code}' "$BASE/api/clusters")"; rc=$?
-  ev="$(hc -H "Host: localhost:$HTTPS_PORT" "$BASE/api/clusters")"
-  [[ "$after" == 000 && $rc -eq 52 && "$ev" == 302 ]]; st=$?; ok_if K33 2 K "$st" "Host: evil.example.test → HTTP $after, curl exit $rc (444: empty reply); Host: localhost:$HTTPS_PORT → $ev (KRATE_PROXY_PUBLIC_HOST=$(envv KRATE_PROXY_PUBLIC_HOST))"
+  ev="$(hc -H "Host: ${BASE#https://}" "$BASE/api/clusters")"
+  names="$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 20 -H 'Host: localhost' "http://localhost:$HTTP_PORT/api/clusters")"
+  [[ "$after" == 000 && $rc -eq 52 && "$ev" == 302 && "$names" == "301 $BASE/api/clusters" ]]; st=$?; ok_if K33 2 K "$st" "Host: evil.example.test → HTTP $after, curl exit $rc (444: empty reply); Host: ${BASE#https://} → $ev; plain HTTP with Host: localhost → $names (redirect to the public authority); KRATE_PROXY_PUBLIC_HOST=$(envv KRATE_PROXY_PUBLIC_HOST)"
   # K34: a changed certificate changes KRATE_PROXY_CONF_SHA and auth apply recreates the proxy; a second apply keeps it.
   before="$(cid proxy)"; names="$(envv KRATE_PROXY_CONF_SHA)"; cap "$KRATE" gen-cert; cap "$KRATE" auth apply; rc=$?
   after="$(cid proxy)"; ev="$(envv KRATE_PROXY_CONF_SHA)"; cap "$KRATE" auth apply; rc2=$?
@@ -759,6 +764,7 @@ FINISHED=false
 on_signal() { log "interrupted"; trap - EXIT HUP INT TERM; FINISHED=true; teardown; finish; exit 130; }
 on_exit() { $FINISHED || { log "unexpected exit"; FINISHED=true; teardown; finish; }; }
 host_conflicts
+open_receipt
 trap on_signal HUP INT TERM
 trap on_exit EXIT
 run_static

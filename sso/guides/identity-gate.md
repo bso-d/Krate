@@ -47,7 +47,7 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 | images | every `*_IMAGE` digest of the edition template |
 | runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py` and `*.mjs` (file list, sorted), plus the commit (and dirty state) of the repository the runner was executed from |
 | host | OS, Docker, Compose, python, openssl versions |
-| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. Ids outside the selected inventory, and J7 on a host without root, are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
+| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
 
 The required inventory is declared in the runner before anything runs
 (`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_X`): a test that never reports cannot
@@ -129,8 +129,8 @@ Every id is one row of the receipt.
 | C2 | `docker compose restart keycloak`, then `users list` and `identity up` | users present; `No changes` |
 | C3 | `identity down` + `identity up` | users present; an enrolled user logs in with password + OTP |
 | C4 | `identity renew-db-tls` | new expiry, chains to the CA, `.prev` discarded, journal `renew-db-tls ok`, Keycloak ready |
-| C6 | `otpPolicyLookAheadWindow` set to 0 in Keycloak behind the CLI's back, then `identity up` | window back to 1 from the realm plan; journal `up reconciled realm policy` |
 | C5 | `renew-db-tls` with an injected restart failure (a `docker` wrapper on `PATH` fails `compose restart`) | exit 1; `server.crt` byte-identical to before; `.prev` consumed; journal `renew-db-tls rolled back`; `keycloak-db` reports `healthy` on the old certificate |
+| C6 | `otpPolicyLookAheadWindow` set to 0 in Keycloak behind the CLI's back, then `identity up` | window back to 1 from the realm plan; journal `up reconciled realm policy` |
 
 ### I: "Implement credential-specific changes through the authoritative store and verify the consumer. Editing .env or regenerating realm JSON is insufficient evidence."
 
@@ -193,9 +193,9 @@ Every id is one row of the receipt.
 | K1 | `auth configure --local`, `config set KAFKA_UI_AUTH_CONFIG=runtime.yml`, `start`, `auth apply` | all exit 0 (preflight inside apply); broker containers untouched; `runtime.yml` has no shared login |
 | K30 | a second `auth apply` | kafka-ui container unchanged; prints `unchanged … sessions kept` |
 | K2–K26, K31, K32 | the Kafbat authorization ladder, `scripts/gate/phase2_kafbat.py` (viewer reads; every mutation refused by the backend with 403; admin mutates; no-group user refused at login; disabled user refused; shared login absent; ID-token issuer/audience checks; identity = `sub`; CSRF; POST-only logout ending the Keycloak session; back-channel logout measured; disabled user's session lifetime measured; open-redirect and proxy-header spoofing; both-groups user = administrator; group rename in `.env` leaves the realm alone; K31: XSRF cookie `Secure`, not HttpOnly, rotated at login; K32: error bodies carry no stack trace; the viewer's `GET /api/config` 403 is part of K2) | each case PASS with the observed status codes and measured seconds in the evidence |
-| K27 | public proxy paths as-is: `/metrics`, `/actuator`, `/actuator/`, `/actuator/health`, `/actuator/prometheus`, `/actuator;x/prometheus`, `/logout/connect`, `/logout/connect/back-channel/keycloak`, `/api/clusters;x`, `/api/clusters` | 404 for the five blocked paths and the base paths, 400 for the two path parameters, 302 for the API |
+| K27 | public proxy paths as-is: `/metrics`, `/actuator`, `/actuator/`, `/actuator/health`, `/actuator/prometheus`, `/actuator;x/prometheus`, `/logout/connect`, `/logout/connect/back-channel/keycloak`, `/api/clusters;x`, `/api/clusters` | 404 for the seven blocked paths (the base paths and the paths below them), 400 for the two path parameters, 302 for the API |
 | K28 | anonymous `/api/clusters` | redirects to `/oauth2/authorization/keycloak` on the public origin |
-| K33 | `Host: evil.example.test` on the public port (Keycloak sign-in mode sets `KRATE_PROXY_PUBLIC_HOST` to the public authority, port included; the raw header is compared) | 444: connection closed without a response (curl exit 52); the real host still answers |
+| K33 | `Host: evil.example.test` on the public port (Keycloak sign-in mode sets `KRATE_PROXY_PUBLIC_HOST` to the public authority, port included; the raw header is compared); the public authority as Host; plain HTTP on the HTTP port with `Host: localhost` | 444: connection closed without a response (curl exit 52); the public authority answers 302; plain HTTP answers 301 to the public origin (the HTTPS port carried by the public authority, not by the plain-HTTP Host) |
 | K34 | `gen-cert` then `auth apply`, then a second `auth apply` | `KRATE_PROXY_CONF_SHA` changed and the proxy container was recreated; the second apply keeps the container; the proxy serves |
 | M1/M2 | see G above | |
 | K17 | EPC | informational row (`owned by runner`): the EPC Compose rendering and CLI parity are S1/S4; the EPC runtime is the Phase 1 gate run inside the Rocky 9 VM (`--no-static --no-screenshots`, receipt under `harness/gate-receipts/epc-vm-<sha>/`) |

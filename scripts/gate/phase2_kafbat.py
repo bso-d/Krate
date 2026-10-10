@@ -1872,8 +1872,8 @@ def parse_args(argv):
     return args
 
 
-class Terminated(Exception):
-    """SIGTERM reached the helper."""
+class Terminated(BaseException):
+    """SIGTERM reached the helper (a BaseException, so case()'s harness-error handler lets it through)."""
 
 
 def _on_sigterm(signum, frame):
