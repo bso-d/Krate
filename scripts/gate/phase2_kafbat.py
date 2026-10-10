@@ -502,14 +502,14 @@ class Gate:
             status, text = 'FAIL', 'harness error %s: %s' % (type(error).__name__, error)
         self.record(name, status, text)
 
-    def probe(self, session, path='/api/clusters', headers=None):
+    def probe(self, session, path='/api/clusters', headers=None, timeout=60):
         """Status of a request carrying only the given SESSION cookie (no jar)."""
         opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=self.tls))
         sent = {'Accept': 'application/json'}
         if session:
             sent['Cookie'] = 'SESSION=' + session
         sent.update(headers or {})
-        return open_request(opener, 'GET', self.base + path, None, sent)
+        return open_request(opener, 'GET', self.base + path, None, sent, timeout)
 
     def wait_dead(self, session, limit=POLL_SECONDS):
         start = time.monotonic()
@@ -710,7 +710,11 @@ class Gate:
         if result['kind'] != 'ok':
             not_run('precondition: %s login %s: %s %s' % (name, result['kind'], result.get('detail', ''),
                                                           result.get('callback', '')))
-        status = self.probe(result['session']).status
+        try:
+            status = self.probe(result['session'], timeout=K5_TIMEOUT).status
+        except (TimeoutError, OSError) as error:  # the cluster API may be busy (e.g. a cache refresh); the session is what is probed
+            log('%s session probe: %s; retrying once' % (name, error))
+            status = self.probe(result['session'], timeout=K5_TIMEOUT).status
         if status != 200:
             not_run('precondition: %s session answered %s on /api/clusters' % (name, status))
         log('%s signed in to Kafbat (%s)' % (name, label))
@@ -958,18 +962,25 @@ class Gate:
             if response.status == 403:
                 forbidden.append(label)
         gone = None
-        for _ in range(40):  # topic deletion completes asynchronously in the controller quorum
-            gone = admin.api('GET', '%s/topics/%s' % (c, topic)).status
-            if gone != 200:
+        deleting = time.monotonic()
+        while time.monotonic() - deleting < 180:  # topic deletion completes asynchronously in the controller quorum
+            try:
+                # Kafbat blocks a GET of a topic that is being deleted (runs 8-10: 60 s, the default budget):
+                # a short budget per poll, a timeout counts as "still deleting", the total is recorded.
+                gone = admin.api('GET', '%s/topics/%s' % (c, topic), timeout=15).status
+            except (TimeoutError, OSError):
+                gone = 'timeout'
+            if gone not in (200, 'timeout'):
                 break
             time.sleep(0.5)
-        if gone == 200:
-            bad.append('topic still present after delete')
+        deleting = time.monotonic() - deleting
+        if gone in (200, 'timeout'):
+            bad.append('topic still present (or Kafbat still blocking its GET) %.0fs after delete' % deleting)
         self.cleanup_groups.discard(f['group_del'])
         core_ok = sum(1 for item in seen[:len(core)] if item.split('=')[1].startswith('2'))
-        text = 'admin1 core %d/%d 2xx (%s); not 403: %s; deleted topic GET=%s; fixture topic created in %s' % (
+        text = 'admin1 core %d/%d 2xx (%s); not 403: %s; deleted topic GET=%s after %.1fs; fixture topic created in %s' % (
             core_ok, len(core), ','.join(item.split('=')[0] for item in seen[:len(core)]),
-            ' '.join(seen[len(core):]), gone, '%.1fs' % self.fixture_seconds if self.fixture_seconds is not None else 'n/a')
+            ' '.join(seen[len(core):]), gone, deleting, '%.1fs' % self.fixture_seconds if self.fixture_seconds is not None else 'n/a')
         if bad or forbidden:
             fail('%s; %s' % (' '.join(bad + ['403:' + x for x in forbidden]), text))
         return 'PASS', text
