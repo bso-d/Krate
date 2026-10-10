@@ -608,8 +608,24 @@ for line in open(env_file):
     if sep and not key.startswith('#'):
         env[key.strip()] = value.strip().strip('"\'')
 if os.path.isfile(kafbat):
-    names = [re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}', lambda m: env.get(m.group(1)) or m.group(2) or '', name)
-             for name in re.findall(r'^\s*-\s*name:\s*"?([^"\n]+?)"?\s*$', open(kafbat).read(), re.M)]
+    # Only the items of kafka.clusters count: track indentation so a `- name:` inside a
+    # cluster's own lists (schema registry, connect, ksqldb) is not taken for a cluster.
+    names, in_clusters, item_indent = [], False, None
+    for line in open(kafbat):
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if re.match(r'^\s*clusters:\s*$', line):
+            in_clusters, clusters_indent, item_indent = True, indent, None
+            continue
+        if in_clusters:
+            if indent <= clusters_indent:
+                in_clusters = False
+                continue
+            m = re.match(r'^\s*-\s*name:\s*"?([^"\n]+?)"?\s*$', line)
+            if m and (item_indent is None or indent == item_indent):
+                item_indent = indent
+                names.append(re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}', lambda x: env.get(x.group(1)) or x.group(2) or '', m.group(1)))
 else:
     names = re.findall(r'^\s*KAFKA_CLUSTERS_\d+_NAME:\s*"?([^"\n]+?)"?\s*$', open(compose).read(), re.M)
 print('\n'.join(names))

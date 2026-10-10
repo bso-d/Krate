@@ -19,7 +19,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh scripts/package-release.sh
+CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh scripts/package-release.sh scripts/gate-identity.sh
 VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
