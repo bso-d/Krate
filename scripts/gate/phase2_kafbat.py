@@ -745,6 +745,12 @@ class Gate:
                 break
             except (TimeoutError, OSError) as error:
                 log('fixture: create topic attempt %d failed after %.0fs: %s' % (attempt, time.monotonic() - started, error))
+                # A timed-out request may still have created the topic: a second POST would then be refused.
+                probe = admin.api('GET', '%s/topics/%s' % (c, topic))
+                if probe.status == 200:
+                    log('fixture: the topic exists after the timed-out attempt %d' % attempt)
+                    response = probe
+                    break
         self.fixture_seconds = time.monotonic() - started
         if response is None or response.status != 200:
             self.fixture_data = 'precondition: admin1 could not create the fixture topic (%s after %.0fs)' % (
