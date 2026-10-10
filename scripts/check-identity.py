@@ -1434,6 +1434,31 @@ def check_nginx_render(checks):
                     e('${KRATE_PROXY_' not in result.stdout, f'{label}: no template variable may survive the render')
 
 
+def check_identity_dirs(checks):
+    """identity up / auth configure create the bind-mounted directories with explicit modes, whatever the umask
+    (EPC VM run at 5b803c6: truststores 700 under umask 077 → Keycloak's bootstrap died listing KC_TRUSTSTORE_PATHS)."""
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        e('mkdir -p "$SCRIPT_DIR/auth/keycloak/truststores"' not in cli, f'{edition}/krate: no bare mkdir of the truststores directory (umask-dependent)')
+        e('ensure_identity_dirs' in function_body(cli, 'prepare_identity_files'), f'{edition}/krate: prepare_identity_files must call ensure_identity_dirs')
+        e(cli.count('  ensure_identity_dirs\n') >= 2, f'{edition}/krate: both the identity and the auth configure paths call ensure_identity_dirs')
+    if bash_binary() is None:
+        return
+    script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'ensure_identity_dirs') + r'''
+SCRIPT_DIR="$1"; umask 077; ensure_identity_dirs
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        site = Path(tmp)
+        result = run_bash(script, site)
+        e(result.returncode == 0, f'ensure_identity_dirs failed: {result.stderr.strip()[:160]}')
+        for name in ('auth', 'auth/keycloak', 'auth/keycloak/truststores'):
+            e((site / name).is_dir() and mode(site / name) == 0o755, f'{name} must be 755 under umask 077; got {mode(site / name) if (site / name).exists() else "missing":o}' if (site / name).exists() else f'{name} missing')
+        (site / 'auth/keycloak/truststores').chmod(0o700)
+        run_bash(script, site)
+        e(mode(site / 'auth/keycloak/truststores') == 0o755, 'an existing 700 truststores directory is widened to 755 on the next run')
+
+
 def check_deploy_release(checks):
     """S2: deploy_release widens only the paths the release archive held; secrets and leftovers keep 0600."""
     e = lambda cond, msg: checks.expect(cond, 'deploy_release: ' + msg)  # noqa: E731
@@ -1474,6 +1499,8 @@ deploy_release ""
         e(result.returncode == 0, f'the extraction must succeed; got {result.returncode}: {result.stderr.strip()[:200]}')
         for name in ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'monitoring/docker-compose.yml', 'monitoring/.env.template', 'sso/identity.py'):
             e((home / name).is_file() and mode(home / name) & 0o044 == 0o044, f'release file {name} must be group/world-readable after a umask-077 install')
+        for name in ('auth', 'auth/ui', 'auth/keycloak', 'auth/keycloak/truststores'):
+            e((home / name).is_dir() and mode(home / name) & 0o055 == 0o055, f'{name} must be traversable by the container users after a umask-077 install; got {mode(home / name):o}')
         e(mode(home / 'krate') & 0o011 == 0o011, 'krate must stay executable for group/others (X)')
         for name in ('monitoring', 'sso'):
             e(mode(home / name) & 0o055 == 0o055, f'release directory {name} must be group/world-traversable')
@@ -1874,7 +1901,7 @@ def main():
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
-                  check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_deploy_release, check_rpm_install, check_gen_cert_ip,
+                  check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_deploy_release, check_rpm_install, check_gen_cert_ip,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock):
         try:
             check(checks)
