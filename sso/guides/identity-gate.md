@@ -39,7 +39,7 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 | images | every `*_IMAGE` digest of the edition template |
 | runner | sha256 of `scripts/gate-identity.sh` and of `scripts/gate/*` |
 | host | OS, Docker, Compose, python, openssl versions |
-| verdict | PASS only when no test failed, none is NOT_RUN, and every id of the required inventory is present; otherwise FAIL or INCOMPLETE |
+| verdict | PASS only when no test failed and every id of the required inventory passed; a required id that is NOT_RUN or absent makes it INCOMPLETE. Rows outside the inventory (J7 on a host without root) are informational |
 
 The required inventory is declared in the runner before anything runs
 (`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_X`): a test that never reports cannot
@@ -106,8 +106,9 @@ Every id is one row of the receipt.
 | B2 | correct password + OTP accepted; wrong password refused | as stated |
 | B3 | disabled user refused; `enable` works | as stated |
 | B4 | direct password grant on `krate-ui` | 400/401 (standard flow only) |
-| B5 | five wrong passwords | brute-force detection reports `disabled: true`, `numFailures: 5` |
+| B5 | five rapid wrong passwords | brute-force detection reports the account temporarily `disabled: true` (Keycloak's quick-login check locks after two rapid failures; later attempts are not counted) |
 | B6 | `reset-password` | a new temporary password is issued (shown once) |
+| B7 | login with the one-time code of the previous 30-second step | accepted: the realm's look-ahead window is 1 (Keycloak's documented default; the plan now sets it, the import otherwise leaves 0) |
 
 ### C: "restart/reapply preserve identity and secrets"
 
@@ -161,7 +162,7 @@ Every id is one row of the receipt.
 | J4 | `krate-realm.json` | placeholders only, none of the secret values |
 | J5 | journal lines of `users add` / `reset-password` | user names only |
 | J6 | `identity logrotate` | renders the drop-in for this journal |
-| J7 | `identity logrotate --install` and `logrotate -d` | accepted (root; on the Mac NOT_RUN, proven on the Linux VM) |
+| J7 | `identity logrotate --install` and `logrotate -d` | accepted (root; informational on a host without root, proven on the Linux VM) |
 
 ### X: the end user's view (owner rule 10)
 
@@ -175,7 +176,7 @@ Every id is one row of the receipt.
 |---|---|---|
 | K1 | `auth configure --local`, `config set KAFKA_UI_AUTH_CONFIG=runtime.yml`, `start`, `auth apply` | all exit 0 (preflight inside apply); broker containers untouched; `runtime.yml` has no shared login |
 | K30 | a second `auth apply` | kafka-ui container unchanged; prints `unchanged … sessions kept` |
-| K2–K26, K31 | the Kafbat authorization ladder, `scripts/gate/phase2_kafbat.py` (viewer reads; every mutation refused by the backend with 403; admin mutates; no-group user refused at login; disabled user refused; shared login absent; ID-token issuer/audience checks; identity = `sub`; CSRF; POST-only logout ending the Keycloak session; back-channel logout measured; disabled user's session lifetime measured; open-redirect and proxy-header spoofing; both-groups user = administrator; group rename in `.env` leaves the realm alone; XSRF cookie `Secure` and rotated at login) | each case PASS with the observed status codes and measured seconds in the evidence |
+| K2–K26, K31, K32 | the Kafbat authorization ladder, `scripts/gate/phase2_kafbat.py` (viewer reads; every mutation refused by the backend with 403; admin mutates; no-group user refused at login; disabled user refused; shared login absent; ID-token issuer/audience checks; identity = `sub`; CSRF; POST-only logout ending the Keycloak session; back-channel logout measured; disabled user's session lifetime measured; open-redirect and proxy-header spoofing; both-groups user = administrator; group rename in `.env` leaves the realm alone; K31: XSRF cookie `Secure`, not HttpOnly, rotated at login; K32: error bodies carry no stack trace; the viewer's `GET /api/config` 403 is part of K2) | each case PASS with the observed status codes and measured seconds in the evidence |
 | K27/K28, M1/M2 | see G above | |
 
 ### Not covered by this runner, proven elsewhere

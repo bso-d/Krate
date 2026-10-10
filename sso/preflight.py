@@ -177,7 +177,8 @@ def validate_db_tls(root):
               f' ({openssl("x509", "-in", server, "-noout", "-enddate").stdout.strip()}); run krate identity renew-db-tls',
               file=sys.stderr)
     names = openssl('x509', '-in', server, '-noout', '-ext', 'subjectAltName').stdout
-    if 'DNS:' + identity.DB_HOST not in names.replace(' ', ''):
+    entries = {entry.strip() for line in names.splitlines() for entry in line.split(',')}
+    if 'DNS:' + identity.DB_HOST not in entries:
         raise Preflight(f'{TLS_DIR}/server.crt must carry subjectAltName DNS:{identity.DB_HOST}')
     if openssl('verify', '-CAfile', str(tls / 'ca.crt'), server).returncode:
         raise Preflight(f'{TLS_DIR}/server.crt is not signed by {TLS_DIR}/ca.crt')

@@ -540,6 +540,20 @@ def check_exposure(checks):
                         ('csrfRepository.saveToken(webFilterExchange.getExchange(), null)', 'the CSRF token rotates at login'),
                         ('oidcSessionRegistry.removeSessionInformation(session.getId())', 'a local logout forgets the OIDC session')):
         e(needle in patch, f'kafbat-ui/native-auth.patch: {why} (missing {needle[:50]!r})')
+    # PR #39 review threads: lifecycle lock during bootstrap, temp-admin listing in the parent shell, group before user,
+    # rotate --value reuse, passphrase minimum from the environment, restore reconciles the UI client.
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        lock = cli[cli.index('\nidentity_lock_if_enabled() {'):cli.index('\n}', cli.index('\nidentity_lock_if_enabled() {'))]
+        e('identity_volume_present' in lock and '.identity.lock' in lock, f'{edition}/krate: lifecycle commands must lock while an identity command runs or the database volume exists, not only once KEYCLOAK_ENABLED is true')
+        e('done <<< "$listing"' in cli and 'listing="$(kcadm -- get users -r master -q search=temp-admin' in cli, f'{edition}/krate: the temp-admin listing must be validated in the parent shell (no die inside a process substitution)')
+        add = cli[cli.index('\n    add)\n      uid='):cli.index('identity_set_temp_password "$user" "$uid"', cli.index('\n    add)\n      uid='))]
+        e(add.index('gid="$(kcadm_group_id') < add.index('kcadm -- create users'), f'{edition}/krate: users add must resolve the group before creating the user')
+        e('must not reuse the value of $other' in cli, f'{edition}/krate: rotate --value must refuse a value equal to another identity/UI credential')
+        e('KRATE_BACKUP_PASSPHRASE must be at least 8 characters' in cli, f'{edition}/krate: the environment passphrase gets the same minimum as the prompt')
+        restore = cli[cli.index('\ncmd_identity_restore() {'):cli.index('\n}', cli.index('\ncmd_identity_restore() {'))]
+        e('identity_reconcile_ui_urls restore' in restore and restore.index('identity_reconcile_ui_urls restore') < restore.index('identity_journal restore ok'),
+          f'{edition}/krate: restore must reconcile the krate-ui client with this host before reporting success')
     build = (ROOT / 'kafbat-ui/build.py').read_text()
     e("IMAGE = 'krate/kafka-ui:1.5.0-sso.7'" in build, 'kafbat-ui/build.py must build sso.7 (the templates pin it)')
 
@@ -653,6 +667,26 @@ def check_renewal(checks, tls):
       'the new certificate must keep SAN DNS:keycloak-db')
     e(396 <= days_left(tls / 'server.crt') <= 398, f'the renewed server.crt must be valid for 398 days; got {days_left(tls / "server.crt")}')
     e(identity.db_tls(tls) == [], 'db-tls without the flag must leave the renewed set unchanged')
+    # The SAN check is exact: DNS:keycloak-db.example is not DNS:keycloak-db (PR #39 review).
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as tmp2:
+        site = Path(tmp2) / 'kraft'
+        site.mkdir(mode=0o700)
+        write_env(site, site_env('kraft'))
+        bad = site / 'auth/keycloak/db-tls'
+        identity.db_tls(bad)
+        (bad / 'bad.ext').write_text('subjectAltName=DNS:keycloak-db.example\nextendedKeyUsage=serverAuth\n')
+        subprocess.run(['openssl', 'req', '-new', '-key', str(bad / 'server.key'), '-subj', '/CN=keycloak-db', '-out', str(bad / 'bad.csr')],
+                       check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['openssl', 'x509', '-req', '-sha256', '-days', '2', '-in', str(bad / 'bad.csr'), '-CA', str(bad / 'ca.crt'), '-CAkey', str(bad / 'ca.key'),
+                        '-CAcreateserial', '-extfile', str(bad / 'bad.ext'), '-out', str(bad / 'server.crt')],
+                       check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for name in ('bad.ext', 'bad.csr'):
+            (bad / name).unlink()
+        code, rendered = compose_config(site / '.env', 'kraft')
+        result = preflight(site, 'identity', rendered) if code == 0 else None
+        e(result is not None and result.returncode == 1 and 'subjectAltName' in result.stderr,
+          f'preflight must refuse a server.crt whose SAN is DNS:keycloak-db.example; got {None if result is None else (result.returncode, result.stderr.strip()[:160])}')
     # A CA that would expire before the new server certificate is renewed with it, and a renewal can be rolled back.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -1037,6 +1071,30 @@ def check_backup_seal(checks):
     key_a = identity.backup_mac_key(b'p', b'12345678')
     key_b = identity.backup_mac_key(b'p', b'12345679')
     e(key_a != key_b, 'the MAC key depends on the per-file salt')
+    # The CLI path streams: a 3 MiB archive round-trips through the real subcommands, a flipped
+    # byte or a wrong passphrase is refused and leaves no output file (PR #39 review, memory growth).
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        big = b'Salted__' + os.urandom(8) + os.urandom(3 * 1024 * 1024 + 7)
+        (tmp / 'payload.enc').write_bytes(big)
+        env = dict(os.environ, KRATE_BACKUP_PASSPHRASE='correct horse battery')
+        def cli(*args, passphrase=None):
+            return subprocess.run([sys.executable, '-I', str(ROOT / 'sso/identity.py'), *args], text=True, capture_output=True,
+                                  env=dict(env, KRATE_BACKUP_PASSPHRASE=passphrase) if passphrase else env)
+        r = cli('backup-seal', '--input', str(tmp / 'payload.enc'), '--output', str(tmp / 'sealed'))
+        e(r.returncode == 0 and mode(tmp / 'sealed') == 0o600, f'backup-seal streams to a 0600 file; got {r.returncode} {r.stderr.strip()}')
+        e(identity.backup_open((tmp / 'sealed').read_bytes(), b'correct horse battery') == big, 'the streamed seal matches the in-memory format')
+        r = cli('backup-open', '--input', str(tmp / 'sealed'), '--output', str(tmp / 'opened'))
+        e(r.returncode == 0 and (tmp / 'opened').read_bytes() == big and mode(tmp / 'opened') == 0o600, f'backup-open streams the ciphertext back; got {r.returncode} {r.stderr.strip()}')
+        flipped = bytearray((tmp / 'sealed').read_bytes()); flipped[len(flipped) // 2] ^= 0x01
+        (tmp / 'tampered').write_bytes(bytes(flipped))
+        r = cli('backup-open', '--input', str(tmp / 'tampered'), '--output', str(tmp / 'opened2'))
+        e(r.returncode == 1 and 'integrity check failed' in r.stderr and not (tmp / 'opened2').exists(),
+          f'a tampered archive is refused with no output left behind; got {r.returncode} {r.stderr.strip()} exists={(tmp / "opened2").exists()}')
+        r = cli('backup-open', '--input', str(tmp / 'sealed'), '--output', str(tmp / 'opened3'), passphrase='wrong passphrase!')
+        e(r.returncode == 1 and 'integrity check failed' in r.stderr and not (tmp / 'opened3').exists(), 'a wrong passphrase is refused with no output')
+        e(sorted(f.name for f in tmp.iterdir()) == ['opened', 'payload.enc', 'sealed', 'tampered'], f'no temporary files remain; got {sorted(f.name for f in tmp.iterdir())}')
 
 
 def main():

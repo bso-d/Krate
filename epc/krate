@@ -760,7 +760,16 @@ identity_profile_enabled() {
 # they hold the identity lock: none of them can stop or recreate Keycloak or
 # its database while backup, restore, rotate or recover-admin is running.
 identity_lock_if_enabled() {
-  if [[ -f "$ENV_FILE" ]] && identity_profile_enabled; then identity_lock; fi
+  [[ -f "$ENV_FILE" ]] || return 0
+  # KEYCLOAK_ENABLED turns true only at the end of the first `identity up`, so the
+  # profile flag alone would let `stop`/`uninstall` run while a bootstrap is in
+  # progress: also take the lock while an identity command holds it or the
+  # database volume exists (identity_lock refuses while another process is live).
+  if identity_profile_enabled || [[ -d "$SCRIPT_DIR/auth/.identity.lock" ]] || identity_volume_present; then identity_lock; fi
+}
+
+identity_volume_present() {
+  docker volume inspect "$(cluster_project)_keycloak_db_data" >/dev/null 2>&1
 }
 
 # Compose with the sso profile always on, so the identity services can be
@@ -1082,13 +1091,15 @@ identity_bootstrap_admin() {
   kcadm_login master user "$admin" "$admin_pw" || die "The permanent admin $admin cannot log in; the bootstrap admin $temp was kept. Check: krate logs keycloak"
   # Remove this run's bootstrap admin and every temporary admin an earlier,
   # interrupted run may have left behind (temp-admin, temp-admin-<random>).
-  local removed=""
+  local removed="" listing
+  listing="$(kcadm -- get users -r master -q search=temp-admin --fields id,username --format csv --noquotes)" \
+    || die "Keycloak query failed; the bootstrap admin $temp may remain. Check: krate logs keycloak, then: krate identity recover-admin"
   while IFS=, read -r uid name; do
     [[ -n "$uid" && "$name" != "$admin" ]] || continue
     [[ "$name" == "$temp" || "$name" =~ ^temp-admin(-[a-z0-9]{8})?$ ]] || continue
     kcadm -- delete "users/$uid" -r master
     removed+=" $name"
-  done < <(kcadm -- get users -r master -q search=temp-admin --fields id,username --format csv --noquotes || die "Keycloak query failed")
+  done <<< "$listing"
   kcadm_logout
   ok "Permanent admin $admin ready; temporary admin(s) removed:${removed:- none found}"
 }
@@ -1235,7 +1246,7 @@ print(json.dumps({"redirectUris": sorted(client.get("redirectUris", [])), "webOr
   if [[ "$current" != "$wanted" ]]; then
     printf '%s\n' "$wanted" | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m \
       || die "Keycloak refused the krate-ui client update"
-    identity_journal up reconciled "krate-ui urls and attributes"
+    identity_journal "${1:-up}" reconciled "krate-ui urls and attributes"
     IDENTITY_CHANGED=true
     ok "krate-ui client URLs and logout attributes updated from the realm plan"
   fi
@@ -1482,6 +1493,12 @@ cmd_identity_users() {
     add)
       uid="$(kcadm_user_id "$IDENTITY_REALM" "$user")" || die "Keycloak query failed"
       [[ -z "$uid" ]] || die "User $user already exists"
+      # The group is resolved first: a failure after the user exists would leave a
+      # half-made account that a retry reports as "already exists".
+      if [[ -n "$group" ]]; then
+        gid="$(kcadm_group_id "$IDENTITY_REALM" "$group")" || die "Keycloak query failed"
+        [[ -n "$gid" ]] || die "Group $group does not exist in realm $IDENTITY_REALM (KEYCLOAK_VIEWER_GROUP/KEYCLOAK_ADMIN_GROUP changed after the realm was created? See the guide: rename it in Keycloak, or set .env back)"
+      fi
       if [[ -n "$email" ]]; then
         kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true -s "email=$email" >/dev/null
       else
@@ -1490,8 +1507,6 @@ cmd_identity_users() {
       uid="$(kcadm_user_id "$IDENTITY_REALM" "$user")" || die "Keycloak query failed"
       [[ -n "$uid" ]] || die "User $user was not created"
       if [[ -n "$group" ]]; then
-        gid="$(kcadm_group_id "$IDENTITY_REALM" "$group")" || die "Keycloak query failed"
-        [[ -n "$gid" ]] || die "Group $group does not exist in realm $IDENTITY_REALM"
         kcadm -- update "users/$uid/groups/$gid" -r "$IDENTITY_REALM" -s "realm=$IDENTITY_REALM" -s "userId=$uid" -s "groupId=$gid" -n
       fi
       identity_set_temp_password "$user" "$uid"
@@ -1540,6 +1555,11 @@ cmd_identity_rotate() {
     # The set .env quoting, Compose interpolation and SQL/JSON bodies all
     # pass unchanged (generated values are letters and digits).
     [[ "$value" =~ ^[A-Za-z0-9._-]{16,}$ ]] || die "$key must be at least 16 characters of letters, digits, . _ or -"
+    # The identity preflight requires distinct credentials; refuse reuse before any store changes.
+    local other
+    for other in KEYCLOAK_DB_PASSWORD KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET KAFKA_UI_PASSWORD PING_KEYCLOAK_CLIENT_SECRET; do
+      [[ "$other" == "$key" || "$(env_value "$other")" != "$value" ]] || die "$key must not reuse the value of $other (every identity and UI credential must be distinct)"
+    done
   else
     value="$(random_secret 24)"
   fi
@@ -1595,6 +1615,7 @@ cmd_identity_rotate() {
 identity_passphrase() {
   local p1 p2
   if [[ -n "${KRATE_BACKUP_PASSPHRASE:-}" ]]; then
+    [[ ${#KRATE_BACKUP_PASSPHRASE} -ge 8 ]] || die "KRATE_BACKUP_PASSPHRASE must be at least 8 characters."
     export KRATE_BACKUP_PASSPHRASE
     return 0
   fi
@@ -1722,6 +1743,10 @@ If that keeps failing, follow the volume-lost procedure in docs/identity-foundat
   identity_up_service keycloak
   identity_verify_admin restore
   identity_verify_cli restore
+  # The dump carries the backup host's krate-ui URLs; on a recovery host they must
+  # follow this installation's plan before the restore is reported complete.
+  prepare_identity_files restore
+  identity_reconcile_ui_urls restore
   identity_journal restore ok "$file"
   ok "Identity database restored from $file"
 }

@@ -697,6 +697,71 @@ def backup_open(sealed, passphrase):
     return ciphertext
 
 
+BACKUP_CHUNK = 1024 * 1024
+
+
+def backup_seal_file(source, output, passphrase):
+    """Stream magic || ciphertext || HMAC-SHA256(ciphertext) from `source` to `output` (one chunk in memory)."""
+    source, output = Path(source), Path(output)
+    size = source.stat().st_size
+    with source.open('rb') as src:
+        head = src.read(16)
+        if not head.startswith(OPENSSL_SALTED) or size < 32:
+            raise ValueError('ciphertext is not an openssl enc -salt output')
+        mac = hmac.new(backup_mac_key(passphrase, head[8:16]), digestmod=hashlib.sha256)
+        src.seek(0)
+        fd, tmp = tempfile.mkstemp(prefix='.seal-', dir=output.parent)
+        try:
+            with os.fdopen(fd, 'wb') as dst:
+                os.fchmod(fd, 0o600)
+                dst.write(BACKUP_MAGIC)
+                while True:
+                    chunk = src.read(BACKUP_CHUNK)
+                    if not chunk:
+                        break
+                    mac.update(chunk)
+                    dst.write(chunk)
+                dst.write(mac.digest())
+            os.replace(tmp, output)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+
+def backup_open_file(sealed, output, passphrase):
+    """Verify the trailing tag while streaming the ciphertext to `output`; a mismatch removes the output."""
+    sealed, output = Path(sealed), Path(output)
+    size = sealed.stat().st_size
+    minimum = len(BACKUP_MAGIC) + 32 + 32
+    with sealed.open('rb') as src:
+        head = src.read(len(BACKUP_MAGIC) + 16)
+        if size < minimum or not head.startswith(BACKUP_MAGIC) or not head[len(BACKUP_MAGIC):].startswith(OPENSSL_SALTED):
+            raise ValueError('not a krate identity backup')
+        salt = head[len(BACKUP_MAGIC) + 8:len(BACKUP_MAGIC) + 16]
+        src.seek(size - 32)
+        tag = src.read(32)
+        mac = hmac.new(backup_mac_key(passphrase, salt), digestmod=hashlib.sha256)
+        src.seek(len(BACKUP_MAGIC))
+        remaining = size - len(BACKUP_MAGIC) - 32
+        fd, tmp = tempfile.mkstemp(prefix='.open-', dir=output.parent)
+        try:
+            with os.fdopen(fd, 'wb') as dst:
+                os.fchmod(fd, 0o600)
+                while remaining > 0:
+                    chunk = src.read(min(BACKUP_CHUNK, remaining))
+                    if not chunk:
+                        raise ValueError('not a krate identity backup')
+                    remaining -= len(chunk)
+                    mac.update(chunk)
+                    dst.write(chunk)
+            if not hmac.compare_digest(mac.digest(), tag):
+                raise ValueError('integrity check failed: the backup was modified or the passphrase is wrong')
+            os.replace(tmp, output)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+
 def backup_passphrase():
     value = os.environ.get(BACKUP_PASSPHRASE_ENV, '')
     if not value:
@@ -705,12 +770,12 @@ def backup_passphrase():
 
 
 def cmd_backup_seal(args):
-    write_file(args.output, backup_seal(Path(args.input).read_bytes(), backup_passphrase()), 0o600)
+    backup_seal_file(args.input, args.output, backup_passphrase())
     return 0
 
 
 def cmd_backup_open(args):
-    write_file(args.output, backup_open(Path(args.input).read_bytes(), backup_passphrase()), 0o600)
+    backup_open_file(args.input, args.output, backup_passphrase())
     return 0
 
 
