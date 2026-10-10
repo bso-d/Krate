@@ -2236,7 +2236,8 @@ cmd_health() {
     else
       label="${RED}${health:-$status}${RESET}"
       all_ok=false
-      [[ "$status" != restarting && "$status" != exited ]] || crashing+=" $name"
+      # krate logs takes the Compose service name, not the container name.
+      [[ "$status" != restarting && "$status" != exited ]] || crashing+=" $(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$cid")"
     fi
 
     printf "  %-35s %b\n" "$name" "$label"
