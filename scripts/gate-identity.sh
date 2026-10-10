@@ -20,7 +20,7 @@ set -uo pipefail
 umask 077
 (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || { echo "bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 2; }
 
-GATE_VERSION=4
+GATE_VERSION=5
 RUNNER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 GATE_DIR="$(dirname "$RUNNER")/gate"
 REPO="$(cd "$(dirname "$RUNNER")/.." && pwd)"
@@ -39,6 +39,7 @@ WIPE=false
 SCREENSHOTS=true
 STATIC=true
 CANDIDATE_ARG=""
+REPO_ARG=""
 
 usage() {
   cat <<EOF
@@ -48,6 +49,8 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
   --edition-dir    kraft or epc checkout or fixture installation (default: $REPO/kraft)
   --candidate SHA  the commit the edition files come from, when the directory has no git (a bundle install);
                    the receipt also records the sha256 of the edition files and is INCOMPLETE without a binding
+  --repo DIR       a checkout of the candidate for the static block (S1-S4) when the edition directory is a bundle
+                   install without Makefile or git; its HEAD must be the --candidate commit
   --wipe           remove an existing .env/auth/certs in that directory first (required when present)
   --keep           leave the fixture running at the end (no teardown)
   --no-screenshots skip the end-user screenshot story (X1 leaves the required inventory)
@@ -67,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --phase) PHASE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --candidate) CANDIDATE_ARG="$2"; shift 2 ;;
+    --repo) [[ -d "$2" ]] || { echo "--repo $2 is not a directory" >&2; exit 2; }; REPO_ARG="$(cd "$2" && pwd)"; shift 2 ;;
     --wipe) WIPE=true; shift ;;
     --keep) KEEP=true; shift ;;
     --no-screenshots) SCREENSHOTS=false; shift ;;
@@ -115,6 +119,22 @@ EDITION_DIGESTS=""
 for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh"; do
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
+if [[ -n "$REPO_ARG" ]]; then
+  $STATIC || { echo "--repo runs the static block on that checkout; it cannot be combined with --no-static (drop one)" >&2; exit 2; }
+  $BOUND && [[ "$CANDIDATE" != *"(stated"* ]] && { echo "--repo is for a bundle install without git; $ED is a git checkout, its static block runs there already" >&2; exit 2; }
+  [[ -n "$CANDIDATE_ARG" ]] || { echo "--repo needs --candidate SHA (the edition directory has no git)" >&2; exit 2; }
+  [[ -f "$REPO_ARG/Makefile" ]] || { echo "--repo $REPO_ARG has no Makefile" >&2; exit 2; }
+  repo_head="$(git -C "$REPO_ARG" rev-parse HEAD 2>/dev/null)" || { echo "--repo $REPO_ARG is not a git checkout" >&2; exit 2; }
+  # --candidate must name exactly one commit of that checkout (at least 7 hex characters, resolved
+  # by git, never a prefix match), and that commit must be HEAD.
+  [[ "$CANDIDATE_ARG" =~ ^[0-9a-f]{7,40}$ ]] || { echo "--candidate must be a commit id of 7 to 40 hex characters" >&2; exit 2; }
+  resolved="$(git -C "$REPO_ARG" rev-parse --verify --quiet "${CANDIDATE_ARG}^{commit}" 2>/dev/null)" \
+    || { echo "--candidate $CANDIDATE_ARG is not one commit of --repo $REPO_ARG" >&2; exit 2; }
+  [[ "$resolved" == "$repo_head" ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG ($resolved)" >&2; exit 2; }
+  TOPLEVEL="$REPO_ARG"
+  CANDIDATE="$resolved (stated as $CANDIDATE_ARG and resolved in --repo; edition files bound by digest; static block on that checkout)"
+  DIRTY="edition: unknown (no git); --repo: $(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"
+fi
 RUNNER_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo 'no git')"
 RUNNER_DIRTY="$(git -C "$REPO" status --porcelain --untracked-files=no -- scripts/gate-identity.sh scripts/gate 2>/dev/null | tr '\n' ';')"
 
