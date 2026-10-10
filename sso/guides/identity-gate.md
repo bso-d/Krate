@@ -10,11 +10,18 @@ Phase 1: both run against one candidate commit, in one receipt.
 ## How to run it
 
 ```bash
-# a disposable checkout (never the operator's installation; the run creates and destroys .env, auth/keycloak, certs)
+# a disposable checkout, or a fixture installation made for the gate (the run creates and destroys
+# .env, auth/keycloak, certs, the journal, monitoring/.env and the monitoring volumes of that edition)
 git -C /path/to/Krate worktree add --detach harness/worktrees/gate HEAD
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe            # Phase 1 + screenshots + Phase 2
-scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots   # on the RHEL/Rocky VM, from the bundle
+scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle
 ```
+
+The runner refuses to start when another Krate installation runs on the host or
+when monitoring volumes of the edition's project already exist, because it would
+destroy them. On a bundle host there is no git: `--candidate <sha>` states the
+commit and the receipt records the sha256 of every edition file under test; a
+receipt without either binding is INCOMPLETE.
 
 Prerequisites: Docker with Compose ≥ 2.20.2, python3, openssl, curl; the
 candidate's images on the host (`krate/kafka-ui:1.5.0-sso.7` built with `make
@@ -34,16 +41,20 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 
 | field | meaning |
 |---|---|
-| candidate commit | `git rev-parse HEAD` of the fixture checkout |
-| dirty tracked files | `git status --porcelain` on kraft, epc, sso, scripts, Makefile, monitoring, kafbat-ui at run time (must be empty for a sign-off receipt) |
+| candidate commit | `git rev-parse HEAD` of the fixture checkout, or the `--candidate` sha on a host without git; neither → `bound: false` and the verdict is INCOMPLETE |
+| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh` of the fixture: what was actually tested, also when the candidate is only stated |
+| dirty tracked files | `git status --porcelain --untracked-files=no` of the whole fixture repository at run time, unfiltered (must be empty for a sign-off receipt; `unknown` without git) |
 | images | every `*_IMAGE` digest of the edition template |
-| runner | sha256 of `scripts/gate-identity.sh` and of `scripts/gate/*` |
+| runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py` and `*.mjs` (file list, sorted), plus the commit (and dirty state) of the repository the runner was executed from |
 | host | OS, Docker, Compose, python, openssl versions |
-| verdict | PASS only when no test failed and every id of the required inventory passed; a required id that is NOT_RUN or absent makes it INCOMPLETE. Rows outside the inventory (J7 on a host without root) are informational |
+| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. Ids outside the selected inventory, and J7 on a host without root, are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
 
 The required inventory is declared in the runner before anything runs
 (`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_X`): a test that never reports cannot
-pass by absence.
+pass by absence. Secret values never travel on a command line (the runner reads
+`.env` in the shell, passes secrets through the environment or 0600 files, runs
+every helper with `python3 -I`, and works under `umask 077`); the receipt files
+and `run.log` are redacted from the list of every secret value seen.
 
 ## Criteria and their tests
 
@@ -76,7 +87,7 @@ Every id is one row of the receipt.
 | F3 | `/health/started`, `/health/ready`, `/health/live` on management port 9000 and the realm on 8080, each queried separately from inside the identity network | four distinct 200s |
 | F4 | authentication probe: `client_credentials` of `krate-cli` through the proxy | 200 (health and authentication are different probes) |
 | F5 | `docker stop keycloak-db`: readiness vs liveness, `identity status`, Keycloak's restart count after 60 s, recovery when the database returns | `ready=503 live=200`; status exit 1; `RestartCount` 0 and state `running`; ready again afterwards |
-| F6 | `identity status` after recovery | exit 0 |
+| F6 | `identity status` after recovery | exit 0 (the command's own status, with its lines as evidence) |
 
 ### G: "Protect every relevant link: trusted browser-facing HTTPS and issuer URLs; explicitly trusted proxy headers; private management endpoints; database TLS with certificate and hostname verification. … audit and close reachable unauthenticated backing-service paths, including published monitoring endpoints."
 
@@ -89,7 +100,7 @@ Every id is one row of the receipt.
 | G5 | name resolution of `keycloak` from the brokers' network | no such name |
 | G6 | forged `X-Forwarded-For: 9.9.9.9` sent straight to keycloak:8080 by a non-proxy peer | the Keycloak event records the peer's own address, not 9.9.9.9 |
 | G7 | the same header sent through the proxy | the event records neither 9.9.9.9 nor the peer: nginx replaces the header with the real client address |
-| G8 | database TLS from a client container: plaintext, `verify-full` against the generated CA, wrong password | plaintext rejected by `pg_hba`; `t|TLSv1.3`; wrong password rejected |
+| G8 | database TLS from a client container: plaintext, `verify-full` against the generated CA, wrong password | plaintext rejected by `pg_hba`; `t\|TLSv1.3`; wrong password rejected |
 | K27/K28 (Phase 2) | Kafbat's `/metrics`, `/actuator/*`, `/logout/connect/*` through the proxy; anonymous API call | 404; redirect to the Keycloak login |
 | M1/M2 (Phase 2) | `monitor up`: Prometheus and Loki bind addresses; kafka-exporter's networks | 127.0.0.1 only; Grafana unchanged; exporter on the brokers' network, not on `identity` |
 
@@ -103,8 +114,8 @@ Every id is one row of the receipt.
 | A4 | `reset-password` then login with the previous password | refused |
 | A5 | `users list` at the end of the ladder | exit 0 |
 | B1 | claims contract: admin user → `groups=[admin group]`; user without group → no `groups` claim | as stated (nothing to map a role from) |
-| B2 | correct password + OTP accepted; wrong password refused | as stated |
-| B3 | disabled user refused; `enable` works | as stated |
+| B2 | correct password + OTP accepted; wrong password refused | accepted; the refusal is the login form again carrying `Invalid username or password.` (an OTP prompt, a required-action page or a 5xx is not a refusal) |
+| B3 | `users disable`, login, `users enable` | disable exit 0; the login form carries `Account is disabled`; enable exit 0 |
 | B4 | direct password grant on `krate-ui` | 400/401 (standard flow only) |
 | B5 | five rapid wrong passwords | brute-force detection reports the account temporarily `disabled: true` (Keycloak's quick-login check locks after two rapid failures; later attempts are not counted) |
 | B6 | `reset-password` | a new temporary password is issued (shown once) |
@@ -118,7 +129,7 @@ Every id is one row of the receipt.
 | C2 | `docker compose restart keycloak`, then `users list` and `identity up` | users present; `No changes` |
 | C3 | `identity down` + `identity up` | users present; an enrolled user logs in with password + OTP |
 | C4 | `identity renew-db-tls` | new expiry, chains to the CA, `.prev` discarded, journal `renew-db-tls ok`, Keycloak ready |
-| C5 | `renew-db-tls` with an injected restart failure (a `docker` wrapper on `PATH` fails `compose restart`) | exit 1; `server.crt` byte-identical to before; journal `renew-db-tls rolled back`; database healthy on the old certificate |
+| C5 | `renew-db-tls` with an injected restart failure (a `docker` wrapper on `PATH` fails `compose restart`) | exit 1; `server.crt` byte-identical to before; `.prev` consumed; journal `renew-db-tls rolled back`; `keycloak-db` reports `healthy` on the old certificate |
 
 ### I: "Implement credential-specific changes through the authoritative store and verify the consumer. Editing .env or regenerating realm JSON is insufficient evidence."
 
@@ -128,6 +139,7 @@ Every id is one row of the receipt.
 | I2 | `rotate KEYCLOAK_ADMIN_PASSWORD` | old refused by kcadm, new lists the master users |
 | I3 | `rotate KEYCLOAK_CLI_CLIENT_SECRET` | `users list` works, new secret authenticates, `identity up` → `No changes` |
 | I4 | `config set KEYCLOAK_DB_PASSWORD=…` on a live database | refused with the `rotate` hint |
+| I5 | `rotate KEYCLOAK_ADMIN_PASSWORD --value` fed the database password's value | refused naming `KEYCLOAK_DB_PASSWORD`; `.env` unchanged; the admin still logs in |
 
 ### D: "a database/configuration restore is demonstrated"
 
@@ -138,6 +150,8 @@ Every id is one row of the receipt.
 | D3 | a tampered archive (one bit flipped); a wrong passphrase | both refused before decryption (`integrity check failed`) |
 | D4 | after a secret rotation and a marker user: `identity down`, `identity restore` | marker gone, earlier users present, Keycloak verified |
 | D5 | the restored `.env` | `KEYCLOAK_CLI_CLIENT_SECRET` back to the backup's value, `KEYCLOAK_DB_PASSWORD` untouched (a database role, not part of the dump); journal `restore reconciled` |
+| D6 | restore on a host with another `KEYCLOAK_PUBLIC_URL` (`https://recovery.example.test/identity`), then the original URL and `identity up` | the `krate-ui` redirect URI follows the new host; journal `restore reconciled krate-ui urls`; `identity up` reconciles it back |
+| D7 | `identity backup` with a 5-character `KRATE_BACKUP_PASSPHRASE` | refused (`at least 8 characters`); no archive written |
 
 ### E: "failure injection reveals no false success, secret leakage or silent replacement"
 
@@ -149,26 +163,27 @@ Every id is one row of the receipt.
 | E4 | the master admin deleted in Keycloak (lost admin) | `identity up` exit 1; `recover-admin` after `down` recreates it |
 | E5 | database volume present but no master realm (a failed first run) | `identity up` detects it and bootstraps; the temporary admin is removed |
 | E6 | the identity lock held by a live process; then that process dies | the command is refused naming the pid; afterwards the stale lock is removed and the command proceeds |
-| E7 | two mutating commands started at the same instant | recorded (refusal count); the deterministic proof is E6 |
-| Z1/Z2 | every secret value seen during the run (each `.env` password/secret before and after rotations, the backup passphrase) searched in the raw log, the journal, the plan files, the keycloak and keycloak-db logs | 0 hits |
+| E7 | two mutating commands started at the same instant | refusals + created = 2 with at least one created: one refused and one created, or both serialised; never two half-made users (the deterministic lock proof is E6) |
+| E8 | `krate stop` while an identity command holds the lock and `KEYCLOAK_ENABLED=false` | refused naming the pid; keycloak and keycloak-db untouched |
+| Z1/Z2 | every secret value seen during the run (each `.env` and `monitoring/.env` password, secret, passphrase and key before and after rotations, the backup passphrase, every temporary password, every enrolled password and TOTP seed) searched in the raw log (temporary passwords: outside their one-time display line), the journal, the plan files, the receipt rows, the screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs | 0 hits |
 
 ### J: "Make configuration planning pure and application explicit: validate prerequisites before mutation, lock concurrent applies, stage a complete generation, redact diffs and journal transitions."
 
 | id | test | pass condition |
 |---|---|---|
-| J1 | a Docker network already covering the identity subnet, then `identity up` | refused naming the network and both keys; no container created |
+| J1 | a Docker network already covering the identity subnet (named `<project>-gate-clash`, removed by the gate), then `identity up` | refused naming the network, `KRATE_IDENTITY_SUBNET` and `KRATE_IDENTITY_PROXY_IP`; no container created |
 | J2 | the same with `start` | refused the same way; no container created |
 | J3 | journal after the first `identity up` | `up bootstrapped` |
 | J4 | `krate-realm.json` | placeholders only, none of the secret values |
 | J5 | journal lines of `users add` / `reset-password` | user names only |
 | J6 | `identity logrotate` | renders the drop-in for this journal |
-| J7 | `identity logrotate --install` and `logrotate -d` | accepted (root; informational on a host without root, proven on the Linux VM) |
+| J7 | `identity logrotate --install` and `logrotate -d`; the gate removes the installed drop-in again | accepted (root; informational on a host without root, proven on the Linux VM) |
 
 ### X: the end user's view (owner rule 10)
 
 | id | test | pass condition |
 |---|---|---|
-| X1 | a real browser (Playwright, Chromium) in the proxy's network namespace: account console asks to sign in → login form → TOTP enrolment → forced password change → signed-in console → second login asks the OTP → wrong OTP → wrong password → disabled user → admin console, master realm and metrics blocked | every step reached; one PNG per step in `screenshots/`, captions in `manifest.json` |
+| X1 | a real browser (Playwright, Chromium in the harness container, reaching the published proxy port through the Docker host gateway as a browser on the host does): account console asks to sign in → login form → TOTP enrolment (QR code and secret masked before the capture) → forced password change → signed-in console → second login asks the OTP → wrong OTP → wrong password → disabled user → admin console, master realm and metrics blocked | every step's outcome asserted (OTP prompt without a password field, `Invalid authenticator code`, `Invalid username or password`, `Account is disabled`, HTTP 404 on the three blocked paths); the story needs both users; one PNG per step in `screenshots/`, captions and the assertions in `manifest.json` |
 
 ### K: Phase 2, "the first UI uses the Keycloak issuer in local mode and enforces approved roles at its backend"
 
@@ -191,9 +206,12 @@ Every id is one row of the receipt.
 ## Last run
 
 The receipt tables below are pasted verbatim from the two receipts of candidate
-c88de6a (2026-10-10). Both verdicts read PASS. The owner's acceptance is recorded in
-the Serena tracker and in PR #39, not here. Known cosmetic defect of this runner
-version: the `runner` field prints the helper digest twice.
+c88de6a (2026-10-10), produced by gate runner v1. Both verdicts read PASS. The owner's
+acceptance is recorded in the Serena tracker and in PR #39, not here. Runner v2
+(this document's rules) replaces them at the next candidate: v1 counted ids outside
+the selected inventory as informational without saying so here, accepted an unbound
+EPC receipt (no git, no `--candidate`), printed the helper digest twice, and the
+EPC receipt's `dirty: none` below means "unknown", not "clean".
 
 ### KRaft, full gate on the development Mac (Phase 1 + screenshots + Phase 2)
 
@@ -410,5 +428,6 @@ invocation (`--no-static --no-screenshots`, proven on the Mac) and are outside t
 
 The owner accepts a phase by recording the receipt folder, the candidate
 commit and the verdict in the Serena memory `project/keycloak-first-tracker`
-(phase table) and in the pull request. A receipt with dirty tracked files,
-a FAIL, a NOT_RUN or a missing required id is not acceptable.
+(phase table) and in the pull request. A receipt with dirty tracked files, an
+unbound candidate, a FAIL, or a NOT_RUN or missing id inside the selected
+inventory is not acceptable.

@@ -41,13 +41,18 @@ CLIENT = "krate-ui"
 
 
 class Flow:
-    def __init__(self, base, client_secret):
+    def __init__(self, base, client_secret, cafile=None):
         self.base = base.rstrip("/") + f"/identity/realms/{REALM}"
         self.redirect = base.rstrip("/") + "/login/oauth2/code/keycloak"
         self.client_secret = client_secret
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE  # fixture proxy uses a self-signed certificate
+        # The fixture proxy's own certificate is pinned when given; verification is never
+        # switched off silently (an unpinned run must say so with --insecure).
+        if cafile:
+            ctx = ssl.create_default_context(cafile=cafile)
+        else:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
         self.jar = http.cookiejar.CookieJar()
 
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -63,10 +68,12 @@ class Flow:
         headers = {"Content-Type": "application/x-www-form-urlencoded"} if body else {}
         r = urllib.request.Request(url, data=body, headers=headers)
         try:
-            resp = self.opener.open(r, timeout=30)
+            resp = self.opener.open(r, timeout=60)
             st, h, text = resp.status, resp.headers, resp.read().decode(errors="replace")
         except urllib.error.HTTPError as e:
             st, h, text = e.code, e.headers, e.read().decode(errors="replace")
+        except urllib.error.URLError as e:
+            raise AssertionError(f"request to {url.split('?')[0]} failed: {e.reason}") from None
         # Follow redirects that stay inside the realm (required-action pages); stop at the client redirect.
         if st in (302, 303) and h.get("Location", "").startswith(self.base + "/"):
             return self.req(h["Location"])
@@ -124,9 +131,16 @@ def wait_next_totp_step():
     time.sleep(30 - time.time() % 30 + 1)  # a TOTP code is single-use; wait for the next 30 s step
 
 
+def env_value(name):
+    value = os.environ.get(name)
+    if not value:
+        raise AssertionError(f"environment variable {name} is not set (secrets reach this probe through the environment)")
+    return value
+
+
 def do_enrol(a):
-    flow = Flow(a.base, os.environ[a.client_secret_env])
-    temp_pw = os.environ[a.password_env]
+    flow = Flow(a.base, env_value(a.client_secret_env), a.cafile)
+    temp_pw = env_value(a.password_env)
     new_pw = secrets.token_urlsafe(14)
     log("login 1: temporary password, pending required actions")
     verifier, action = flow.start_auth()
@@ -186,13 +200,13 @@ def do_enrol(a):
 
 
 def do_login(a):
-    flow = Flow(a.base, os.environ[a.client_secret_env])
+    flow = Flow(a.base, env_value(a.client_secret_env), a.cafile)
     if a.state:
         with open(a.state) as f:
             s = json.load(f)
         user, password, totp_secret = s["user"], s["password"], s["totp"]
     else:
-        user, password, totp_secret = a.user, os.environ[a.password_env], None
+        user, password, totp_secret = a.user, env_value(a.password_env), None
     verifier, action = flow.start_auth()
     st, h, page = flow.password_step(action, user, password)
     if st == 200 and 'name="otp"' in page and totp_secret:
@@ -204,15 +218,25 @@ def do_login(a):
             raise AssertionError("login succeeded but was expected to be refused")
         print(json.dumps({"result": "OK", "claims": claims}))
         return
-    # Refused: still on a Keycloak page (login form with an error, or an error page).
+    # Refused: a refusal is the login form again (no OTP field) or Keycloak's error page,
+    # carrying a message; anything else (an OTP prompt, a required-action page, a 5xx) is
+    # not a refusal and fails the case.
+    on_form = st == 200 and 'id="kc-form-login"' in page and 'name="otp"' not in page
+    on_error_page = st in (200, 400, 401, 403) and 'id="kc-error-message"' in page
+    if not (on_form or on_error_page):
+        print(json.dumps({"result": "FAIL", "error": f"not a refusal: status {st}, page {page[:120]!r}"}))
+        sys.exit(1)
     # keycloak.v2 theme (PatternFly 5): the message sits in #input-error-container-<field> as helper text;
     # the error page uses #kc-error-message. Verified in Chrome DevTools on 2026-10-10 (harness/gate-receipts/devtools-walk-02-wrong-password.png).
     msg = (re.search(r'id="input-error[^"]*".*?helper-text__item-text[^>]*>\s*([^<]*?)\s*<', page, re.S)
            or re.search(r'id="kc-error-message".*?<p[^>]*>([^<]*)<', page, re.S)
            or re.search(r'<span[^>]*kc-feedback-text[^>]*>([^<]*)<', page))
-    reason = html.unescape(msg.group(1).strip()) if msg else f"status {st}"
+    reason = html.unescape(msg.group(1).strip()) if msg else ""
     if a.expect == "ok":
-        raise AssertionError(f"login refused: {reason}")
+        raise AssertionError(f"login refused: {reason or 'status ' + str(st)}")
+    if not reason or (a.reason and a.reason not in reason):
+        print(json.dumps({"result": "FAIL", "error": f"refused without the expected message: got {reason!r}, expected {a.reason!r}"}))
+        sys.exit(1)
     print(json.dumps({"result": "REFUSED", "reason": reason, "status": st}))
 
 
@@ -222,6 +246,7 @@ def log(msg):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--cafile", dest="cafile_top", help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("enrol")
     e.add_argument("--base", required=True)
@@ -229,6 +254,7 @@ def main():
     e.add_argument("--password-env", required=True)
     e.add_argument("--client-secret-env", required=True)
     e.add_argument("--state", required=True)
+    e.add_argument("--cafile", help="pin the proxy certificate (certs/server.crt); without it verification is off")
     l = sub.add_parser("login")
     l.add_argument("--base", required=True)
     l.add_argument("--state")
@@ -236,8 +262,12 @@ def main():
     l.add_argument("--password-env")
     l.add_argument("--client-secret-env", required=True)
     l.add_argument("--expect", choices=["ok", "refused"], default="ok")
+    l.add_argument("--reason", help="with --expect refused: the message the refusal must carry")
+    l.add_argument("--cafile", help="pin the proxy certificate (certs/server.crt); without it verification is off")
     l.add_argument("--totp-offset", type=int, default=0, help="use the code of this neighbouring 30-second step (default: current)")
     a = p.parse_args()
+    if getattr(a, "cafile_top", None) and not getattr(a, "cafile", None):
+        a.cafile = a.cafile_top
     if a.cmd == "login" and not a.state and not (a.user and a.password_env):
         p.error("login needs --state or --user with --password-env")
     try:

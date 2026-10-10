@@ -524,7 +524,7 @@ class Gate:
             return 'edition dir lacks .env or an executable krate: ' + self.edition
         self.env = read_env(env_path)
         for key, value in self.env.items():
-            if re.search(r'(_PASSWORD|_SECRET|_PASSPHRASE)$', key):
+            if re.search(r'(_PASSWORD|_SECRET|_PASSPHRASE|_KEY)$', key):
                 REDACT.add(value)
         if self.env.get('KAFKA_UI_AUTH_CONFIG') != 'runtime.yml':
             return 'KAFKA_UI_AUTH_CONFIG is %r, not runtime.yml' % self.env.get('KAFKA_UI_AUTH_CONFIG')
@@ -1613,7 +1613,12 @@ class Gate:
             return self.finish()
         try:
             if self.wanted('K22'):
-                self.prepare_disabled()
+                try:
+                    self.prepare_disabled()
+                except Outcome as outcome:  # a login/disable step reporting through fail()/not_run() outside a case
+                    self.idle_result = outcome
+                except Exception as error:
+                    self.idle_result = Outcome('FAIL', 'K22 preparation error %s: %s' % (type(error).__name__, error))
             self.case('K7', self.k7_disabled)
             plan = [('K2', self.k2_viewer_reads), ('K3', self.k3_viewer_mutations), ('K4', self.k4_viewer_messages),
                     ('K20', self.k20_unguarded), ('K5', self.k5_admin_mutations), ('K12', self.k12_csrf_cross_site),
@@ -1635,11 +1640,16 @@ class Gate:
         return self.finish()
 
     def finish(self):
+        first = True
         for case in CASES:
             if case not in self.results:
                 reason = 'not selected (--only)' if not self.wanted(case) else 'not reached'
                 self.results[case] = ('NOT_RUN', reason)
             status, text = self.results[case]
+            if first and self.tls_mode:
+                # The TLS mode of the whole run is part of the evidence, not only of the log.
+                text = 'TLS %s; %s' % (self.tls_mode, text)
+                first = False
             print('%s\t%s\t%s' % (case, status, evidence(text)), flush=True)
         return 1 if any(status == 'FAIL' for status, _ in self.results.values()) else 0
 
@@ -1851,7 +1861,7 @@ def parse_args(argv):
     if not re.match(r'^https://[^/]+$', args.base_url.rstrip('/')):
         parser.error('--base-url must be an https origin without a path')
     if args.only and any(case not in CASES for case in args.only):
-        parser.error('--only accepts K1..K26')
+        parser.error('--only accepts ' + ', '.join(CASES))
     return args
 
 

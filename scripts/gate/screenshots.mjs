@@ -5,7 +5,9 @@
 //
 //   node screenshots.mjs --base https://localhost:8443 --out /out --user U --disabled-user D --resolve-to 192.168.65.254
 // Passwords come from the environment: GATE_TEMP_PASSWORD (U's temporary password),
-// GATE_DISABLED_PASSWORD (D's). Nothing secret is printed or written.
+// GATE_DISABLED_PASSWORD (D's). Nothing secret is printed or written: the TOTP QR code
+// and secret are masked before that page is captured, and each step asserts its outcome
+// (the OTP prompt, the refusal messages, the 404s) and records it in manifest.json.
 //
 // Story (one PNG per step, numbered): account console asks to sign in -> login form ->
 // TOTP enrolment -> forced password change -> signed-in account console -> sign out ->
@@ -15,7 +17,7 @@ import { createRequire } from 'node:module';
 // The harness image installs playwright globally; ESM ignores NODE_PATH, so resolve it explicitly.
 const require = createRequire(process.env.PW_MODULES ? process.env.PW_MODULES + '/resolve-from-here.js' : import.meta.url);
 const { chromium } = require('playwright');
-import { createHmac } from 'node:crypto';
+import { createHmac, randomInt } from 'node:crypto';
 import { writeFileSync, chmodSync } from 'node:fs';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((acc, v, i, arr) => {
@@ -28,8 +30,11 @@ const USER = args.user;
 const DISABLED = args['disabled-user'];
 const TEMP_PW = process.env.GATE_TEMP_PASSWORD;
 const DISABLED_PW = process.env.GATE_DISABLED_PASSWORD;
-if (!USER || !TEMP_PW) { console.error('need --user and GATE_TEMP_PASSWORD'); process.exit(2); }
-const NEW_PW = [...Array(18)].map(() => 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 54)]).join('');
+if (!USER || !TEMP_PW || !DISABLED || !DISABLED_PW) { console.error('need --user, --disabled-user, GATE_TEMP_PASSWORD and GATE_DISABLED_PASSWORD'); process.exit(2); }
+const asserted = [];
+function assert(cond, what) { if (!cond) throw new Error('assert: ' + what); asserted.push(what); }
+async function visibleText(selector) { const l = page.locator(selector); return (await l.count()) ? (await l.first().innerText()).trim() : ''; }
+const NEW_PW = [...Array(18)].map(() => 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'[randomInt(54)]).join('');
 
 function totp(secretBytes, t = Date.now() / 1000) {
   const counter = Buffer.alloc(8);
@@ -45,7 +50,7 @@ async function shot(page, slug, caption) {
   n += 1;
   const file = `${String(n).padStart(2, '0')}-${slug}.png`;
   await page.screenshot({ path: `${OUT}/${file}`, fullPage: false });
-  manifest.push({ file, caption, url: page.url() });
+  manifest.push({ file, caption, url: page.url(), asserted: asserted.splice(0) });
   console.log(`${file}\t${caption}`);
 }
 
@@ -77,7 +82,11 @@ try {
     if (await page.locator('input[name="totpSecret"]').count()) {
       const raw = await page.locator('input[name="totpSecret"]').inputValue();
       totpSecret = Buffer.from(raw, 'latin1');
-      await shot(page, 'totp-enrolment-required', 'First login: the user must enrol an authenticator app (TOTP) before continuing');
+      // The QR code and the typed secret encode the enrolment seed: masked before the capture,
+      // so the published PNG carries no credential (the gate's leak scan covers the captions only).
+      await page.addStyleTag({ content: '#kc-totp-secret-qr-code, #kc-totp-secret-key, .kc-totp-secret-qr-code, [id*="totp-secret"] img { visibility: hidden !important; }' });
+      await page.evaluate(() => { for (const el of document.querySelectorAll('img[src^="data:image"]')) el.style.visibility = 'hidden'; for (const el of document.querySelectorAll('#kc-totp-secret-key, span[id*="secret"]')) el.textContent = '(masked by the gate)'; });
+      await shot(page, 'totp-enrolment-required', 'First login: the user must enrol an authenticator app (TOTP) before continuing (QR code and secret masked)');
       await page.fill('#totp', totp(totpSecret));
       await page.locator('input[name="userLabel"]').fill('phone');
       await page.locator('#saveTOTPBtn, input[type="submit"], button[type="submit"]').first().click();
@@ -108,10 +117,13 @@ try {
   await page.fill('#password', NEW_PW);
   await page.click('#kc-login');
   await page.waitForSelector('#otp');
+  assert(!(await page.locator('#password').count()), 'the second login asks for the OTP (no password field on this page)');
   await shot(page, 'second-login-asks-otp', 'Every later login asks for the one-time code after the password');
   await page.fill('#otp', '000000');
   await page.click('#kc-login');
-  await page.waitForSelector('#otp');
+  await page.waitForSelector('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  const otpMsg = await visibleText('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  assert(/invalid authenticator code/i.test(otpMsg) && (await page.locator('#otp').count()), `wrong OTP refused on the OTP form with: ${otpMsg}`);
   await shot(page, 'wrong-otp-refused', 'A wrong one-time code is refused');
   await ctx.clearCookies();
 
@@ -119,19 +131,21 @@ try {
   await page.fill('#username', USER);
   await page.fill('#password', 'definitely-not-the-password');
   await page.click('#kc-login');
-  await page.waitForSelector('#kc-form-login');
+  await page.waitForSelector('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  const pwMsg = await visibleText('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  assert(/invalid username or password/i.test(pwMsg) && (await page.locator('#kc-form-login').count()), `wrong password refused on the login form with: ${pwMsg}`);
   await shot(page, 'wrong-password-refused', 'A wrong password is refused with a generic message');
   await ctx.clearCookies();
 
-  if (DISABLED && DISABLED_PW) {
-    await openLogin();
-    await page.fill('#username', DISABLED);
-    await page.fill('#password', DISABLED_PW);
-    await page.click('#kc-login');
-    await page.waitForLoadState('networkidle');
-    await shot(page, 'disabled-user-refused', `Disabled user ${DISABLED}: the login is refused`);
-    await ctx.clearCookies();
-  }
+  await openLogin();
+  await page.fill('#username', DISABLED);
+  await page.fill('#password', DISABLED_PW);
+  await page.click('#kc-login');
+  await page.waitForSelector('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  const disMsg = await visibleText('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  assert(/account is disabled/i.test(disMsg), `disabled user refused with: ${disMsg}`);
+  await shot(page, 'disabled-user-refused', `Disabled user ${DISABLED}: the login is refused`);
+  await ctx.clearCookies();
 
   for (const [path, slug, caption] of [
     ['/identity/admin/', 'admin-console-blocked', 'The Keycloak admin console is not reachable through the public proxy (404)'],
@@ -139,11 +153,12 @@ try {
     ['/identity/metrics', 'metrics-blocked', 'Metrics are not reachable through the public proxy (404)'],
   ]) {
     const resp = await page.goto(`${BASE}${path}`, { waitUntil: 'load' });
-    await shot(page, slug, `${caption}; HTTP ${resp ? resp.status() : '?'}`);
+    assert(resp && resp.status() === 404, `${path} answers HTTP ${resp ? resp.status() : '?'} (404 required)`);
+    await shot(page, slug, `${caption}; HTTP ${resp.status()}`);
   }
   writeFileSync(`${OUT}/manifest.json`, JSON.stringify(manifest, null, 2));
   chmodSync(`${OUT}/manifest.json`, 0o644);
-  console.log('STORY OK');
+  console.log(`STORY OK: ${manifest.reduce((k, m) => k + m.asserted.length, 0)} assertions over ${manifest.length} screenshots`);
 } catch (e) {
   await shot(page, 'failure', `Story failed: ${String(e.message || e).slice(0, 160)}`);
   writeFileSync(`${OUT}/manifest.json`, JSON.stringify(manifest, null, 2));
