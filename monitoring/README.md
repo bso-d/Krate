@@ -13,16 +13,16 @@ Fluent Bit collector, which ships every selected container log to Loki and to
 VictoriaLogs through separate outputs and queues. See
 [collector behavior, limits and notices](fluent-bit/README.md).
 
-`./krate monitor up` starts everything; `./krate monitor ui` prints both
-addresses. Grafana, its SSO configuration, its dashboards and its email rules
+`./krate monitor up` starts everything; `./krate credentials` (or
+`./krate monitor ui`) prints both addresses and logins. Grafana, its SSO configuration, its dashboards and its email rules
 are not changed by the parallel path.
 
 ## Perses
 
 Perses v0.54.0 is reachable only through the `perses-gateway` nginx service on
 `PERSES_PORT`, which serves HTTPS with the cluster certificate
-(`certs/server.crt` and `certs/server.key`; create them with `./krate gen-cert`
-or install your own). Perses, VictoriaLogs, Alertmanager, OAuth2 Proxy and the
+(`certs/server.crt` and `certs/server.key`; `./krate` creates a self-signed pair
+when none exists, or install your own). Perses, VictoriaLogs, Alertmanager, OAuth2 Proxy and the
 access guard publish no host ports. Perses, the gateway, OAuth2 Proxy and the
 guard run on their own `perses` network, which Prometheus and VictoriaLogs join
 as Perses' datasources; Grafana and the other monitoring services cannot reach
@@ -42,7 +42,7 @@ nothing is downloaded at runtime. Mapping details:
 
 | Mode | Who can sign in | Roles |
 | --- | --- | --- |
-| `local` (default) | `PERSES_ADMIN_USER` with `PERSES_ADMIN_PASSWORD` (12+ characters, required) | That user is a full Perses admin. |
+| `local` (default) | `PERSES_ADMIN_USER` with `PERSES_ADMIN_PASSWORD` (generated when empty; `krate monitor ui` shows it) | That user is a full Perses admin. |
 | `native` | Company SSO users in the Viewer or Admin IdP group | IdP groups become native Perses roles (recommended SSO mode). |
 | `gateway` | Company SSO users in the Viewer or Admin IdP group | The gateway enforces roles; Perses' own auth is off. |
 
@@ -120,12 +120,11 @@ state persist in the `alertmanager_data` volume.
 ## Upgrading an existing installation
 
 1. In the **old installation**, run `./krate monitor down` (never `down -v`).
-2. Merge the new `monitoring/.env.template` into the site `.env`: add the new
-   `*_IMAGE` lines from the **same extracted offline package**, and set
-   `PERSES_ADMIN_PASSWORD`. Keep existing ports, SMTP, Grafana and token-file
-   settings, and the existing data volumes.
-3. Load the new package's images (`./krate install` or `./krate load-images`)
-   and run `./krate monitor up`.
+2. Run the new package's `./krate install`. It keeps `monitoring/.env` (taking it
+   over from an installation made before `/opt/krate`), updates its `*_IMAGE`
+   lines and fills new settings such as `PERSES_ADMIN_PASSWORD`; ports, SMTP,
+   Grafana and token-file settings and the data volumes stay.
+3. Run `./krate monitor up` in the installation directory.
 4. Check Grafana and Perses dashboards, Loki and VictoriaLogs for
    `job="containerlogs"`, and `./krate monitor status`.
 

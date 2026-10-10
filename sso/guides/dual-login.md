@@ -29,32 +29,23 @@ it to check PingFederate TLS. Do not turn off certificate checks.
    shows. Include remote clusters when used.
 2. Run `./krate auth configure /path/to/site.json`. This creates
    `auth/ui/runtime.yml` and `auth/keycloak/krate-realm.json`. It does not
-   replace existing files or start services. Review both files.
-3. Set these values in `.env`:
-
-   ```dotenv
-   KAFKA_UI_AUTH_CONFIG=runtime.yml
-   KEYCLOAK_PUBLIC_URL=https://app.example.internal/identity
-   KEYCLOAK_ADMIN_USER=admin
-   KEYCLOAK_ADMIN_PASSWORD=<unique-admin-password>
-   KEYCLOAK_DB_PASSWORD=<unique-database-password>
-   KEYCLOAK_KAFBAT_CLIENT_SECRET=<unique-kafbat-client-secret>
-   PING_KEYCLOAK_CLIENT_SECRET=<secret-from-IAM>
-   ```
-
-   Set `KEYCLOAK_PUBLIC_URL` to `public_url` plus `/identity`. The first
-   three secrets above are separate from the shared Kafbat Admin password.
-   Protect `.env` with your site secret controls. Keep the existing
-   `KAFKA_UI_USER` and `KAFKA_UI_PASSWORD` for shared Admin access.
-4. Protect `.env` with `chmod 600 .env`. Use different, randomly generated
-   secrets of at least 16 characters for all four identity secrets and the
-   shared Admin password. Keep generated settings free of credentials.
+   replace existing files or start services. Review both files. It also sets
+   `KEYCLOAK_PUBLIC_URL` (`public_url` plus `/identity`) in `.env`, and
+   `KAFKA_UI_FQDN` to the `public_url` host when that is still blank.
+3. Nothing else needs setting by hand. `./krate` generates the shared Admin
+   password and the Keycloak admin, database and Kafbat client secrets (24
+   random characters each, all different) before Keycloak's database first
+   starts, and keeps `.env` at mode 600. `./krate auth apply` asks for the one
+   value it cannot generate, the client secret PingFederate issued for
+   Keycloak, or set it beforehand with
+   `./krate config set PING_KEYCLOAK_CLIENT_SECRET=<secret-from-IAM>`.
+   `./krate credentials` shows the Keycloak admin login.
+4. Protect `.env` with your site secret controls.
 5. Install/load the packaged images and start the broker cluster in shared-login
    mode first. Provision a matching TLS certificate and private key at
    `certs/server.crt` and `certs/server.key` (private key mode 600). The certificate must match
    `public_url` and remain valid for at least another day. Users must trust its
-   issuing CA. Set `KAFKA_UI_AUTH_CONFIG=runtime.yml` only after configuration
-   and credentials are ready.
+   issuing CA. Then run `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml`.
 6. Run `./krate auth apply`. Preflight verifies credentials, configuration, TLS,
    the Compose version, running brokers and locally available service images.
    It starts PostgreSQL and waits for database health, starts Keycloak and waits
@@ -163,11 +154,12 @@ session can sign the user back in until IAM revokes it.
 
 ## Package and release checks
 
-Build both packages separately when including OS-specific Docker installers:
+Build each package from its edition directory; each includes its OS-specific
+Docker installers:
 
 ```bash
-make bundle MODE=kraft VERSION=v3 ARCH=amd64 TARGET_OS=noble INCLUDE_DOCKER=1
-make bundle MODE=epc VERSION=v3 ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
+cd kraft && ./krate package v3 amd64     # Ubuntu 24.04 Docker packages
+cd ../epc && ./krate package v3 amd64    # RHEL 9 Docker packages
 ```
 
 The builder verifies all Compose profile images are saved and recorded in

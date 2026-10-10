@@ -121,33 +121,30 @@ New packages are released as `package-kraft-vN` and `package-epc-vN`; see [Relea
 
 - **To run a cluster:** Docker Engine 25.0.3 or newer, a working Docker service, and Docker Compose. The scripts accept the `docker compose` plugin or standalone `docker-compose` 1.29.2 or newer; the examples use the plugin.
 - **To create the UI certificate:** OpenSSL, or your own certificate and key at `certs/server.crt` and `certs/server.key`.
-- **To build packages:** a connected machine with Docker, Bash, Git, and GNU Make 4.0 or newer. On macOS, use `gmake` wherever the examples say `make`.
+- **To run from a checkout or build packages:** a connected machine with Docker, Bash, Git, Python 3, Node.js and npm (for the Kafbat UI image), and GNU Make 4.0 or newer, which `./krate` calls for you. On macOS, `brew install make` provides it.
 - **For KRaft/EPC monitoring:** Python 3 on the host, in addition to Docker.
 
 Choose the package for the target VM's processor: `amd64` means x86_64; `arm64` means ARM64. Leave room for the package, loaded images, and stored messages. The EPC guide explains how to budget its `/data` disk.
 
 ## Start on a connected machine
 
-1. Clone the repository and create the KRaft settings file.
+1. Clone the repository.
 
    ```bash
    git clone https://github.com/bso-d/Krate.git
    cd Krate/kraft
-   cp .env.template .env
    ```
 
-2. Edit `.env`. Set `KAFKA_UI_USER` and `KAFKA_UI_PASSWORD` to your own login details. Set `KAFKA_UI_FQDN` to the hostname you will use to open the UI. The default login is `admin` / `changeme`; replace it before exposing the UI.
+2. Optionally set the UI hostname, for example `./krate config set KAFKA_UI_FQDN=kafka.example.com`. Left blank, it is this machine's hostname.
 
-3. Start the cluster and check it.
+3. Start the cluster and show its logins.
 
    ```bash
-   ./krate gen-cert
    ./krate start
-   ./krate health
-   ./krate ui
+   ./krate credentials
    ```
 
-Docker downloads the images on this first run. When startup is complete, `health` should report healthy services. `ui` prints the address and login details; open that HTTPS address to view the four brokers in Kafbat UI.
+The first `start` does all of the setup: it creates `.env` and `monitoring/.env`, generates every password and secret, creates a self-signed UI certificate, builds the Kafbat UI image (several minutes) and downloads the other images. Nothing needs copying or editing by hand. `./krate setup` runs the same preparation without starting anything. When startup is complete, `start` reports healthy services and `credentials` prints every address and login; open the Kafbat UI address to view the four brokers.
 
 The generated certificate is self-signed, so the browser will show a trust warning. You can trust `certs/server.crt` or supply a certificate trusted by your browser.
 
@@ -155,48 +152,30 @@ For ZooKeeper, use `cd Krate/zk` and `./kafka` instead of `./krate`. Use `start`
 
 ## Build an offline package
 
-Run these commands from the repository root on the connected machine:
+Run `./krate package` on the connected machine, from `kraft/` for the KRaft package or `epc/` for the EPC package:
 
 ```bash
-# KRaft package for an x86_64 VM
-make bundle VERSION=v1 MODE=kraft ARCH=amd64
-
-# KRaft package for an ARM64 VM
-make bundle VERSION=v1 MODE=kraft ARCH=arm64
+cd Krate/kraft
+./krate package v1 amd64          # for an x86_64 VM
+./krate package v1 arm64          # for an ARM64 VM
+./krate package v1 amd64 none     # without Docker installation packages
 ```
 
-`VERSION` is a package label in the form `vN`, such as `v1` or `v5`. `MODE=both` builds default Krate and EPC. `MODE=zk` builds only the frozen legacy package. `ARCH` defaults to the build machine's processor when omitted.
+`v1` is a package label in the form `vN`. The processor defaults to the build machine's. The last argument selects the Docker installation packages bundled for VMs without Docker: by default `noble` (Ubuntu 24.04) for KRaft and `rhel9` for EPC; `jammy` selects Ubuntu 22.04 and `none` leaves them out.
 
-Each build writes a package, a SHA-256 checksum, and a record of the saved images under `dist/`. For the first command above:
+`package` builds the Kafbat UI image for the target processor, downloads the Docker packages, saves every pinned image and checks the result. For the first command above it writes:
 
 ```text
-dist/
+dist/release/package-kraft-v1/
 ├── krate-kraft-v1-amd64.tar.gz
 ├── krate-kraft-v1-amd64.tar.gz.sha256
-└── krate-kraft-v1-amd64.tar.gz.images.lock.tsv
+├── krate-kraft-v1-amd64.tar.gz.images.lock.tsv
+└── krate-kraft-v1-amd64.notes.md
 ```
 
-The package includes the cluster files, its command script, saved Docker images, and monitoring files. The image record lists the exact images, their checksums, and their processor type; a copy is also inside the package. `NO_PULL=1` reuses images already on the build machine; they must match `ARCH`.
+The package includes the cluster files, its command script, saved Docker images, and monitoring files. The image record lists the exact images, their checksums, and their processor type; a copy is also inside the package.
 
-### Include Docker for a VM that does not have it
-
-For Ubuntu 24.04 on x86_64:
-
-```bash
-make docker-debs UBUNTU_VERSION=noble ARCH=amd64
-make bundle VERSION=v1 MODE=kraft ARCH=amd64 TARGET_OS=noble INCLUDE_DOCKER=1
-```
-
-Use `jammy` for Ubuntu 22.04 and `arm64` for an ARM64 VM. Prepared packages live under `docker-offline/<os>/<arch>/`. The build checks that these match the requested OS and processor. Docker package versions are selected at download time.
-
-For the RHEL 9 EPC edition:
-
-```bash
-make docker-rpms RHEL_VERSION=9 ARCH=amd64
-make bundle VERSION=v2 MODE=epc ARCH=amd64 TARGET_OS=rhel9 INCLUDE_DOCKER=1
-```
-
-The Ubuntu installer uses `dpkg` and may try `apt-get` to repair missing dependencies. Make sure the target has the required OS dependencies before relying on a fully offline install. The RHEL installer disables network repositories; missing OS dependencies must be supplied locally.
+The Ubuntu installer uses `dpkg` and may try `apt-get` to repair missing dependencies. Make sure the target has the required OS dependencies before relying on a fully offline install. The RHEL installer disables network repositories; missing OS dependencies must be supplied locally. The frozen ZooKeeper package is still built with `make bundle VERSION=vN MODE=zk`.
 
 ## Install the package on a VM
 
@@ -206,30 +185,36 @@ Copy the package and its `.sha256` file to the VM. For the KRaft package built a
 sha256sum -c krate-kraft-v1-amd64.tar.gz.sha256
 tar -xzf krate-kraft-v1-amd64.tar.gz
 cd krate-kraft-v1-amd64
-cp .env.template .env
 ```
 
-The checksum should report `OK`. Edit `.env` to set your UI login and hostname, as in the connected setup.
+The checksum should report `OK`.
 
 If Docker is missing and you included its packages, run `./krate docker-install` first. It needs administrator access. Then run:
 
 ```bash
 ./krate doctor
 ./krate install
-./krate health
-./krate ui
 ```
 
-`doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images, creates a UI certificate if needed, and starts the cluster.
+`doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images and installs the package into `/opt/krate/kraft` (`/opt/krate/epc` for EPC; set `KRATE_HOME` to choose another directory). There it does the same setup as `start` (settings, generated passwords, certificate), starts the cluster, waits for it to be healthy and prints every login. `credentials` shows them again later.
+
+The installation directory holds everything specific to the site: `.env`, `monitoring/.env`, the certificate in `certs/` and the SSO files under `auth/`. The cluster's Docker project is always `krate-kraft` (or `krate-epc`), whatever directory a package was unpacked to, so its data volumes keep the same names.
+
+### Update to a newer package
+
+Unpack the new package anywhere and run its `./krate install`, with the cluster running or stopped. It replaces only the release files in the installation directory and loads the new images. Settings, passwords, certificates, SSO files and stored messages stay; new image pins and settings are added automatically.
+
+Installations from before `/opt/krate` ran inside their package directory, and their Docker project and volumes were named after it. The first `install` of a newer package finds that installation through its containers, takes over its `.env`, `monitoring/.env`, certificate and SSO files, and keeps using its data volumes (recorded as `KRATE_PROJECT` in `.env`). If the old containers were already removed, name the old directory: `./krate install --from /path/to/krate-kraft-v1-amd64`.
 
 For a downloaded ZooKeeper package, use `./kafka`. For EPC, set `KAFKA_ADVERTISED_HOST` for clients on other machines and review the data directory before the first start.
 
 ## Everyday commands
 
-Run these inside the KRaft or EPC directory, or an extracted package:
+Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`) or a checkout's `kraft/` or `epc/`. Run from an extracted package, they act on the installation:
 
 | Command | What it does |
 | --- | --- |
+| `./krate credentials` | Shows every address and login: Kafbat UI, Grafana, Perses and, with SSO, Keycloak |
 | `./krate status` | Lists the services and their state |
 | `./krate health` | Checks whether services are healthy |
 | `./krate logs -f kafka-92` | Follows one broker's logs |
@@ -241,7 +226,7 @@ Run these inside the KRaft or EPC directory, or an extracted package:
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
 
-Settings live in `.env`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
+Settings live in `.env`. The `*_IMAGE` lines are the exception: each command resets them to the pins in `.env.template`, so a rebuilt Kafbat UI image or a newer package takes effect without editing `.env`. To use a different image, change `.env.template`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
 
 In the supplied KRaft and ZooKeeper setups, `uninstall --purge` deletes stored Kafka messages by removing their Docker storage volumes. EPC stores messages in host folders under `KAFKA_DATA_DIR` (default `/data`), so those messages remain after purge. Deleting EPC messages requires stopping the cluster and separately removing its broker folders. Purge is not part of the normal stop/start workflow.
 
@@ -258,16 +243,16 @@ the SSO profile is inactive.
 See the [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and
 [operator setup guide](sso/guides/dual-login.md).
 
-For this checkout, build the customized image with `make kafbat-ui ARCH=amd64`
-before starting or bundling EPC or KRaft; see the [build notes](kafbat-ui/README.md).
-The resulting offline bundles include that image. EPC packages include SSO from
+From a checkout, `./krate start` builds the customized Kafbat image when it is
+missing and `./krate build` rebuilds it; see the [build notes](kafbat-ui/README.md).
+Offline packages include that image. EPC packages include SSO from
 `epc-v2`, and KRaft packages from `package-kraft-v1`.
 
 ## Monitoring
 
 Krate and EPC each include monitoring files in their package. Prometheus collects measurements and evaluates alert rules, and a host exporter supplies disk, CPU, and memory measurements. Fluent Bit collects container logs. Two dashboard and alerting paths run side by side: Grafana with Loki and Grafana email, and Perses (HTTPS) with VictoriaLogs and Alertmanager email. See the [monitoring guide](monitoring/README.md).
 
-Before starting it, copy `monitoring/.env.template` to `monitoring/.env`, change the Grafana login and set `PERSES_ADMIN_PASSWORD`. Perses uses the cluster certificate in `certs/`. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
+Its settings and passwords are prepared with the cluster's; `./krate credentials` shows the logins. Perses uses the cluster certificate in `certs/`. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
 
 ```bash
 ./krate monitor up

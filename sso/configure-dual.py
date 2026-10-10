@@ -121,7 +121,8 @@ def main():
                 output.write(json.dumps(data, indent=2) + "\n")
                 os.fchmod(output.fileno(), 0o644)
         print(f"Created Kafbat and Keycloak configuration in {args.output_dir}; no services changed.")
-        print("Review the generated files, set unique secrets and run krate auth apply with Compose 2.20.2 or newer.")
+        print('Review the generated files, then run krate auth apply (Compose 2.20.2 or newer). '
+          'It generates the Keycloak secrets and asks for the PingFederate client secret.')
     except (OSError, ValueError) as exc:
         for path in created:
             path.unlink()

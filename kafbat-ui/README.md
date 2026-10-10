@@ -36,10 +36,17 @@ The authentication changes require review when upgrading upstream.
 
 ## Build
 
+`./krate start` and `./krate setup` build this image when the pinned one is not
+on the host, `./krate build` rebuilds it for the host, and `./krate package`
+builds it for the package's processor. They run:
+
 ```bash
 make kafbat-ui ARCH=amd64
 # Or: python3 kafbat-ui/build.py --arch arm64 --source /path/to/pinned-checkout
 ```
+
+The build pins the new image ID as `KAFKA_UI_IMAGE` in `kraft/.env.template`
+and `epc/.env.template`, and `./krate` carries that pin into `.env`.
 
 Use a connected build host with Python 3, Git, Docker, Node and npm. Upstream
 recommends Node 22. The builder pins upstream commit, pnpm and code generation
