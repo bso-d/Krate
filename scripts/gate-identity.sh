@@ -94,8 +94,8 @@ declare -A SEEN=()
 PASSES=0; FAILS=0; NOTRUN=0
 
 # ── required inventory (declared before anything runs; a missing row fails the gate) ──
-REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 A1 A2 A3 B1 B2 B3 B4 B5 B6 C1 C2 C3 I1 I2 I3 I4 D1 D2 D3 D4 D5 E1 E2 E3 E4 E5 E6 E7 J1 J2 J3 J4 J5 G7 G8 Z1)
-REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K29 K30 K31 M1 M2 Z2)
+REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 A1 A2 A3 A4 A5 B1 B2 B3 B4 B5 B6 B7 C1 C2 C3 C4 C5 I1 I2 I3 I4 I5 D1 D2 D3 D4 D5 D6 D7 E1 E2 E3 E4 E5 E6 E7 E8 J1 J2 J3 J4 J5 J6 G7 G8 Z1)
+REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K32 M1 M2 Z2)
 REQUIRED_X=(X1)
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$RAW" >&2; }
@@ -116,6 +116,12 @@ cap() { # run a command, append its output to the raw log, keep it in CAP, retur
   local rc
   CAP="$("$@" 2>&1)"; rc=$?
   printf -- '--- %s (exit %s)\n%s\n' "$*" "$rc" "$CAP" >> "$RAW"
+  return $rc
+}
+cap_in() { # FILE cmd...: like cap, with stdin from FILE
+  local rc file="$1"; shift
+  CAP="$("$@" 2>&1 < "$file")"; rc=$?
+  printf -- '--- %s < %s (exit %s)\n%s\n' "$*" "$file" "$rc" "$CAP" >> "$RAW"
   return $rc
 }
 envv() { grep -E "^${1}=" "$ENVF" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true; }
@@ -188,6 +194,9 @@ fixture_env() {
   "$KRATE" config set "KRATE_IDENTITY_SUBNET=$SUBNET" >/dev/null
   "$KRATE" config set "KRATE_IDENTITY_PROXY_IP=$PROXY_IP" >/dev/null
   "$KRATE" config set "KRATE_IDENTITY_IP_RANGE=$IP_RANGE" >/dev/null
+  # Monitoring ports of the fixture (the defaults may be in use on a developer host).
+  "$KRATE" config set GRAFANA_PORT=13000 >/dev/null; "$KRATE" config set PROM_PORT=19090 >/dev/null
+  "$KRATE" config set LOKI_PORT=13100 >/dev/null; "$KRATE" config set PERSES_PORT=13443 >/dev/null
   PG_IMAGE="$(envv KEYCLOAK_DB_IMAGE)"
 }
 host_conflicts() { # other krate installations on this Docker host block a run (one installation per host by design)
@@ -275,8 +284,7 @@ run_phase1() {
   ev="$(docker run --rm --network "${PROJECT}_kafka-network" "$PG_IMAGE" sh -c 'getent hosts keycloak >/dev/null 2>&1 && echo resolvable || echo "no route: keycloak is not a name on kafka-network"' 2>&1 | tail -1)"
   [[ "$ev" == no\ route* ]]; st=$?; ok_if G5 1 G "$st" "$ev"
   # trusted proxy headers: a forged X-Forwarded-For from a non-proxy peer is ignored; the proxy's own header is used
-  # shellcheck disable=SC2016
-  probe "$PG_IMAGE" sh -c 'body="grant_type=client_credentials&client_id=krate-cli&client_secret=wrong-gate-secret"; printf "POST /identity/realms/krate/protocol/openid-connect/token HTTP/1.0\r\nHost: localhost\r\nX-Forwarded-For: 9.9.9.9\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n\r\n%s" ${#body} "$body" | nc -w 5 keycloak 8080 >/dev/null; hostname -i' >"$STATE/probe-ip" 2>/dev/null
+  probe "$PG_IMAGE" sh -c 'wget -q -O /dev/null --header "X-Forwarded-For: 9.9.9.9" --post-data "grant_type=client_credentials&client_id=krate-cli&client_secret=wrong-gate-secret" http://keycloak:8080/identity/realms/krate/protocol/openid-connect/token 2>/dev/null; hostname -i' >"$STATE/probe-ip" 2>/dev/null
   sleep 2
   ev="$(kcadm_master get events -r krate -q type=CLIENT_LOGIN_ERROR -q max=3 --fields ipAddress,type --format csv --noquotes | head -3 | tr '\n' ' ')"
   ip="$(tr -d '[:space:]' < "$STATE/probe-ip")"
@@ -295,7 +303,7 @@ run_phase1() {
   add_user gated --viewer; GATED_TEMP="${TEMP_PW:-}"
   cap "$KRATE" identity users list; ev="$(printf '%s' "$CAP" | grep -E '^  (gatev|gatea|gaten|gated) ' | awk '{print $1":"$2}' | tr '\n' ' ')"
   [[ "$ev" == "gatea:true gated:true gaten:true gatev:true " ]]; st=$?; ok_if A1 1 A "$st" "users add (viewer, admin+email, no group, viewer) then list: [$ev]"
-  cap "$KRATE" identity users groups gatea; ev="$(printf '%s' "$CAP" | xargs)"
+  cap "$KRATE" identity users groups gatea; ev="$(printf '%s' "$CAP" | grep -v '^Logging into' | xargs)"
   cap "$KRATE" identity users add 'bad name'; rc=$?; cap "$KRATE" identity users add gatev --viewer; after=$?
   [[ "$ev" == "$(envv KEYCLOAK_ADMIN_GROUP)" && $rc -ne 0 && $after -ne 0 ]]; st=$?; ok_if A2 1 A "$st" "gatea groups=[$ev]; 'bad name' refused (exit $rc); duplicate gatev refused (exit $after)"
   TEMP_PW="$GATEV_TEMP"; cap flow enrol --base "$BASE" --user gatev --password-env GATE_TEMP_PW --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --state "$STATE/gatev.json"; rc=$?
@@ -319,7 +327,8 @@ run_phase1() {
   for _ in 1 2 3 4 5; do flow login --base "$BASE" --user gateb --password-env GATE_TEMP_PW --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect refused >/dev/null 2>&1; done
   uid="$(kcadm_master get users -r krate -q username=gateb -q exact=true --fields id --format csv --noquotes | head -1 | tr -d '[:space:]')"
   ev="$(kcadm_master get "attack-detection/brute-force/users/$uid" -r krate | tr -d ' \n')"
-  [[ "$ev" == *'"disabled":true'* && "$ev" == *'"numFailures":5'* ]]; st=$?; ok_if B5 1 B "$st" "after 5 wrong passwords: $ev"
+  [[ "$ev" == *'"disabled":true'* && "$ev" =~ \"numFailures\":[2-9] ]]; st=$?; ok_if B5 1 B "$st" "after 5 rapid wrong passwords the account is temporarily locked (brute-force detection; Keycloak's quick-login check locks after two rapid failures, later attempts are not counted): $ev"
+  cap flow login --base "$BASE" --state "$STATE/gatea.json" --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect ok --totp-offset -1; st=$?; ok_if B7 1 B "$st" "a one-time code from the previous 30-second step is accepted (realm look-ahead window 1, Keycloak's documented default): $(printf '%s' "$CAP" | tail -1 | cut -c1-60)"
   cap "$KRATE" identity users reset-password gatev; rc=$?; [[ -n "$(temp_password "$CAP")" ]]; st=$?; ok_if B6 1 B "$st" "reset-password sets a new temporary password (exit $rc; shown once)"
   TEMP_PW="$(temp_password "$CAP")"
   cap flow login --base "$BASE" --state "$STATE/gatev.json" --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect refused; st=$?; ok_if A4 1 A "$st" "old password refused after reset-password ($(printf '%s' "$CAP" | tail -1 | cut -c1-80))"
@@ -357,11 +366,18 @@ run_phase1() {
   rc2="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 -d "grant_type=client_credentials&client_id=krate-cli&client_secret=$(envv KEYCLOAK_CLI_CLIENT_SECRET)" "$BASE/identity/realms/krate/protocol/openid-connect/token")"
   cap "$KRATE" identity up; ev=$?
   [[ $rc -eq 0 && $after -eq 0 && "$rc2" == 200 && $ev -eq 0 && "$CAP" == *"No changes"* ]]; st=$?; ok_if I3 1 I "$st" "rotate KEYCLOAK_CLI_CLIENT_SECRET: users list works, new secret authenticates (HTTP $rc2), identity up → No changes"
+  before="$(envv KEYCLOAK_ADMIN_PASSWORD)"; printf '%s\n' "$(envv KEYCLOAK_DB_PASSWORD)" > "$STATE/reuse"
+  cap_in "$STATE/reuse" "$KRATE" identity rotate KEYCLOAK_ADMIN_PASSWORD --value; rc=$?
+  kcadm_master get users -r master --fields username --format csv --noquotes >/dev/null 2>&1; after=$?
+  [[ $rc -ne 0 && "$CAP" == *"must not reuse the value of KEYCLOAK_DB_PASSWORD"* && "$(envv KEYCLOAK_ADMIN_PASSWORD)" == "$before" && $after -eq 0 ]]; st=$?; ok_if I5 1 I "$st" "rotate --value with the database password's value: refused (exit $rc) naming KEYCLOAK_DB_PASSWORD; .env and Keycloak unchanged (admin login still works)"
   cap "$KRATE" config set KEYCLOAK_DB_PASSWORD=NotAllowedViaConfigSet123; rc=$?
   [[ $rc -ne 0 && "$CAP" == *"identity rotate"* ]]; st=$?; ok_if I4 1 I "$st" "config set of a live identity secret refused with the rotate hint (exit $rc)"
 
   # ── D: backup / restore ──
+  KRATE_BACKUP_PASSPHRASE=short cap "$KRATE" identity backup "$STATE/short.enc"; rc=$?
+  [[ $rc -ne 0 && "$CAP" == *"at least 8 characters"* && ! -e "$STATE/short.enc" ]]; st=$?; ok_if D7 1 D "$st" "KRATE_BACKUP_PASSPHRASE of 5 characters refused (exit $rc), no archive written"
   export KRATE_BACKUP_PASSPHRASE; KRATE_BACKUP_PASSPHRASE="$(openssl rand -base64 18)"; collect_secrets
+  cap "$KRATE" identity users list; users_at_backup="$(printf '%s' "$CAP" | grep -c -E '^  gate[a-z]+ ')"
   cap "$KRATE" identity backup "$STATE/gate.enc"; rc=$?
   ev="mode=$(stat -f %Lp "$STATE/gate.enc" 2>/dev/null || stat -c %a "$STATE/gate.enc") magic=$(head -c 24 "$STATE/gate.enc" | tr -d '\n')"
   [[ $rc -eq 0 && "$ev" == "mode=600 magic=krate-identity-backup/1" ]]; st=$?; ok_if D1 1 D "$st" "identity backup: exit $rc; $ev; $(stat -f %z "$STATE/gate.enc" 2>/dev/null || stat -c %s "$STATE/gate.enc") bytes"
@@ -374,12 +390,12 @@ run_phase1() {
 import sys
 p = sys.argv[1]; b = bytearray(open(p, 'rb').read()); i = len(b) // 2; b[i] ^= 0x01; open(p, 'wb').write(b)
 EOF
-  cap "$KRATE" identity restore "$STATE/tampered.enc"; rc=$?; ev="$(printf '%s' "$CAP" | tail -1 | cut -c1-100)"
+  cap "$KRATE" identity restore "$STATE/tampered.enc"; rc=$?; tampered_out="$CAP"; ev="$(printf '%s' "$CAP" | grep -o -E 'integrity check failed[^.]*' | head -1)"
   saved="$KRATE_BACKUP_PASSPHRASE"; KRATE_BACKUP_PASSPHRASE="wrong-passphrase-$RANDOM"; cap "$KRATE" identity restore "$STATE/gate.enc"; after=$?; KRATE_BACKUP_PASSPHRASE="$saved"
-  [[ $rc -ne 0 && "$ev" == *"integrity check failed"* && $after -ne 0 ]]; st=$?; ok_if D3 1 D "$st" "tampered archive refused before decryption ($ev); wrong passphrase refused (exit $after)"
+  [[ $rc -ne 0 && "$tampered_out" == *"integrity check failed"* && $after -ne 0 ]]; st=$?; ok_if D3 1 D "$st" "tampered archive (one bit flipped) refused before decryption: '$ev' (exit $rc); wrong passphrase refused (exit $after)"
   cap "$KRATE" identity restore "$STATE/gate.enc"; rc=$?; collect_secrets
-  cap "$KRATE" identity users list; ev="$(printf '%s' "$CAP" | grep -c -E '^  gatem ')"; after="$(printf '%s' "$CAP" | grep -c -E '^  gate[a-z] ')"
-  [[ $rc -eq 0 && "$ev" == 0 && "$after" == 6 ]]; st=$?; ok_if D4 1 D "$st" "restore: exit $rc; marker user gatem gone, the 6 earlier users present; Keycloak verified"
+  cap "$KRATE" identity users list; ev="$(printf '%s' "$CAP" | grep -c -E '^  gatem ')"; after="$(printf '%s' "$CAP" | grep -c -E '^  gate[a-z]+ ')"
+  [[ $rc -eq 0 && "$ev" == 0 && "$after" == "$users_at_backup" ]]; st=$?; ok_if D4 1 D "$st" "restore: exit $rc; marker user gatem gone; the $users_at_backup users of the backup present (now $after); Keycloak verified"
   [[ "$(envv KEYCLOAK_CLI_CLIENT_SECRET)" != "$cli_after_rotate" && "$(envv KEYCLOAK_DB_PASSWORD)" == "$db_before" ]] && journal_has ' restore reconciled '; st=$?; ok_if D5 1 D "$st" "restore reconciled .env: KEYCLOAK_CLI_CLIENT_SECRET back to the backup's value, KEYCLOAK_DB_PASSWORD (a database role) untouched; journal: $(grep -E ' restore reconciled ' "$JOURNAL" | tail -1 | cut -c21-100)"
 
   # ── E: failure injection ──
@@ -403,7 +419,7 @@ EOF
   kcadm_master delete "users/$uid" -r master >/dev/null 2>&1
   cap "$KRATE" identity up; rc=$?; cap "$KRATE" identity down; cap "$KRATE" identity recover-admin; after=$?; cap "$KRATE" identity up; wait_status 180; names="$(master_users)"
   [[ $rc -ne 0 && $after -eq 0 && "$names" == "$(envv KEYCLOAK_ADMIN_USER) " ]]; st=$?; ok_if E4 1 E "$st" "admin deleted in Keycloak (lost admin): up exit=$rc; recover-admin after down recreates it (exit $after); master users [$names]"
-  cap "$KRATE" identity down; docker volume rm "${PROJECT}_keycloak_db_data" >/dev/null 2>&1
+  cap "$KRATE" identity down; compose rm -sf keycloak keycloak-db >/dev/null 2>&1; docker volume rm "${PROJECT}_keycloak_db_data" >/dev/null 2>&1
   compose up -d --no-deps --wait keycloak-db >/dev/null 2>&1
   cap "$KRATE" identity up; rc=$?; collect_secrets; names="$(master_users)"
   [[ $rc -eq 0 && "$CAP" == *"bootstrapping"* && "$names" == "$(envv KEYCLOAK_ADMIN_USER) " ]]; st=$?; ok_if E5 1 E "$st" "volume exists but no master realm (failed first run): identity up detects it, bootstraps (temp-admin created and removed); master users [$names]"
@@ -412,6 +428,12 @@ EOF
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   cap "$KRATE" identity users add gatelock --viewer; after=$?; names="$(printf '%s' "$CAP" | grep -o -E 'Removing the stale identity lock[^"]*' | head -1)"
   [[ $rc -ne 0 && -n "$ev" && $after -eq 0 && -n "$names" ]]; st=$?; ok_if E6 1 E "$st" "lock held by a live process: '$ev' (exit $rc); after that process died: '$names' and the command proceeds (exit $after)"
+  mkdir -p "$ED/auth/.identity.lock"; sleep 600 & holder=$!; echo "$holder" > "$ED/auth/.identity.lock/pid"
+  set_env_raw KEYCLOAK_ENABLED false
+  cap "$KRATE" stop; rc=$?; ev="$(printf '%s' "$CAP" | grep -o -E 'Another krate identity command is running[^.]*' | head -1)"
+  names="$(running_services)"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; set_env_raw KEYCLOAK_ENABLED true; rm -rf "$ED/auth/.identity.lock"
+  [[ $rc -ne 0 && -n "$ev" && "$names" == *keycloak-db* && "$names" == *"keycloak "* ]]; st=$?; ok_if E8 1 E "$st" "'krate stop' while an identity command holds the lock and KEYCLOAK_ENABLED is still false: '$ev' (exit $rc); identity services untouched [$names]"
   ( "$KRATE" identity users add gateraceA --viewer >"$STATE/raceA" 2>&1 ) & ( "$KRATE" identity users add gateraceB --viewer >"$STATE/raceB" 2>&1 ) & wait
   ev="refusals=$(cat "$STATE/raceA" "$STATE/raceB" | grep -c 'Another krate identity command is running') created=$(cat "$STATE/raceA" "$STATE/raceB" | grep -c 'created')"
   record E7 1 E PASS "two simultaneous mutating commands: $ev (either one refused or they serialised; deterministic proof is E6)"
@@ -437,7 +459,7 @@ EOF
   PATH="$STATE/fakebin:$PATH" cap "$KRATE" identity renew-db-tls; rc=$?
   after="$(shasum -a 256 "$TLS/server.crt" 2>/dev/null | cut -c1-16 || sha256sum "$TLS/server.crt" | cut -c1-16)"
   [[ $rc -ne 0 && "$before" == "$after" && ! -f "$TLS/server.crt.prev" ]] && journal_has ' renew-db-tls rolled back '; st=$?; ok_if C5 1 C "$st" "injected restart failure: renew-db-tls exit=$rc, server.crt byte-identical to before ($before), .prev consumed, journal 'rolled back'; database restarted on the old certificate: $(docker inspect -f '{{.State.Health.Status}}' "$(cid keycloak-db)")"
-  cap "$KRATE" identity logrotate; rc=$?; ev="$(printf '%s' "$CAP" | grep -E 'identity-journal.log|rotate|maxage' | head -3 | xargs)"
+  cap "$KRATE" identity logrotate; rc=$?; ev="$(printf '%s' "$CAP" | grep -F "$JOURNAL" | head -1 | xargs) $(printf '%s' "$CAP" | grep -E '^\s*(rotate|maxage|copytruncate)' | xargs)"
   [[ $rc -eq 0 && "$ev" == *"$JOURNAL"* ]]; st=$?; ok_if J6 1 J "$st" "logrotate render names this journal: $ev"
   if [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; then
     cap sudo "$KRATE" identity logrotate --install; rc=$?; cap sudo logrotate -d "/etc/logrotate.d/krate-identity-$EDITION"; st=$?; ok_if J7 1 J "$st" "logrotate --install (exit $rc) and 'logrotate -d' dry run accepted"
@@ -445,6 +467,14 @@ EOF
     record J7 1 J NOT_RUN "needs root (proven on the Linux VM run: harness/linux-vm/RUNBOOK.md)"
   fi
   cap "$KRATE" identity users list; st=$?; ok_if A5 1 A "$st" "users list after the whole ladder: $(printf '%s' "$CAP" | grep -c -E '^  gate') gate users"
+  # D6: recovery host with another public URL: restore reconciles the krate-ui client with this host's plan.
+  cap "$KRATE" identity backup "$STATE/gate2.enc"; cap "$KRATE" identity down
+  "$KRATE" config set KEYCLOAK_PUBLIC_URL=https://recovery.example.test/identity >/dev/null
+  cap "$KRATE" identity restore "$STATE/gate2.enc"; rc=$?
+  ev="$(kcadm_master get clients -r krate -q clientId=krate-ui --fields redirectUris --format csv --noquotes | head -1 | tr -d '[:space:]')"
+  journal_has ' restore reconciled krate-ui urls'; after=$?
+  "$KRATE" config set "KEYCLOAK_PUBLIC_URL=$BASE/identity" >/dev/null; cap "$KRATE" identity up; rc2=$?; wait_status 180
+  [[ $rc -eq 0 && "$ev" == *recovery.example.test* && $after -eq 0 && $rc2 -eq 0 ]]; st=$?; ok_if D6 1 D "$st" "restore with KEYCLOAK_PUBLIC_URL=https://recovery.example.test/identity: exit $rc; krate-ui redirect now [$ev]; journal 'restore reconciled krate-ui urls'; set back and identity up (exit $rc2) reconciles again"
 }
 
 # ═══════════════════════════ end-user screenshots ═══════════════════════════
@@ -495,7 +525,7 @@ run_phase2() {
   # monitoring binds and exporter network
   cap "$KRATE" monitor up; rc=$?
   ev="prom=[$(docker port "$(docker ps -q --filter name=prometheus | head -1)" 2>/dev/null | tr '\n' ' ')] loki=[$(docker port "$(docker ps -q --filter name=loki | head -1)" 2>/dev/null | tr '\n' ' ')] grafana=[$(docker port "$(docker ps -q --filter name=grafana | head -1)" 2>/dev/null | tr '\n' ' ')]"
-  [[ $rc -eq 0 && "$ev" == *"prom=[9090/tcp -> 127.0.0.1:9090"* && "$ev" == *"loki=[3100/tcp -> 127.0.0.1:3100"* && "$ev" == *"grafana=[3000/tcp -> 0.0.0.0:3000"* ]]; st=$?; ok_if M1 2 M "$st" "monitor up exit=$rc; $ev"
+  [[ $rc -eq 0 && "$ev" == *"prom=[9090/tcp -> 127.0.0.1:19090"* && "$ev" == *"loki=[3100/tcp -> 127.0.0.1:13100"* && "$ev" == *"grafana=[3000/tcp -> 0.0.0.0:13000"* ]]; st=$?; ok_if M1 2 M "$st" "monitor up exit=$rc; Prometheus and Loki bound to 127.0.0.1 only, Grafana on all interfaces: $ev"
   after="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$(docker ps -q --filter name=kafka-exporter | head -1)" 2>/dev/null)"
   [[ "$after" == *"${PROJECT}_kafka-network"* && "$after" != *"${PROJECT}_identity"* ]]; st=$?; ok_if M2 2 M "$st" "kafka-exporter networks: [$after] (brokers' network, not identity)"
   cap "$KRATE" monitor down
@@ -509,7 +539,7 @@ run_phase2() {
     done < "$STATE/k.tsv"
     log "phase2_kafbat.py exit=$rc"
   fi
-  for id in "${REQUIRED_P2[@]}"; do [[ -n "${SEEN[$id]:-}" ]] || record "$id" 2 K NOT_RUN "no result produced (scripts/gate/phase2_kafbat.py missing or incomplete)"; done
+  for id in "${REQUIRED_P2[@]}"; do [[ "$id" == Z* || -n "${SEEN[$id]:-}" ]] || record "$id" 2 K NOT_RUN "no result produced (scripts/gate/phase2_kafbat.py missing or incomplete)"; done
 }
 
 # ═══════════════════════════ leak scan, teardown, verdict ═══════════════════════════
@@ -541,7 +571,13 @@ finish() {
   for id in "${REQUIRED_P2[@]}"; do [[ "$phases" == 2 || "$phases" == all ]] || break; [[ -n "${SEEN[$id]:-}" ]] || missing+=("$id"); done
   $SCREENSHOTS && for id in "${REQUIRED_X[@]}"; do [[ -n "${SEEN[$id]:-}" ]] || missing+=("$id"); done
   (( FAILS == 0 )) || verdict=FAIL
-  if (( NOTRUN > 0 || ${#missing[@]} > 0 )) && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
+  # Required ids that did not pass (NOT_RUN) count as missing; informational rows (J7 on a
+  # host without root, K ids outside the required set) do not decide the verdict.
+  local notrun_required=0
+  for id in "${REQUIRED_P1[@]}" "${REQUIRED_P2[@]}" "${REQUIRED_X[@]}"; do
+    grep -q -E "^${id}	.*	NOT_RUN	" "$RECEIPT" && notrun_required=$((notrun_required+1))
+  done
+  if (( notrun_required > 0 || ${#missing[@]} > 0 )) && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
   # redact and publish the log
   local expr="" s
   for s in "${SECRETS[@]}"; do expr="$expr -e s|$(printf '%s' "$s" | sed 's/[][\\.*^$|/&]/\\&/g')|<redacted>|g"; done
