@@ -1452,7 +1452,7 @@ SCRIPT_DIR="$1"; umask 077; ensure_identity_dirs
         site = Path(tmp)
         result = run_bash(script, site)
         e(result.returncode == 0, f'ensure_identity_dirs failed: {result.stderr.strip()[:160]}')
-        for name in ('auth', 'auth/keycloak', 'auth/keycloak/truststores'):
+        for name in ('auth', 'auth/ui', 'auth/keycloak', 'auth/keycloak/truststores'):
             e((site / name).is_dir() and mode(site / name) == 0o755, f'{name} must be 755 under umask 077; got {mode(site / name) if (site / name).exists() else "missing":o}' if (site / name).exists() else f'{name} missing')
         (site / 'auth/keycloak/truststores').chmod(0o700)
         run_bash(script, site)

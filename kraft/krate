@@ -1163,10 +1163,11 @@ Otherwise restore the .env of this installation, or a backup: krate identity res
 # Directories the containers traverse through bind mounts are created with explicit
 # modes, whatever the operator's umask: under umask 077 they would be 700, and Keycloak
 # then cannot list KC_TRUSTSTORE_PATHS (it dies with "Cannot read the array length
-# because array is null"). The files inside keep their own modes (db-tls keys 600).
+# because array is null"); Kafbat (user kafkaui) mounts auth/ui the same way. The files
+# inside keep their own modes (db-tls keys 600).
 ensure_identity_dirs() {
-  install -d -m 755 "$SCRIPT_DIR/auth" "$SCRIPT_DIR/auth/keycloak" "$SCRIPT_DIR/auth/keycloak/truststores" \
-    || die "Could not create $SCRIPT_DIR/auth/keycloak/truststores"
+  install -d -m 755 "$SCRIPT_DIR/auth" "$SCRIPT_DIR/auth/ui" "$SCRIPT_DIR/auth/keycloak" "$SCRIPT_DIR/auth/keycloak/truststores" \
+    || die "Could not create the auth directories under $SCRIPT_DIR"
 }
 
 # The database TLS material (generated when absent, never over an incomplete

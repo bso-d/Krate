@@ -423,8 +423,10 @@ The same Kafbat configuration serves the brokered login: Keycloak stays the
 issuer and sends the user on to PingFederate. Agree the values in the
 [IAM guide](pingfederate-iam-guide.md); the VM and the user's browser must
 reach PingFederate on the ports in its approved endpoint URLs. Place the
-enterprise CA PEM file in `auth/keycloak/truststores/`; Keycloak uses it to
-check PingFederate TLS. Do not turn off certificate checks.
+enterprise CA PEM file in `auth/keycloak/truststores/` with mode 644 (the
+Keycloak container reads it as its own user; a file written under a 077 umask is
+600 and invisible to it); Keycloak uses it to check PingFederate TLS. Do not turn
+off certificate checks.
 
 Copy `sso/dual-example.json` to a private site file. Set `public_url`, the
 PingFederate issuer, client ID and endpoints, the two AD group names and
