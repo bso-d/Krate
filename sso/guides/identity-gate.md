@@ -178,12 +178,13 @@ Every id is one row of the receipt.
 | K30 | a second `auth apply` | kafka-ui container unchanged; prints `unchanged … sessions kept` |
 | K2–K26, K31, K32 | the Kafbat authorization ladder, `scripts/gate/phase2_kafbat.py` (viewer reads; every mutation refused by the backend with 403; admin mutates; no-group user refused at login; disabled user refused; shared login absent; ID-token issuer/audience checks; identity = `sub`; CSRF; POST-only logout ending the Keycloak session; back-channel logout measured; disabled user's session lifetime measured; open-redirect and proxy-header spoofing; both-groups user = administrator; group rename in `.env` leaves the realm alone; K31: XSRF cookie `Secure`, not HttpOnly, rotated at login; K32: error bodies carry no stack trace; the viewer's `GET /api/config` 403 is part of K2) | each case PASS with the observed status codes and measured seconds in the evidence |
 | K27/K28, M1/M2 | see G above | |
+| K17 | EPC | informational row (`owned by runner`): the EPC Compose rendering and CLI parity are S1/S4; the EPC runtime is the Phase 1 gate run inside the Rocky 9 VM (`--no-static --no-screenshots`, receipt under `harness/gate-receipts/epc-vm-<sha>/`) |
 
 ### Not covered by this runner, proven elsewhere
 
 | what | where | result |
 |---|---|---|
-| EPC runtime, offline bundle install on a RHEL-9 class host (SELinux enforcing), `logrotate --install` | Rocky Linux 9 Lima VM, `harness/linux-vm/RUNBOOK.md` (run 2 with commit ≥ 0b32a40) | see the run-2 section of the runbook |
+| EPC runtime, offline bundle install on a RHEL-9 class host (SELinux enforcing), `logrotate --install` | Rocky Linux 9 Lima VM, `harness/linux-vm/RUNBOOK.md` (clean-room run 2 at 0b32a40: all steps passed offline) and the Phase 1 gate run inside the VM (`harness/gate-receipts/epc-vm-<sha>/receipt.md`) | runbook run 2: PASS; gate receipt: see its verdict |
 | Ubuntu deb install | not run (no Ubuntu host in this programme yet) | open |
 | amd64 image builds | CI `broker-ci.yml` matrix; the Kafbat image is built per arch with `make kafbat-ui ARCH=amd64` on the bundling host | CI |
 

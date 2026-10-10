@@ -474,7 +474,7 @@ class Gate:
     def cluster_api(self) -> str:
         if not self.cluster:
             not_run('precondition: no Kafbat cluster name in runtime.yml')
-        return self.cluster_api()
+        return '/api/clusters/' + self.cluster
 
     def wanted(self, case):
         return self.only is None or case in self.only

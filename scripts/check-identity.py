@@ -559,6 +559,30 @@ def check_exposure(checks):
     e("IMAGE = 'krate/kafka-ui:1.5.0-sso.7'" in build, 'kafbat-ui/build.py must build sso.7 (the templates pin it)')
 
 
+def check_gate_scripts(checks):
+    """The gate helpers import and their pure helpers behave; --help works under python3 -I (a self-recursive helper once passed every static tool)."""
+    import types
+    e = lambda cond, msg: checks.expect(cond, 'gate scripts: ' + msg)  # noqa: E731
+    for name in ('scripts/gate/phase2_kafbat.py', 'scripts/gate/keycloak_login_flow.py'):
+        result = subprocess.run([sys.executable, '-I', str(ROOT / name), '--help'], text=True, capture_output=True)
+        e(result.returncode == 0 and 'usage' in result.stdout.lower(), f'{name} --help must exit 0; got {result.returncode}: {result.stderr.strip()[:120]}')
+    spec = importlib.util.spec_from_file_location('phase2_kafbat', ROOT / 'scripts/gate/phase2_kafbat.py')
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    gate = types.SimpleNamespace(cluster='cluster-x', kc='client')
+    e(module.Gate.cluster_api(gate) == '/api/clusters/cluster-x', 'Gate.cluster_api builds the cluster path without recursion')
+    e(module.Gate.keycloak(gate) == 'client', 'Gate.keycloak returns the initialised client')
+    for attr, value in (('cluster', None), ('kc', None)):
+        try:
+            getattr(module.Gate, 'cluster_api' if attr == 'cluster' else 'keycloak')(types.SimpleNamespace(**{attr: value, 'kc': 'c', 'cluster': 'c'} | {attr: value}))
+            e(False, f'Gate helper must refuse a missing {attr}')
+        except module.Outcome as outcome:
+            e(outcome.status == 'NOT_RUN', f'a missing {attr} is NOT_RUN with a reason; got {outcome.status}')
+    e(isinstance(module.Gate.__dict__['follow'], staticmethod), 'Gate.follow is static (no self)')
+    e(set(module.CASES) == {f'K{i}' for i in range(1, 27)} | {'K31', 'K32'}, f'CASES are K1-K26, K31, K32; got {module.CASES}')
+
+
 def check_parity(checks):
     result = subprocess.run(['diff', '-U0', str(ROOT / 'kraft/krate'), str(ROOT / 'epc/krate')], text=True, capture_output=True)
     hunks = re.split(r'^(?=@@ )', result.stdout, flags=re.MULTILINE)[1:]
@@ -1102,7 +1126,7 @@ def check_backup_seal(checks):
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_parity, check_zk_frozen, check_writers, check_backup_seal,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight):
         try:
             check(checks)

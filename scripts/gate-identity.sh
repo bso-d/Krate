@@ -150,7 +150,7 @@ kcadm_master() { # kcadm args, authenticated as the master admin from .env (pass
   local c; c="$(cid keycloak)"
   KC_CLI_PASSWORD="$(envv KEYCLOAK_ADMIN_PASSWORD)" docker exec -e KC_CLI_PASSWORD "$c" /opt/keycloak/bin/kcadm.sh config credentials \
     --server http://localhost:8080/identity --realm master --user "$(envv KEYCLOAK_ADMIN_USER)" --config /tmp/kcadm-gate.config >/dev/null 2>&1 || return 1
-  docker exec "$c" /opt/keycloak/bin/kcadm.sh "$@" --config /tmp/kcadm-gate.config 2>&1
+  docker exec "$c" /opt/keycloak/bin/kcadm.sh "$@" --config /tmp/kcadm-gate.config 2>>"$RAW"
 }
 master_users() { kcadm_master get users -r master --fields username --format csv --noquotes | sort | tr '\n' ' '; }
 wait_status() { # wait until `identity status` exits 0 (max $1 s)
@@ -325,9 +325,10 @@ run_phase1() {
   # brute force: 5 wrong passwords lock the account temporarily
   add_user gateb --viewer; TEMP_PW="wrong-$RANDOM"
   for _ in 1 2 3 4 5; do flow login --base "$BASE" --user gateb --password-env GATE_TEMP_PW --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect refused >/dev/null 2>&1; done
-  uid="$(kcadm_master get users -r krate -q username=gateb -q exact=true --fields id --format csv --noquotes | head -1 | tr -d '[:space:]')"
+  uid="$(kcadm_master get users -r krate -q username=gateb -q exact=true --fields id --format csv --noquotes | grep -o -E '[0-9a-f-]{36}' | head -1)"
   ev="$(kcadm_master get "attack-detection/brute-force/users/$uid" -r krate | tr -d ' \n')"
   [[ "$ev" == *'"disabled":true'* && "$ev" =~ \"numFailures\":[2-9] ]]; st=$?; ok_if B5 1 B "$st" "after 5 rapid wrong passwords the account is temporarily locked (brute-force detection; Keycloak's quick-login check locks after two rapid failures, later attempts are not counted): $ev"
+  sleep 61  # a code is single-use: let the step gatea's B1 login consumed expire before using "the previous step"
   cap flow login --base "$BASE" --state "$STATE/gatea.json" --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect ok --totp-offset -1; st=$?; ok_if B7 1 B "$st" "a one-time code from the previous 30-second step is accepted (realm look-ahead window 1, Keycloak's documented default): $(printf '%s' "$CAP" | tail -1 | cut -c1-60)"
   cap "$KRATE" identity users reset-password gatev; rc=$?; [[ -n "$(temp_password "$CAP")" ]]; st=$?; ok_if B6 1 B "$st" "reset-password sets a new temporary password (exit $rc; shown once)"
   TEMP_PW="$(temp_password "$CAP")"
@@ -379,8 +380,8 @@ run_phase1() {
   export KRATE_BACKUP_PASSPHRASE; KRATE_BACKUP_PASSPHRASE="$(openssl rand -base64 18)"; collect_secrets
   cap "$KRATE" identity users list; users_at_backup="$(printf '%s' "$CAP" | grep -c -E '^  gate[a-z]+ ')"
   cap "$KRATE" identity backup "$STATE/gate.enc"; rc=$?
-  ev="mode=$(stat -f %Lp "$STATE/gate.enc" 2>/dev/null || stat -c %a "$STATE/gate.enc") magic=$(head -c 24 "$STATE/gate.enc" | tr -d '\n')"
-  [[ $rc -eq 0 && "$ev" == "mode=600 magic=krate-identity-backup/1" ]]; st=$?; ok_if D1 1 D "$st" "identity backup: exit $rc; $ev; $(stat -f %z "$STATE/gate.enc" 2>/dev/null || stat -c %s "$STATE/gate.enc") bytes"
+  ev="mode=$(stat -c %a "$STATE/gate.enc" 2>/dev/null || stat -f %Lp "$STATE/gate.enc") magic=$(head -c 24 "$STATE/gate.enc" | tr -d '\n')"
+  [[ $rc -eq 0 && "$ev" == "mode=600 magic=krate-identity-backup/1" ]]; st=$?; ok_if D1 1 D "$st" "identity backup: exit $rc; $ev; $(stat -c %s "$STATE/gate.enc" 2>/dev/null || stat -f %z "$STATE/gate.enc") bytes"
   cap "$KRATE" identity rotate KEYCLOAK_CLI_CLIENT_SECRET; collect_secrets; cli_after_rotate="$(envv KEYCLOAK_CLI_CLIENT_SECRET)"; db_before="$(envv KEYCLOAK_DB_PASSWORD)"
   add_user gatem --viewer
   cap "$KRATE" identity restore "$STATE/gate.enc"; rc=$?
@@ -415,7 +416,7 @@ EOF
   cap "$KRATE" identity down; cap "$KRATE" identity recover-admin; rc2=$?; collect_secrets
   cap "$KRATE" identity up; wait_status 180; names="$(master_users)"
   [[ $rc -ne 0 && -n "$ev" && $after -ne 0 && $rc2 -eq 0 && "$names" == "$(envv KEYCLOAK_ADMIN_USER) " ]]; st=$?; ok_if E3 1 E "$st" "wrong admin password: up exit=$rc with recover-admin hint; recover-admin refused while running (exit $after); after down it recreates the admin (exit $rc2); master users [$names]"
-  uid="$(kcadm_master get users -r master -q username="$(envv KEYCLOAK_ADMIN_USER)" -q exact=true --fields id --format csv --noquotes | head -1 | tr -d '[:space:]')"
+  uid="$(kcadm_master get users -r master -q username="$(envv KEYCLOAK_ADMIN_USER)" -q exact=true --fields id --format csv --noquotes | grep -o -E '[0-9a-f-]{36}' | head -1)"
   kcadm_master delete "users/$uid" -r master >/dev/null 2>&1
   cap "$KRATE" identity up; rc=$?; cap "$KRATE" identity down; cap "$KRATE" identity recover-admin; after=$?; cap "$KRATE" identity up; wait_status 180; names="$(master_users)"
   [[ $rc -ne 0 && $after -eq 0 && "$names" == "$(envv KEYCLOAK_ADMIN_USER) " ]]; st=$?; ok_if E4 1 E "$st" "admin deleted in Keycloak (lost admin): up exit=$rc; recover-admin after down recreates it (exit $after); master users [$names]"
@@ -471,7 +472,7 @@ EOF
   cap "$KRATE" identity backup "$STATE/gate2.enc"; cap "$KRATE" identity down
   "$KRATE" config set KEYCLOAK_PUBLIC_URL=https://recovery.example.test/identity >/dev/null
   cap "$KRATE" identity restore "$STATE/gate2.enc"; rc=$?
-  ev="$(kcadm_master get clients -r krate -q clientId=krate-ui --fields redirectUris --format csv --noquotes | head -1 | tr -d '[:space:]')"
+  ev="$(kcadm_master get clients -r krate -q clientId=krate-ui --fields redirectUris --format csv --noquotes | grep -F 'https://' | head -1 | tr -d '[:space:]')"
   journal_has ' restore reconciled krate-ui urls'; after=$?
   "$KRATE" config set "KEYCLOAK_PUBLIC_URL=$BASE/identity" >/dev/null; cap "$KRATE" identity up; rc2=$?; wait_status 180
   [[ $rc -eq 0 && "$ev" == *recovery.example.test* && $after -eq 0 && $rc2 -eq 0 ]]; st=$?; ok_if D6 1 D "$st" "restore with KEYCLOAK_PUBLIC_URL=https://recovery.example.test/identity: exit $rc; krate-ui redirect now [$ev]; journal 'restore reconciled krate-ui urls'; set back and identity up (exit $rc2) reconciles again"
@@ -567,7 +568,7 @@ teardown() {
 finish() {
   local verdict=PASS missing=() id phases
   phases="$PHASE"
-  for id in "${REQUIRED_P1[@]}"; do [[ "$phases" == 1 || "$phases" == all ]] || break; [[ -n "${SEEN[$id]:-}" ]] || missing+=("$id"); done
+  for id in "${REQUIRED_P1[@]}"; do [[ "$phases" == 1 || "$phases" == all ]] || break; $STATIC || [[ "$id" != S* ]] || continue; [[ -n "${SEEN[$id]:-}" ]] || missing+=("$id"); done
   for id in "${REQUIRED_P2[@]}"; do [[ "$phases" == 2 || "$phases" == all ]] || break; [[ -n "${SEEN[$id]:-}" ]] || missing+=("$id"); done
   $SCREENSHOTS && for id in "${REQUIRED_X[@]}"; do [[ -n "${SEEN[$id]:-}" ]] || missing+=("$id"); done
   (( FAILS == 0 )) || verdict=FAIL
@@ -575,14 +576,32 @@ finish() {
   # host without root, K ids outside the required set) do not decide the verdict.
   local notrun_required=0
   for id in "${REQUIRED_P1[@]}" "${REQUIRED_P2[@]}" "${REQUIRED_X[@]}"; do
+    $STATIC || [[ "$id" != S* ]] || continue   # --no-static: the static ids are proven on the repository host
+    [[ "$phases" == all || "$id" != K* && "$id" != M* && "$id" != Z2 ]] || continue  # --phase 1: no Phase 2 ids
     grep -q -E "^${id}	.*	NOT_RUN	" "$RECEIPT" && notrun_required=$((notrun_required+1))
   done
   if (( notrun_required > 0 || ${#missing[@]} > 0 )) && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
-  # redact and publish the log
-  local expr="" s
-  for s in "${SECRETS[@]}"; do expr="$expr -e s|$(printf '%s' "$s" | sed 's/[][\\.*^$|/&]/\\&/g')|<redacted>|g"; done
-  if [[ -n "$expr" ]]; then eval "sed $expr" < "$RAW" > "$OUT/run.log"; else cp "$RAW" "$OUT/run.log"; fi
-  rm -f "$RAW"; rm -rf "$STATE"
+  # Redact and publish the log: the secret values go to python through a 0600 file, never through
+  # a shell expression; the raw log stays (0600) when the redacted copy could not be written.
+  local secrets_file="$STATE/secrets.txt"
+  : > "$secrets_file"; chmod 600 "$secrets_file"
+  printf '%s\n' "${SECRETS[@]}" >> "$secrets_file"
+  if python3 - "$RAW" "$OUT/run.log" "$secrets_file" <<'PYEOF'
+import sys
+raw, out, secrets_path = sys.argv[1:4]
+secrets = [line.rstrip('\n') for line in open(secrets_path, encoding='utf-8', errors='replace') if line.strip()]
+data = open(raw, encoding='utf-8', errors='replace').read()
+for value in sorted(set(secrets), key=len, reverse=True):
+    data = data.replace(value, '<redacted>')
+open(out, 'w', encoding='utf-8').write(data)
+sys.exit(0 if data else 1)
+PYEOF
+  then
+    rm -f "$RAW"
+  else
+    log "WARNING: redaction failed; the raw log is kept at $RAW (mode 600) and must be redacted by hand"
+  fi
+  rm -rf "$STATE"
   {
     echo "# Krate identity gate receipt"
     echo
