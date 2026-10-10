@@ -618,6 +618,11 @@ Items 1 to 4 confirm what Phase 1 implements. Items 5 to 13 need a choice.
 Each item lists the options, the recommended one, why, and the sources.
 Quotes are from the sources listed at the end of this section.
 
+**Decided 2026-10-10 (owner):** items 1 to 4 confirmed; for items 5 to 13 the
+recommended option was accepted. Items 7 (B), 8 (B), 9 (B) and 13 (B) are the
+first Phase 2 commits; item 6 (B) is revisited when Phase 2 adds the Kafbat
+side; item 8 (D) belongs to Phase 4.
+
 ### 1. Local mode (confirm)
 
 Implemented: local user accounts in realm `krate`; every integrated UI uses
