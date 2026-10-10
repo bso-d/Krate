@@ -509,6 +509,13 @@ def check_exposure(checks):
             block = nginx.find('    location ^~ ' + path + ' {\n        return 404;')
             e(0 <= block < public, f'{edition}/nginx.conf: {path} must return 404 before the catch-all location /')
         e('X-Forwarded-Port $server_port' not in nginx, f'{edition}/nginx.conf: must not forward the container listening port as X-Forwarded-Port (the client port is in X-Forwarded-Host)')
+        # nginx discards the server-level proxy_set_header directives in any location that sets its own:
+        # every proxied location must restate the client address headers itself.
+        for block in re.findall(r'location [^{]+\{(.*?)\n    \}', nginx, re.S):
+            if 'proxy_pass' not in block or 'proxy_set_header' not in block:
+                continue  # no own headers: the server-level X-Forwarded-For/X-Real-IP apply
+            e('proxy_set_header X-Forwarded-For $remote_addr;' in block and 'proxy_set_header X-Real-IP $remote_addr;' in block,
+              f'{edition}/nginx.conf: a proxied location must set X-Forwarded-For and X-Real-IP to $remote_addr itself: {block.strip()[:60]!r}')
         for header in ('Forwarded', 'X-Forwarded-Prefix', 'X-Forwarded-Ssl', 'X-Forwarded-Port'):
             e(nginx.count(f'proxy_set_header {header} "";') == nginx.count('proxy_set_header X-Forwarded-Host $http_host;') == 4,
               f'{edition}/nginx.conf: every proxied location must clear the client-supplied {header} header')

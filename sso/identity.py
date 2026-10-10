@@ -6,6 +6,7 @@ runtime.yml carry ``${VAR}`` placeholders that Keycloak and Kafbat resolve from
 their container environment.
 """
 import argparse
+from typing import Any
 import datetime
 import hashlib
 import hmac
@@ -395,8 +396,19 @@ def runtime(values):
     }
 
 
+def without_credentials(data: Any) -> Any:
+    """A deep copy of a plan with every *secret*/*password* key removed, for anything that prints."""
+    if isinstance(data, dict):
+        return {key: without_credentials(value) for key, value in data.items()
+                if not any(marker in key.lower() for marker in ('secret', 'password'))}
+    if isinstance(data, list):
+        return [without_credentials(item) for item in data]
+    return data
+
+
 def runtime_summary(data, path, outcome):
-    """Human-readable description of a Kafbat plan; it never touches a credential field."""
+    """Human-readable description of a Kafbat plan; it receives a copy without credential keys."""
+    data = without_credentials(data)
     client = data['auth']['oauth2']['client'][UI_REGISTRATION]
     roles = {role['name']: role for role in data['rbac']['roles']}
     viewer_topic = next(p for p in roles['viewer']['permissions'] if p['resource'] == 'topic')
