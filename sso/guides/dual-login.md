@@ -259,8 +259,9 @@ request.
   with their own headers; they are trusted infrastructure of this deployment,
   and the identity side is protected independently by
   `KC_PROXY_TRUSTED_ADDRESSES`.
-- The proxy answers 404 for Kafbat's unauthenticated `/metrics`, `/actuator/`
-  and `/logout/connect/` paths; metrics per cluster are read through the
+- The proxy answers 404 for Kafbat's unauthenticated `/metrics`, `/actuator`
+  and `/logout/connect` paths (prefixes: the base paths and everything below
+  them; `/actuator` alone is Spring's endpoint discovery page); metrics per cluster are read through the
   signed-in API (`/api/clusters/<name>/metrics`, viewer permission).
 - The viewer role has no `applicationconfig` permission: that view renders
   the running Kafbat configuration, client secret included. Viewers see

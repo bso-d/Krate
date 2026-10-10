@@ -509,9 +509,12 @@ def check_exposure(checks):
     for edition in EDITIONS:
         nginx = (ROOT / edition / 'nginx.conf').read_text()
         public = nginx.index('    location / {')
-        for path in ('/metrics', '/actuator/', '/logout/connect/'):
+        for path in ('/metrics', '/actuator', '/logout/connect'):
+            # The prefix must not end in a slash: `location ^~ /actuator/` leaves the base path /actuator
+            # (Spring's unauthenticated endpoint discovery page) to the catch-all (GHAS on PR #39).
             block = nginx.find('    location ^~ ' + path + ' {\n        return 404;')
-            e(0 <= block < public, f'{edition}/nginx.conf: {path} must return 404 before the catch-all location /')
+            e(0 <= block < public, f'{edition}/nginx.conf: {path} (no trailing slash, so the base path is covered) must return 404 before the catch-all location /')
+            e('location ^~ ' + path + '/ {' not in nginx, f'{edition}/nginx.conf: {path}/ with a trailing slash would leave {path} itself reachable')
         e('X-Forwarded-Port $server_port' not in nginx, f'{edition}/nginx.conf: must not forward the container listening port as X-Forwarded-Port (the client port is in X-Forwarded-Host)')
         # nginx discards the server-level proxy_set_header directives in any location that sets its own
         # (AGENTS.md rule 13): every such location must restate the whole server-level set itself.
@@ -1299,8 +1302,8 @@ grep -E '^KRATE_PROXY_' "$ENV_FILE"
         (site / 'certs/server.crt').write_text('certificate one\n')
         (site / 'certs/server.key').write_text('key one\n')
 
-        def env_file(url):
-            write_env(site, {'KAFKA_UI_AUTH_CONFIG': 'local.yml', 'KEYCLOAK_PUBLIC_URL': url,
+        def env_file(public_url):
+            write_env(site, {'KAFKA_UI_AUTH_CONFIG': 'local.yml', 'KEYCLOAK_PUBLIC_URL': public_url,
                              'KRATE_PROXY_CONF_SHA': '', 'KRATE_PROXY_PUBLIC_HOST': ''})
 
         def sync(auth_mode=''):
