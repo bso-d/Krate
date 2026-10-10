@@ -448,6 +448,7 @@ class Gate:
         self.kc: Optional[Kcadm] = None
         self.tls = None
         self.fixture_data = None
+        self.fixture_seconds = None
         self.idle_thread = None
         self.idle_result = None
         self.terminated = False
@@ -732,11 +733,24 @@ class Gate:
         topic = 'gate2-fix-' + self.run_id
         groups = ['gate2-cg-' + self.run_id, 'gate2-cgdel-' + self.run_id]
         c = self.cluster_api()
-        response = admin.api('POST', c + '/topics', {'name': topic, 'partitions': 1, 'replicationFactor': 1})
-        if response.status != 200:
-            self.fixture_data = 'precondition: admin1 could not create the fixture topic (%s %s)' % (
-                response.status, response.snippet())
+        # The first mutation after `krate start` is the slow one (the brokers' first metadata/controller
+        # round trip through Kafbat's admin client); it gets the K5 budget and one retry, and its
+        # duration is recorded so the K5 evidence shows what the fixture host did.
+        started = time.monotonic()
+        response = None
+        for attempt in (1, 2):
+            try:
+                response = admin.api('POST', c + '/topics', {'name': topic, 'partitions': 1, 'replicationFactor': 1},
+                                     timeout=K5_TIMEOUT)
+                break
+            except (TimeoutError, OSError) as error:
+                log('fixture: create topic attempt %d failed after %.0fs: %s' % (attempt, time.monotonic() - started, error))
+        self.fixture_seconds = time.monotonic() - started
+        if response is None or response.status != 200:
+            self.fixture_data = 'precondition: admin1 could not create the fixture topic (%s after %.0fs)' % (
+                '%s %s' % (response.status, response.snippet()) if response is not None else 'timed out twice', self.fixture_seconds)
             not_run(self.fixture_data)
+        log('fixture: topic created in %.1fs' % self.fixture_seconds)
         self.cleanup_topics.add(topic)
         for index in range(3):
             admin.api('POST', '%s/topics/%s/messages' % (c, topic),
@@ -947,9 +961,9 @@ class Gate:
             bad.append('topic still present after delete')
         self.cleanup_groups.discard(f['group_del'])
         core_ok = sum(1 for item in seen[:len(core)] if item.split('=')[1].startswith('2'))
-        text = 'admin1 core %d/%d 2xx (%s); not 403: %s; deleted topic GET=%s' % (
+        text = 'admin1 core %d/%d 2xx (%s); not 403: %s; deleted topic GET=%s; fixture topic created in %s' % (
             core_ok, len(core), ','.join(item.split('=')[0] for item in seen[:len(core)]),
-            ' '.join(seen[len(core):]), gone)
+            ' '.join(seen[len(core):]), gone, '%.1fs' % self.fixture_seconds if self.fixture_seconds is not None else 'n/a')
         if bad or forbidden:
             fail('%s; %s' % (' '.join(bad + ['403:' + x for x in forbidden]), text))
         return 'PASS', text
