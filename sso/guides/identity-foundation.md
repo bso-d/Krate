@@ -826,7 +826,12 @@ minutes or longer" [S6]; 8 hours and 15 minutes are inside those bounds, and
 15 minutes matches the stricter AAL3 inactivity limit. The 5-minute token
 bounds how long a revoked user keeps a valid bearer token (the handover's
 "residual-access deadline"); Keycloak documents the three realm settings that
-carry these values [S7].
+carry these values [S7]. For comparison, Keycloak's own defaults for a new
+realm are 300 s access token, 30 minutes idle and 10 hours maximum
+(`Constants.DEFAULT_ACCESS_TOKEN_LIFESPAN`, `DEFAULT_SESSION_IDLE_TIMEOUT`,
+`DEFAULT_SESSION_MAX_LIFESPAN`, applied by `DefaultExportImportManager`
+[S18]): the token value is Keycloak's default, the two session limits are
+stricter.
 
 ### 5. Group precedence
 
@@ -1042,5 +1047,8 @@ hint. See "`./krate identity logrotate [--install]`".
   <https://github.com/keycloak/keycloak/blob/26.8.0/docs/guides/server/importExport.adoc>
 - [S16] Keycloak 26.8.0 Admin REST API:
   <https://www.keycloak.org/docs-api/26.8.0/rest-api/index.html>
+- [S18] Keycloak 26.8.0 realm defaults:
+  <https://github.com/keycloak/keycloak/blob/26.8.0/server-spi-private/src/main/java/org/keycloak/models/Constants.java#L59>,
+  <https://github.com/keycloak/keycloak/blob/26.8.0/model/storage-private/src/main/java/org/keycloak/storage/datastore/DefaultExportImportManager.java#L255-L266>
 - [S17] Docker Compose CLI reference, `docker compose restart`:
   <https://docs.docker.com/reference/cli/docker/compose/restart/>

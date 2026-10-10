@@ -1,68 +1,22 @@
 diff --git a/api/src/main/java/io/kafbat/ui/config/auth/NativeLoginSupport.java b/api/src/main/java/io/kafbat/ui/config/auth/NativeLoginSupport.java
 new file mode 100644
-index 0000000..3f02c35
+index 0000000..569ec29
 --- /dev/null
 +++ b/api/src/main/java/io/kafbat/ui/config/auth/NativeLoginSupport.java
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,44 @@
 +package io.kafbat.ui.config.auth;
 +
-+import io.kafbat.ui.service.rbac.AccessControlService;
-+import java.util.Collection;
-+import java.util.List;
-+import org.springframework.core.env.Environment;
-+import org.springframework.security.authentication.ReactiveAuthenticationManager;
-+import org.springframework.security.authentication.UserDetailsRepositoryReactiveAuthenticationManager;
-+import org.springframework.security.core.authority.SimpleGrantedAuthority;
-+import org.springframework.security.core.userdetails.User;
-+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 +import org.springframework.security.oauth2.client.registration.ReactiveClientRegistrationRepository;
++import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestCustomizers;
 +import org.springframework.security.oauth2.client.web.server.DefaultServerOAuth2AuthorizationRequestResolver;
 +import org.springframework.security.oauth2.client.web.server.ServerOAuth2AuthorizationRequestResolver;
-+import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestCustomizers;
 +import org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest;
-+import org.springframework.util.Assert;
 +import org.springframework.web.server.ServerWebExchange;
 +import reactor.core.publisher.Mono;
 +
-+/** Local shared login and an optional identity hint; OAuth authentication remains Spring's. */
++/** PKCE plus a bounded, non-authoritative identity hint; OAuth authentication remains Spring's. */
 +public final class NativeLoginSupport {
 +  private NativeLoginSupport() { }
-+
-+  public static boolean sharedEnabled(Environment environment) {
-+    return environment.getProperty("auth.oauth2.allow-shared-login", Boolean.class, false);
-+  }
-+
-+  public static ReactiveAuthenticationManager sharedManager(Environment environment, AccessControlService acs) {
-+    String username = environment.getRequiredProperty("spring.security.user.name");
-+    String password = environment.getRequiredProperty("spring.security.user.password");
-+    String role = environment.getRequiredProperty("auth.oauth2.shared-role");
-+    Assert.hasText(username, "Shared username is required");
-+    Assert.hasText(password, "Shared password is required");
-+    Assert.isTrue(acs.isRbacEnabled() && acs.getRoles().stream().anyMatch(r -> role.equals(r.getName())),
-+        "Shared login requires a configured RBAC role");
-+    var encoder = new BCryptPasswordEncoder();
-+    String hash = encoder.encode(password);
-+    var manager = new UserDetailsRepositoryReactiveAuthenticationManager(
-+        name -> Mono.<org.springframework.security.core.userdetails.UserDetails>just(
-+            new SharedUser(username, hash, role)).filter(u -> u.getUsername().equals(name)));
-+    manager.setPasswordEncoder(encoder);
-+    return manager;
-+  }
-+
-+  private static final class SharedUser extends User implements RbacUser {
-+    private final String role;
-+
-+    SharedUser(String username, String hash, String role) {
-+      super(username, hash, List.of(new SimpleGrantedAuthority(role)));
-+      this.role = role;
-+    }
-+
-+    @Override
-+    public String name() { return getUsername(); }
-+
-+    @Override
-+    public Collection<String> groups() { return List.of(role); }
-+  }
 +
 +  public static ServerOAuth2AuthorizationRequestResolver resolver(ReactiveClientRegistrationRepository clients) {
 +    var delegate = new DefaultServerOAuth2AuthorizationRequestResolver(clients);
@@ -95,30 +49,79 @@ index 0000000..3f02c35
 +  }
 +}
 diff --git a/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java b/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
-index 16b75d4..a56bf10 100644
+index 16b75d4..23a280d 100644
 --- a/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
 +++ b/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
-@@ -11,6 +11,11 @@ import java.util.Optional;
- import lombok.RequiredArgsConstructor;
- import lombok.extern.slf4j.Slf4j;
- import org.springframework.beans.factory.annotation.Qualifier;
+@@ -5,6 +5,7 @@ import io.kafbat.ui.service.rbac.AccessControlService;
+ import io.kafbat.ui.service.rbac.extractor.ProviderAuthorityExtractor;
+ import io.kafbat.ui.util.StaticFileWebFilter;
+ import java.util.ArrayList;
++import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Optional;
+@@ -18,10 +19,13 @@ import org.springframework.boot.autoconfigure.security.oauth2.resource.OAuth2Res
+ import org.springframework.boot.context.properties.EnableConfigurationProperties;
+ import org.springframework.context.annotation.Bean;
+ import org.springframework.context.annotation.Configuration;
 +import org.springframework.core.env.Environment;
-+import org.springframework.http.HttpMethod;
+ import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+ import org.springframework.security.authentication.DelegatingReactiveAuthenticationManager;
++import org.springframework.security.config.Customizer;
+ import org.springframework.security.config.annotation.method.configuration.EnableReactiveMethodSecurity;
+ import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
++import org.springframework.security.config.web.server.OidcBackChannelServerLogoutHandler;
+ import org.springframework.security.config.web.server.SecurityWebFiltersOrder;
+ import org.springframework.security.config.web.server.ServerHttpSecurity;
+ import org.springframework.security.oauth2.client.authentication.OAuth2LoginReactiveAuthenticationManager;
+@@ -29,6 +33,9 @@ import org.springframework.security.oauth2.client.endpoint.OAuth2AuthorizationCo
+ import org.springframework.security.oauth2.client.endpoint.ReactiveOAuth2AccessTokenResponseClient;
+ import org.springframework.security.oauth2.client.endpoint.WebClientReactiveAuthorizationCodeTokenResponseClient;
+ import org.springframework.security.oauth2.client.oidc.authentication.OidcAuthorizationCodeReactiveAuthenticationManager;
++import org.springframework.security.oauth2.client.oidc.authentication.OidcIdTokenValidator;
++import org.springframework.security.oauth2.client.oidc.server.session.InMemoryReactiveOidcSessionRegistry;
++import org.springframework.security.oauth2.client.oidc.server.session.ReactiveOidcSessionRegistry;
+ import org.springframework.security.oauth2.client.oidc.userinfo.OidcReactiveOAuth2UserService;
+ import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserRequest;
+ import org.springframework.security.oauth2.client.oidc.web.server.logout.OidcClientInitiatedServerLogoutSuccessHandler;
+@@ -38,13 +45,25 @@ import org.springframework.security.oauth2.client.registration.ReactiveClientReg
+ import org.springframework.security.oauth2.client.userinfo.DefaultReactiveOAuth2UserService;
+ import org.springframework.security.oauth2.client.userinfo.OAuth2UserRequest;
+ import org.springframework.security.oauth2.client.userinfo.ReactiveOAuth2UserService;
++import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 +import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
 +import org.springframework.security.oauth2.core.OAuth2Error;
-+import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatchers;
- import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
- import org.springframework.boot.autoconfigure.security.oauth2.client.OAuth2ClientProperties;
- import org.springframework.boot.autoconfigure.security.oauth2.client.OAuth2ClientPropertiesMapper;
-@@ -58,6 +63,7 @@ import reactor.netty.http.client.HttpClient;
++import org.springframework.security.oauth2.core.OAuth2ErrorCodes;
+ import org.springframework.security.oauth2.core.oidc.user.OidcUser;
+ import org.springframework.security.oauth2.core.user.OAuth2User;
++import org.springframework.security.oauth2.jwt.JwtValidators;
+ import org.springframework.security.oauth2.jwt.NimbusReactiveJwtDecoder;
+ import org.springframework.security.oauth2.server.resource.introspection.SpringReactiveOpaqueTokenIntrospector;
+ import org.springframework.security.web.server.SecurityWebFilterChain;
++import org.springframework.security.web.server.authentication.logout.DelegatingServerLogoutHandler;
++import org.springframework.security.web.server.authentication.logout.SecurityContextServerLogoutHandler;
+ import org.springframework.security.web.server.authentication.logout.ServerLogoutSuccessHandler;
++import org.springframework.security.web.server.authentication.logout.WebSessionServerLogoutHandler;
++import org.springframework.security.web.server.csrf.CookieServerCsrfTokenRepository;
++import org.springframework.security.web.server.csrf.CsrfToken;
++import org.springframework.security.web.server.csrf.ServerCsrfTokenRequestAttributeHandler;
+ import org.springframework.web.reactive.function.client.WebClient;
++import org.springframework.web.server.WebFilter;
+ import reactor.core.publisher.Mono;
+ import reactor.netty.http.client.HttpClient;
+ 
+@@ -57,7 +76,10 @@ import reactor.netty.http.client.HttpClient;
+ @Slf4j
  public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
  
++  private static final String REQUIRE_MAPPED_ROLE = "auth.oauth2.require-mapped-role";
++
    private final OAuthProperties properties;
 +  private final Environment environment;
  
    /**
     * WebClient configured to use system proxy properties (http.proxyHost/https.proxyHost,
-@@ -78,7 +84,9 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -78,17 +100,37 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
        ReactiveOAuth2AccessTokenResponseClient<OAuth2AuthorizationCodeGrantRequest> tokenResponseClient,
        ReactiveOAuth2UserService<OidcUserRequest, OidcUser> oidcUserService,
        ReactiveOAuth2UserService<OAuth2UserRequest, OAuth2User> oauth2UserService,
@@ -129,54 +132,141 @@ index 16b75d4..a56bf10 100644
    ) {
      log.info("Configuring OAUTH2 authentication.");
  
-@@ -102,10 +110,24 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
++    if (requireMappedRole()) {
++      if (!acs.isRbacEnabled()) {
++        throw new IllegalArgumentException("SSO requires explicit RBAC roles");
++      }
++      if (properties.getResourceServer() != null) {
++        // A bearer token authenticates a Jwt principal that is not an RbacUser, which
++        // AccessControlService does not restrict. Refuse to start rather than bypass RBAC.
++        throw new IllegalArgumentException("SSO with a required mapped role does not permit a resource server");
++      }
++    }
++
+     var oidcAuthManager =
+         new OidcAuthorizationCodeReactiveAuthenticationManager(tokenResponseClient, oidcUserService);
+ 
+-    oidcAuthManager.setJwtDecoderFactory(clientRegistration ->
+-        NimbusReactiveJwtDecoder.withJwkSetUri(clientRegistration.getProviderDetails().getJwkSetUri())
+-            .webClient(webClient)
+-            .build());
++    oidcAuthManager.setJwtDecoderFactory(clientRegistration -> {
++      var decoder = NimbusReactiveJwtDecoder.withJwkSetUri(clientRegistration.getProviderDetails().getJwkSetUri())
++          .webClient(webClient)
++          .build();
++      // The bare decoder checks only the signature and timestamps. Add Spring's ID token
++      // validator so issuer, audience, azp, exp and iat are checked against the registration,
++      // as Spring's default ReactiveOidcIdTokenDecoderFactory does.
++      decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(List.of(
++          JwtValidators.createDefault(), new OidcIdTokenValidator(clientRegistration))));
++      return decoder;
++    });
+ 
+     var oauth2AuthManager =
+         new OAuth2LoginReactiveAuthenticationManager(tokenResponseClient, oauth2UserService);
+@@ -102,9 +144,21 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
              .anyExchange()
              .authenticated()
          )
 -        .oauth2Login(oauth2 -> oauth2.authenticationManager(delegatingAuthManager))
+-        .logout(spec -> spec.logoutSuccessHandler(logoutHandler))
+-        .csrf(ServerHttpSecurity.CsrfSpec::disable);
 +        .oauth2Login(oauth2 -> oauth2.authenticationManager(delegatingAuthManager)
 +            .authorizationRequestResolver(NativeLoginSupport.resolver(registrations)))
-         .logout(spec -> spec.logoutSuccessHandler(logoutHandler))
-         .csrf(ServerHttpSecurity.CsrfSpec::disable);
++        // The provider posts logout tokens to /logout/connect/back-channel/{registrationId}.
++        .oidcLogout(logout -> logout.backChannel(Customizer.withDefaults()))
++        // Spring's default logout matcher accepts POST /logout only; also end the WebSession.
++        .logout(spec -> spec
++            .logoutHandler(new DelegatingServerLogoutHandler(
++                new SecurityContextServerLogoutHandler(), new WebSessionServerLogoutHandler()))
++            .logoutSuccessHandler(logoutHandler))
++        // The SPA reads the XSRF-TOKEN cookie and sends it back as X-XSRF-TOKEN (or as the
++        // _csrf form field of the logout form); the plain handler compares that raw value.
++        .csrf(csrf -> csrf
++            .csrfTokenRepository(CookieServerCsrfTokenRepository.withHttpOnlyFalse())
++            .csrfTokenRequestHandler(new ServerCsrfTokenRequestAttributeHandler()));
++    builder.addFilterAfter(csrfCookieWriter(), SecurityWebFiltersOrder.CSRF);
  
-+    if (environment.getProperty("auth.oauth2.require-mapped-role", Boolean.class, false)
-+        && !acs.isRbacEnabled()) {
-+      throw new IllegalArgumentException("SSO requires explicit RBAC roles");
-+    }
-+    if (NativeLoginSupport.sharedEnabled(environment)) {
-+      builder.formLogin(form -> form.loginPage(LOGIN_URL)
-+          .authenticationManager(NativeLoginSupport.sharedManager(environment, acs))
-+          .authenticationSuccessHandler(emptyRedirectSuccessHandler()));
-+      // End this application session; an enterprise-wide IdP logout is separate.
-+      builder.logout(spec -> spec.logoutSuccessHandler(redirectLogoutSuccessHandler())
-+          .requiresLogout(ServerWebExchangeMatchers.pathMatchers(HttpMethod.GET, "/logout")));
-+    }
-+
      if (properties.getResourceServer() != null) {
        OAuth2ResourceServerProperties resourceServer = properties.getResourceServer();
-       if (resourceServer.getJwt() != null && resourceServer.getJwt().getJwkSetUri() != null) {
-@@ -155,7 +177,13 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -130,6 +184,26 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+     return builder.build();
+   }
+ 
++  /**
++   * CsrfWebFilter only exposes a deferred token; nothing subscribes to it on a safe request,
++   * so the cookie would never be issued to the SPA. Subscribe before continuing the chain.
++   */
++  private static WebFilter csrfCookieWriter() {
++    return (exchange, chain) -> {
++      Mono<CsrfToken> token = exchange.getAttribute(CsrfToken.class.getName());
++      return (token == null ? Mono.<Void>empty() : token.then()).then(chain.filter(exchange));
++    };
++  }
++
++  private boolean requireMappedRole() {
++    return environment.getProperty(REQUIRE_MAPPED_ROLE, Boolean.class, false);
++  }
++
++  private static OAuth2AuthenticationException accessDenied(String reason) {
++    return new OAuth2AuthenticationException(
++        new OAuth2Error(OAuth2ErrorCodes.ACCESS_DENIED, "Sign-in refused: " + reason, null));
++  }
++
+   @Bean
+   public ReactiveOAuth2AccessTokenResponseClient<OAuth2AuthorizationCodeGrantRequest>
+       authorizationCodeTokenResponseClient(@Qualifier("oauthWebClient") WebClient webClient) {
+@@ -151,11 +225,20 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+           var provider = getProviderByProviderId(request.getClientRegistration().getRegistrationId());
+           final var extractor = getExtractor(provider, acs);
+           if (extractor == null) {
++            if (requireMappedRole()) {
++              // A principal that is not an RbacUser would not be subject to RBAC.
++              return Mono.error(accessDenied("no authority extractor applies to the provider"));
++            }
+             return Mono.just(user);
            }
  
            return extractor.extract(acs, user, Map.of("request", request, "provider", provider))
 -              .map(groups -> new RbacOidcUser(user, groups));
 +              .flatMap(groups -> {
-+                if (groups.isEmpty()
-+                    && environment.getProperty("auth.oauth2.require-mapped-role", Boolean.class, false)) {
-+                  return Mono.error(new OAuth2AuthenticationException(new OAuth2Error("access_denied")));
++                if (groups.isEmpty() && requireMappedRole()) {
++                  return Mono.error(accessDenied("no RBAC role is mapped to the subject"));
 +                }
 +                return Mono.just(new RbacOidcUser(user, groups));
 +              });
          });
    }
  
-@@ -181,8 +209,20 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -170,19 +253,41 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+           var provider = getProviderByProviderId(request.getClientRegistration().getRegistrationId());
+           final var extractor = getExtractor(provider, acs);
+           if (extractor == null) {
++            if (requireMappedRole()) {
++              return Mono.error(accessDenied("no authority extractor applies to the provider"));
++            }
+             return Mono.just(user);
+           }
+ 
+           return extractor.extract(acs, user, Map.of("request", request, "provider", provider))
+-              .map(groups -> new RbacOAuth2User(user, groups));
++              .flatMap(groups -> {
++                if (groups.isEmpty() && requireMappedRole()) {
++                  return Mono.error(accessDenied("no RBAC role is mapped to the subject"));
++                }
++                return Mono.just(new RbacOAuth2User(user, groups));
++              });
+         });
+   }
+ 
    @Bean
    public InMemoryReactiveClientRegistrationRepository clientRegistrationRepository() {
      final OAuth2ClientProperties props = OAuthPropertiesConverter.convertProperties(properties);
 -    final List<ClientRegistration> registrations =
 -        new ArrayList<>(new OAuth2ClientPropertiesMapper(props).asClientRegistrations().values());
-+    final Map<String, String> explicitIssuers = new java.util.HashMap<>();
++    // With every endpoint configured explicitly there is no startup discovery, yet the
++    // issuer is kept on the registration so OidcIdTokenValidator checks the iss claim.
++    final Map<String, String> explicitIssuers = new HashMap<>();
 +    props.getProvider().forEach((id, provider) -> {
 +      if (provider.getIssuerUri() != null && provider.getAuthorizationUri() != null
 +          && provider.getTokenUri() != null && provider.getJwkSetUri() != null
@@ -193,19 +283,31 @@ index 16b75d4..a56bf10 100644
      if (registrations.isEmpty()) {
        throw new IllegalArgumentException("OAuth2 authentication is enabled but no providers specified.");
      }
-diff --git a/api/src/main/java/io/kafbat/ui/service/ApplicationInfoService.java b/api/src/main/java/io/kafbat/ui/service/ApplicationInfoService.java
-index dd5d9c4..a445fa7 100644
---- a/api/src/main/java/io/kafbat/ui/service/ApplicationInfoService.java
-+++ b/api/src/main/java/io/kafbat/ui/service/ApplicationInfoService.java
-@@ -106,8 +106,10 @@ public class ApplicationInfoService {
+@@ -194,6 +299,22 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+     return new OidcClientInitiatedServerLogoutSuccessHandler(repository);
    }
  
-   public AppAuthenticationSettingsDTO getAuthenticationProperties() {
-+    boolean shared = getAuthType().equalsIgnoreCase(OAUTH2.getValue())
-+        && io.kafbat.ui.config.auth.NativeLoginSupport.sharedEnabled(applicationContext.getEnvironment());
-     return new AppAuthenticationSettingsDTO()
--        .authType(AuthTypeDTO.fromValue(getAuthType()))
-+        .authType(shared ? AuthTypeDTO.LOGIN_FORM : AuthTypeDTO.fromValue(getAuthType()))
-         .oAuthProviders(getOAuthProviders());
++  @Bean
++  public ReactiveOidcSessionRegistry oidcSessionRegistry() {
++    // Shared by oauth2Login, which records each session's ID token, and the back-channel handler.
++    return new InMemoryReactiveOidcSessionRegistry();
++  }
++
++  @Bean
++  public OidcBackChannelServerLogoutHandler oidcBackChannelLogoutHandler(ReactiveOidcSessionRegistry sessionRegistry) {
++    var handler = new OidcBackChannelServerLogoutHandler(sessionRegistry);
++    // The handler ends each registered session by posting its id to this application's own
++    // back-channel endpoint at {baseUrl}, the scheme, host and port the provider's request
++    // arrived on. The cookie must carry the name WebFlux issues for the session id.
++    handler.setSessionCookieName(environment.getProperty("server.reactive.session.cookie.name", "SESSION"));
++    return handler;
++  }
++
+   private ProviderAuthorityExtractor getExtractor(final OAuthProperties.OAuth2Provider provider,
+                                                   AccessControlService acs) {
+     Optional<ProviderAuthorityExtractor> extractor = acs.getOauthExtractors()
+@@ -209,4 +330,3 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
    }
  
+ }
+-

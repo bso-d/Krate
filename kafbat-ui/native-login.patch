@@ -54,84 +54,12 @@ index 16980af..cb5b87b 100644
        {Array(5).fill(<S.HeaderCell $sections={2} />)}
        {Array(2).fill(<S.HeaderCell />)}
        <S.HeaderCell $sections={2} />
-diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.styled.tsx b/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.styled.tsx
-index da1388b..8450aac 100644
---- a/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.styled.tsx
-+++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.styled.tsx
-@@ -54,3 +54,38 @@ export const ErrorMessageText = styled.span`
-   font-size: 14px;
-   line-height: 20px;
- `;
-+
-+export const SsoSection = styled.div`
-+  width: 100%;
-+  display: flex;
-+  flex-direction: column;
-+  gap: 16px;
-+  margin-top: -16px;
-+`;
-+
-+export const Divider = styled.div`
-+  display: flex;
-+  align-items: center;
-+  gap: 16px;
-+  font-size: 12px;
-+  opacity: 0.6;
-+  color: ${({ theme }) => theme.auth_page.signIn.titleColor};
-+
-+  &::before,
-+  &::after {
-+    content: '';
-+    flex: 1;
-+    height: 1px;
-+    background: currentColor;
-+    opacity: 0.25;
-+  }
-+`;
-+
-+export const SsoHint = styled.p`
-+  font-size: 12px;
-+  line-height: 16px;
-+  text-align: center;
-+  margin: 0;
-+  opacity: 0.65;
-+  color: ${({ theme }) => theme.auth_page.signIn.titleColor};
-+`;
 diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.tsx b/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.tsx
-index fc5273f..1e4204c 100644
+index fc5273f..a7e0ca8 100644
 --- a/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.tsx
 +++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/BasicSignIn.tsx
-@@ -1,4 +1,4 @@
--import React from 'react';
-+import React, { useState } from 'react';
- import { Button } from 'components/common/Button/Button';
- import Input from 'components/common/Input/Input';
- import { Controller, FormProvider, useForm } from 'react-hook-form';
-@@ -8,25 +8,35 @@ import { useNavigate } from 'react-router-dom';
- import { useQueryClient } from '@tanstack/react-query';
- 
- import * as S from './BasicSignIn.styled';
-+import { ssoLoginUrl } from './ssoLogin';
- 
- interface FormValues {
-   username: string;
-   password: string;
- }
- 
--function BasicSignIn() {
-+interface Props {
-+  ssoAuthorizationUri?: string;
-+}
-+
-+function BasicSignIn({ ssoAuthorizationUri }: Props) {
-+  const [ssoPending, setSsoPending] = useState(false);
-   const methods = useForm<FormValues>({
-     defaultValues: { username: '', password: '' },
-   });
-   const navigate = useNavigate();
-   const { mutateAsync, isPending } = useAuthenticate();
+@@ -23,10 +23,13 @@ function BasicSignIn() {
    const client = useQueryClient();
-+  const pending = isPending || ssoPending;
  
    const onSubmit = async (data: FormValues) => {
 +    methods.clearErrors('root');
@@ -145,12 +73,12 @@ index fc5273f..1e4204c 100644
          } else {
            await client.invalidateQueries({ queryKey: ['app', 'info'] });
            navigate('/');
-@@ -38,12 +48,12 @@ function BasicSignIn() {
+@@ -38,12 +41,12 @@ function BasicSignIn() {
    return (
      <FormProvider {...methods}>
        <S.Form onSubmit={methods.handleSubmit(onSubmit)}>
 -        <S.Fieldset>
-+        <S.Fieldset disabled={pending}>
++        <S.Fieldset disabled={isPending}>
            {methods.formState.errors.root && (
 -            <S.ErrorMessage>
 +            <S.ErrorMessage role="alert">
@@ -161,31 +89,16 @@ index fc5273f..1e4204c 100644
                </S.ErrorMessageText>
              </S.ErrorMessage>
            )}
-@@ -52,13 +62,21 @@ function BasicSignIn() {
-             control={methods.control}
-             render={({ field }) => (
-               <S.Field>
--                <S.Label htmlFor={field.name}>Username</S.Label>
-+                <S.Label htmlFor={field.name}>
-+                  {ssoAuthorizationUri ? 'Username / email' : 'Username'}
-+                </S.Label>
-                 <Input
-                   onChange={field.onChange}
+@@ -58,6 +61,8 @@ function BasicSignIn() {
                    value={field.value}
                    name={field.name}
                    id={field.name}
--                  placeholder="Enter your username"
 +                  autoComplete="username"
 +                  required
-+                  placeholder={
-+                    ssoAuthorizationUri
-+                      ? 'Username or company email'
-+                      : 'Enter your username'
-+                  }
+                   placeholder="Enter your username"
                    style={{ borderRadius: '8px' }}
                  />
-               </S.Field>
-@@ -76,6 +94,8 @@ function BasicSignIn() {
+@@ -76,6 +81,8 @@ function BasicSignIn() {
                    name={field.name}
                    type="password"
                    id={field.name}
@@ -194,175 +107,60 @@ index fc5273f..1e4204c 100644
                    placeholder="Enter your password"
                    style={{ borderRadius: '8px' }}
                  />
-@@ -88,11 +108,43 @@ function BasicSignIn() {
+@@ -88,7 +95,7 @@ function BasicSignIn() {
            buttonType="primary"
            type="submit"
            style={{ width: '100%', borderRadius: '8px' }}
 -          disabled={!methods.formState.isValid}
-+          disabled={!methods.formState.isValid || pending}
++          disabled={!methods.formState.isValid || isPending}
            inProgress={isPending}
          >
            {!isPending && 'Log in'}
-         </Button>
-+        {ssoAuthorizationUri && (
-+          <S.SsoSection>
-+            <S.Divider>or</S.Divider>
-+            <Button
-+              buttonSize="L"
-+              buttonType="secondary"
-+              type="button"
-+              style={{ width: '100%', borderRadius: '8px' }}
-+              disabled={pending}
-+              inProgress={ssoPending}
-+              onClick={() => {
-+                try {
-+                  const url = ssoLoginUrl(
-+                    ssoAuthorizationUri,
-+                    methods.getValues('username')
-+                  );
-+                  methods.setValue('password', '');
-+                  setSsoPending(true);
-+                  window.location.assign(url);
-+                } catch (error) {
-+                  methods.setError('root', {
-+                    message: (error as Error).message,
-+                  });
-+                  methods.setFocus('username');
-+                }
-+              }}
-+            >
-+              {!ssoPending && 'Sign in with SSO'}
-+            </Button>
-+            <S.SsoHint>Continue with your company account</S.SsoHint>
-+          </S.SsoSection>
-+        )}
-       </S.Form>
-     </FormProvider>
-   );
-diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/dualLogin.spec.tsx b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/dualLogin.spec.tsx
+diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/authModes.spec.tsx b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/authModes.spec.tsx
 new file mode 100644
-index 0000000..2ce4cec
+index 0000000..c5ee790
 --- /dev/null
-+++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/dualLogin.spec.tsx
-@@ -0,0 +1,57 @@
++++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/authModes.spec.tsx
+@@ -0,0 +1,37 @@
 +import React from 'react';
 +import { screen } from '@testing-library/react';
 +import { render } from 'lib/testHelpers';
 +import { AuthType } from 'generated-sources';
 +import SignInForm from 'components/AuthPage/SignIn/SignIn';
 +
-+it('keeps the native username/password form and adds one independent SSO button', () => {
-+  render(
-+    <SignInForm
-+      authType={AuthType.LOGIN_FORM}
-+      oAuthProviders={[
-+        {
-+          clientName: 'SSO',
-+          authorizationUri: '/oauth2/authorization/keycloak',
-+        },
-+      ]}
-+    />
++const keycloak = [
++  {
++    clientName: 'Keycloak',
++    authorizationUri: '/oauth2/authorization/keycloak',
++  },
++];
++
++it('renders only the provider button in OAUTH2 mode: no local credential form', () => {
++  render(<SignInForm authType={AuthType.OAUTH2} oAuthProviders={keycloak} />);
++  expect(
++    screen.getByRole('button', { name: 'Log in with Keycloak' })
++  ).toBeInTheDocument();
++  expect(screen.queryByLabelText('Username')).not.toBeInTheDocument();
++  expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
++  expect(
++    screen.queryByRole('button', { name: 'Log in' })
++  ).not.toBeInTheDocument();
++});
++
++it('keeps the native credential form in LOGIN_FORM mode without any SSO button', () => {
++  render(<SignInForm authType={AuthType.LOGIN_FORM} />);
++  expect(screen.getByLabelText('Username')).toHaveAttribute(
++    'autocomplete',
++    'username'
 +  );
-+  expect(screen.getByLabelText('Username / email')).toBeInTheDocument();
 +  expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'password');
 +  expect(screen.getByRole('button', { name: 'Log in' })).toBeInTheDocument();
 +  expect(
-+    screen.getByRole('button', { name: 'Sign in with SSO' })
-+  ).toBeEnabled();
-+  expect(
-+    screen.getByRole('button', { name: 'Sign in with SSO' })
-+  ).toHaveAttribute('type', 'button');
-+  expect(
-+    screen.queryByText('Use an account issued by the organization')
++    screen.queryByRole('button', { name: /sso/i })
 +  ).not.toBeInTheDocument();
 +});
-+
-+it('preserves native basic-login mode', () => {
-+  render(<SignInForm authType={AuthType.LOGIN_FORM} />);
-+  expect(screen.getByLabelText('Username')).toBeInTheDocument();
-+  expect(
-+    screen.queryByRole('button', { name: 'Sign in with SSO' })
-+  ).not.toBeInTheDocument();
-+});
-+
-+it('preserves other OAuth provider configurations', () => {
-+  render(
-+    <SignInForm
-+      authType={AuthType.OAUTH2}
-+      oAuthProviders={[
-+        {
-+          clientName: 'Company',
-+          authorizationUri: '/oauth2/authorization/company',
-+        },
-+      ]}
-+    />
-+  );
-+  expect(
-+    screen.getByRole('button', { name: 'Log in with Company' })
-+  ).toBeInTheDocument();
-+  expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
-+});
-diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/ssoLogin.spec.ts b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/ssoLogin.spec.ts
-new file mode 100644
-index 0000000..042679e
---- /dev/null
-+++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/__tests__/ssoLogin.spec.ts
-@@ -0,0 +1,27 @@
-+import { ssoLoginUrl } from 'components/AuthPage/SignIn/BasicSignIn/ssoLogin';
-+
-+it('passes only the entered identity hint, safely encoded', () => {
-+  expect(
-+    ssoLoginUrl(
-+      '/oauth2/authorization/keycloak',
-+      ' person+test@example.com '
-+    )
-+  ).toBe(
-+    '/oauth2/authorization/keycloak?login_hint=person%2Btest%40example.com'
-+  );
-+});
-+
-+it.each(['', '   ', 'a\nb', 'a'.repeat(255)])(
-+  'rejects an invalid hint',
-+  (value) => {
-+    expect(() =>
-+      ssoLoginUrl('/oauth2/authorization/keycloak', value)
-+    ).toThrow();
-+  }
-+);
-+
-+it('cannot redirect to an arbitrary server', () => {
-+  expect(() =>
-+    ssoLoginUrl('https://other.example', 'user@example.com')
-+  ).toThrow();
-+});
-diff --git a/frontend/src/components/AuthPage/SignIn/BasicSignIn/ssoLogin.ts b/frontend/src/components/AuthPage/SignIn/BasicSignIn/ssoLogin.ts
-new file mode 100644
-index 0000000..9d5330d
---- /dev/null
-+++ b/frontend/src/components/AuthPage/SignIn/BasicSignIn/ssoLogin.ts
-@@ -0,0 +1,20 @@
-+export function ssoLoginUrl(
-+  authorizationUri: string,
-+  username: string
-+): string {
-+  if (authorizationUri !== '/oauth2/authorization/keycloak') {
-+    throw new Error('Unable to start SSO');
-+  }
-+  const hint = username.trim();
-+  if (
-+    !hint ||
-+    hint.length > 254 ||
-+    Array.from(hint).some(
-+      (c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127
-+    )
-+  ) {
-+    throw new Error('Enter your company email to continue with SSO');
-+  }
-+  const query = new URLSearchParams({ login_hint: hint });
-+  return `${window.basePath || ''}${authorizationUri}?${query}`;
-+}
 diff --git a/frontend/src/components/AuthPage/SignIn/SignIn.styled.tsx b/frontend/src/components/AuthPage/SignIn/SignIn.styled.tsx
-index 0f24b45..c841ec0 100644
+index 0f24b45..81f6455 100644
 --- a/frontend/src/components/AuthPage/SignIn/SignIn.styled.tsx
 +++ b/frontend/src/components/AuthPage/SignIn/SignIn.styled.tsx
 @@ -6,6 +6,7 @@ export const SignInStyled = styled.div`
@@ -373,48 +171,264 @@ index 0f24b45..c841ec0 100644
    gap: 56px;
    flex-grow: 1;
  `;
-@@ -17,3 +18,10 @@ export const SignInTitle = styled.span(
-     font-weight: 600;
-   `
- );
-+
-+export const AuthError = styled.p`
-+  color: ${({ theme }) => theme.auth_page.signIn.titleColor};
-+  font-size: 14px;
-+  line-height: 20px;
-+  text-align: center;
-+`;
-diff --git a/frontend/src/components/AuthPage/SignIn/SignIn.tsx b/frontend/src/components/AuthPage/SignIn/SignIn.tsx
-index 987ee5e..b0c9dde 100644
---- a/frontend/src/components/AuthPage/SignIn/SignIn.tsx
-+++ b/frontend/src/components/AuthPage/SignIn/SignIn.tsx
-@@ -1,4 +1,5 @@
- import React from 'react';
-+import { useSearchParams } from 'react-router-dom';
- import { AuthType, OAuthProvider } from 'generated-sources';
+diff --git a/frontend/src/components/NavBar/UserInfo/UserInfo.tsx b/frontend/src/components/NavBar/UserInfo/UserInfo.tsx
+index 371e866..3af98e6 100644
+--- a/frontend/src/components/NavBar/UserInfo/UserInfo.tsx
++++ b/frontend/src/components/NavBar/UserInfo/UserInfo.tsx
+@@ -3,6 +3,7 @@ import { Dropdown, DropdownItem } from 'components/common/Dropdown';
+ import UserIcon from 'components/common/Icons/UserIcon';
+ import DropdownArrowIcon from 'components/common/Icons/DropdownArrowIcon';
+ import { useUserInfo } from 'lib/hooks/useUserInfo';
++import { postForm } from 'lib/csrf';
  
- import BasicSignIn from './BasicSignIn/BasicSignIn';
-@@ -11,11 +12,22 @@ interface Props {
+ import * as S from './UserInfo.styled';
+ 
+@@ -19,7 +20,9 @@ const UserInfo = () => {
+         </S.Wrapper>
+       }
+     >
+-      <DropdownItem href={`${window.basePath}/logout`}>Log out</DropdownItem>
++      <DropdownItem onClick={() => postForm(`${window.basePath}/logout`)}>
++        Log out
++      </DropdownItem>
+     </Dropdown>
+   ) : null;
+ };
+diff --git a/frontend/src/components/NavBar/UserInfo/__tests__/UserInfo.spec.tsx b/frontend/src/components/NavBar/UserInfo/__tests__/UserInfo.spec.tsx
+index a7ea286..90a56b6 100644
+--- a/frontend/src/components/NavBar/UserInfo/__tests__/UserInfo.spec.tsx
++++ b/frontend/src/components/NavBar/UserInfo/__tests__/UserInfo.spec.tsx
+@@ -51,13 +51,21 @@ describe('UserInfo', () => {
+     expect(logout).toBeInTheDocument();
+   });
+ 
+-  it('should render logout link with correct context path', async () => {
++  it('should log out with a POST form carrying the context path and token', async () => {
+     const username = 'someName';
+     const baseUrl = '/tt-test01';
+     Object.defineProperty(window, 'basePath', {
+       value: baseUrl,
+       writable: true,
+     });
++    Object.defineProperty(document, 'cookie', {
++      value: 'XSRF-TOKEN=tok',
++      writable: true,
++      configurable: true,
++    });
++    const submit = jest
++      .spyOn(HTMLFormElement.prototype, 'submit')
++      .mockImplementation(() => {});
+     (useUserInfo as jest.Mock).mockImplementation(() => ({ username }));
+ 
+     renderComponent();
+@@ -65,7 +73,17 @@ describe('UserInfo', () => {
+     await userEvent.click(dropdown);
+ 
+     const logout = screen.getByText('Log out');
+-    expect(logout).toHaveAttribute('href', '/tt-test01/logout');
++    expect(logout).not.toHaveAttribute('href');
++    await userEvent.click(logout);
++
++    const form = document.querySelector(
++      'form[method="post"]'
++    ) as HTMLFormElement;
++    expect(form).toHaveAttribute('action', '/tt-test01/logout');
++    expect(
++      (form.querySelector('input[name="_csrf"]') as HTMLInputElement).value
++    ).toBe('tok');
++    expect(submit).toHaveBeenCalledTimes(1);
+   });
+ 
+   it('should not render anything if the username does not exists', () => {
+diff --git a/frontend/src/lib/__tests__/csrf.spec.ts b/frontend/src/lib/__tests__/csrf.spec.ts
+new file mode 100644
+index 0000000..1addcaf
+--- /dev/null
++++ b/frontend/src/lib/__tests__/csrf.spec.ts
+@@ -0,0 +1,77 @@
++import { csrfMiddleware, csrfToken, postForm, withCsrfHeader } from 'lib/csrf';
++
++const setCookie = (value: string) => {
++  Object.defineProperty(document, 'cookie', {
++    value,
++    writable: true,
++    configurable: true,
++  });
++};
++
++describe('csrf', () => {
++  afterEach(() => {
++    setCookie('');
++    document.body.innerHTML = '';
++  });
++
++  it('reads the XSRF-TOKEN cookie among others', () => {
++    setCookie('SESSION=abc; XSRF-TOKEN=tok%2D1; other=2');
++    expect(csrfToken()).toBe('tok-1');
++  });
++
++  it('returns no token without the cookie', () => {
++    setCookie('SESSION=abc');
++    expect(csrfToken()).toBeUndefined();
++  });
++
++  it('adds the header to unsafe methods only and keeps existing headers', () => {
++    setCookie('XSRF-TOKEN=tok');
++    const post = withCsrfHeader({
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++    });
++    expect(post.headers).toEqual({
++      'content-type': 'application/json',
++      'X-XSRF-TOKEN': 'tok',
++    });
++    expect(withCsrfHeader({ method: 'DELETE' }).headers).toEqual({
++      'X-XSRF-TOKEN': 'tok',
++    });
++    expect(withCsrfHeader({ method: 'get' }).headers).toBeUndefined();
++    expect(withCsrfHeader({}).headers).toBeUndefined();
++  });
++
++  it('leaves the request unchanged when no token is available', () => {
++    setCookie('');
++    const init = { method: 'POST', headers: { a: 'b' } };
++    expect(withCsrfHeader(init)).toBe(init);
++  });
++
++  it('applies the header through the generated-client middleware', async () => {
++    setCookie('XSRF-TOKEN=tok');
++    const result = await csrfMiddleware.pre({
++      url: '/api/x',
++      init: { method: 'PATCH' },
++    });
++    expect(result).toEqual({
++      url: '/api/x',
++      init: { method: 'PATCH', headers: { 'X-XSRF-TOKEN': 'tok' } },
++    });
++  });
++
++  it('submits a hidden POST form carrying the _csrf field', () => {
++    setCookie('XSRF-TOKEN=tok');
++    const submit = jest
++      .spyOn(HTMLFormElement.prototype, 'submit')
++      .mockImplementation(() => {});
++    postForm('/base/logout');
++    const form = document.querySelector('form') as HTMLFormElement;
++    expect(form).toHaveAttribute('method', 'post');
++    expect(form).toHaveAttribute('action', '/base/logout');
++    const field = form.querySelector('input') as HTMLInputElement;
++    expect(field.type).toBe('hidden');
++    expect(field.name).toBe('_csrf');
++    expect(field.value).toBe('tok');
++    expect(submit).toHaveBeenCalledTimes(1);
++  });
++});
+diff --git a/frontend/src/lib/constants.ts b/frontend/src/lib/constants.ts
+index 9269760..3288df7 100644
+--- a/frontend/src/lib/constants.ts
++++ b/frontend/src/lib/constants.ts
+@@ -3,6 +3,7 @@ import {
+   ConfigurationParameters,
+   ConsumerGroupState,
+ } from 'generated-sources';
++import { csrfMiddleware } from 'lib/csrf';
+ 
+ declare global {
+   interface Window {
+@@ -16,6 +17,8 @@ export const BASE_PARAMS: ConfigurationParameters = {
+   headers: {
+     'Content-Type': 'application/json',
+   },
++  // Unsafe requests echo the XSRF-TOKEN cookie as X-XSRF-TOKEN.
++  middleware: [csrfMiddleware],
+ };
+ 
+ export const TOPIC_NAME_VALIDATION_PATTERN = /^[a-zA-Z0-9._-]+$/;
+diff --git a/frontend/src/lib/csrf.ts b/frontend/src/lib/csrf.ts
+new file mode 100644
+index 0000000..d82ae16
+--- /dev/null
++++ b/frontend/src/lib/csrf.ts
+@@ -0,0 +1,55 @@
++export const CSRF_COOKIE = 'XSRF-TOKEN';
++export const CSRF_HEADER = 'X-XSRF-TOKEN';
++export const CSRF_FIELD = '_csrf';
++
++const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS', 'TRACE'];
++
++/** The token Spring Security issued in the readable XSRF-TOKEN cookie, if any. */
++export function csrfToken(): string | undefined {
++  const entry = document.cookie
++    .split(';')
++    .map((part) => part.trim())
++    .find((part) => part.startsWith(`${CSRF_COOKIE}=`));
++  if (!entry) return undefined;
++  const value = entry.slice(CSRF_COOKIE.length + 1);
++  return value ? decodeURIComponent(value) : undefined;
++}
++
++/** Adds X-XSRF-TOKEN to a request whose method can change state. */
++export function withCsrfHeader(init: RequestInit = {}): RequestInit {
++  const method = (init.method || 'GET').toUpperCase();
++  const token = csrfToken();
++  if (SAFE_METHODS.includes(method) || !token) return init;
++  const headers: Record<string, string> = {};
++  new Headers(init.headers).forEach((value, key) => {
++    headers[key] = value;
++  });
++  headers[CSRF_HEADER] = token;
++  return { ...init, headers };
++}
++
++/** Generated-client middleware: every unsafe API call carries the token. */
++export const csrfMiddleware = {
++  pre: async ({ url, init }: { url: string; init: RequestInit }) => ({
++    url,
++    init: withCsrfHeader(init),
++  }),
++};
++
++/** Navigates with a POST, as a hidden form, so the server-side logout matcher accepts it. */
++export function postForm(action: string): void {
++  const form = document.createElement('form');
++  form.method = 'post';
++  form.action = action;
++  form.style.display = 'none';
++  const token = csrfToken();
++  if (token) {
++    const field = document.createElement('input');
++    field.type = 'hidden';
++    field.name = CSRF_FIELD;
++    field.value = token;
++    form.appendChild(field);
++  }
++  document.body.appendChild(form);
++  form.submit();
++}
+diff --git a/frontend/src/lib/hooks/api/appConfig.ts b/frontend/src/lib/hooks/api/appConfig.ts
+index 7460b27..d04168f 100644
+--- a/frontend/src/lib/hooks/api/appConfig.ts
++++ b/frontend/src/lib/hooks/api/appConfig.ts
+@@ -13,6 +13,7 @@ import {
+   ApplicationInfo,
+ } from 'generated-sources';
+ import { QUERY_REFETCH_OFF_OPTIONS } from 'lib/constants';
++import { withCsrfHeader } from 'lib/csrf';
+ 
+ export function useAuthSettings() {
+   return useSuspenseQuery({
+@@ -114,10 +115,10 @@ export function useUpdateAppConfig({
+ export function useAppConfigFilesUpload() {
+   return useMutation({
+     mutationFn: (payload: FormData) =>
+-      fetch('/api/config/relatedfiles', {
+-        method: 'POST',
+-        body: payload,
+-      }).then((res) => res.json()),
++      fetch(
++        '/api/config/relatedfiles',
++        withCsrfHeader({ method: 'POST', body: payload })
++      ).then((res) => res.json()),
+   });
  }
  
- function SignInForm({ authType, oAuthProviders }: Props) {
-+  const [params] = useSearchParams();
-+  const sso = oAuthProviders?.find(
-+    (provider) =>
-+      provider.authorizationUri === '/oauth2/authorization/keycloak'
-+  );
-+
-   return (
-     <S.SignInStyled>
-       <S.SignInTitle>Sign in</S.SignInTitle>
-+      {params.has('error') && (
-+        <S.AuthError role="alert">
-+          Sign-in was not completed. Check your company access or try again.
-+        </S.AuthError>
-+      )}
-       {(authType === AuthType.LDAP || authType === AuthType.LOGIN_FORM) && (
--        <BasicSignIn />
-+        <BasicSignIn ssoAuthorizationUri={sso?.authorizationUri} />
-       )}
-       {authType === AuthType.OAUTH2 && (
-         <OAuthSignIn oAuthProviders={oAuthProviders} />

@@ -22,7 +22,7 @@ BASE_IMAGE = 'kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65d
 # Runtime base: Temurin publishes its JDK source; upstream's Azul Zulu base does not.
 RUNTIME_IMAGE = 'eclipse-temurin:25-jre-alpine@sha256:3c0a9084927a221ccd1d007fcaf614465672c0af37aaa834c5184483afe56d61'
 RUNTIME_PACKAGES = ('gcompat', 'tzdata')  # upstream's apk add list
-IMAGE = 'krate/kafka-ui:1.5.0-sso.5'
+IMAGE = 'krate/kafka-ui:1.5.0-sso.6'
 JDK_IMAGE = 'eclipse-temurin:25-jdk@sha256:119a3d18f160a3e7655a66034d0f43beee31cd7b3b9142d57a5de29772011de6'
 LOMBOK_SHA256 = '3488a4e9994c26596baaceebee58cad36a50e3bdaec5be72b5834d3c3b560306'
 AUTH_PATCH = ROOT / 'kafbat-ui/native-auth.patch'
@@ -43,8 +43,7 @@ def patch_jar(original, output, assets, classes):
     replacements = {'BOOT-INF/classes/' + p.relative_to(classes).as_posix(): p
                     for p in classes.rglob('*.class')}
     allowed = ('io/kafbat/ui/config/auth/NativeLoginSupport',
-               'io/kafbat/ui/config/auth/OAuthSecurityConfig',
-               'io/kafbat/ui/service/ApplicationInfoService')
+               'io/kafbat/ui/config/auth/OAuthSecurityConfig')
     assert replacements and all(name.removeprefix('BOOT-INF/classes/').split('$')[0].removesuffix('.class')
                                 in allowed for name in replacements)
     with zipfile.ZipFile(original) as source, zipfile.ZipFile(output, 'w') as target:
@@ -61,7 +60,7 @@ def patch_jar(original, output, assets, classes):
         for entry in source.infolist():
             if not entry.filename.startswith(prefix) and entry.filename not in replacements:
                 assert source.read(entry) == target.read(entry.filename), entry.filename
-    print('Verified: all entries outside the frontend and three patched authentication classes are unchanged.', flush=True)
+    print('Verified: all entries outside the frontend and two patched authentication classes are unchanged.', flush=True)
 
 
 def fetch_runtime_packages(arch, directory):
@@ -130,11 +129,14 @@ def main():
         'supportsES6=true,nullSafeAdditionalProps=true,withInterfaces=true', '--type-mappings', 'object=any')
     bin_dir = frontend / 'node_modules/.bin'
     run(str(bin_dir / 'tsc'), '--noEmit', cwd=frontend)
-    run(str(bin_dir / 'eslint'), 'src/components/AuthPage', cwd=frontend)
+    run(str(bin_dir / 'eslint'), 'src/components/AuthPage', 'src/components/NavBar/UserInfo',
+        'src/lib/csrf.ts', 'src/lib/__tests__', 'src/lib/constants.ts', 'src/lib/hooks/api/appConfig.ts',
+        cwd=frontend)
     run(str(bin_dir / 'jest'), '--runInBand', '--watch=false', '--coverage=false',
-        'src/components/AuthPage/SignIn/BasicSignIn/__tests__', cwd=frontend)
+        'src/components/AuthPage/SignIn/BasicSignIn/__tests__', 'src/components/NavBar/UserInfo/__tests__',
+        'src/lib/__tests__', cwd=frontend)
     run(str(bin_dir / 'vite'), 'build', cwd=frontend,
-        env=dict(os.environ, VITE_TAG='v1.5.0-sso.3', VITE_COMMIT=REVISION[:8] + '-sso'))
+        env=dict(os.environ, VITE_TAG='v1.5.0-sso.6', VITE_COMMIT=REVISION[:8] + '-sso'))
     context = output / 'image'
     context.mkdir(exist_ok=True)
     original = output / 'upstream-api.jar'
@@ -168,14 +170,14 @@ def main():
         '-processorpath', '/build/lombok.jar', '-d', '/build/classes',
         *['/source/api/src/main/java/' + name for name in (
             'io/kafbat/ui/config/auth/NativeLoginSupport.java',
-            'io/kafbat/ui/config/auth/OAuthSecurityConfig.java',
-            'io/kafbat/ui/service/ApplicationInfoService.java')])
+            'io/kafbat/ui/config/auth/OAuthSecurityConfig.java')])
     patch_jar(original, context / 'api.jar', frontend / 'build/vite/static', classes)
     shutil.copyfile(source / 'LICENSE', context / 'LICENSE')
     notice = source / 'NOTICE'
     (context / 'upstream-NOTICE').write_text(notice.read_text() if notice.exists() else
         'Based on kafbat/kafka-ui v1.5.0. Original project: https://github.com/kafbat/kafka-ui\n'
-        'Modifies login presentation and authentication to combine local login with native OIDC.\n')
+        'Modifies login presentation and hardens native OIDC authentication (CSRF, POST logout,\n'
+        'ID token claim validation, required role mapping, back-channel logout).\n')
     shutil.copyfile(PATCH, context / PATCH.name)
     shutil.copyfile(AUTH_PATCH, context / AUTH_PATCH.name)
     if f'ARG KRATE_RUNTIME_IMAGE={RUNTIME_IMAGE}\n' not in (ROOT / 'kafbat-ui/Dockerfile').read_text():
