@@ -97,9 +97,12 @@ def validate(root, mode, config):
     validate_realm(root, origin, secrets)
     validate_ui_mount(root, services['kafka-ui'])
     host = urlsplit(origin).hostname
-    match = subprocess.check_output(['openssl', 'x509', '-in', str(cert), '-checkhost', host, '-noout'], text=True)
-    if 'does match certificate' not in match:
-        raise Preflight('TLS certificate does not match the public hostname')
+    # openssl exits 1 on a mismatch (3.x), so the status is read, not raised.
+    match = subprocess.run(['openssl', 'x509', '-in', str(cert), '-checkhost', host, '-noout'],
+                           text=True, capture_output=True, stdin=subprocess.DEVNULL)
+    if match.returncode or 'does match certificate' not in match.stdout:
+        raise Preflight(f'certs/server.crt does not cover the public hostname {host} (KEYCLOAK_PUBLIC_URL);'
+                        ' run krate gen-cert (it covers that name, the host FQDN and localhost) and krate restart proxy')
     kc = services['keycloak']['environment']
     if kc.get('KC_HOSTNAME') != origin + '/identity':
         raise Preflight('Rendered KC_HOSTNAME differs from KEYCLOAK_PUBLIC_URL in .env; clear conflicting shell environment variables')

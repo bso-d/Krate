@@ -34,12 +34,14 @@ ZK_MONITOR_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' zk/monito
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 # RHEL needs buildx explicitly; on Debian it arrives as a docker-ce dependency.
 DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-extras docker-compose-plugin docker-buildx-plugin
-# containerd.io requires container-selinux, which every RHEL host running
-# containers already has. It is downloaded to optional/ rather than the main set
-# because the newest build requires selinux-policy >= el9_8 — newer than RHEL 9.6
-# ships — so installing it unconditionally FAILS on a 9.6 host that was fine.
-# The installer falls back to it only when the host has none.
-DOCKER_RPM_OPTIONAL := container-selinux
+# Base-OS dependencies a minimal or cloud host may lack go to optional/, never to
+# the main set: containerd.io requires container-selinux (coupled to the host's
+# selinux-policy minor version: a newer build FAILS on an older host that was fine),
+# and docker-ce 29 requires nftables. `krate docker-install` adds an optional
+# package only when dnf names it as missing on that host. Build with
+# RHEL_BUILDER_IMAGE=rockylinux:9 (or the target's own distro image) so the
+# optional builds match the target's policy; otherwise install them from the OS media.
+DOCKER_RPM_OPTIONAL := container-selinux nftables libnftnl
 
 .PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft bundle-epc docker-debs docker-rpms monitor-up monitor-down monitor-status monitor-logs clean dist-clean
 .SILENT: help
@@ -489,9 +491,9 @@ docker-rpms:
 >echo "    Builder: $(RHEL_BUILDER_IMAGE)"
 >echo "    Output : $$output_dir"
 >
-># --resolve also pulls dependencies the builder image lacks (container-selinux
-># being the one a minimal RHEL host usually needs), so the set installs with
-># dnf --disablerepo='*' on an air-gapped VM.
+># The main set is exactly the Docker CE packages; optional/ carries the base-OS
+># dependencies a minimal host may lack, so the set installs with
+># dnf --disablerepo='*' on an air-gapped VM (see DOCKER_RPM_OPTIONAL).
 >docker run --rm --platform "linux/$(ARCH)" \
 >  -e BASEURL="https://download.docker.com/linux/rhel/$(RHEL_VERSION)/$$rpm_arch/stable" \
 >  -e PKGS="$(DOCKER_RPM_PACKAGES)" \

@@ -1913,11 +1913,18 @@ get_fqdn() {
 cmd_gen_cert() {
   command -v openssl &>/dev/null || die "openssl not found — needed to generate the TLS certificate."
   mkdir -p "$CERTS_DIR"
-  local fqdn ip san
+  local fqdn ip san public_host
   fqdn="$(get_fqdn)"
   ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  san="DNS:${fqdn}"; [[ -n "$ip" ]] && san="${san},IP:${ip}"
-  info "Generating self-signed TLS certificate (CN=${fqdn}${ip:+, IP $ip})..."
+  # The browser-facing name is KEYCLOAK_PUBLIC_URL's host (default localhost); the
+  # certificate covers it together with the host FQDN so a fresh install passes the
+  # authentication preflight without a second gen-cert.
+  public_host="$(env_value KEYCLOAK_PUBLIC_URL)"; public_host="${public_host#*://}"; public_host="${public_host%%/*}"; public_host="${public_host%%:*}"
+  san="DNS:${fqdn}"
+  [[ -z "$public_host" || "$public_host" == "$fqdn" ]] || san="${san},DNS:${public_host}"
+  [[ "$fqdn" == localhost || "$public_host" == localhost ]] || san="${san},DNS:localhost"
+  [[ -n "$ip" ]] && san="${san},IP:${ip}"
+  info "Generating self-signed TLS certificate (CN=${fqdn}; names ${san//DNS:/}${ip:+})..."
   openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
     -keyout "$CERT_KEY" -out "$CERT_CRT" \
     -subj "/CN=${fqdn}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \
@@ -2795,7 +2802,7 @@ cmd_doctor() {
       *) warn "Could not determine SELinux state" ;;
     esac
     if command -v rpm &>/dev/null && ! rpm -q container-selinux &>/dev/null; then
-      warn "container-selinux is not installed — 'krate docker-install' will use the bundled copy."
+      warn "container-selinux is not installed — 'krate docker-install' adds the bundled copy when it matches this host's selinux-policy; otherwise install it first from your RHEL media: dnf install container-selinux"
     fi
     echo ""
 
@@ -3032,22 +3039,35 @@ docker_install_rpm() {
 
   info "Installing Docker CE from ${#rpms[@]} bundled RPM packages..."
   echo ""
-  if ! sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}"; then
-    # containerd.io requires container-selinux. A host that has run containers
-    # already has it; a minimal one may not. It is kept out of the main set
-    # because the newest build needs a newer selinux-policy than RHEL 9.6 ships,
-    # so installing it unconditionally would fail on a host that was fine.
-    if [[ ${#optional[@]} -gt 0 ]]; then
-      echo ""
-      info "Retrying with the bundled optional dependencies..."
-      sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" "${optional[@]}" \
-        || die "Offline install failed even with the bundled dependencies.
-A dependency is missing from both this host and the bundle. Install it from your
-RHEL media or Satellite, then re-run: krate docker-install"
-    else
-      die "Offline install failed and no optional/ dependencies are bundled."
-    fi
+  local attempt_log
+  attempt_log="$(mktemp)" || die "Cannot create a temporary file"
+  if sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" 2> >(tee "$attempt_log" >&2); then
+    rm -f "$attempt_log"
+    return 0
   fi
+  # dnf names what the host lacks ("nothing provides X needed by Y"). Base-OS
+  # dependencies a minimal host may miss (container-selinux, nftables) travel in
+  # optional/; only the bundled packages that provide a named requirement are
+  # added, so a host that already has them never gets another distro's build.
+  local -a missing=() wanted=()
+  local need rpm_file
+  mapfile -t missing < <(grep -o -E 'nothing provides [^ ]+' "$attempt_log" | awk '{print $3}' | sed -E 's/\(.*//' | sort -u)
+  rm -f "$attempt_log"
+  for need in "${missing[@]}"; do
+    for rpm_file in "${optional[@]}"; do
+      [[ "${rpm_file##*/}" == "$need"-[0-9]* ]] && wanted+=("$rpm_file")
+    done
+  done
+  if [[ ${#wanted[@]} -eq 0 ]]; then
+    die "Offline install failed: this host lacks ${missing[*]:-a dependency dnf did not name}, and the bundle has no package for it.
+Install it from your RHEL media or Satellite, then re-run: krate docker-install"
+  fi
+  echo ""
+  info "Adding the bundled dependencies this host lacks: ${wanted[*]##*/}"
+  sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" "${wanted[@]}" \
+    || die "Offline install failed even with the bundled dependencies (${missing[*]}).
+container-selinux must match this host's selinux-policy build; install it from your
+RHEL media or Satellite (dnf install container-selinux), then re-run: krate docker-install"
 }
 
 # Debian/Ubuntu. dpkg does not resolve dependencies, so install in dependency

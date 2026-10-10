@@ -106,6 +106,7 @@ ALLOWED_LINES = [re.compile(pattern) for pattern in (
 ALLOWED_BLOCKS = [re.compile(pattern, re.MULTILINE) for pattern in (
     r'^(fmt_kb|cmd_disk|note_auto_create|ensure_data_dirs|docker_install_rpm|docker_install_deb)\(\) \{',
     r'# ── RHEL family',
+    r'info "Package conflicts"',  # the doctor's RHEL package-conflict check (EPC only)
     r'docker_install_(rpm|deb) ',
     r'systemctl (enable|start) docker',
 )]

@@ -1912,11 +1912,18 @@ get_fqdn() {
 cmd_gen_cert() {
   command -v openssl &>/dev/null || die "openssl not found — needed to generate the TLS certificate."
   mkdir -p "$CERTS_DIR"
-  local fqdn ip san
+  local fqdn ip san public_host
   fqdn="$(get_fqdn)"
   ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  san="DNS:${fqdn}"; [[ -n "$ip" ]] && san="${san},IP:${ip}"
-  info "Generating self-signed TLS certificate (CN=${fqdn}${ip:+, IP $ip})..."
+  # The browser-facing name is KEYCLOAK_PUBLIC_URL's host (default localhost); the
+  # certificate covers it together with the host FQDN so a fresh install passes the
+  # authentication preflight without a second gen-cert.
+  public_host="$(env_value KEYCLOAK_PUBLIC_URL)"; public_host="${public_host#*://}"; public_host="${public_host%%/*}"; public_host="${public_host%%:*}"
+  san="DNS:${fqdn}"
+  [[ -z "$public_host" || "$public_host" == "$fqdn" ]] || san="${san},DNS:${public_host}"
+  [[ "$fqdn" == localhost || "$public_host" == localhost ]] || san="${san},DNS:localhost"
+  [[ -n "$ip" ]] && san="${san},IP:${ip}"
+  info "Generating self-signed TLS certificate (CN=${fqdn}; names ${san//DNS:/}${ip:+})..."
   openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
     -keyout "$CERT_KEY" -out "$CERT_CRT" \
     -subj "/CN=${fqdn}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \

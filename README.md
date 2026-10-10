@@ -242,6 +242,11 @@ operator flow is: `./krate setup` or `./krate start`, then
 `./krate identity up`, then (Phase 2) `./krate auth configure` and
 `./krate auth apply`.
 
+The certificate `./krate gen-cert` (or the first start) writes covers the host
+FQDN, the host of `KEYCLOAK_PUBLIC_URL` and `localhost`, so `./krate auth apply`
+passes its hostname check on a fresh install; after changing
+`KEYCLOAK_PUBLIC_URL` run `./krate gen-cert` and `./krate restart proxy`.
+
 `./krate identity up` generates the database TLS material and the realm, starts
 PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the
 `krate-cli` service account. Until it has run, `./krate start` prints
