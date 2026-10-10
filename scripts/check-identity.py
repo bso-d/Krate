@@ -2,6 +2,7 @@
 """Static checks for the Krate identity foundation (templates, realm plan, Compose, CLI parity)."""
 import contextlib
 import importlib.util
+from typing import Callable
 import io
 import ipaddress
 import json
@@ -15,7 +16,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'sso'))
-import identity  # noqa: E402
+import identity  # noqa: E402  # pyright: ignore[reportMissingImports]  # sso/ is put on sys.path above
 
 EDITIONS = ('kraft', 'epc')
 TEMPLATE_VALUES = {
@@ -781,7 +782,7 @@ def check_name_refusals(checks, edition, site, env, auth_mode, rendered):
 
 def network_mutations(rendered):
     """(label, mutated rendered config) pairs that preflight must refuse in both Keycloak-backed modes."""
-    def mutate(label, change):
+    def mutate(label, change: 'Callable[[dict], object]'):
         config = json.loads(rendered)
         change(config)
         return label, json.dumps(config)
@@ -866,6 +867,7 @@ def check_plan_and_preflight(checks):
 
 def load_configure_dual():
     spec = importlib.util.spec_from_file_location('configure_dual', ROOT / 'sso/configure-dual.py')
+    assert spec is not None and spec.loader is not None, 'sso/configure-dual.py missing'
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -947,18 +949,18 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
     original = runtime_file.read_text()
     realm_original = realm_file.read_text()
 
-    def expect_refusal(label, needle, auth_mode='runtime.yml', config=rendered):
-        result = preflight(site, auth_mode, config)
-        checks.expect(result.returncode == 1 and needle in result.stderr,
-                      f'{edition}: preflight --mode runtime.yml must refuse: {label} (naming {needle!r});'
-                      f' got exit {result.returncode}: {result.stderr.strip()}')
+    def expect_refusal(case, wanted, auth_mode='runtime.yml', rendered_config=rendered):
+        outcome = preflight(site, auth_mode, rendered_config)
+        checks.expect(outcome.returncode == 1 and wanted in outcome.stderr,
+                      f'{edition}: preflight --mode runtime.yml must refuse: {case} (naming {wanted!r});'
+                      f' got exit {outcome.returncode}: {outcome.stderr.strip()}')
 
     def viewer_topic(d):
         return next(p for p in d['rbac']['roles'][0]['permissions'] if p['resource'] == 'topic')
 
-    def mutated_runtime(change):
+    def mutated_runtime(mutation):
         data = json.loads(original)
-        change(data)
+        mutation(data)
         identity.write_file(runtime_file, json.dumps(data, indent=2) + '\n', 0o644)
 
     cases = (
@@ -1023,12 +1025,12 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
     # kafka-ui must bind-mount this site's auth/ui read-only; runtime.yml must exist.
     config = json.loads(rendered)
     config['services']['kafka-ui']['volumes'] = [m for m in config['services']['kafka-ui']['volumes'] if m.get('target') != '/etc/krate/auth']
-    expect_refusal('kafka-ui without the auth/ui mount', '/etc/krate/auth', config=json.dumps(config))
+    expect_refusal('kafka-ui without the auth/ui mount', '/etc/krate/auth', rendered_config=json.dumps(config))
     config = json.loads(rendered)
     for mount in config['services']['kafka-ui']['volumes']:
         if mount.get('target') == '/etc/krate/auth':
             mount['source'] = str(ROOT / 'kraft/auth/ui')
-    expect_refusal('kafka-ui mounting another directory at /etc/krate/auth', '/etc/krate/auth', config=json.dumps(config))
+    expect_refusal('kafka-ui mounting another directory at /etc/krate/auth', '/etc/krate/auth', rendered_config=json.dumps(config))
     runtime_file.unlink()
     expect_refusal('runtime.yml missing', 'auth/ui/runtime.yml')
     identity.write_file(runtime_file, original, 0o644)

@@ -780,7 +780,7 @@ def cmd_backup_open(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or '').splitlines()[0])
     commands = parser.add_subparsers(dest='command', required=True)
     planner = commands.add_parser('plan', help='write the local realm plan from .env values')
     planner.add_argument('--env-file', type=Path, required=True)

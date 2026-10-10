@@ -96,7 +96,9 @@ def validate(root, mode, config):
     # applied to the running realm separately, so their absence here is expected.
     validate_realm(root, origin, secrets)
     validate_ui_mount(root, services['kafka-ui'])
-    host = urlsplit(origin).hostname
+    host = urlsplit(origin).hostname or ''
+    if not host:
+        raise Preflight('KEYCLOAK_PUBLIC_URL has no hostname')
     # openssl exits 1 on a mismatch (3.x), so the status is read, not raised.
     match = subprocess.run(['openssl', 'x509', '-in', str(cert), '-checkhost', host, '-noout'],
                            text=True, capture_output=True, stdin=subprocess.DEVNULL)
@@ -218,7 +220,7 @@ def validate_networks(config):
         pool = ipaddress.ip_network(entries[0]['ip_range'], strict=True)
     except ValueError:
         raise Preflight('KRATE_IDENTITY_IP_RANGE is not a valid CIDR network') from None
-    if not pool.subnet_of(subnet):
+    if pool.version != subnet.version or not pool.subnet_of(subnet):  # pyright: ignore[reportArgumentType]  # same family checked first
         raise Preflight('KRATE_IDENTITY_IP_RANGE must lie inside KRATE_IDENTITY_SUBNET')
     gateway = entries[0].get('gateway') or str(next(subnet.hosts()))
     services = config['services']

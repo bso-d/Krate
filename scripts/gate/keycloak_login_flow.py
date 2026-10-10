@@ -51,7 +51,8 @@ class Flow:
         self.jar = http.cookiejar.CookieJar()
 
         class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *a, **k):
+            # noinspection PyMethodMayBeStatic
+            def redirect_request(self, *_args, **_kwargs):  # overrides an instance method
                 return None
 
         self.opener = urllib.request.build_opener(
@@ -134,7 +135,10 @@ def do_enrol(a):
     seen = []
     for _ in range(3):  # required actions in whatever order the realm presents them
         if st == 200 and 'name="totpSecret"' in page:
-            raw = html.unescape(re.search(r'name="totpSecret"[^>]*value="([^"]+)"', page).group(1))
+            found = re.search(r'name="totpSecret"[^>]*value="([^"]+)"', page)
+            if not found:
+                raise AssertionError("TOTP page without a totpSecret value: " + page[:200])
+            raw = html.unescape(found.group(1))
             secret_b32 = base64.b32encode(raw.encode()).decode()  # Keycloak keys HmacOTP on the raw secret's bytes
             st, h, page = flow.req(flow.form_action(page), {"totp": flow.totp(secret_b32), "totpSecret": raw,
                                                            "userLabel": "gate", "logout-sessions": "on"})
@@ -192,7 +196,8 @@ def do_login(a):
     verifier, action = flow.start_auth()
     st, h, page = flow.password_step(action, user, password)
     if st == 200 and 'name="otp"' in page and totp_secret:
-        st, h, page = flow.req(flow.form_action(page), {"otp": flow.totp(totp_secret)})
+        # --totp-offset N uses the code of the Nth neighbouring 30-second step (the realm's look-ahead window).
+        st, h, page = flow.req(flow.form_action(page), {"otp": flow.totp(totp_secret, time.time() + 30 * a.totp_offset)})
     if flow.is_code_redirect(st, h):
         claims = flow.exchange(h["Location"], verifier)
         if a.expect == "refused":
@@ -231,6 +236,7 @@ def main():
     l.add_argument("--password-env")
     l.add_argument("--client-secret-env", required=True)
     l.add_argument("--expect", choices=["ok", "refused"], default="ok")
+    l.add_argument("--totp-offset", type=int, default=0, help="use the code of this neighbouring 30-second step (default: current)")
     a = p.parse_args()
     if a.cmd == "login" and not a.state and not (a.user and a.password_env):
         p.error("login needs --state or --user with --password-env")

@@ -31,14 +31,6 @@ const DISABLED_PW = process.env.GATE_DISABLED_PASSWORD;
 if (!USER || !TEMP_PW) { console.error('need --user and GATE_TEMP_PASSWORD'); process.exit(2); }
 const NEW_PW = [...Array(18)].map(() => 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 54)]).join('');
 
-function b32decode(s) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  let bits = '';
-  for (const c of s.replace(/[\s=]/g, '').toUpperCase()) bits += alphabet.indexOf(c).toString(2).padStart(5, '0');
-  const bytes = [];
-  for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
-  return Buffer.from(bytes);
-}
 function totp(secretBytes, t = Date.now() / 1000) {
   const counter = Buffer.alloc(8);
   counter.writeBigUInt64BE(BigInt(Math.floor(t / 30)));
@@ -46,7 +38,6 @@ function totp(secretBytes, t = Date.now() / 1000) {
   const o = d[d.length - 1] & 15;
   return String((d.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0');
 }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let n = 0;
 const manifest = [];
