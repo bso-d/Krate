@@ -460,10 +460,10 @@ run_screenshots() {
   # Chromium inside the container maps "localhost" to the Docker host gateway, so the
   # published proxy port is reached the way a browser on the host reaches it.
   local gateway
-  gateway="$(docker run --rm --add-host host.docker.internal:host-gateway "$PG_IMAGE" sh -c 'getent hosts host.docker.internal | cut -d" " -f1' 2>/dev/null | tr -d '[:space:]')"
+  gateway="$(docker run --rm --add-host host.docker.internal:host-gateway "$PG_IMAGE" sh -c 'getent ahostsv4 host.docker.internal | awk "{print \$1; exit}"' 2>/dev/null | tr -d '[:space:]')"
   [[ -n "$gateway" ]] || { record X1 1 X NOT_RUN "cannot resolve the Docker host gateway (host.docker.internal) from a container"; return; }
   cap docker run --rm --add-host host.docker.internal:host-gateway -v "$OUT/screenshots:/out" -v "$GATE_DIR:/gate:ro" \
-    -e GATE_TEMP_PASSWORD="$shot_pw" -e GATE_DISABLED_PASSWORD="$shotd_pw" -e NODE_PATH=/usr/lib/node_modules \
+    -e GATE_TEMP_PASSWORD="$shot_pw" -e GATE_DISABLED_PASSWORD="$shotd_pw" -e PW_MODULES=/usr/lib/node_modules \
     krate-harness/playwright:1.60.0 node /gate/screenshots.mjs --base "$BASE" --out /out --user gateshot --disabled-user gateshotd --resolve-to "$gateway"
   ok_if X1 1 X $? "$(find "$OUT/screenshots" -name '*.png' | wc -l | tr -d ' ') screenshots in $OUT/screenshots (manifest.json has the captions): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
 }

@@ -11,7 +11,10 @@
 // TOTP enrolment -> forced password change -> signed-in account console -> sign out ->
 // second login asks for the OTP -> wrong password refused -> disabled user refused ->
 // admin console and master realm are not reachable through the proxy.
-import { chromium } from 'playwright';
+import { createRequire } from 'node:module';
+// The harness image installs playwright globally; ESM ignores NODE_PATH, so resolve it explicitly.
+const require = createRequire(process.env.PW_MODULES ? process.env.PW_MODULES + '/resolve-from-here.js' : import.meta.url);
+const { chromium } = require('playwright');
 import { createHmac } from 'node:crypto';
 import { writeFileSync, chmodSync } from 'node:fs';
 
