@@ -1113,6 +1113,11 @@ def truststore_pem(site, name='enterprise-ca.pem', mode=0o644):
     trust = site / 'auth/keycloak/truststores'
     trust.mkdir(parents=True, exist_ok=True)
     trust.chmod(0o755)
+    # Every directory on the way gets 755 explicitly: the gate runner runs under umask 077.
+    for parent in reversed((trust / name).relative_to(trust).parents):
+        if str(parent) != '.':
+            (trust / parent).mkdir(exist_ok=True)
+            (trust / parent).chmod(0o755)
     identity.write_file(trust / name, '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n', mode)
     return trust / name
 
@@ -1239,9 +1244,7 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     (trust / 'enterprise-ca.p12').chmod(0o600)
     expect_refusal('a 600 PKCS12 file', 'enterprise-ca.p12 must be world-readable')
     (trust / 'enterprise-ca.p12').unlink()
-    (trust / 'ca').mkdir()
-    (trust / 'ca').chmod(0o755)  # explicit: the gate runner runs under umask 077, and a 700 directory is refused first
-    truststore_pem(site, name='ca/root.pem')
+    truststore_pem(site, name='ca/root.pem')  # creates ca/ with 755 (the gate runner runs under umask 077)
     expect_pass('a PEM in a sub-directory')
     (trust / 'ca/root.pem').chmod(0o600)
     expect_refusal('a 600 PEM in a sub-directory', 'ca/root.pem must be world-readable')
@@ -1249,7 +1252,7 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     (trust / 'ca').chmod(0o700)
     expect_refusal('a 700 sub-directory', 'truststores/ca must have mode 755')
     (trust / 'ca').chmod(0o755)
-    (trust / 'notes.txt').write_text('not a certificate\n')
+    identity.write_file(trust / 'notes.txt', 'not a certificate\n', 0o644)  # refused by name, whatever its mode
     expect_refusal('a stray non-truststore file', 'notes.txt is not a truststore file')
     (trust / 'notes.txt').unlink()
     (trust / 'ca/root.pem').unlink()
