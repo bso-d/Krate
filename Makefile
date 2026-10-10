@@ -647,7 +647,9 @@ docker-rpms:
 >      continue
 >    fi
 >    for file in "$${providers[@]}"; do
->      [[ " $${wanted[*]} $${added[*]} " == *" $$file "* ]] || added+=("$$file")
+>      already=false
+>      for known in "$${wanted[@]}" "$${added[@]}"; do [[ "$$known" == "$$file" ]] && already=true; done
+>      $$already || added+=("$$file")
 >    done
 >  done
 >  [[ $${#added[@]} -gt 0 ]] || break

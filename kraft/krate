@@ -2060,8 +2060,8 @@ cmd_gen_cert() {
   # authentication preflight without a second gen-cert.
   public_host="$(public_url_host)"
   san="$(san_entry "$fqdn")"
-  [[ -z "$public_host" || "$public_host" == "$fqdn" ]] || san="${san},$(san_entry "$public_host")"
-  [[ "$fqdn" == localhost || "$public_host" == localhost ]] || san="${san},DNS:localhost"
+  [[ -z "$public_host" || "$public_host" == "${fqdn,,}" ]] || san="${san},$(san_entry "$public_host")"
+  [[ "${fqdn,,}" == localhost || "$public_host" == localhost ]] || san="${san},DNS:localhost"
   [[ -z "$ip" || ",${san}," == *",IP:${ip},"* ]] || san="${san},IP:${ip}"
   local san_names="${san//DNS:/}"
   info "Generating self-signed TLS certificate (CN=${fqdn}; names ${san_names//IP:/})..."
@@ -2411,7 +2411,7 @@ cmd_ui() {
   sep
   if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
     # In Keycloak sign-in mode the proxy serves KEYCLOAK_PUBLIC_URL's host only.
-    public="$(env_value KEYCLOAK_PUBLIC_URL)"
+    public="$(env_value KEYCLOAK_PUBLIC_URL)"; public="${public%/}"
     echo "  URL       ${public%/identity}/"
     echo "  Sign-in   Keycloak (realm krate) — manage users with krate identity users"
   else
