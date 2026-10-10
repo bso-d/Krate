@@ -36,8 +36,8 @@ apply_auth() {
   auth_sha="$(python3 -c 'import hashlib, sys; h = hashlib.sha256(sys.argv[1].encode() + b"\n"); h.update(open(sys.argv[2], "rb").read()); print(h.hexdigest()[:32])' "$mode" "$SCRIPT_DIR/auth/ui/$mode")"
   [[ "$(env_value KRATE_UI_AUTH_SHA)" == "$auth_sha" ]] || set_env_file_value "$ENV_FILE" KRATE_UI_AUTH_SHA "$auth_sha"
   # The same for the proxy: KRATE_PROXY_CONF_SHA (nginx.conf and the certificate, which a
-  # running proxy never rereads) and KRATE_PROXY_PUBLIC_HOST (the one host served in
-  # runtime.yml mode) are part of its environment, so it is recreated exactly when they changed.
+  # running proxy never rereads) and KRATE_PROXY_PUBLIC_HOST (the one Host value served in
+  # runtime.yml mode, port included) are part of its environment, so it is recreated exactly when they changed.
   sync_proxy_env "$mode"
   before="$(compose_cmd ps -q kafka-ui)"
   compose_cmd up -d --pull never --no-build --no-deps --wait --wait-timeout "$timeout" kafka-ui

@@ -253,9 +253,10 @@ an IP entry, which browsers require for an IP host). After changing
 `KEYCLOAK_PUBLIC_URL`, run `./krate gen-cert` and then `./krate start` or
 `./krate auth apply`: the proxy's Compose environment carries a digest of
 `nginx.conf` and the certificate (`KRATE_PROXY_CONF_SHA`) and, in Keycloak
-sign-in mode, the one host name it serves (`KRATE_PROXY_PUBLIC_HOST`), so
-those commands recreate it exactly when one of them changed. In Keycloak
-sign-in mode a request for any other host name is closed without a response;
+sign-in mode, the one `Host` value it serves (`KRATE_PROXY_PUBLIC_HOST`: the
+public host, plus `:port` unless 443), so those commands recreate it exactly when
+one of them changed. In Keycloak sign-in mode a request with any other `Host`
+header (name or port) is closed without a response;
 open the UI at the `KEYCLOAK_PUBLIC_URL` origin (`./krate ui` prints it).
 
 Offline Docker RPMs: `make docker-rpms` downloads the Docker CE packages plus the

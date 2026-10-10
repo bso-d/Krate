@@ -299,11 +299,14 @@ deploy_release() {
   ensure_home_dir
   work="$(mktemp -d)" || die "Cannot create a temporary directory"
   # The release archive is written once, listed, then extracted: the listing is exactly
-  # what was copied. Site files and the temporary .env copies an interrupted krate run
-  # leaves beside .env (.env.XXXXXX, mode 600, full .env contents) are not release files.
+  # what was copied. Site files, every .env.* beside .env (the temporary copies an
+  # interrupted krate run leaves, mode 600 with the full .env contents, and operator
+  # backups such as .env.bak) and sealed identity backups are not release files; the
+  # template is copied on its own below. Any other file an operator drops into the
+  # package directory is treated as a release file (copied, world-readable).
   if ! ( cd "$SCRIPT_DIR" && tar -cf - --exclude=./images --exclude=./docker-offline --exclude=./.env \
       --exclude=./certs --exclude=./auth --exclude=./monitoring/.env --exclude=./monitoring/auth \
-      --exclude='./sso/site*.json' --exclude='./.env.??????' --exclude='./monitoring/.env.??????' \
+      --exclude='./sso/site*.json' --exclude='./.env.*' --exclude='./monitoring/.env.*' \
       --exclude='.identity-backup.*' . ) > "$work/release.tar" \
     || ! tar -tf "$work/release.tar" > "$work/release.list" \
     || ! ( cd "$KRATE_HOME" && tar -xf "$work/release.tar" ); then
@@ -319,6 +322,9 @@ deploy_release() {
     die "Could not set read permissions on the release files in $KRATE_HOME"
   fi
   rm -rf "$work"
+  if ! { cp "$SCRIPT_DIR/.env.template" "$KRATE_HOME/.env.template" && chmod 644 "$KRATE_HOME/.env.template"; }; then
+    die "Could not copy .env.template to $KRATE_HOME"
+  fi
   mkdir -p "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak/truststores"
   chmod go+rx "$KRATE_HOME/auth" "$KRATE_HOME/auth/ui"
   cp "$SCRIPT_DIR/auth/ui/local.yml" "$KRATE_HOME/auth/ui/local.yml"
@@ -2086,13 +2092,24 @@ public_url_host() {
   printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
 }
 
+# The Host header a browser sends for KEYCLOAK_PUBLIC_URL: the host, plus :port when
+# the URL names a port other than https's default (browsers omit :443).
+public_url_authority() {
+  local authority port
+  authority="$(env_value KEYCLOAK_PUBLIC_URL)"; authority="${authority#*://}"; authority="${authority%%/*}"
+  if [[ "$authority" == \[* ]]; then port="${authority#*]}"; else port="${authority#"${authority%%:*}"}"; fi
+  port="${port#:}"
+  if [[ -n "$port" && "$port" != 443 ]]; then printf '%s:%s\n' "$(public_url_host)" "$port"; else public_url_host; fi
+}
+
 # The proxy's Compose environment follows its inputs, so `up` recreates it exactly when
 # one changed. KRATE_PROXY_CONF_SHA digests nginx.conf and certs/server.{crt,key}: a new
 # release replaces nginx.conf (a new inode the running proxy, bound to the old one, never
 # sees) and nginx reads the certificate only at start, while Compose recreates a container
-# only when its configuration or image changes. KRATE_PROXY_PUBLIC_HOST is the one host
-# name the proxy serves in Keycloak sign-in mode (runtime.yml): KEYCLOAK_PUBLIC_URL's host,
-# the only one Keycloak accepts redirects for. Empty in local.yml mode: every name is served.
+# only when its configuration or image changes. KRATE_PROXY_PUBLIC_HOST is the one Host
+# header value the proxy serves in Keycloak sign-in mode (runtime.yml): the authority of
+# KEYCLOAK_PUBLIC_URL (host, plus :port unless 443), the only one Keycloak accepts redirects
+# for. Empty in local.yml mode: every name is served.
 # $1: the authentication mode to plan for (empty: KAFKA_UI_AUTH_CONFIG in .env).
 sync_proxy_env() {
   local mode="${1:-}" sha host=""
@@ -2105,7 +2122,7 @@ for name in sys.argv[1:]:
     digest.update(b"%d\n" % len(data) + data)
 print(digest.hexdigest()[:32])' "$SCRIPT_DIR/nginx.conf" "$CERT_CRT" "$CERT_KEY")" \
     || die "Cannot read nginx.conf, certs/server.crt and certs/server.key for the proxy digest"
-  [[ "$mode" != runtime.yml ]] || host="$(public_url_host)"
+  [[ "$mode" != runtime.yml ]] || host="$(public_url_authority)"
   [[ "$(env_value KRATE_PROXY_CONF_SHA)" == "$sha" ]] || set_env_file_value "$ENV_FILE" KRATE_PROXY_CONF_SHA "$sha"
   [[ "$(env_value KRATE_PROXY_PUBLIC_HOST)" == "$host" ]] || set_env_file_value "$ENV_FILE" KRATE_PROXY_PUBLIC_HOST "$host"
 }

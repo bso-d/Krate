@@ -38,27 +38,48 @@ IDENTITY_MEMBERS = {'keycloak-db', 'keycloak', 'proxy', 'kafka-ui'}
 EGRESS_NETWORK = 'identity-egress'
 
 
-# Column-0 lines kafbat.yml may contain: blank, a comment, the document marker and the kafka: key.
-KAFBAT_YML_TOP = re.compile(r'(\s*|#.*|---\s*|kafka:\s*(#.*)?)')
+# Column-0 lines kafbat.yml may contain: blank, a comment and the kafka: key; the document
+# marker only before the first content line (a later `---` opens a second document, whose root
+# mapping may be indented, so it would never reach column 0).
+KAFBAT_YML_BLANK = re.compile(r'\s*(#.*)?')
+KAFBAT_YML_KAFKA = re.compile(r'kafka:\s*(#.*)?')
 
 
 def validate_kafbat_yml(root):
     """EPC's kafbat.yml is merged into the same Spring configuration; it may configure clusters only.
 
-    Every line that starts in column 0 opens a top-level node, whatever its spelling (a quoted
-    key, a flow mapping, a second document's key), so each one must be blank, a comment, `---`
-    or `kafka:`; anything else is refused without trying to parse it.
+    A node is opened by a column-0 line, whatever its spelling (a quoted key, a flow mapping, a
+    complex key), or by an indented line before any `kafka:` (an indented root mapping, which YAML
+    allows). So: before `kafka:` only blank lines, comments and one leading `---` may appear; after
+    it, column-0 lines must be blank or comments; `---` and `...` are refused anywhere else. Nothing
+    is parsed.
     """
     path = root / 'kafbat.yml'
     if not path.is_file():
         return
     lines = path.read_text().splitlines()
-    others = [str(number) for number, line in enumerate(lines, 1)
-              if not line.startswith(' ') and not KAFBAT_YML_TOP.fullmatch(line)]
-    if others:
+    offending = []
+    seen_kafka = False
+    seen_content = False
+    for number, line in enumerate(lines, 1):
+        if KAFBAT_YML_BLANK.fullmatch(line):
+            continue
+        if not seen_content and re.fullmatch(r'---\s*(#.*)?', line):
+            seen_content = True
+            continue
+        seen_content = True
+        if not seen_kafka:
+            if KAFBAT_YML_KAFKA.fullmatch(line):
+                seen_kafka = True
+            else:
+                offending.append(str(number))  # anything before kafka:, indented or not, opens another node
+            continue
+        if not line.startswith((' ', '\t')) or re.match(r'\s*(---|\.\.\.)(\s|$)', line):
+            offending.append(str(number))
+    if offending:
         raise Preflight('kafbat.yml may define the kafka: section only (clusters); other top-level content on line(s) '
-                        + ', '.join(others[:5]))
-    if not any(line.startswith('kafka:') for line in lines):
+                        + ', '.join(offending[:5]))
+    if not seen_kafka:
         raise Preflight('kafbat.yml may define the kafka: section only (clusters); it has no kafka: section')
 
 

@@ -761,6 +761,22 @@ def check_renewal(checks, tls):
         e(not (short / '.renew-stale').exists(), 'a stale work directory from a killed run is removed before renewing')
         identity.discard_previous(short)
         e(sorted(os.listdir(short)) == sorted(identity.TLS_FILES), 'after discard only the five files remain')
+        # A renewal over a mixed set (.prev files beside a server.crt that no longer chains to ca.crt) is refused:
+        # discarding .prev there would delete the only good copy (post-c4e0d41 review nit).
+        good = {name: (short / name).read_bytes() for name in identity.TLS_FILES}
+        with tempfile.TemporaryDirectory() as other_dir:
+            other = Path(other_dir) / 'tls'
+            identity.db_tls(other)
+            for name in ('server.key', 'server.crt'):
+                (short / (name + '.prev')).write_bytes(good[name])
+                (short / name).write_bytes((other / name).read_bytes())
+        try:
+            identity.renew_server(short)
+            e(False, 'a renewal over a mixed set (.prev present, server.crt not chaining to ca.crt) must be refused')
+        except ValueError as error:
+            e('.prev' in str(error) and 'rollback' in str(error), f'the refusal names the .prev files and the rollback; got {error}')
+        e(sorted(identity.rollback(short)) == ['server.crt', 'server.key'], 'the rollback puts the previous server files back')
+        e({name: (short / name).read_bytes() for name in identity.TLS_FILES} == good, 'after the rollback the set is the good one again')
         # A killed CA renewal leaves ca.*.prev behind; a later server-only renewal must discard them first,
         # or its rollback would put the old CA back beside a server certificate signed by the new one (PR #39 review S8).
         ca_now = {name: (short / name).read_bytes() for name in ('ca.key', 'ca.crt')}
@@ -1073,6 +1089,10 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
             ('a complex mapping key', 'kafka:\n  clusters: []\n? management\n: {}\n'),
             ('a flow mapping at column 0', 'kafka:\n  clusters: []\n{auth: {type: DISABLED}}\n'),
             ('a second document', 'kafka:\n  clusters: []\n---\nauth:\n  type: DISABLED\n'),
+            ('a second document with an indented root', 'kafka:\n  clusters: []\n---\n management:\n   endpoints: x\n'),
+            ('an indented root before kafka:', ' management:\n   endpoints: x\nkafka:\n  clusters: []\n'),
+            ('a document end marker', 'kafka:\n  clusters: []\n...\nauth: {}\n'),
+            ('an indented document marker', 'kafka:\n  clusters: []\n  ---\n  auth: {}\n'),
             ('no kafka: section', '# clusters elsewhere\n')):
         kafbat.write_text(text)
         expect_refusal(f'kafbat.yml with {label}', 'kafbat.yml')
@@ -1267,7 +1287,7 @@ def check_proxy_env(checks):
     if bash_binary() is None:
         return
     script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'replace_env_file', 'set_env_file_value',
-                                         'public_url_host', 'sync_proxy_env') + r'''
+                                         'public_url_host', 'public_url_authority', 'sync_proxy_env') + r'''
 SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; CERT_CRT="$1/certs/server.crt"; CERT_KEY="$1/certs/server.key"
 sync_proxy_env "${2:-}"
 grep -E '^KRATE_PROXY_' "$ENV_FILE"
@@ -1304,10 +1324,12 @@ grep -E '^KRATE_PROXY_' "$ENV_FILE"
             e(changed not in digests, f'sync_proxy_env: a changed {path} must change KRATE_PROXY_CONF_SHA')
             digests.add(changed)
         _, _, host = sync('runtime.yml')
-        e(host == 'kafka.example.test', f'sync_proxy_env (runtime.yml): the public host in lower case without the port; got {host!r}')
-        env_file('https://[FD00::5]:8443/identity')
-        _, _, host = sync('runtime.yml')
-        e(host == '[fd00::5]', f'sync_proxy_env (runtime.yml): an IPv6 literal keeps its brackets, as nginx $host does; got {host!r}')
+        e(host == 'kafka.example.test:8443', f'sync_proxy_env (runtime.yml): the public authority in lower case, port included; got {host!r}')
+        for url, expected in (('https://[FD00::5]:8443/identity', '[fd00::5]:8443'), ('https://[fd00::5]/identity', '[fd00::5]'),
+                              ('https://kafka.example.test/identity', 'kafka.example.test'), ('https://kafka.example.test:443/identity', 'kafka.example.test')):
+            env_file(url)
+            _, _, host = sync('runtime.yml')
+            e(host == expected, f'sync_proxy_env (runtime.yml): {url} gives the Host value a browser sends ({expected}: brackets kept, :443 omitted); got {host!r}')
         _, _, host = sync('local.yml')
         e(host == '', f'sync_proxy_env (local.yml): the public host is cleared again; got {host!r}')
 
@@ -1340,11 +1362,15 @@ def check_nginx_edge(checks):
         nginx = (ROOT / edition / 'nginx.conf').read_text()
         label = f'{edition}/nginx.conf'
         source, entries, default = nginx_map(nginx, 'krate_foreign_host')
-        e(source == '$host ${KRATE_PROXY_PUBLIC_HOST}', f'{label}: $krate_foreign_host must compare $host with KRATE_PROXY_PUBLIC_HOST; got {source!r}')
+        e(source == '$http_host ${KRATE_PROXY_PUBLIC_HOST}',
+          f'{label}: $krate_foreign_host must compare the raw Host header ($http_host, port included; $host is taken from an absolute request-URI) with KRATE_PROXY_PUBLIC_HOST; got {source!r}')
         for host, public, refused in (('kafka.example.test', 'kafka.example.test', '0'), ('KAFKA.example.test', 'kafka.example.test', '0'),
                                       ('evil.example', 'kafka.example.test', '1'), ('kafka.example.test.evil', 'kafka.example.test', '1'),
                                       ('kafka', 'kafka.example.test', '1'), ('_', 'localhost', '1'), ('[fd00::5]', '[fd00::5]', '0'),
-                                      ('any.name', '', '0'), ('10.1.2.3', '', '0')):
+                                      ('kafka.example.test:8443', 'kafka.example.test:8443', '0'), ('kafka.example.test', 'kafka.example.test:8443', '1'),
+                                      ('kafka.example.test:9999', 'kafka.example.test', '1'), ('kafka.example.test:8443', 'kafka.example.test', '1'),
+                                      ('[fd00::5]:8443', '[fd00::5]:8443', '0'), ('', 'kafka.example.test', '1'),
+                                      ('any.name', '', '0'), ('10.1.2.3', '', '0'), ('any.name:9999', '', '0')):
             got = map_value(entries, default, f'{host} {public}')
             e(got == refused, f'{label}: host {host!r} with public host {public!r} must map to {refused}; got {got}')
         _, entries, default = nginx_map(nginx, 'krate_path_parameter')
@@ -1363,6 +1389,39 @@ def check_nginx_edge(checks):
         head = tls[:tls.index('    location ')]
         e('    if ($krate_path_parameter) { return 400; }' in head, f'{label}: the HTTPS server must refuse a path parameter before any location')
         e(head.index('return 444') < head.index('return 400'), f'{label}: the host check comes first')
+
+
+def check_nginx_render(checks):
+    """nginx.conf is a template: render it the way the proxy image does (envsubst with the filter) and run nginx -t, for both modes."""
+    e = checks.expect
+    template = (ROOT / 'kraft/.env.template').read_text()
+    found = re.search(r'^NGINX_IMAGE=(\S+)', template, re.M)
+    if found is None:
+        e(False, 'kraft/.env.template: NGINX_IMAGE missing')
+        return
+    image = found.group(1)
+    with tempfile.TemporaryDirectory() as tmp:
+        certs = Path(tmp) / 'certs'
+        certs.mkdir()
+        made = subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-days', '1', '-subj', '/CN=check',
+                               '-keyout', str(certs / 'server.key'), '-out', str(certs / 'server.crt')],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if not e(made.returncode == 0, f'openssl could not make a throwaway certificate: {made.stderr.strip()[:120]}'):
+            return
+        for path in certs.iterdir():
+            path.chmod(0o644)
+        for edition in EDITIONS:
+            for public_host in ('', 'kafka.example.test:8443'):
+                result = subprocess.run(['docker', 'run', '--rm', '-v', f'{ROOT / edition / "nginx.conf"}:/etc/nginx/templates/default.conf.template:ro',
+                                         '-v', f'{certs}:/etc/nginx/certs:ro', '-e', 'NGINX_ENVSUBST_FILTER=^KRATE_PROXY_',
+                                         '-e', f'KRATE_PROXY_PUBLIC_HOST={public_host}', '-e', 'KRATE_PROXY_CONF_SHA=check', image, 'nginx', '-T'],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
+                label = f'{edition}/nginx.conf rendered with KRATE_PROXY_PUBLIC_HOST={public_host!r}'
+                if e(result.returncode == 0 and 'syntax is ok' in result.stderr and 'test is successful' in result.stderr,
+                     f'{label}: nginx -t must pass; exit {result.returncode}: {result.stderr.strip()[-300:]}'):
+                    e(f'map "$http_host {public_host}" $krate_foreign_host' in result.stdout,
+                      f'{label}: the rendered map must carry the public host literally')
+                    e('${KRATE_PROXY_' not in result.stdout, f'{label}: no template variable may survive the render')
 
 
 def check_deploy_release(checks):
@@ -1386,7 +1445,8 @@ deploy_release ""
                  'auth/ui/local.yml': 0o600, 'monitoring/docker-compose.yml': 0o600, 'monitoring/.env.template': 0o600,
                  'sso/identity.py': 0o600,
                  # operator leftovers in the package directory: never part of the release
-                 '.env.Pk12Lm': 0o600, 'monitoring/.env.Rt34Uv': 0o600, '.identity-backup.Xy12Ab': 0o600}
+                 '.env.Pk12Lm': 0o600, 'monitoring/.env.Rt34Uv': 0o600, '.identity-backup.Xy12Ab': 0o600,
+                 '.env.bak': 0o600, 'monitoring/.env.orig': 0o600}
         for name, file_mode in files.items():
             (package / name).parent.mkdir(parents=True, exist_ok=True)
             (package / name).write_text(name + '\n')
@@ -1409,8 +1469,9 @@ deploy_release ""
             e(mode(home / name) & 0o055 == 0o055, f'release directory {name} must be group/world-traversable')
         for name in site:
             e(mode(home / name) == 0o600, f'{name} must keep mode 600 (not a release file); got {mode(home / name):o}')
-        for name in ('.env.Pk12Lm', 'monitoring/.env.Rt34Uv', '.identity-backup.Xy12Ab'):
+        for name in ('.env.Pk12Lm', 'monitoring/.env.Rt34Uv', '.identity-backup.Xy12Ab', '.env.bak', 'monitoring/.env.orig'):
             e(not (home / name).exists(), f'the package-directory leftover {name} must not be copied into KRATE_HOME')
+        e((home / '.env.template').is_file() and mode(home / '.env.template') == 0o644, '.env.template is copied on its own with mode 644')
         e((home / 'auth/ui/local.yml').is_file() and mode(home / 'auth/ui/local.yml') == 0o644, 'auth/ui/local.yml is installed with mode 644')
 
 
@@ -1597,7 +1658,7 @@ container_status() { echo running; }
 sso_dir() { echo /sso; }
 env_value() { echo admin; }
 identity_ready() { return 0; }
-python3() { log "python3 $*"; if [[ "$*" == *--renew-server* ]]; then echo "renewed CA and server certificate, valid until Jan 1 00:00:00 2030 GMT"; fi; }
+python3() { log "python3 $*"; if [[ "$*" == *--renew-server* ]]; then if [[ -n "${SAME_CA:-}" ]]; then echo "renewed server certificate, valid until Jan 1 00:00:00 2030 GMT"; else echo "renewed CA and server certificate, valid until Jan 1 00:00:00 2030 GMT"; fi; fi; }
 identity_compose() { log "compose $*"; }
 identity_health_wait() { log "wait $1"; [[ " ${FAIL_WAIT:-} " != *" $1 "* ]]; }
 identity_wait_healthy() { log "wait-or-die $1"; }
@@ -1609,7 +1670,8 @@ cmd_identity_renew_db_tls
 '''
         for case, overrides, succeeds in (('success', {}, True), ('keycloak unhealthy', {'FAIL_WAIT': 'keycloak'}, False),
                                           ('admin login refused', {'LOGIN_RC': '1'}, False),
-                                          ('database unhealthy', {'FAIL_WAIT': 'keycloak-db'}, False)):
+                                          ('database unhealthy', {'FAIL_WAIT': 'keycloak-db'}, False),
+                                          ('same CA', {'SAME_CA': '1'}, True)):
             with tempfile.TemporaryDirectory() as tmp:
                 calls_file = Path(tmp) / 'calls'
                 result = run_bash(script, env=dict(os.environ, CALLS=str(calls_file), **overrides))
@@ -1617,6 +1679,15 @@ cmd_identity_renew_db_tls
                 discard = next((i for i, line in enumerate(calls) if '--discard-previous' in line), None)
                 rollback = next((i for i, line in enumerate(calls) if '--rollback' in line), None)
                 label = f'{edition}/krate renew-db-tls with a renewed CA ({case})'
+                if case == 'same CA':
+                    # Keycloak's trust is unchanged: the database's health settles it, .prev goes before the
+                    # readiness poll, and Keycloak is neither restarted nor logged into.
+                    e(result.returncode == 0 and discard is not None and rollback is None
+                      and 'compose restart --no-deps keycloak-db' in calls and 'wait keycloak-db' in calls
+                      and calls.index('wait keycloak-db') < discard
+                      and not any(line.startswith('login ') or line == 'compose restart --no-deps keycloak' for line in calls),
+                      f'{edition}/krate renew-db-tls with the same CA: restart keycloak-db, wait, discard .prev, no Keycloak restart or login; got {calls}')
+                    continue
                 if succeeds:
                     steps = ('compose restart --no-deps keycloak-db', 'wait keycloak-db', 'compose restart --no-deps keycloak',
                              'wait keycloak', 'login master admin')
@@ -1784,7 +1855,7 @@ def main():
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
-                  check_bash_available, check_proxy_env, check_nginx_edge, check_deploy_release, check_rpm_install, check_gen_cert_ip,
+                  check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_deploy_release, check_rpm_install, check_gen_cert_ip,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock):
         try:
             check(checks)

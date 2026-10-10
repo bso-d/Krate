@@ -571,6 +571,10 @@ def renew_server(directory, days=SERVER_CERT_DAYS):
         raise IncompleteMaterial(f'{directory} is incomplete; missing ' + ', '.join(missing)
                                  + '. Renewal needs the existing CA; restore the directory from a backup first.')
     remove_stale_work(directory)
+    if any((directory / (name + '.prev')).exists() for name in TLS_FILES) and not chain_verifies(directory):
+        raise IncompleteMaterial(f'{directory} holds .prev files of an interrupted renewal and server.crt does not verify '
+                                 'against ca.crt: the current set is mixed. Put the previous set back first '
+                                 '(identity.py db-tls --rollback) instead of renewing on top of it.')
     discard_previous(directory)
     renew_ca = seconds_left(directory / 'ca.crt') < days * 86400
     names = ('ca.key', 'ca.crt', 'server.key', 'server.crt') if renew_ca else ('server.key', 'server.crt')
@@ -593,6 +597,15 @@ def renew_server(directory, days=SERVER_CERT_DAYS):
     for name in names:
         os.replace(directory / (name + '.new'), directory / name)
     return not_after(directory / 'server.crt'), renew_ca
+
+
+def chain_verifies(directory):
+    """True when server.crt chains to ca.crt (openssl verify; expiry is not the question, a renewal fixes that)."""
+    try:
+        _openssl(['verify', '-no_check_time', '-CAfile', 'ca.crt', 'server.crt'], directory, capture=True)
+    except subprocess.SubprocessError:
+        return False
+    return True
 
 
 def rollback(directory):

@@ -229,13 +229,15 @@ request.
   learns the `end_session_endpoint` from `runtime.yml`
   (`custom-params.end-session-uri`, written by `krate auth configure`); the
   preflight refuses a `runtime.yml` without it.
-- In this mode the proxy serves one host name only: the host of
-  `KEYCLOAK_PUBLIC_URL` (`KRATE_PROXY_PUBLIC_HOST`, case-insensitive, any
-  port). A request for any other name (another DNS alias, an IP address
-  that is not the public host, a forged `Host` header) is closed without a response (nginx 444),
-  so no client can make Kafbat build its redirect and logout URLs from a
-  host of its choice; Keycloak's exact redirect allowlist would refuse such a
-  login anyway. Use the `KEYCLOAK_PUBLIC_URL` origin in the browser
+- In this mode the proxy serves one `Host` value only: the authority of
+  `KEYCLOAK_PUBLIC_URL` (`KRATE_PROXY_PUBLIC_HOST`: host, plus `:port` unless
+  443; case-insensitive). A request whose raw `Host` header is anything else
+  (another DNS alias, an IP address that is not the public host, another
+  port, a forged header, also with an absolute request-URI) is closed without
+  a response (nginx 444) before any location, so the upstreams only ever see
+  that one authority as `Host` and `X-Forwarded-Host` and no client can make
+  Kafbat build its redirect and logout URLs from an authority of its choice;
+  Keycloak's exact redirect allowlist would refuse such a login anyway. Use the `KEYCLOAK_PUBLIC_URL` origin in the browser
   (`./krate ui` prints it). In `local.yml` mode every name is served.
 - The proxy refuses (400) any path with a path parameter (`;`, raw or
   encoded `%3B`) on every route: nginx normalises dot segments and
@@ -340,9 +342,15 @@ has a look-ahead window of 0, which refuses a TOTP code typed across the
 window changed. The same by hand:
 
 ```bash
+# log in first (the block above removes /tmp/kcadm.config at its end)
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh config credentials \
+  --config /tmp/kcadm.config --server http://localhost:8080/identity --realm master --user admin
 docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
   /opt/keycloak/bin/kcadm.sh update realms/krate \
   --config /tmp/kcadm.config -s otpPolicyLookAheadWindow=1
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  rm -f /tmp/kcadm.config
 ```
 
 Editing the realm file by hand is overwritten and does not change the realm. Review other
