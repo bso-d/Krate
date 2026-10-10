@@ -13,7 +13,12 @@ RHEL_VERSION ?= 9
 # the Ubuntu release so existing invocations keep working; set TARGET_OS=rhel9
 # for a RHEL target.
 TARGET_OS ?= $(UBUNTU_VERSION)
-RHEL_BUILDER_IMAGE ?= almalinux:9
+# Builder for the RHEL-family RPM set. Its distro supplies the optional/ packages
+# (container-selinux, nftables); Rocky tracks the RHEL minor releases, so the
+# bundled container-selinux matches a current RHEL/Rocky 9 host. For a target whose
+# selinux-policy is older or newer, build with that target's own distro image or let
+# `krate docker-install` name the package to take from the OS media.
+RHEL_BUILDER_IMAGE ?= rockylinux:9
 INCLUDE_DOCKER ?= 0
 NO_PULL ?= 0
 

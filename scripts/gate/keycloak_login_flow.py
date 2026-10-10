@@ -200,7 +200,11 @@ def do_login(a):
         print(json.dumps({"result": "OK", "claims": claims}))
         return
     # Refused: still on a Keycloak page (login form with an error, or an error page).
-    msg = re.search(r'<span[^>]*kc-feedback-text[^>]*>([^<]*)<', page) or re.search(r'id="kc-error-message".*?<p[^>]*>([^<]*)<', page, re.S)
+    # keycloak.v2 theme (PatternFly 5): the message sits in #input-error-container-<field> as helper text;
+    # the error page uses #kc-error-message. Verified in Chrome DevTools on 2026-10-10 (harness/gate-receipts/devtools-walk-02-wrong-password.png).
+    msg = (re.search(r'id="input-error[^"]*".*?helper-text__item-text[^>]*>\s*([^<]*?)\s*<', page, re.S)
+           or re.search(r'id="kc-error-message".*?<p[^>]*>([^<]*)<', page, re.S)
+           or re.search(r'<span[^>]*kc-feedback-text[^>]*>([^<]*)<', page))
     reason = html.unescape(msg.group(1).strip()) if msg else f"status {st}"
     if a.expect == "ok":
         raise AssertionError(f"login refused: {reason}")

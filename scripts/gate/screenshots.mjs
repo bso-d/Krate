@@ -59,12 +59,18 @@ const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { widt
 const page = await ctx.newPage();
 const account = `${BASE}/identity/realms/krate/account`;
 
-try {
+async function openLogin() {
   await page.goto(account, { waitUntil: 'networkidle' });
-  await shot(page, 'account-console-asks-to-sign-in', 'Opening the account console: Keycloak asks the user to sign in');
-  await page.getByRole('button', { name: /sign in/i }).click();
+  const signIn = page.getByRole('button', { name: /sign in/i });
+  if (!(await page.locator('#kc-form-login').count()) && (await signIn.count())) await signIn.first().click();
   await page.waitForSelector('#kc-form-login');
-  await shot(page, 'login-form', 'Krate realm login form (username + password), served through the HTTPS proxy');
+}
+
+try {
+  // Verified in Chrome DevTools (2026-10-10): the unauthenticated account console redirects
+  // straight to the realm login form (#kc-form-login, #username, #password, #kc-login).
+  await openLogin();
+  await shot(page, 'login-form', 'Opening the account console sends the user to the Krate login form (username + password) through the HTTPS proxy');
 
   await page.fill('#username', USER);
   await page.fill('#password', TEMP_PW);
@@ -100,9 +106,7 @@ try {
   if (await signOut.count()) { await signOut.first().click(); await page.waitForLoadState('networkidle'); }
   await ctx.clearCookies();
 
-  await page.goto(account, { waitUntil: 'networkidle' });
-  await page.getByRole('button', { name: /sign in/i }).click();
-  await page.waitForSelector('#kc-form-login');
+  await openLogin();
   await page.fill('#username', USER);
   await page.fill('#password', NEW_PW);
   await page.click('#kc-login');
@@ -114,9 +118,7 @@ try {
   await shot(page, 'wrong-otp-refused', 'A wrong one-time code is refused');
   await ctx.clearCookies();
 
-  await page.goto(account, { waitUntil: 'networkidle' });
-  await page.getByRole('button', { name: /sign in/i }).click();
-  await page.waitForSelector('#kc-form-login');
+  await openLogin();
   await page.fill('#username', USER);
   await page.fill('#password', 'definitely-not-the-password');
   await page.click('#kc-login');
@@ -125,9 +127,7 @@ try {
   await ctx.clearCookies();
 
   if (DISABLED && DISABLED_PW) {
-    await page.goto(account, { waitUntil: 'networkidle' });
-    await page.getByRole('button', { name: /sign in/i }).click();
-    await page.waitForSelector('#kc-form-login');
+    await openLogin();
     await page.fill('#username', DISABLED);
     await page.fill('#password', DISABLED_PW);
     await page.click('#kc-login');

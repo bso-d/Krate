@@ -242,10 +242,22 @@ operator flow is: `./krate setup` or `./krate start`, then
 `./krate identity up`, then (Phase 2) `./krate auth configure` and
 `./krate auth apply`.
 
+Acceptance of the identity work is decided by the executable gate
+`scripts/gate-identity.sh` (criteria, tests and receipts:
+[sso/guides/identity-gate.md](sso/guides/identity-gate.md)).
+
 The certificate `./krate gen-cert` (or the first start) writes covers the host
 FQDN, the host of `KEYCLOAK_PUBLIC_URL` and `localhost`, so `./krate auth apply`
 passes its hostname check on a fresh install; after changing
 `KEYCLOAK_PUBLIC_URL` run `./krate gen-cert` and `./krate restart proxy`.
+
+Offline Docker RPMs: `make docker-rpms` downloads the Docker CE packages plus the
+base-OS dependencies a minimal host may lack (`container-selinux`, `nftables`)
+into `optional/`, from the builder image `RHEL_BUILDER_IMAGE` (default
+`rockylinux:9`); `krate docker-install` adds only the bundled packages `dnf`
+names as missing on that host and otherwise tells you which package to take
+from the OS media. The whole flow was proven offline on a Rocky Linux 9.8 VM
+with SELinux enforcing (see `sso/guides/identity-gate.md`).
 
 `./krate identity up` generates the database TLS material and the realm, starts
 PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the
