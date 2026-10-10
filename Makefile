@@ -13,13 +13,21 @@ RHEL_VERSION ?= 9
 # the Ubuntu release so existing invocations keep working; set TARGET_OS=rhel9
 # for a RHEL target.
 TARGET_OS ?= $(UBUNTU_VERSION)
-RHEL_BUILDER_IMAGE ?= almalinux:9
+# Builder for the RHEL-family RPM set. Its distro supplies the optional/ packages
+# (container-selinux, nftables and its libraries). This is the Rocky Linux project's
+# own image (the Docker Official Image rockylinux:9 is no longer updated), pinned by
+# digest like every other build input; its packages resolve from Rocky's current
+# repositories, which follow the RHEL 9 minor releases. For a target whose
+# selinux-policy is older or newer, build with that target's own distro image or let
+# `krate docker-install` name the package to take from the OS media. To move the pin:
+# docker buildx imagetools inspect rockylinux/rockylinux:9 (the index Digest line).
+RHEL_BUILDER_IMAGE ?= rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f
 INCLUDE_DOCKER ?= 0
 NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh scripts/package-release.sh
+CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh scripts/package-release.sh scripts/gate-identity.sh
 VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
@@ -34,12 +42,16 @@ ZK_MONITOR_IMAGES := $(shell awk -F= '/^[A-Z0-9_]+_IMAGE=/{print $$2}' zk/monito
 DOCKER_PACKAGES := containerd.io docker-ce-cli docker-ce docker-compose-plugin
 # RHEL needs buildx explicitly; on Debian it arrives as a docker-ce dependency.
 DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-extras docker-compose-plugin docker-buildx-plugin
-# containerd.io requires container-selinux, which every RHEL host running
-# containers already has. It is downloaded to optional/ rather than the main set
-# because the newest build requires selinux-policy >= el9_8 — newer than RHEL 9.6
-# ships — so installing it unconditionally FAILS on a 9.6 host that was fine.
-# The installer falls back to it only when the host has none.
-DOCKER_RPM_OPTIONAL := container-selinux
+# Base-OS dependencies a minimal or cloud host may lack go to optional/, never to
+# the main set: containerd.io requires container-selinux (coupled to the host's
+# selinux-policy minor version: a newer build FAILS on an older host that was fine),
+# and docker-ce 29 requires nftables, which requires libnftnl and jansson (libnftnl
+# in turn libmnl). `krate docker-install` and the bundled install-docker.sh add an
+# optional package only when it provides a capability dnf names as missing on that
+# host. Build with the default RHEL_BUILDER_IMAGE (or the target's own distro image)
+# so the optional builds match the target's policy; otherwise install them from the
+# OS media.
+DOCKER_RPM_OPTIONAL := container-selinux nftables libnftnl jansson libmnl
 
 .PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft bundle-epc docker-debs docker-rpms monitor-up monitor-down monitor-status monitor-logs clean dist-clean
 .SILENT: help
@@ -53,8 +65,9 @@ help:
 >zk edition.
 >
 >Targets:
->  make check                                     Run syntax, ShellCheck, Compose and offline-policy validation
+>  make check                                     Run syntax, ShellCheck, Compose, offline-policy and identity validation
 >  make offline-check                             Verify offline application defaults (Python 3 + Compose v2)
+>  make identity-check                            Verify the identity templates, realm plan and Compose wiring (Python 3 + Compose v2)
 >  make offline-smoke                             Test pinned Kafbat locally with networking disabled
 >  make sso-config VARIANT=epc SSO_SETTINGS=sso/site.json
 >                                                Generate opt-in SSO config (no activation)
@@ -87,7 +100,7 @@ help:
 >  VARIANT=kraft|epc       Which cluster the monitor-* targets act on
 >EOF
 
-.PHONY: offline-check
+.PHONY: offline-check identity-check
 .PHONY: sso-config
 .PHONY: dual-config kafbat-ui
 
@@ -100,10 +113,13 @@ dual-config:
 sso-config:
 >python3 sso/configure.py --app "$(SSO_APP)" --settings "$(SSO_SETTINGS)" --output "$(SSO_OUTPUT)"
 
-check: syntax lint compose-check offline-check
+check: syntax lint compose-check offline-check identity-check
 
 offline-check:
 >python3 scripts/check-offline.py
+
+identity-check:
+>python3 scripts/check-identity.py
 
 offline-smoke: offline-check
 >bash
@@ -250,10 +266,12 @@ bundle: offline-check
 >  # published, including the components it could not be obtained for.
 >  cp LICENSE LICENSE-SOURCES.md "$$bundle_dir/"
 >  if [[ "$$mode" != "zk" ]]; then
->    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso" "$$bundle_dir/docs"
+>    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso/logrotate" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
->    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py "$$bundle_dir/sso/"
->    cp sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md "$$bundle_dir/docs/"
+>    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py sso/identity.py "$$bundle_dir/sso/"
+>    # Rendered by `krate identity logrotate` with the installation's journal path.
+>    cp sso/logrotate/krate-identity.conf "$$bundle_dir/sso/logrotate/"
+>    cp sso/guides/identity-foundation.md sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md "$$bundle_dir/docs/"
 >  fi
 >  # The CLI ships as ./krate everywhere except the frozen ZooKeeper edition,
 >  # whose published v5 bundle documents ./kafka.
@@ -483,9 +501,9 @@ docker-rpms:
 >echo "    Builder: $(RHEL_BUILDER_IMAGE)"
 >echo "    Output : $$output_dir"
 >
-># --resolve also pulls dependencies the builder image lacks (container-selinux
-># being the one a minimal RHEL host usually needs), so the set installs with
-># dnf --disablerepo='*' on an air-gapped VM.
+># The main set is exactly the Docker CE packages; optional/ carries the base-OS
+># dependencies a minimal host may lack, so the set installs with
+># dnf --disablerepo='*' on an air-gapped VM (see DOCKER_RPM_OPTIONAL).
 >docker run --rm --platform "linux/$(ARCH)" \
 >  -e BASEURL="https://download.docker.com/linux/rhel/$(RHEL_VERSION)/$$rpm_arch/stable" \
 >  -e PKGS="$(DOCKER_RPM_PACKAGES)" \
@@ -497,9 +515,10 @@ docker-rpms:
 >    dnf install -y -q dnf-plugins-core
 >    # Make the builder resemble a real RHEL host before resolving. The builder
 >    # image is minimal, so without this dnf treats base OS packages as missing
->    # and downloads AlmaLinux builds of selinux-policy, policycoreutils,
->    # iptables and friends — which would replace Red Hat'"'"'s own packages on the
->    # target VM, at a different minor version. A RHEL host already has these.
+>    # and downloads the builder distro'"'"'s builds of selinux-policy,
+>    # policycoreutils, iptables and friends — which would replace Red Hat'"'"'s own
+>    # packages on the target VM, at a different minor version. A RHEL host
+>    # already has these.
 >    dnf install -y -q policycoreutils selinux-policy-targeted iptables-nft nftables diffutils
 >    # No --resolve on the main set: take exactly the named Docker packages, so
 >    # the bundle can never carry a base OS package built by another distro.
@@ -578,20 +597,75 @@ docker-rpms:
 >  exit 1
 >fi
 >
+># dnf names what the host lacks ("nothing provides <capability> needed by
+># <package>"). Only the optional/ packages that provide a named capability are
+># added, round by round (an added package can name its own missing dependency),
+># so a host that already has them never gets another distro's build. Same
+># selection as `krate docker-install` (epc/krate); the two functions below are
+># kept identical to its copies (scripts/check-identity.py compares them).
+>rpm_missing_capabilities() {
+>  sed -n 's/.*nothing provides \([^ ]*\).*/\1/p' "$$1" | sort -u
+>}
+>
+>rpm_providers_of() {
+>  local need="$$1" file listing
+>  shift
+>  for file in "$$@"; do
+>    if [[ "$$need" == /* ]]; then
+>      listing="$$(rpm -qpl "$$file" 2>/dev/null)" || continue
+>    else
+>      listing="$$(rpm -qp --provides "$$file" 2>/dev/null | awk '{print $$1}')" || continue
+>    fi
+>    if [[ $$'\n'"$$listing"$$'\n' == *$$'\n'"$$need"$$'\n'* ]]; then echo "$$file"; fi
+>  done
+>}
+>
 >echo "==> Installing Docker CE from $${#pkgs[@]} bundled packages..."
->if ! run "$$installer" install -y --allowerasing --disablerepo='*' "$${pkgs[@]}"; then
->  # containerd.io requires container-selinux. Any RHEL host that has run
->  # containers already has it; a minimal one may not. Retry with the bundled
->  # copy, which is kept out of the main set because the newest build wants a
->  # newer selinux-policy than RHEL 9.6 ships.
->  if [[ $${#optional[@]} -gt 0 ]]; then
->    echo ""
->    echo "==> Retrying with bundled optional dependencies..."
->    run "$$installer" install -y --allowerasing --disablerepo='*' "$${pkgs[@]}" "$${optional[@]}"
->  else
->    echo "Install failed and no optional/ dependencies are bundled." >&2
->    exit 1
+>attempt_log="$$(mktemp)"
+>wanted=()
+>missing=()
+>unresolved=()
+>installed=0
+>for round in 0 1 2 3; do
+>  rc=0
+>  # stderr goes to the file and is printed after dnf has exited, so the file is
+>  # complete when it is read.
+>  run "$$installer" install -y --allowerasing --disablerepo='*' "$${pkgs[@]}" "$${wanted[@]}" 2>"$$attempt_log" || rc=$$?
+>  cat "$$attempt_log" >&2
+>  if [[ "$$rc" -eq 0 ]]; then
+>    installed=1
+>    break
 >  fi
+>  [[ "$$round" -lt 3 ]] || break
+>  mapfile -t missing < <(rpm_missing_capabilities "$$attempt_log")
+>  added=()
+>  unresolved=()
+>  for need in "$${missing[@]}"; do
+>    mapfile -t providers < <(rpm_providers_of "$$need" "$${optional[@]}")
+>    if [[ $${#providers[@]} -eq 0 ]]; then
+>      unresolved+=("$$need")
+>      continue
+>    fi
+>    for file in "$${providers[@]}"; do
+>      already=false
+>      for known in "$${wanted[@]}" "$${added[@]}"; do [[ "$$known" == "$$file" ]] && already=true; done
+>      $$already || added+=("$$file")
+>    done
+>  done
+>  [[ $${#added[@]} -gt 0 ]] || break
+>  echo ""
+>  echo "==> Adding the bundled dependencies this host lacks: $${added[*]##*/}"
+>  wanted+=("$${added[@]}")
+>done
+>rm -f "$$attempt_log"
+>if [[ "$$installed" -ne 1 ]]; then
+>  if [[ $${#wanted[@]} -eq 0 ]]; then
+>    echo "Offline install failed: this host lacks $${missing[*]:-a dependency dnf did not name}, and the bundle has no package for it." >&2
+>  else
+>    echo "Offline install failed even with the bundled dependencies ($${wanted[*]##*/})$${unresolved[*]:+; no bundled package provides $${unresolved[*]}}." >&2
+>  fi
+>  echo "Install it from your RHEL media or Satellite (container-selinux must match this host's selinux-policy build), then re-run." >&2
+>  exit 1
 >fi
 >
 ># ── Service + group ──────────────────────────────────────────────────────────

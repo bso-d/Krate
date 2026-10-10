@@ -17,6 +17,12 @@ VictoriaLogs through separate outputs and queues. See
 `./krate monitor ui`) prints both addresses and logins. Grafana, its SSO configuration, its dashboards and its email rules
 are not changed by the parallel path.
 
+Prometheus (`PROM_PORT`, 9090) and Loki (`LOKI_PORT`, 3100) have no login of
+their own, so they are published on the host's loopback interface only
+(`PROM_BIND=127.0.0.1`, `LOKI_BIND=127.0.0.1` in `monitoring/.env`); set
+`0.0.0.0` to publish them on every interface. Grafana and Perses reach them
+inside the Docker network either way.
+
 ## Perses
 
 Perses v0.54.0 is reachable only through the `perses-gateway` nginx service on

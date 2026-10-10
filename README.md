@@ -222,25 +222,83 @@ Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`)
 | `./krate lag my-group` | Shows that backlog for one group |
 | `./krate stop` / `./krate start` | Stops or starts services, keeping stored messages |
 | `./krate down` | Removes containers while keeping stored messages |
+| `./krate identity up` | Starts the Keycloak identity service and its database, creates its admin on first start |
+| `./krate identity status` / `./krate identity users list` | Shows identity service health; lists local users |
+| `./krate identity renew-db-tls` / `./krate identity logrotate --install` | Renews the identity database certificate; hands the identity journal to the host's logrotate |
+| `./krate auth configure [--force] [--viewer-messages]` / `./krate auth apply` | Plans Kafbat's Keycloak login (`auth/ui/runtime.yml`) from `.env`; validates and applies it to the UI |
 | `./krate help` | Lists the available commands |
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
 
-Settings live in `.env`. The `*_IMAGE` lines are the exception: each command resets them to the pins in `.env.template`, so a rebuilt Kafbat UI image or a newer package takes effect without editing `.env`. To use a different image, change `.env.template`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
+Settings live in `.env`. The `*_IMAGE` lines are the exception: every command that runs Docker Compose (`start`, `stop`, `status`, `health`, `logs`, `install`, `setup`, `identity ...`, `monitor up`, `auth apply`) first resets them to the pins in `.env.template`, so a rebuilt Kafbat UI image or a newer package takes effect without editing `.env`. Commands that only read or edit settings (`config`, `ui`, `credentials`, `help`) leave `.env` as it is. To use a different image, change `.env.template`. For example, `./krate config set KAFKA_UI_FQDN=kafka.example.com` updates the UI hostname setting. After changing a setting used by a container, run `./krate start` to apply it. After changing the certificate hostname, also run `./krate gen-cert` and `./krate restart proxy`.
 
 In the supplied KRaft and ZooKeeper setups, `uninstall --purge` deletes stored Kafka messages by removing their Docker storage volumes. EPC stores messages in host folders under `KAFKA_DATA_DIR` (default `/data`), so those messages remain after purge. Deleting EPC messages requires stopping the cluster and separately removing its broker folders. Purge is not part of the normal stop/start workflow.
 
-## SSO for EPC and regular Krate
+## Identity and SSO for EPC and regular Krate
 
-The SSO integration uses the same dark Kafbat login page for the
-shared Admin account and Keycloak SSO. Keycloak connects to PingFederate.
-AD groups determine Viewer and Admin access. Keycloak and its database use
-the `sso` profile in each release's existing Compose file.
-SSO requires Compose 2.20.2 or newer. `./krate auth apply` validates the
-installation and reconciles only the identity/UI services, using locally loaded
-images. Keycloak and PostgreSQL are included in both offline packages even when
-the SSO profile is inactive.
-See the [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and
+Each edition includes Keycloak as a local identity service with a PostgreSQL
+database, both in the `sso` profile of the edition's Compose file. The
+operator flow is: `./krate setup` or `./krate start`, then
+`./krate identity up`, then (Phase 2) `./krate auth configure` and
+`./krate auth apply`.
+
+Acceptance of the identity work is decided by the executable gate
+`scripts/gate-identity.sh` (criteria, tests and receipts:
+[sso/guides/identity-gate.md](sso/guides/identity-gate.md)).
+
+The certificate `./krate gen-cert` (or the first start) writes covers the host
+FQDN, the host of `KEYCLOAK_PUBLIC_URL` and `localhost`, so `./krate auth apply`
+passes its hostname check on a fresh install (an IP address as the host gets
+an IP entry, which browsers require for an IP host). After changing
+`KEYCLOAK_PUBLIC_URL`, run `./krate gen-cert` and then `./krate start` or
+`./krate auth apply`: the proxy's Compose environment carries a digest of
+`nginx.conf` and the certificate (`KRATE_PROXY_CONF_SHA`) and, in Keycloak
+sign-in mode, the one `Host` value it serves (`KRATE_PROXY_PUBLIC_HOST`: the
+public host, plus `:port` unless 443), so those commands recreate it exactly when
+one of them changed. In Keycloak sign-in mode an HTTPS request with any other
+`Host` header (name or port) is closed without a response, and the plain-HTTP
+port only redirects to the public origin; open the UI at the
+`KEYCLOAK_PUBLIC_URL` origin (`./krate ui` prints it).
+
+Offline Docker RPMs: `make docker-rpms` downloads the Docker CE packages plus the
+base-OS dependencies a minimal host may lack (`container-selinux`, `nftables`
+and the libraries nftables needs: `libnftnl`, `jansson`, `libmnl`) into
+`optional/`, from the builder image `RHEL_BUILDER_IMAGE` (default: the Rocky
+Linux project's maintained `rockylinux/rockylinux:9`, pinned by digest; the
+Docker Official Image `rockylinux:9` is no longer updated). `krate
+docker-install` (and the bundled `docker-offline/install-docker.sh`, which uses
+the same selection) adds only the bundled packages that provide a capability
+`dnf` names as missing on that host, over up to three rounds (an added package
+can name its own missing library), and otherwise tells you which capability to
+take from the OS media. The whole flow was proven offline on a Rocky Linux 9.8 VM
+with SELinux enforcing (see `sso/guides/identity-gate.md`).
+
+`./krate identity up` generates the database TLS material and the realm, starts
+PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the
+`krate-cli` service account. Until it has run, `./krate start` prints
+`Identity services skipped (run: krate identity up)` and starts the cluster
+without Keycloak. `./krate identity users` manages local users;
+`./krate identity rotate`, `backup`, `restore` and `recover-admin` cover
+secrets, the database and a lost admin login; `renew-db-tls` reissues the
+database certificate and `logrotate --install` rotates the journal. Keycloak,
+its database, the proxy and Kafbat share a private `identity` Docker network
+on which the proxy has a fixed address that Keycloak trusts for forwarded
+headers (`KRATE_IDENTITY_SUBNET`, `KRATE_IDENTITY_PROXY_IP` in `.env`). The
+[identity foundation guide](sso/guides/identity-foundation.md) holds the
+inventory of projects, ports, volumes and credentials, the trust boundaries,
+every procedure and the upgrade steps for a Keycloak database from before
+`krate identity`.
+
+With `KAFKA_UI_AUTH_CONFIG=runtime.yml` Kafbat signs users in through Keycloak
+only (`./krate auth configure` plans it from `.env`; no shared form login; the
+realm groups decide Viewer and Admin access). Keycloak can connect to
+PingFederate in Phase 3. SSO requires Compose 2.20.2 or newer.
+`./krate auth apply` validates the installation and reconciles only the UI
+service, using locally loaded images. It does not start Keycloak: when
+Keycloak is not ready it stops and tells you to run `./krate identity up`.
+Keycloak and PostgreSQL are included in both offline packages even when the
+SSO profile is inactive. See the
+[IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and the
 [operator setup guide](sso/guides/dual-login.md).
 
 From a checkout, `./krate start` builds the customized Kafbat image when it is
@@ -260,7 +318,7 @@ Its settings and passwords are prepared with the cluster's; `./krate credentials
 ./krate monitor ui
 ```
 
-The default Grafana address uses port `3000`; Perses uses HTTPS on `3443`, Prometheus uses `9090` and Loki uses `3100`. Email alerts require your own mail server and recipients; they are off by default. When enabled, Grafana and Alertmanager both send them. Perses supports company SSO with native IdP-group roles; see the [Perses SSO guide](sso/guides/perses-sso.md).
+The default Grafana address uses port `3000`; Perses uses HTTPS on `3443`. Prometheus (`9090`) and Loki (`3100`) have no login and are bound to `127.0.0.1` on the host (`PROM_BIND`, `LOKI_BIND` in `monitoring/.env`; set `0.0.0.0` to publish them). Email alerts require your own mail server and recipients; they are off by default. When enabled, Grafana and Alertmanager both send them. Perses supports company SSO with native IdP-group roles; see the [Perses SSO guide](sso/guides/perses-sso.md).
 
 ZooKeeper has its own smaller stack: Kafka measurements, Prometheus, and Grafana, started with `./kafka monitor up`. It does not include Loki or host measurements.
 
@@ -326,7 +384,7 @@ make help
 make check
 ```
 
-`make check` checks Bash syntax, runs ShellCheck, and validates the Compose files. It needs GNU Make, Bash, ShellCheck, and the Docker Compose plugin. On macOS, run `gmake check`. `make test` and `make validate` are aliases for these same checks; they do not start a cluster.
+`make check` checks Bash syntax, runs ShellCheck, validates the Compose files, the offline defaults and the identity templates and realm plan. It needs GNU Make, Bash, ShellCheck, Python 3, and the Docker Compose plugin. On macOS, run `gmake check`. `make test` and `make validate` are aliases for these same checks; they do not start a cluster.
 
 The [broker CI workflow](.github/workflows/broker-ci.yml) separately builds the broker images and checks message delivery on GitHub Actions. Use the installation and operations guides for checks on your target host.
 
@@ -357,7 +415,7 @@ Krate uses the projects below. Credit belongs to their owners, maintainers, and 
 | [Fluent Bit](https://github.com/fluent/fluent-bit), [dkjson](https://dkolf.de/dkjson-lua/) and [Python](https://www.python.org/) | Fluent Bit contributors, David Heiko Kolf, and the Python Software Foundation/contributors | Shared KRaft/EPC container log collection and metadata discovery; see [monitoring transition and notices](monitoring/README.md) |
 | [Ubuntu](https://ubuntu.com/) | Canonical and the Ubuntu community | Ubuntu targets and Docker package preparation |
 | [Red Hat Enterprise Linux](https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux) | Red Hat and contributors | RHEL target for the EPC edition |
-| [AlmaLinux](https://almalinux.org/) | AlmaLinux OS Foundation and community | Default container used to prepare RHEL packages |
+| [Rocky Linux](https://rockylinux.org/) | Rocky Enterprise Software Foundation and community | Default container used to prepare RHEL packages |
 | [Alpine Linux](https://www.alpinelinux.org/) | Alpine Linux contributors | Base system used by some upstream containers |
 | [Bash](https://www.gnu.org/software/bash/) and [GNU Make](https://www.gnu.org/software/make/) | GNU project, Free Software Foundation, and contributors | Command scripts and package builds |
 | [Git](https://git-scm.com/) | Git maintainers and contributors | Source checkout |

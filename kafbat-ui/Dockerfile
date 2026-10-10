@@ -4,8 +4,8 @@
 # revision. build.py checks that this default matches its RUNTIME_IMAGE.
 ARG KRATE_RUNTIME_IMAGE=eclipse-temurin:25-jre-alpine@sha256:3c0a9084927a221ccd1d007fcaf614465672c0af37aaa834c5184483afe56d61
 FROM ${KRATE_RUNTIME_IMAGE}
-LABEL org.opencontainers.image.title="Kafka UI with shared login and native SSO" \
-      org.opencontainers.image.description="Kafbat v1.5.0 with native dual login and PingFederate OIDC" \
+LABEL org.opencontainers.image.title="Kafka UI with native SSO" \
+      org.opencontainers.image.description="Kafbat v1.5.0 with native OIDC login, CSRF protection, POST and back-channel logout" \
       io.krate.kafbat-source-revision="afc9c918e13c4422268a3a5b7933c7b448746c82"
 
 # gcompat for the glibc-linked snappy codec, as upstream. build.py fetched the

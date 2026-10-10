@@ -1,73 +1,280 @@
-# Shared Admin login and company SSO
+# Kafbat login through Keycloak
 
 These steps apply to EPC and regular Krate. Both use their existing
-`docker-compose.yml`. Keycloak and PostgreSQL run in the `sso` profile.
-Kafbat uses Keycloak for SSO. Keycloak sends the user to PingFederate.
-The shared Admin login stays in Kafbat and does not use Keycloak.
+`docker-compose.yml`. Keycloak and PostgreSQL run in the `sso` profile and are
+started and administered with `./krate identity`; the
+[identity foundation guide](identity-foundation.md) describes that service,
+its inventory, credentials and recovery.
+
+With `KAFKA_UI_AUTH_CONFIG=runtime.yml` Kafbat signs users in through the
+Keycloak realm `krate` and nothing else: there is no shared username/password
+form in that mode. In Phase 2 the users are local Keycloak users managed with
+`./krate identity users`; in Phase 3 Keycloak brokers the login to
+PingFederate behind the same issuer, so Kafbat's configuration does not change.
+`KAFKA_UI_AUTH_CONFIG=local.yml` (the default) keeps the shared Admin form and
+does not use Keycloak.
+
+The order is: `./krate setup` or `./krate start`, then `./krate identity up`,
+then `./krate auth configure`, `./krate config set
+KAFKA_UI_AUTH_CONFIG=runtime.yml` and `./krate auth apply`.
 
 ## Before you start
 
-SSO requires the Docker Compose plugin **2.20.2 or newer**. The packaged Ubuntu
-and RHEL Docker installers include a newer plugin. Ordinary shared-login cluster
-operation retains Compose 1.29.2 compatibility. Use the same edition
-`docker-compose.yml` for brokers, Kafbat, nginx, Keycloak and PostgreSQL; no
-authentication override file is required. Every SSO image is included even when
-the optional profile is inactive.
+Keycloak login requires the Docker Compose plugin **2.20.2 or newer**. The
+packaged Ubuntu and RHEL Docker installers include a newer plugin. Ordinary
+shared-login cluster operation retains Compose 1.29.2 compatibility. Use the
+same edition `docker-compose.yml` for brokers, Kafbat, nginx, Keycloak and
+PostgreSQL; no authentication override file is required. Every identity image
+is included even when the optional profile is inactive.
 
+Use a real HTTPS application FQDN and a certificate trusted by users. The
+browser reaches Kafbat and Keycloak at one origin: `KEYCLOAK_PUBLIC_URL` is
+that origin plus `/identity`, and the Kafbat callback and logout targets are
+derived from it. Set it before the first `./krate identity up` where you can;
+if it changes later, `./krate identity up` reconciles the realm client and
+`./krate auth configure --force` followed by `./krate auth apply` rewrites
+and applies Kafbat's side.
 
-Agree the values in the [IAM guide](pingfederate-iam-guide.md). Use a real HTTPS
-application FQDN and a certificate trusted by users. The VM and the user's
-browser must reach PingFederate on the ports in its approved endpoint URLs.
-Place the enterprise CA PEM file in `auth/keycloak/truststores/`. Keycloak uses
-it to check PingFederate TLS. Do not turn off certificate checks.
+## Set up Keycloak login (Phase 2)
 
-## Set up the installation
+1. `./krate setup` (or the first `./krate start`) creates `.env` with every
+   password and secret and the UI certificate. Set the public origin now:
+   `./krate config set KEYCLOAK_PUBLIC_URL=https://<fqdn>/identity`. Provision
+   a matching TLS certificate and private key at `certs/server.crt` and
+   `certs/server.key` (private key mode 600), valid for at least another day
+   and covering `<fqdn>`, or let `./krate gen-cert` make a self-signed one.
+2. `./krate identity up` generates the database TLS material and the realm
+   plan, starts PostgreSQL and Keycloak, creates the permanent Keycloak admin
+   and sets `KEYCLOAK_ENABLED=true`. Check it with `./krate identity status`.
+   Create the first users: `./krate identity users add <name> --admin` and
+   `./krate identity users add <name> --viewer` (each prints a one-time
+   temporary password; the user sets a new one and enrols TOTP at first
+   login).
+3. `./krate auth configure` writes `auth/ui/runtime.yml`, Kafbat's
+   configuration, from `.env` and the edition's cluster list: `cluster-1-kraft`
+   for regular Krate; `KAFKA_UI_CLUSTER_NAME` (default `cluster-epc`) plus
+   every uncommented `- name:` entry of `kafbat.yml` for EPC. It is written
+   by `sso/identity.py runtime`, the same planner that writes the realm, and
+   contains the Keycloak client registration, the two roles and the session
+   settings described below, and the client secret only as the
+   `${KEYCLOAK_KAFBAT_CLIENT_SECRET}` placeholder that Kafbat resolves from
+   its container environment. An identical rerun changes nothing; a file that
+   differs from the plan is kept unless you pass `--force`. The command also
+   sets `KAFKA_UI_FQDN` to the `KEYCLOAK_PUBLIC_URL` host when that is still
+   blank and warns when `certs/server.crt` does not cover it. Review the file
+   and the printed summary. `--viewer-messages` records
+   `KAFKA_UI_VIEWER_MESSAGES=true` in `.env` before planning (see "What a
+   viewer can do").
+4. `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml`.
+5. `./krate auth apply`. Preflight verifies `.env` (mode 600, the five
+   identity secrets, `KEYCLOAK_ADMIN_USER` and the group names), the
+   certificate (matching key, unexpired, covering the public host), the
+   rendered Compose configuration (mode, identity network, `kafka-ui` mounting
+   `auth/ui` read-only), the realm file (regenerated by `identity up`,
+   including the back-channel logout attributes) and `runtime.yml` itself: no
+   shared login keys, `require-mapped-role: true`, cookie name `SESSION`, the
+   Keycloak client with issuer `<origin>/identity/realms/krate` and callback
+   `<origin>/login/oauth2/code/keycloak`, the roles `viewer` and
+   `administrator` whose only subjects are the two realm groups from `.env`,
+   no `defaultRole`, no `ksql` and no `messages_read` for the viewer unless
+   `KAFKA_UI_VIEWER_MESSAGES=true`, and every section equal to the plan for
+   this `.env`. It then checks the Compose version, running healthy brokers
+   and locally loaded images. It does not start Keycloak: when Keycloak is
+   not ready it stops with `Keycloak is not ready. Run: krate identity up
+   (then: krate identity status)`. When Keycloak is ready it recreates
+   `kafka-ui` and then the proxy, waits for their health (180 seconds each),
+   verifies HTTPS discovery through the public identity route (15-second
+   deadline) and prints the login model now in force. It never pulls images,
+   builds assets, reconciles brokers or deletes volumes. On failure inspect
+   `./krate status`, `./krate identity status` and service logs before
+   retrying; avoid sharing logs containing tokens or personal information.
 
-1. Copy `sso/dual-example.json` to a private site file. Set `public_url`, the
-   PingFederate issuer, client ID and endpoints, the two AD group names, and
-   `groups_claim`. Set `clusters` to every exact Kafbat cluster name this UI
-   shows. Include remote clusters when used.
-2. Run `./krate auth configure /path/to/site.json`. This creates
-   `auth/ui/runtime.yml` and `auth/keycloak/krate-realm.json`. It does not
-   replace existing files or start services. Review both files. It also sets
-   `KEYCLOAK_PUBLIC_URL` (`public_url` plus `/identity`) in `.env`, and
-   `KAFKA_UI_FQDN` to the `public_url` host when that is still blank.
-3. Nothing else needs setting by hand. `./krate` generates the shared Admin
-   password and the Keycloak admin, database and Kafbat client secrets (24
-   random characters each, all different) before Keycloak's database first
-   starts, and keeps `.env` at mode 600. `./krate auth apply` asks for the one
-   value it cannot generate, the client secret PingFederate issued for
-   Keycloak, or set it beforehand with
-   `./krate config set PING_KEYCLOAK_CLIENT_SECRET=<secret-from-IAM>`.
-   `./krate credentials` shows the Keycloak admin login.
-4. Protect `.env` with your site secret controls.
-5. Install/load the packaged images and start the broker cluster in shared-login
-   mode first. Provision a matching TLS certificate and private key at
-   `certs/server.crt` and `certs/server.key` (private key mode 600). The certificate must match
-   `public_url` and remain valid for at least another day. Users must trust its
-   issuing CA. Then run `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml`.
-6. Run `./krate auth apply`. Preflight verifies credentials, configuration, TLS,
-   the Compose version, running brokers and locally available service images.
-   It starts PostgreSQL and waits for database health, starts Keycloak and waits
-   for its readiness endpoint, then recreates Kafbat and waits for Kafbat/nginx
-   health, then verifies HTTPS discovery through the public identity route. The
-   installation host must resolve and reach its own public application URL. Each service wait is bounded to 180 seconds; public discovery has a 15-second
-   deadline. It never pulls images, builds
-   assets, reconciles brokers or deletes volumes. On failure the command exits
-   nonzero; inspect `./krate status` and service logs before retrying. Avoid
-   sharing logs containing tokens or personal information.
+`./krate ui` and `./krate credentials` show `Sign-in: Keycloak (realm krate)
+— manage users with krate identity users` in this mode and no shared password.
+Repeat `./krate auth configure --force` and `./krate auth apply` after
+changing `KEYCLOAK_PUBLIC_URL`, `KEYCLOAK_SESSION_IDLE_MINUTES`,
+`KAFKA_UI_VIEWER_MESSAGES` or, on EPC, the cluster list in `kafbat.yml`.
+`KEYCLOAK_VIEWER_GROUP` and `KEYCLOAK_ADMIN_GROUP` are read when the realm is
+created and are not renamed afterwards (identity foundation guide, owner
+decision 6); the Kafbat roles must name the groups that exist in the realm.
 
-Keycloak health runs on its internal management port 9000 with metrics enabled
-for database readiness. No identity or database port is published on the host.
-Only nginx exposes the browser routes. A healthy service does not establish
-successful enterprise login; complete the site's IAM acceptance procedure on
-the production network before granting access.
+## The login model
 
-The login page has a shared username/password form and an SSO button. The
-username/email field supplies an optional `login_hint` on the SSO route. A
-hint is not proof of identity. PingFederate decides whether an existing
-enterprise session is enough or a new sign-in or MFA is required. The shared
-password is never sent on the SSO route.
+- The login page offers one button, "Log in with Keycloak", and goes straight
+  to Keycloak's login (username, password, TOTP). Kafbat has no form login
+  in this mode; `KAFKA_UI_USER` and `KAFKA_UI_PASSWORD` stay in `.env` for
+  `local.yml` and are not accepted by Kafbat while `runtime.yml` is active.
+- The authorization request uses PKCE (S256) and a nonce; the realm client
+  `krate-ui` accepts exactly one callback, `<origin>/login/oauth2/code/keycloak`.
+  Kafbat validates the ID token's signature against the realm's keys and its
+  issuer and audience (`krate-ui`); a token minted for another client is
+  refused.
+- The user's identity in Kafbat is the OIDC `sub` (the Keycloak user id), not
+  the username or email: audit log lines name the `sub`. The realm's user
+  profile keeps the username read-only (an admin cannot rename it; kcadm
+  answers `error-user-attribute-read-only`); a changed email or display name
+  keeps the same identity and the same permissions (gate case K10).
+- Kafbat's error bodies carry no stack trace (`http.error.excludeStackTraces`
+  in both auth files); a signed-in viewer sees the code and message only.
+- Roles come only from the `groups` claim of the ID token (group membership
+  mapper, `full.path=false`):
+
+  | `groups` contains | Kafbat role |
+  | --- | --- |
+  | `KEYCLOAK_ADMIN_GROUP` (default `KRATE_ADMINS`) | `administrator` |
+  | `KEYCLOAK_VIEWER_GROUP` (default `KRATE_VIEWERS`) | `viewer` |
+  | both | `administrator` (Kafbat unions the matching roles; owner decision 5) |
+  | neither, or no claim | login refused (`require-mapped-role`); the browser lands on `/login?error` and no session is created |
+
+- Recovery: when nobody with the `administrator` role can sign in (for
+  example every member left the admin group), a host operator creates or
+  repairs a local Keycloak user from the installation host:
+  `./krate identity users add <name> --admin`, or
+  `./krate identity users groups <name>` to inspect memberships. Keycloak
+  itself is administered with `./krate identity` (admin login lost:
+  `./krate identity recover-admin`). Switching Kafbat back to the shared form
+  is also possible: `./krate config set KAFKA_UI_AUTH_CONFIG=local.yml` and
+  `./krate auth apply`.
+
+## What a viewer can do
+
+The `viewer` role has `view` on every Kafbat resource and `analysis_view` on
+topics. Message payloads are not included: `messages_read` is granted only
+when the site opts in with `KAFKA_UI_VIEWER_MESSAGES=true` in `.env` (or
+`./krate auth configure --viewer-messages`), followed by
+`./krate auth configure --force` and `./krate auth apply`. The
+`administrator` role has every action on every resource, including KSQL.
+Permissions are enforced per endpoint by Kafbat (v1.5.0 controllers); a
+denied request is answered with 403, and a request without a session is
+redirected (302) to the Keycloak login, also for API calls.
+
+| Area | Viewer can (200) | Viewer cannot (403) |
+| --- | --- | --- |
+| Clusters and brokers | list clusters, cluster metrics and stats, brokers, broker metrics, broker configs, log directories | change a broker config, move a partition log directory |
+| Topics | list topics, topic details, configs, active producers, consumer groups of a topic, topic analysis results | create, clone, recreate, update, delete a topic; add partitions; change the replication factor; start or cancel an analysis |
+| Messages | nothing, unless `KAFKA_UI_VIEWER_MESSAGES=true`: read messages and register smart filters | read messages (default), produce messages, delete messages |
+| Consumer groups | list groups, group details, lag | delete a group, reset offsets, delete offsets of a topic |
+| Schema registry | list and read schemas and compatibility levels | create or delete schemas, change compatibility |
+| Kafka Connect | list connects, connectors, tasks, plugins | create, delete, configure, restart connectors or tasks, reset offsets, validate a plugin config |
+| ACLs and quotas | list ACLs (also as CSV), list client quotas | create, delete or sync ACLs, change quotas |
+| KSQL | nothing | execute statements, list streams or tables |
+| Application config | read the current Kafbat configuration (`GET /api/config`) | restart with a new configuration, upload related files, validate a configuration |
+| Audit | read the audit configuration | - |
+
+Two endpoints have no role check in Kafbat v1.5.0 and are reachable by every
+signed-in user, including a viewer; they are accepted as viewer-reachable:
+`PUT /api/smartfilters/testexecutions` evaluates a filter expression against a
+sample message the caller sends in the request body (it reads no stored
+message), and `POST /api/clusters/{cluster}/cache` refreshes Kafbat's cached
+cluster metadata (it changes nothing in Kafka). Both are logged like any other
+request.
+
+## Revocation and session behaviour
+
+- Kafbat's own session is the `SESSION` cookie (`Secure`, `HttpOnly`,
+  `SameSite=Lax`). Its idle limit is `KEYCLOAK_SESSION_IDLE_MINUTES`
+  (default 15 minutes), the same value the realm uses for its SSO session, so
+  there is one knob for both. The realm reads it when the realm is created;
+  Kafbat reads it from `runtime.yml` at every `auth apply`.
+- Back-channel logout: the realm client `krate-ui` registers
+  `http://kafka-ui:8080/logout/connect/back-channel/keycloak` (reachable only
+  over the private `identity` network: the public proxy answers 404 for
+  `/logout/connect/`, and Kafbat posts its own per-session replay to
+  `127.0.0.1:8080`, never to a forwarded host) with "Backchannel logout session
+  required" on. When a Keycloak session ends by logout, Keycloak POSTs a
+  signed logout token to Kafbat and Kafbat ends the matching session at
+  once. This happens when the user logs out (also through Kafbat's own Log
+  out, see below), and when an administrator signs the user out, from the
+  host: `./krate identity users` has no sign-out command yet; use the admin
+  CLI in the Keycloak container (`kcadm.sh create users/<id>/logout -r
+  krate`, see "Keycloak administration") or the realm's "Sign out all active
+  sessions". Keycloak notes that signing out "does not revoke outstanding
+  access tokens"; Kafbat does not use them after login, so the session ends
+  with the back-channel request.
+- Disabling a user (`./krate identity users disable <name>`) prevents new
+  logins but does not end a session that already exists: that session lasts
+  until the idle limit or until the user is signed out as above. Removing a
+  user from a group has effect at the next login, because Kafbat computes the
+  roles once at login. The exact times (back-channel propagation, idle
+  expiry after disablement) are measured in the Phase 2 fixture and recorded
+  in the pull request.
+- `./krate identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET` recreates `kafka-ui`
+  in this mode, which ends every Kafbat session. `./krate auth apply` itself
+  recreates `kafka-ui` only when the applied auth file or the image changed
+  (Compose compares the file digest `KRATE_UI_AUTH_SHA` it writes to `.env`);
+  an unchanged re-apply prints `Kafbat UI unchanged ... user sessions kept`.
+  The proxy follows the same rule: `krate start`, `krate install` and
+  `krate auth apply` write `KRATE_PROXY_CONF_SHA` (a digest of `nginx.conf`
+  and `certs/server.{crt,key}`) and `KRATE_PROXY_PUBLIC_HOST` to `.env`, both
+  part of the proxy's environment, so the proxy is recreated exactly when the
+  release's `nginx.conf`, the certificate or the public host changed. A plain
+  `krate restart proxy` reloads files but keeps the old environment.
+
+## CSRF and logout
+
+- Kafbat requires a CSRF token on every state-changing request (anything but
+  GET, HEAD, OPTIONS, TRACE): the token is issued in the cookie `XSRF-TOKEN`
+  (`Secure`, readable by the page script, rotated at every login)
+  and must be sent back in the header `X-XSRF-TOKEN`. The bundled UI does
+  this itself; a script that reuses a browser session must do the same, or
+  it receives 403 before any permission check. Requests authenticated by
+  session cookie are therefore not usable from a third-party page.
+- Logout is `POST /logout` only (a GET does nothing) and needs the CSRF
+  token. It ends the Kafbat session and redirects to Keycloak's
+  `end_session_endpoint` with the ID token and a `post_logout_redirect_uri`
+  of the public origin; the realm client accepts only the exact values
+  `<origin>` and `<origin>/` (Keycloak stores them as `<origin>##<origin>/`),
+  so no other redirect target is honoured. Keycloak then ends its SSO session
+  and sends the back-channel logout to every client of that session. Kafbat
+  learns the `end_session_endpoint` from `runtime.yml`
+  (`custom-params.end-session-uri`, written by `krate auth configure`); the
+  preflight refuses a `runtime.yml` without it.
+- In this mode the proxy serves one `Host` value only: the authority of
+  `KEYCLOAK_PUBLIC_URL` (`KRATE_PROXY_PUBLIC_HOST`: host, plus `:port` unless
+  443; case-insensitive). A request whose raw `Host` header is anything else
+  (another DNS alias, an IP address that is not the public host, another
+  port, a forged header, also with an absolute request-URI) is closed without
+  a response (nginx 444) before any location, so the upstreams only ever see
+  that one authority as `Host` and `X-Forwarded-Host` and no client can make
+  Kafbat build its redirect and logout URLs from an authority of its choice;
+  Keycloak's exact redirect allowlist would refuse such a login anyway. The
+  plain-HTTP port does not check `Host` (a plain-HTTP header never carries the
+  HTTPS port): it only answers a redirect to the public origin. Use the
+  `KEYCLOAK_PUBLIC_URL` origin in the browser (`./krate ui` prints it). In
+  `local.yml` mode every name is served and the redirect keeps the name used.
+- The proxy refuses (400) any path with a path parameter (`;`, raw or
+  encoded `%3B`) on every route: nginx normalises dot segments and
+  percent-encoding before it matches a location, but not `;`, so this keeps
+  the 404 routes below independent of Kafbat's own firewall. Dot segments
+  within a name and encoded slashes stay allowed outside `/identity/`: Kafka
+  topic names may contain `..`, and Kafbat sends schema subjects
+  path-encoded.
+- The proxy forwards only its own `X-Forwarded-For`, `X-Forwarded-Proto` and
+  `X-Forwarded-Host` (host and port as the browser sent them) and drops a
+  client's `Forwarded`, `X-Forwarded-Prefix`, `X-Forwarded-Ssl` and
+  `X-Forwarded-Port`: Kafbat (`server.forward-headers-strategy=framework`)
+  would otherwise honour them for its redirects. It does not send
+  `X-Forwarded-Port` itself because that would carry the container's
+  listening port (443), not `KAFKA_UI_HTTPS_PORT`; with a non-443 port Spring
+  then built `post_logout_redirect_uri` without the port and Keycloak refused
+  the logout (found by the Phase 2 gate, case K24). Containers on the Docker
+  networks (brokers, the monitoring exporter) can still reach `kafka-ui:8080`
+  with their own headers; they are trusted infrastructure of this deployment,
+  and the identity side is protected independently by
+  `KC_PROXY_TRUSTED_ADDRESSES`.
+- The proxy answers 404 for Kafbat's unauthenticated `/metrics`, `/actuator`
+  and `/logout/connect` paths (prefixes: the base paths and everything below
+  them; `/actuator` alone is Spring's endpoint discovery page); metrics per cluster are read through the
+  signed-in API (`/api/clusters/<name>/metrics`, viewer permission).
+- The viewer role has no `applicationconfig` permission: that view renders
+  the running Kafbat configuration, client secret included. Viewers see
+  clusters, brokers, topics, consumers, schemas, connectors, ACLs, audit and
+  quotas read-only.
+- `./krate auth configure --no-viewer-messages` withdraws the message-payload
+  opt-in (`KAFKA_UI_VIEWER_MESSAGES=false`); re-run `./krate auth configure
+  --force` and `./krate auth apply` so `runtime.yml` and the UI follow.
+- In `local.yml` mode Kafbat is the unmodified upstream shared-login build
+  (GET logout, no CSRF token); this guide's statements apply to `runtime.yml`.
 
 ## Keycloak administration
 
@@ -79,15 +286,32 @@ separators, limits identity requests per client address, and logs them
 without query strings.
 
 Administer Keycloak only from the installation host. Run these commands in the
-installation directory. Use the admin CLI in the Keycloak container. The CLI asks for the `KEYCLOAK_ADMIN_PASSWORD`; do not
-type it on the command line:
+installation directory. Local users in realm `krate` are managed with
+`./krate identity users list|add|disable|enable|reset-password|groups`; that
+is the supported path and it does not need the master admin. A lost admin
+login is repaired with `./krate identity recover-admin` (Keycloak stopped);
+see the identity foundation guide. Use the admin CLI in the Keycloak container
+only for realm-level changes such as the ones below. The Compose file has no
+`name:` entry, so every raw `docker compose` call needs the project, the env
+file and the profile: `-p krate-<edition> --env-file .env --profile sso`,
+where `<edition>` is `kraft` or `epc` (or the `KRATE_PROJECT` value from
+`.env` for an installation made before `/opt/krate`). The CLI asks for the
+`KEYCLOAK_ADMIN_PASSWORD`; do not type it on the command line:
 
 ```bash
-docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh config credentials \
   --config /tmp/kcadm.config --server http://localhost:8080/identity --realm master --user admin
-docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh get realms/krate \
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh get realms/krate \
   --config /tmp/kcadm.config --fields realm,bruteForceProtected
-docker compose --profile sso exec keycloak rm -f /tmp/kcadm.config
+# Sign a user out of every session (ends the Kafbat session through back-channel logout):
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh get users -r krate -q username=<name> --config /tmp/kcadm.config --fields id
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh create users/<id>/logout -r krate --config /tmp/kcadm.config
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  rm -f /tmp/kcadm.config
 ```
 
 Use the `KEYCLOAK_ADMIN_USER` value in place of `admin` if you changed it.
@@ -97,25 +321,51 @@ import does not change an existing realm. For an installation that existed
 before this change, and for the `master` realm, turn the protection on once:
 
 ```bash
-docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh update realms/krate \
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh update realms/krate \
   --config /tmp/kcadm.config -s bruteForceProtected=true -s failureFactor=5
-docker compose --profile sso exec keycloak /opt/keycloak/bin/kcadm.sh update realms/master \
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh update realms/master \
   --config /tmp/kcadm.config -s bruteForceProtected=true -s failureFactor=5
 ```
 
 ## Updates and recovery
 
 Keycloak stores users, broker links and sessions in the named PostgreSQL volume.
-Back up that volume with the approved database process. Realm import only
-creates a realm when it does not already exist. Editing the generated realm
-file does not change an existing realm. Review changes with IAM and apply them
-through Keycloak administration or a controlled realm migration.
+Back it up with `./krate identity backup <file>` (encrypted `pg_dump`) and
+restore with `./krate identity restore <file>`; see the identity foundation
+guide. Realm import only creates a realm when it does not already exist.
+`./krate identity up` (and `./krate identity restore`) regenerate the realm
+file from `.env` and reconcile only the `krate-ui` client (redirect URIs, web
+origins, `frontchannelLogout` off, and the PKCE, post-logout and back-channel
+logout attributes) and the realm's `otpPolicyLookAheadWindow` (1) in an
+existing realm. A realm created before these were planned, or restored from
+an older backup, therefore gets them at the next `identity up`; an older realm
+has a look-ahead window of 0, which refuses a TOTP code typed across the
+30-second boundary. The journal records `up reconciled realm policy` when the
+window changed. The same by hand:
 
-To switch Kafbat back to shared login only, set
-`KAFKA_UI_AUTH_CONFIG=local.yml` and recreate only `kafka-ui` with Compose.
-Run `./krate auth apply` after changing back to `local.yml`. The same command
-recreates only the UI and checks the proxy. Identity services and their database
-are retained for recovery. Do not use `down -v` on a live cluster.
+```bash
+# log in first (the block above removes /tmp/kcadm.config at its end)
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh config credentials \
+  --config /tmp/kcadm.config --server http://localhost:8080/identity --realm master --user admin
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  /opt/keycloak/bin/kcadm.sh update realms/krate \
+  --config /tmp/kcadm.config -s otpPolicyLookAheadWindow=1
+docker compose -p krate-<edition> --env-file .env --profile sso exec keycloak \
+  rm -f /tmp/kcadm.config
+```
+
+Editing the realm file by hand is overwritten and does not change the realm. Review other
+changes with IAM and apply them through Keycloak administration or a
+controlled realm migration.
+
+To switch Kafbat back to the shared login, set
+`KAFKA_UI_AUTH_CONFIG=local.yml` with `./krate config set` and run
+`./krate auth apply`. The same command recreates only the UI and checks the
+proxy. Identity services and their database are retained for recovery. Do not
+use `down -v` on a live cluster.
 
 Both image references are fixed by version and SHA-256 digest in
 `.env.template`. The offline bundle contains those exact images. Use the
@@ -123,34 +373,79 @@ Both image references are fixed by version and SHA-256 digest in
 
 ## Site acceptance
 
-Use the site's approved browser and IAM test identities to verify shared Admin,
-SSO Viewer/Admin, unmapped-user denial, logout and identity-provider outage
-behavior. The repository-side qualification uses disposable local identities;
-actual enterprise federation acceptance is performed on the production network.
+Use the site's approved browser and test identities to verify the three
+identities (no session, viewer, administrator): a viewer is answered 403 on
+every mutation in the table above and 200 on the reads; an administrator
+succeeds; a user in neither group is refused at login; an unauthenticated API
+call is redirected to the login; Kafbat's Log out ends the Keycloak session;
+a sign-out in Keycloak ends the Kafbat session; a disabled user cannot sign in
+again. Repository-side qualification uses disposable local identities; actual
+enterprise federation acceptance (Phase 3) is performed on the production
+network.
 
 ## Backup, restore and upgrades
 
-Before an identity upgrade, take a PostgreSQL logical backup using the same
-manifest. Protect the backup as identity data and encrypt it under site policy:
-
-```bash
-umask 077
-docker compose --profile sso exec -T keycloak-db pg_dump -U keycloak -d keycloak > keycloak-backup.sql
-```
+Before an identity upgrade, take a backup. `./krate identity backup <file>`
+writes an encrypted and integrity-sealed archive (AES-256 plus an HMAC-SHA256
+tag that `restore` verifies before decrypting; passphrase from
+`KRATE_BACKUP_PASSPHRASE` or prompted) with mode 600. It holds the `pg_dump`
+and the admin user, admin password and the two client secrets that were valid
+at that time. Protect the backup and its passphrase as identity data under
+site policy.
 
 For recovery, use a separately provisioned recovery host with the same pinned
-PostgreSQL and Keycloak versions. Restore into its empty database with
-`docker compose --profile sso exec -T keycloak-db psql -U keycloak -d keycloak < keycloak-backup.sql`
-before starting Keycloak. Never restore over an active production database.
-Validate shared login, identity login and roles there before a cutover.
+PostgreSQL and Keycloak versions. Run `./krate identity up` there, then
+`./krate identity down` and `./krate identity restore <file>`. `restore`
+refuses to run while Keycloak is up, writes the four secrets from the archive
+into that host's `.env` where they differ, and verifies readiness, the admin
+login and the `krate-cli` login afterwards. The database password stays the
+recovery host's own: roles are not part of the dump. Never restore over an
+active production database. Validate Keycloak login and roles there before a
+cutover.
+
+A Keycloak database from before `krate identity` is not migrated; see
+"Upgrading from the previous Keycloak setup" in the identity foundation
+guide.
 
 Realm imports do not update existing realms. Use the approved Keycloak admin
 procedure for group mappings, client changes and session-policy changes; back up
-first. Repeat `auth apply` after changing runtime UI configuration. It preserves
-broker containers and the existing identity database. The default session idle
-limit comes from `session_idle_minutes`; the generated realm maximum session
-lifetime is eight hours. Kafbat logout ends its local session; an upstream SSO
-session can sign the user back in until IAM revokes it.
+first. Repeat `./krate auth configure --force` and `./krate auth apply` after
+changing a `.env` value that `runtime.yml` carries. They preserve broker
+containers and the existing identity database. The realm's session idle limit
+and maximum lifetime come from `KEYCLOAK_SESSION_IDLE_MINUTES` and
+`KEYCLOAK_SESSION_MAX_HOURS` in `.env` when the realm is created (defaults 15
+minutes and 8 hours); Kafbat's session idle limit is the same
+`KEYCLOAK_SESSION_IDLE_MINUTES`, read at every `auth configure`.
+
+## Company SSO through PingFederate (Phase 3)
+
+The same Kafbat configuration serves the brokered login: Keycloak stays the
+issuer and sends the user on to PingFederate. Agree the values in the
+[IAM guide](pingfederate-iam-guide.md); the VM and the user's browser must
+reach PingFederate on the ports in its approved endpoint URLs. Place the
+enterprise CA PEM file in `auth/keycloak/truststores/` with mode 644 (the
+Keycloak container reads it as its own user; a file written under a 077 umask is
+600 and invisible to it); Keycloak uses it to check PingFederate TLS. Do not turn
+off certificate checks.
+
+Copy `sso/dual-example.json` to a private site file. Set `public_url`, the
+PingFederate issuer, client ID and endpoints, the two AD group names and
+`groups_claim`, and `clusters` to every exact Kafbat cluster name this UI
+shows (including remote clusters). The session idle limit and the viewer
+message opt-in are not site-file keys: they come from `.env`
+(`KEYCLOAK_SESSION_IDLE_MINUTES`, `KAFKA_UI_VIEWER_MESSAGES`) so that both
+flows plan the same `runtime.yml`. `./krate auth configure /path/to/site.json`
+then writes `auth/ui/runtime.yml` (identical to the local plan for that
+origin and cluster list) and `auth/keycloak/pingfederate-idp.json`: the
+identity provider, the browser flow that redirects to PingFederate, and two
+mappers that place a user whose `groups_claim` carries the site's AD group
+into the realm group of the same role (`KEYCLOAK_VIEWER_GROUP`,
+`KEYCLOAK_ADMIN_GROUP`), which is what Kafbat's roles read. It does not
+replace existing files, sets `KEYCLOAK_PUBLIC_URL` from `public_url`, and the
+plan is applied to the realm in Phase 3. `./krate auth apply` asks for the one
+value it cannot generate, the client secret PingFederate issued for Keycloak,
+only when that plan exists (or set it beforehand with
+`./krate config set PING_KEYCLOAK_CLIENT_SECRET=<secret-from-IAM>`).
 
 ## Package and release checks
 
@@ -163,8 +458,33 @@ cd ../epc && ./krate package v3 amd64    # RHEL 9 Docker packages
 ```
 
 The builder verifies all Compose profile images are saved and recorded in
-`images.lock.tsv`, including Keycloak and PostgreSQL, and ships both activation
-helpers. Site `.env`, generated realm/runtime files, certificates and credentials
-are excluded. Verify the package SHA-256 before extraction. Runtime SSO needs
-only these saved images; PingFederate is an external site service and is never
-packaged.
+`images.lock.tsv`, including Keycloak and PostgreSQL, and ships the activation
+and identity helpers (`sso/activate.sh`, `sso/preflight.py`, `sso/identity.py`,
+`sso/configure-dual.py`) with this guide and the identity foundation guide
+under `docs/`. Site `.env`, generated realm/runtime files, certificates and
+credentials are excluded. Verify the package SHA-256 before extraction.
+Keycloak login needs only these saved images; PingFederate is an external site
+service and is never packaged.
+
+## Sources
+
+- Spring Security 6.5, reactive OIDC logout (back-channel endpoint, session
+  cookie correlation): <https://docs.spring.io/spring-security/reference/6.5/reactive/oauth2/login/logout.html>;
+  the reactive handler's defaults (`{baseUrl}/logout/connect/back-channel/{registrationId}`, cookie `SESSION`):
+  <https://github.com/spring-projects/spring-security/blob/6.5.9/config/src/main/java/org/springframework/security/config/web/server/OidcBackChannelServerLogoutHandler.java>
+- Spring Security 6.5, reactive CSRF (`XSRF-TOKEN` / `X-XSRF-TOKEN`, safe methods, POST-only logout):
+  <https://docs.spring.io/spring-security/reference/6.5/reactive/exploits/csrf.html>
+- Spring Boot 3.5 application properties (`server.reactive.session.timeout`, `server.reactive.session.cookie.name`):
+  <https://docs.spring.io/spring-boot/3.5/appendix/application-properties/index.html>
+- Keycloak 26.8.0, OIDC client settings (Backchannel logout URL, Backchannel logout session required, post-logout redirect validation):
+  <https://github.com/keycloak/keycloak/blob/26.8.0/docs/documentation/server_admin/topics/clients/oidc/con-basic-settings.adoc>;
+  attribute keys: <https://github.com/keycloak/keycloak/blob/26.8.0/server-spi-private/src/main/java/org/keycloak/protocol/oidc/OIDCConfigAttributes.java>;
+  the `##` separator of multi-valued client attributes: `Constants.CFG_DELIMITER` in
+  <https://github.com/keycloak/keycloak/blob/26.8.0/server-spi-private/src/main/java/org/keycloak/models/Constants.java>
+- Keycloak 26.8.0, administering sessions ("Sign out all active sessions does not revoke outstanding access tokens"):
+  <https://github.com/keycloak/keycloak/blob/26.8.0/docs/documentation/server_admin/topics/sessions/administering.adoc>
+- Kafbat v1.5.0 (pinned commit) permission checks per controller, e.g.
+  <https://github.com/kafbat/kafka-ui/blob/afc9c918e13c4422268a3a5b7933c7b448746c82/api/src/main/java/io/kafbat/ui/controller/MessagesController.java>
+  (`executeSmartFilterTest` without a role check) and
+  <https://github.com/kafbat/kafka-ui/blob/afc9c918e13c4422268a3a5b7933c7b448746c82/api/src/main/java/io/kafbat/ui/controller/ClustersController.java>
+  (`updateClusterInfo`, cluster-level check only)

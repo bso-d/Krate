@@ -17,7 +17,11 @@ CERT_KEY="$CERTS_DIR/server.key"
 # Set when this CLI runs from a source checkout, where it can also build the
 # Kafbat UI image and offline packages; empty inside an extracted package.
 REPO_DIR=""
-if [[ -f "$SCRIPT_DIR/../Makefile" && -f "$SCRIPT_DIR/../kafbat-ui/build.py" ]]; then
+# A checkout's CLI lives in the edition directory itself (<repo>/kraft or
+# <repo>/epc) and has no images/ beside it; a package extracted under the
+# repository root has the same parent files but its own name and images/.
+if [[ "${SCRIPT_DIR##*/}" == "$KRATE_VARIANT" && ! -d "$SCRIPT_DIR/images" \
+    && -f "$SCRIPT_DIR/../Makefile" && -f "$SCRIPT_DIR/../kafbat-ui/build.py" ]]; then
   REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
 # Where a package is installed. Its settings, passwords, certificates and SSO
@@ -105,6 +109,18 @@ require_env() {
   fi
 }
 
+# Put a finished temporary file in place of an env file by renaming it, so a
+# reader never sees a partial file and a crash leaves the old one intact. Run
+# as root (sudo), the new file keeps the owner of the one it replaces.
+replace_env_file() {
+  local file="$1" tmp="$2" owner
+  if [[ "$(id -u)" -eq 0 && -e "$file" ]]; then
+    owner="$(stat -c '%u:%g' "$file" 2>/dev/null || stat -f '%u:%g' "$file")" || { rm -f "$tmp"; die "Cannot read the owner of $file"; }
+    chown "$owner" "$tmp" || { rm -f "$tmp"; die "Cannot set the owner of $tmp"; }
+  fi
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; die "Cannot replace $file"; }
+}
+
 # Image pins belong to the release, not the site: keep every *_IMAGE in an .env
 # equal to its template, so an .env copied from an older package or before a
 # `make kafbat-ui` rebuild never sends Compose after an image that is not here.
@@ -119,16 +135,15 @@ sync_image_pins() {
     END { for (k in pin) if (!(k in seen) || cur[k] != pin[k]) print k }
   ' "$template" "$env_file" | LC_ALL=C sort | xargs)"
   [[ -n "$keys" ]] || return 0
-  tmp="$(mktemp)"
+  tmp="$(mktemp "$(dirname "$env_file")/${env_file##*/}.XXXXXX")" || die "Cannot create a temporary file beside $env_file"
+  chmod 600 "$tmp"
   awk -F= '
     NR == FNR { if ($1 ~ /^[A-Z0-9_]+_IMAGE$/) pin[$1] = substr($0, length($1) + 2); next }
     $1 in pin { seen[$1] = 1; $0 = $1 "=" pin[$1] }
     { print }
     END { for (k in pin) if (!(k in seen)) print k "=" pin[k] }
   ' "$template" "$env_file" > "$tmp" || { rm -f "$tmp"; die "Cannot update image pins in $env_file"; }
-  # Rewrite in place so the file keeps its owner and mode (it holds secrets).
-  cat "$tmp" > "$env_file"
-  rm -f "$tmp"
+  replace_env_file "$env_file" "$tmp"
   warn "Updated $keys in $env_file to match ${template##*/}" >&2
 }
 
@@ -142,11 +157,14 @@ random_secret() {
   echo "${secret:0:length}"
 }
 
-# Set KEY=VALUE in an env file, replacing its line or appending one. Rewrites
-# in place so the file keeps its owner and mode.
+# Set KEY=VALUE in an env file, replacing its line or appending one. The new
+# content is written to a temporary file beside the target (mode 600) and
+# renamed over it, so a reader never sees a partial file and a crash leaves
+# the old one intact.
 set_env_file_value() {
   local file="$1" key="$2" value="$3" tmp
-  tmp="$(mktemp)"
+  tmp="$(mktemp "$(dirname "$file")/${file##*/}.XXXXXX")" || die "Cannot create a temporary file beside $file"
+  chmod 600 "$tmp"
   # Passed through the environment: awk -v would expand backslashes in values.
   KRATE_KEY="$key" KRATE_VALUE="$value" awk -F= '
     BEGIN { key = ENVIRON["KRATE_KEY"]; value = ENVIRON["KRATE_VALUE"] }
@@ -154,8 +172,7 @@ set_env_file_value() {
     { print }
     END { if (!done) print key "=" value }
   ' "$file" > "$tmp" || { rm -f "$tmp"; die "Cannot update $key in $file"; }
-  cat "$tmp" > "$file"
-  rm -f "$tmp"
+  replace_env_file "$file" "$tmp"
 }
 
 # Whether a named volume of a Compose project exists.
@@ -165,14 +182,17 @@ compose_volume_exists() {
 }
 
 # Fill each KEY whose value in an env file is still a placeholder (empty,
-# changeme or REPLACE_ME) with a random secret of the given length, and print
-# the keys filled. Values a site set are never changed.
+# REPLACE_ME, or the old template default changeme) with a random secret of
+# the given length, and print the keys filled. Values a site set are never
+# changed. Callers refuse a changeme that is already live (a started Kafbat
+# UI, an existing Grafana volume) before this runs, so it never replaces a
+# value in use and never lets the insecure default through either.
 fill_secrets() {
   local file="$1" length="$2" key
   shift 2
   for key in "$@"; do
     case "$(env_value_file "$file" "$key")" in
-      ""|changeme|REPLACE_ME) ;;
+      ""|REPLACE_ME|changeme) ;;
       *) continue ;;
     esac
     set_env_file_value "$file" "$key" "$(random_secret "$length")"
@@ -216,6 +236,9 @@ adopt_legacy_project() {
   legacy="$(legacy_projects | xargs)"
   # When this edition's containers exist, their project is the one being updated.
   running="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$BROKER_CONTAINER" 2>/dev/null || true)"
+  # A broker already running in the fixed project is the installation in use:
+  # a stale legacy volume must not switch Compose to another project.
+  [[ "$running" != "krate-${KRATE_VARIANT}" ]] || return 0
   if [[ -n "$running" && " $legacy " == *" $running "* ]]; then
     legacy="$running"
   fi
@@ -272,17 +295,48 @@ import_site_files() {
 # site files come from --from DIR, the package directory or the directory the
 # running (or stopped) cluster was started from.
 deploy_release() {
-  local from="$1" taken previous
+  local from="$1" taken previous work
   ensure_home_dir
-  ( cd "$SCRIPT_DIR" && tar -cf - --exclude=./images --exclude=./docker-offline --exclude=./.env \
+  work="$(mktemp -d)" || die "Cannot create a temporary directory"
+  # The release archive is written once, listed, then extracted: the listing is exactly
+  # what was copied. Site files, every .env.* beside .env (the temporary copies an
+  # interrupted krate run leaves, mode 600 with the full .env contents, and operator
+  # backups such as .env.bak) and sealed identity backups are not release files; the
+  # template is copied on its own below. Any other file an operator drops into the
+  # package directory is treated as a release file (copied, world-readable).
+  if ! ( cd "$SCRIPT_DIR" && tar -cf - --exclude=./images --exclude=./docker-offline --exclude=./.env \
       --exclude=./certs --exclude=./auth --exclude=./monitoring/.env --exclude=./monitoring/auth \
-      --exclude='./sso/site*.json' . ) | ( cd "$KRATE_HOME" && tar -xf - ) \
-    || die "Could not copy the release files to $KRATE_HOME"
+      --exclude='./sso/site*.json' --exclude='./.env.*' --exclude='./monitoring/.env.*' \
+      --exclude='.identity-backup.*' . ) > "$work/release.tar" \
+    || ! tar -tf "$work/release.tar" > "$work/release.list" \
+    || ! ( cd "$KRATE_HOME" && tar -xf "$work/release.tar" ); then
+    rm -rf "$work"
+    die "Could not copy the release files to $KRATE_HOME"
+  fi
+  # The container users (kafkaui, nginx, grafana) read these files through bind mounts:
+  # an operator umask of 077 or 027 at extraction would leave them unreadable. Only the
+  # paths the release archive contained are widened (an allow-list): site files, secrets
+  # and anything else in KRATE_HOME (an identity backup, a leftover temporary) keep their modes.
+  if ! ( cd "$KRATE_HOME" && tr '\n' '\0' < "$work/release.list" | xargs -0 chmod go+rX ); then
+    rm -rf "$work"
+    die "Could not set read permissions on the release files in $KRATE_HOME"
+  fi
+  rm -rf "$work"
+  # The templates are release files that the .env.* exclusion above also matched.
+  if ! { cp "$SCRIPT_DIR/.env.template" "$KRATE_HOME/.env.template" && chmod 644 "$KRATE_HOME/.env.template" \
+      && mkdir -p "$KRATE_HOME/monitoring" && cp "$SCRIPT_DIR/monitoring/.env.template" "$KRATE_HOME/monitoring/.env.template" \
+      && chmod 644 "$KRATE_HOME/monitoring/.env.template"; }; then
+    die "Could not copy the .env templates to $KRATE_HOME"
+  fi
   mkdir -p "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak/truststores"
+  chmod go+rx "$KRATE_HOME/auth" "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak" "$KRATE_HOME/auth/keycloak/truststores"
   cp "$SCRIPT_DIR/auth/ui/local.yml" "$KRATE_HOME/auth/ui/local.yml"
+  chmod 644 "$KRATE_HOME/auth/ui/local.yml"
   if [[ -f "$SCRIPT_DIR/monitoring/auth/local.ini" ]]; then
     mkdir -p "$KRATE_HOME/monitoring/auth"
+    chmod go+rx "$KRATE_HOME/monitoring" "$KRATE_HOME/monitoring/auth"
     cp "$SCRIPT_DIR/monitoring/auth/local.ini" "$KRATE_HOME/monitoring/auth/local.ini"
+    chmod 644 "$KRATE_HOME/monitoring/auth/local.ini"
   fi
   ok "Installed $(basename "$SCRIPT_DIR") into $KRATE_HOME"
 
@@ -301,15 +355,40 @@ deploy_release() {
   fi
 }
 
-# Passwords and secrets of the cluster .env. Keycloak keeps its admin, database
-# and client secrets from its first start, so those are generated only while its
-# database volume does not exist yet. PING_KEYCLOAK_CLIENT_SECRET is issued by
-# PingFederate; `krate auth apply` asks for it.
-generate_secrets() {
-  local keys=(KAFKA_UI_PASSWORD) generated
-  if ! compose_volume_exists "$(cluster_project)" keycloak_db_data; then
-    keys+=(KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET)
+# The old template default `changeme` is a placeholder only while nothing uses
+# it: Kafbat reads KAFKA_UI_PASSWORD at every container start, so once a UI
+# container exists the value is live and must be changed deliberately. Before
+# that, it is cleared so a password gets generated like any other placeholder.
+refuse_live_changeme() {
+  [[ "$(env_value KAFKA_UI_PASSWORD)" == changeme ]] || return 0
+  local existing
+  existing="$(docker ps -aq --filter "label=com.docker.compose.project=$(cluster_project)" \
+    --filter "label=com.docker.compose.service=kafka-ui")" || die "Cannot ask Docker whether the Kafbat UI exists; is the Docker daemon running?"
+  if [[ -n "$existing" ]]; then
+    die "KAFKA_UI_PASSWORD is changeme (insecure) and the Kafbat UI was started with it.
+Set a new password: krate config set KAFKA_UI_PASSWORD=<value>
+or empty it so krate generates one: krate config set KAFKA_UI_PASSWORD=
+then: krate start"
   fi
+  set_env_file_value "$ENV_FILE" KAFKA_UI_PASSWORD ""
+  warn "KAFKA_UI_PASSWORD was the template default changeme; generating a password instead"
+}
+
+# Passwords and secrets of the cluster .env. Keycloak keeps its admin, database
+# and client secrets from its first start, so those are generated only while
+# its database is known to be pristine; when that cannot be told, the cluster
+# still starts and `krate identity up` reports the reason. The secret
+# PingFederate issued (PING_KEYCLOAK_CLIENT_SECRET) is asked for by
+# `krate auth apply`.
+generate_secrets() {
+  local keys=(KAFKA_UI_PASSWORD) generated state
+  refuse_live_changeme
+  state="$(identity_state)" || exit 1
+  case "${state%% *}" in
+    pristine) keys+=("${IDENTITY_KEYS[@]}") ;;
+    existing) ;;
+    *) warn "Identity secrets not generated: ${state#unknown }" ;;
+  esac
   generated="$(fill_secrets "$ENV_FILE" 24 "${keys[@]}" | xargs)"
   if [[ -n "$generated" ]]; then
     ok "Generated $generated in .env"
@@ -328,7 +407,20 @@ prepare_monitor_env() {
   chmod 600 "$env_file"
   sync_image_pins "$env_file" "$MONITOR_DIR/.env.template"
   if ! compose_volume_exists "krate-${KRATE_VARIANT}-monitoring" grafana_data; then
+    # No Grafana data yet: the old template default is not in use anywhere, so
+    # it is a placeholder and a password gets generated.
+    if [[ "$(env_value_file "$env_file" GRAFANA_PASSWORD)" == changeme ]]; then
+      set_env_file_value "$env_file" GRAFANA_PASSWORD ""
+      warn "GRAFANA_PASSWORD was the template default changeme; generating a password instead"
+    fi
     keys+=(GRAFANA_PASSWORD)
+  else
+    # Grafana keeps the password its volume was created with; .env cannot
+    # change it, so say what is in use rather than generate a value in vain.
+    case "$(env_value_file "$env_file" GRAFANA_PASSWORD)" in
+      "") warn "GRAFANA_PASSWORD is empty but Grafana's volume exists: its stored password stays in use. Record it with: krate config set GRAFANA_PASSWORD=..." ;;
+      changeme) warn "GRAFANA_PASSWORD is changeme (insecure) and Grafana's volume exists: change it in Grafana, then record it with: krate config set GRAFANA_PASSWORD=..." ;;
+    esac
   fi
   generated="$({ fill_secrets "$env_file" 24 "${keys[@]}"
     fill_secrets "$env_file" 32 PERSES_ENCRYPTION_KEY OAUTH2_PROXY_COOKIE_SECRET; } | xargs)"
@@ -375,11 +467,14 @@ prepare() {
   chmod 600 "$ENV_FILE"
   sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
   adopt_legacy_project
+  # Any `up` creates the identity network; refuse a subnet clash here, not with Docker's raw error.
+  identity_network_clash "${KRATE_COMMAND:-start}"
   generate_secrets
   if [[ -d "$MONITOR_DIR" ]]; then
     prepare_monitor_env
   fi
   ensure_cert
+  sync_proxy_env "$(env_value KAFKA_UI_AUTH_CONFIG)"
   ensure_ui_image
 }
 
@@ -436,10 +531,10 @@ cmd_credentials() {
     monitor_logins | sed 's/^/  /'
     sep
   fi
-  if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
+  if identity_profile_enabled; then
     echo -e "${BOLD}  Keycloak admin${RESET}"
     sep
-    echo "  URL       $(env_value KEYCLOAK_PUBLIC_URL)/admin/"
+    echo "  Console   not published: the proxy answers 404 for $(env_value KEYCLOAK_PUBLIC_URL)/admin/ (use krate identity ... or kcadm from the host)"
     echo "  Username  $(env_value KEYCLOAK_ADMIN_USER)"
     echo "  Password  $(env_value KEYCLOAK_ADMIN_PASSWORD)"
     sep
@@ -452,7 +547,18 @@ cmd_credentials() {
 # classic image store resolves name@digest only against registry digests, so
 # pass Compose the bare image ID. Packages use krate-offline tags instead.
 resolve_local_ui_image() {
-  local action="${1:-}"
+  local action="${1:-}" arg targeted=true
+  local -a services=()
+  # `up` of named services that leave out kafka-ui does not need its image.
+  for arg in "${@:2}"; do
+    [[ "$arg" == -* ]] || services+=("$arg")
+  done
+  if [[ "$action" == up && ${#services[@]} -gt 0 ]]; then
+    targeted=false
+    for arg in "${services[@]}"; do
+      if [[ "$arg" == kafka-ui ]]; then targeted=true; fi
+    done
+  fi
   # A set KAFKA_UI_IMAGE, even an empty one, overrides .env for Compose.
   local image
   if [[ -n "${KAFKA_UI_IMAGE+set}" ]]; then
@@ -464,28 +570,43 @@ resolve_local_ui_image() {
   docker image inspect "$image" >/dev/null 2>&1 && return 0
   if docker image inspect "${image##*@}" >/dev/null 2>&1; then
     export KAFKA_UI_IMAGE="${image##*@}"
-  elif [[ "$action" == up ]]; then
+  elif [[ "$action" == up ]] && $targeted; then
     # Compose would try Docker Hub, where this locally built image never exists.
     die "Kafbat UI image $image is not built on this host. Build it from the repository root: make kafbat-ui"
   fi
 }
 
-# Wrapper so all compose calls use the right files and detected binary
+# Wrapper so all compose calls use the right files and detected binary. The
+# sso profile (Keycloak and its database) joins the cluster once identity is
+# enabled or Kafbat is in runtime.yml mode.
 compose_cmd() {
   sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
-  resolve_local_ui_image "${1:-}"
-  if [[ -f "$ENV_FILE" && "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
-    local version
-    version="$(get_compose_version)"
-    version_gte "$version" "2.20.2" || die "SSO requires Docker Compose 2.20.2 or newer; found $version"
+  resolve_local_ui_image "$@"
+  if [[ -f "$ENV_FILE" ]] && identity_profile_enabled; then
+    require_sso_compose
+    local with_sso=true
     if [[ "${1:-}" == up ]]; then
-      local auth_tools="$SCRIPT_DIR/sso"
-      [[ -d "$auth_tools" ]] || auth_tools="$SCRIPT_DIR/../sso"
-      "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile sso config --format json | python3 "$auth_tools/preflight.py" --directory "$SCRIPT_DIR" --mode runtime.yml
-      shift
-      set -- up --pull never --no-build "$@"
+      # Until `krate identity up` has made the site files (Compose bind-mounts
+      # them; were they missing, Docker would create root-owned directories in
+      # their place) and the database, the brokers start without identity.
+      local f
+      for f in auth/keycloak/krate-realm.json auth/keycloak/db-tls/ca.crt; do
+        [[ -f "$SCRIPT_DIR/$f" ]] || with_sso=false
+      done
+      if $with_sso && [[ "$(identity_state)" == pristine ]]; then with_sso=false; fi
+      if ! $with_sso; then
+        if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
+          die "Kafbat UI is in runtime.yml mode and needs Keycloak. Run: krate identity up"
+        fi
+        warn "Identity services skipped (run: krate identity up)"
+      fi
+      if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
+        "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile sso config --format json | python3 "$(sso_dir)/preflight.py" --directory "$SCRIPT_DIR" --mode runtime.yml
+        shift
+        set -- up --pull never --no-build "$@"
+      fi
     fi
-    set -- --profile sso "$@"
+    if $with_sso; then set -- --profile sso "$@"; fi
   fi
   "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
@@ -506,41 +627,1364 @@ ensure_ping_secret() {
   ok "Saved PING_KEYCLOAK_CLIENT_SECRET in .env"
 }
 
+# Kafbat's cluster names for the RBAC roles: from kafbat.yml when the edition
+# has one beside the CLI (EPC; Spring placeholders resolved from .env), else
+# from the Compose file's KAFKA_CLUSTERS_<n>_NAME entries. One name per line.
+ui_clusters() {
+  python3 - "$SCRIPT_DIR/kafbat.yml" "$COMPOSE_FILE" "$ENV_FILE" <<'PY'
+import os, re, sys
+kafbat, compose, env_file = sys.argv[1:4]
+env = {}
+for line in open(env_file):
+    key, sep, value = line.strip().partition('=')
+    if sep and not key.startswith('#'):
+        env[key.strip()] = value.strip().strip('"\'')
+if os.path.isfile(kafbat):
+    # Only the items of kafka.clusters count: track indentation so a `- name:` inside a
+    # cluster's own lists (schema registry, connect, ksqldb) is not taken for a cluster.
+    names, in_clusters, item_indent = [], False, None
+    for line in open(kafbat):
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if re.match(r'^\s*clusters:\s*$', line):
+            in_clusters, clusters_indent, item_indent = True, indent, None
+            continue
+        if in_clusters:
+            if indent <= clusters_indent:
+                in_clusters = False
+                continue
+            m = re.match(r'^\s*-\s*name:\s*"?([^"\n]+?)"?\s*$', line)
+            if m and (item_indent is None or indent == item_indent):
+                item_indent = indent
+                names.append(re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}', lambda x: env.get(x.group(1)) or x.group(2) or '', m.group(1)))
+else:
+    names = re.findall(r'^\s*KAFKA_CLUSTERS_\d+_NAME:\s*"?([^"\n]+?)"?\s*$', open(compose).read(), re.M)
+print('\n'.join(names))
+PY
+}
+
+# Derived .env values and the certificate check shared by both configure paths.
+auth_configure_host() {
+  local public_url="$1" host fqdn
+  if [[ -z "$(env_value KAFKA_UI_FQDN)" ]]; then
+    host="${public_url#*://}"
+    host="${host%%[:/]*}"
+    set_env_file_value "$ENV_FILE" KAFKA_UI_FQDN "$host"
+    ok "Set KAFKA_UI_FQDN=$host in .env"
+  fi
+  fqdn="$(get_fqdn)"
+  if [[ -f "$CERT_CRT" ]] && ! openssl x509 -in "$CERT_CRT" -noout -checkhost "$fqdn" 2>/dev/null | grep -q 'does match'; then
+    warn "certs/server.crt does not cover $fqdn. Install the CA-issued certificate and key in certs/, or run: krate gen-cert"
+  fi
+  echo ""
+  info "Next: krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml, then krate auth apply (Keycloak must be running: krate identity up)"
+}
+
+# Plan Kafbat's Keycloak login, auth/ui/runtime.yml. Without a settings file
+# the realm is the only issuer (local Keycloak users): the plan is a pure
+# function of .env and this edition's cluster list, written by sso/identity.py.
+# With a PingFederate settings file the same plan is written together with the
+# identity-provider plan (applied to the realm in the SSO phase).
+auth_configure() {
+  local sso_dir="$1" settings="" force=false viewer_messages="" arg public_url
+  shift
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=true ;;
+      --viewer-messages) viewer_messages=true ;;
+      --no-viewer-messages) viewer_messages=false ;;
+      --local) ;;
+      -*) die "Usage: krate auth configure [settings.json] [--force] [--viewer-messages|--no-viewer-messages]" ;;
+      *) [[ -z "$settings" ]] || die "Usage: krate auth configure [settings.json] [--force] [--viewer-messages|--no-viewer-messages]"
+         settings="$arg" ;;
+    esac
+  done
+  require_env
+  ensure_identity_dirs
+  if [[ "$viewer_messages" == true && "$(env_value KAFKA_UI_VIEWER_MESSAGES)" != true ]]; then
+    set_env_file_value "$ENV_FILE" KAFKA_UI_VIEWER_MESSAGES true
+    ok "Set KAFKA_UI_VIEWER_MESSAGES=true in .env (viewers may read message payloads)"
+  elif [[ "$viewer_messages" == false && "$(env_value KAFKA_UI_VIEWER_MESSAGES)" == true ]]; then
+    set_env_file_value "$ENV_FILE" KAFKA_UI_VIEWER_MESSAGES false
+    ok "Set KAFKA_UI_VIEWER_MESSAGES=false in .env (viewers no longer read message payloads)"
+  fi
+  if [[ -n "$settings" ]]; then
+    [[ -f "$settings" ]] || die "Settings file not found: $settings"
+    if $force; then
+      die "--force replaces the local plan only; remove auth/ui/runtime.yml and auth/keycloak/pingfederate-idp.json before rerunning with a settings file"
+    fi
+    python3 "$sso_dir/configure-dual.py" --settings "$settings" --env-file "$ENV_FILE" --output-dir "$SCRIPT_DIR/auth"
+    # Derive the .env values that follow from public_url instead of asking for them.
+    public_url="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["public_url"].rstrip("/"))' "$settings")"
+    set_env_file_value "$ENV_FILE" KEYCLOAK_PUBLIC_URL "$public_url/identity"
+    ok "Set KEYCLOAK_PUBLIC_URL=$public_url/identity in .env"
+  else
+    local -a clusters=() args=()
+    mapfile -t clusters < <(ui_clusters)
+    [[ ${#clusters[@]} -gt 0 ]] || die "No Kafbat cluster name found in $SCRIPT_DIR/kafbat.yml or ${COMPOSE_FILE##*/}"
+    args=(runtime --env-file "$ENV_FILE" --clusters "${clusters[@]}" --output "$SCRIPT_DIR/auth/ui/runtime.yml")
+    if $force; then args+=(--force); fi
+    python3 "$sso_dir/identity.py" "${args[@]}"
+    public_url="$(env_value KEYCLOAK_PUBLIC_URL)"
+    public_url="${public_url%/}"
+    public_url="${public_url%/identity}"
+  fi
+  auth_configure_host "$public_url"
+}
+
 cmd_auth() {
-  local action="${1:-}" sso_dir="$SCRIPT_DIR/sso"
-  [[ -d "$sso_dir" ]] || sso_dir="$SCRIPT_DIR/../sso"
+  local action="${1:-}" sso_dir
+  sso_dir="$(sso_dir)"
+  shift || true
   case "$action" in
-    configure)
-      [[ $# -eq 2 ]] || die "Usage: krate auth configure <settings.json>"
-      python3 "$sso_dir/configure-dual.py" --settings "$2" --output-dir "$SCRIPT_DIR/auth"
-      mkdir -p "$SCRIPT_DIR/auth/keycloak/truststores"
-      # Derive the .env values that follow from public_url instead of asking for them.
-      require_env
-      local public_url
-      public_url="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["public_url"].rstrip("/"))' "$2")"
-      set_env_file_value "$ENV_FILE" KEYCLOAK_PUBLIC_URL "$public_url/identity"
-      ok "Set KEYCLOAK_PUBLIC_URL=$public_url/identity in .env"
-      if [[ -z "$(env_value KAFKA_UI_FQDN)" ]]; then
-        local host="${public_url#*://}"
-        host="${host%%[:/]*}"
-        set_env_file_value "$ENV_FILE" KAFKA_UI_FQDN "$host"
-        ok "Set KAFKA_UI_FQDN=$host in .env"
-      fi
-      local fqdn
-      fqdn="$(get_fqdn)"
-      if [[ -f "$CERT_CRT" ]] && ! openssl x509 -in "$CERT_CRT" -noout -checkhost "$fqdn" 2>/dev/null | grep -q 'does match'; then
-        warn "certs/server.crt does not cover $fqdn. Install the CA-issued certificate and key in certs/, or run: krate gen-cert"
-      fi
-      ;;
+    configure) auth_configure "$sso_dir" "$@" ;;
     apply)
       [[ -f "$sso_dir/activate.sh" ]] || die "Missing packaged SSO activation helper"
       prepare
-      ensure_ping_secret
+      # PingFederate's secret is needed only once its identity-provider plan exists.
+      if [[ -f "$SCRIPT_DIR/auth/keycloak/pingfederate-idp.json" ]]; then ensure_ping_secret; fi
       # shellcheck disable=SC1091
       source "$sso_dir/activate.sh"
       apply_auth "$sso_dir"
       ;;
-    *) die "Usage: krate auth {configure <settings.json>|apply}" ;;
+    *) die "Usage: krate auth {configure [settings.json] [--force] [--viewer-messages|--no-viewer-messages]|apply}" ;;
+  esac
+}
+
+# ─── identity (Keycloak and its database) ─────────────────────────────────────
+# Keycloak holds the site's users and runs under the sso Compose profile beside
+# the brokers, but is managed on its own: these commands need no broker. The
+# database volume keycloak_db_data is the authoritative store; .env carries the
+# credentials Keycloak and its database were initialised with, so the identity
+# secrets are generated only before that database exists and changed later
+# through `krate identity rotate`, which updates both sides.
+IDENTITY_KEYS=(KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_CLI_CLIENT_SECRET)
+IDENTITY_REALM=krate
+IDENTITY_TIMEOUT=180
+IDENTITY_LOCK=""
+IDENTITY_TMPDIR=""
+IDENTITY_CHANGED=false
+KCADM_SERVER=http://localhost:8080/identity
+KCADM_CID=""
+KCADM_CONFIG=""
+
+# The SSO helpers sit beside the CLI in a package and at the root of a checkout.
+sso_dir() {
+  local dir="$SCRIPT_DIR/sso"
+  [[ -d "$dir" ]] || dir="$SCRIPT_DIR/../sso"
+  echo "$dir"
+}
+
+require_sso_compose() {
+  local version
+  version="$(get_compose_version)"
+  version_gte "$version" "2.20.2" || die "SSO requires Docker Compose 2.20.2 or newer; found $version. Install the packaged Compose plugin."
+}
+
+# The sso profile is part of the cluster once identity is enabled, or while
+# Kafbat is in runtime.yml mode (its SSO login needs Keycloak).
+identity_profile_enabled() {
+  [[ "$(env_value KEYCLOAK_ENABLED)" == true || "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml ]]
+}
+
+# Lifecycle commands reach the identity containers once the profile is on, so
+# they hold the identity lock: none of them can stop or recreate Keycloak or
+# its database while backup, restore, rotate or recover-admin is running.
+identity_lock_if_enabled() {
+  [[ -f "$ENV_FILE" ]] || return 0
+  # KEYCLOAK_ENABLED turns true only at the end of the first `identity up`, so the
+  # profile flag alone would let `stop`/`uninstall` run while a bootstrap is in
+  # progress: also take the lock while an identity command holds it or the
+  # database volume exists (identity_lock refuses while another process is live).
+  if identity_profile_enabled || [[ -d "$SCRIPT_DIR/auth/.identity.lock" ]] || identity_volume_present; then identity_lock; fi
+}
+
+identity_volume_present() {
+  docker volume inspect "$(cluster_project)_keycloak_db_data" >/dev/null 2>&1
+}
+
+# Compose with the sso profile always on, so the identity services can be
+# addressed before KEYCLOAK_ENABLED is set (identity up sets it last).
+identity_compose() {
+  sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
+  resolve_local_ui_image
+  "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile sso "$@"
+}
+
+# Container ID of an identity service (running or not); empty when none.
+identity_container() {
+  identity_compose ps -a -q "$1" 2>/dev/null | head -1 || true
+}
+
+# Docker state of a container ID: running, exited, ... or absent.
+container_status() {
+  [[ -n "$1" ]] || { echo absent; return 0; }
+  docker inspect --format '{{.State.Status}}' "$1" 2>/dev/null || echo absent
+}
+
+# Health of a container ID (its state when it has no healthcheck), or absent.
+container_health() {
+  [[ -n "$1" ]] || { echo absent; return 0; }
+  docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$1" 2>/dev/null || echo absent
+}
+
+# Die unless the packaged image of every given service is loaded.
+require_service_images() {
+  local listing service image
+  listing="$(identity_compose config --format json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+for name in sys.argv[1:]:
+    print(name, services[name]["image"])' "$@")" || die "Cannot read the images of: $*"
+  while read -r service image; do
+    [[ -n "$service" ]] || continue
+    docker image inspect "$image" >/dev/null 2>&1 \
+      || die "Packaged image for $service is missing; run krate load-images first (in a checkout: docker pull $image)"
+  done <<< "$listing"
+}
+
+# Whether Keycloak's database exists. Prints one line: pristine (no volume and
+# no keycloak-db container; the first start imports the realm and creates the
+# bootstrap admin), existing, or "unknown <reason>" when Docker could not be
+# asked or a keycloak_db_data volume of another Compose project might be the
+# one in use. A missing volume name alone is never taken as "empty". The
+# other edition's fixed project and monitoring stacks keep volumes of their
+# own and are not counted. No side effects: a legacy project is adopted by
+# the caller (adopt_legacy_project) before this is asked.
+identity_state() {
+  local project projects other container ignore=krate-epc
+  [[ "$KRATE_VARIANT" == kraft ]] || ignore=krate-kraft
+  project="$(cluster_project)"
+  if ! projects="$(docker volume ls --filter label=com.docker.compose.volume=keycloak_db_data \
+      --format '{{.Label "com.docker.compose.project"}}' | LC_ALL=C sort -u)"; then
+    echo "unknown docker volume ls failed; is the Docker daemon running?"
+    return 0
+  fi
+  other="$(printf '%s\n' "$projects" | grep -v '^$' | grep -vx "$project" | grep -vx "$ignore" \
+    | grep -v -- '-monitoring$' | xargs || true)"
+  if [[ -n "$other" ]]; then
+    echo "unknown a keycloak_db_data volume also exists in Compose project(s) $other while this installation is $project; use it with krate config set KRATE_PROJECT=<name>, or remove it"
+    return 0
+  fi
+  container="$(docker ps -aq --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=keycloak-db" 2>/dev/null | head -1 || true)"
+  if printf '%s\n' "$projects" | grep -qx "$project" || [[ -n "$container" ]]; then
+    echo existing
+  else
+    echo pristine
+  fi
+}
+
+# Refuse to create the identity network on an address range another Docker
+# network already covers: Docker would reject the second network, and the
+# proxy's fixed address (KC_PROXY_TRUSTED_ADDRESSES) would belong to someone
+# else. Networks of this Compose project are the ones Compose manages here and
+# are skipped; every other network counts (another project, Docker's own
+# bridge, networks made by hand). Dies naming the network and both .env keys.
+identity_network_clash() {
+  local subnet project listing clash
+  local -a ids=()
+  subnet="$(env_value KRATE_IDENTITY_SUBNET)"
+  subnet="${subnet:-172.29.250.0/24}"
+  project="$(cluster_project)"
+  listing="$(docker network ls -q)" || die "Cannot list Docker networks; is the Docker daemon running?"
+  [[ -n "$listing" ]] || return 0
+  mapfile -t ids <<< "$listing"
+  # One line per network: name, Compose project (or -), its IPAM subnets.
+  clash="$(docker network inspect -f '{{.Name}} {{or (index .Labels "com.docker.compose.project") "-"}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' "${ids[@]}" 2>/dev/null \
+    | python3 -c '
+import ipaddress, sys
+wanted = ipaddress.ip_network(sys.argv[1], strict=False)
+for line in sys.stdin:
+    name, owner, *subnets = line.split()
+    if owner == sys.argv[2]:
+        continue
+    for subnet in subnets:
+        try:
+            if wanted.overlaps(ipaddress.ip_network(subnet, strict=False)):
+                print(name, subnet, "(no Compose project)" if owner == "-" else "(Compose project " + owner + ")")
+                sys.exit(0)
+        except (ValueError, TypeError):
+            continue
+' "$subnet" "$project")" || die "Cannot inspect the Docker networks for a clash with the identity subnet $subnet"
+  [[ -n "$clash" ]] || return 0
+  identity_journal "${1:-up}" refused "identity subnet $subnet overlaps Docker network ${clash%% *}"
+  die "Docker network $clash overlaps the identity subnet $subnet (KRATE_IDENTITY_SUBNET).
+Choose a free range and set both keys together, then run the command again:
+  krate config set KRATE_IDENTITY_SUBNET=<cidr>
+  krate config set KRATE_IDENTITY_PROXY_IP=<an address inside it>"
+}
+
+# One identity command at a time: a directory lock (a rename is atomic on
+# every platform; macOS has no flock). The pid file is written into a private
+# directory first, which is then renamed to the lock, so the lock never exists
+# without its pid. A lock whose process is gone is stale.
+identity_lock() {
+  local dir="$SCRIPT_DIR/auth/.identity.lock" tmp pid mtime
+  mkdir -p "$SCRIPT_DIR/auth"
+  tmp="$dir.$$.tmp"
+  rm -rf "$tmp"
+  { mkdir "$tmp" && echo "$$" > "$tmp/pid"; } || { rm -rf "$tmp"; die "Cannot create the lock $dir"; }
+  # The lock's age is read before the attempt: a refused rename touches it.
+  mtime="$(stat -c %Y "$dir" 2>/dev/null || stat -f %m "$dir" 2>/dev/null || echo 0)"
+  if ! identity_lock_rename "$tmp" "$dir"; then
+    pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    if identity_lock_live "$pid" "$mtime"; then
+      die "Another krate identity command is running (pid ${pid:-?}). Wait for it to finish."
+    fi
+    warn "Removing the stale identity lock left by process ${pid:-?}"
+    rm -rf "$dir"
+    { mkdir "$tmp" && echo "$$" > "$tmp/pid"; } || { rm -rf "$tmp"; die "Cannot create the lock $dir"; }
+    identity_lock_rename "$tmp" "$dir" || die "Cannot create the lock $dir"
+  fi
+  IDENTITY_LOCK="$dir"
+  trap identity_cleanup EXIT
+}
+
+# Rename the prepared directory to the lock. When the lock already exists, mv
+# either fails or moves the directory inside it; both count as "held", and the
+# prepared directory is removed.
+identity_lock_rename() {
+  local tmp="$1" dir="$2" inside="$2/${1##*/}"
+  if mv "$tmp" "$dir" 2>/dev/null && [[ ! -d "$inside" ]]; then
+    return 0
+  fi
+  rm -rf "$tmp" "$inside"
+  return 1
+}
+
+# Whether a lock is held by a live process: its pid $1 exists (ps, which needs
+# no permission to signal). A lock whose pid is not readable yet counts as
+# live while its directory (modified at $2, epoch seconds) is younger than 60 s.
+identity_lock_live() {
+  if [[ "$1" =~ ^[0-9]+$ ]]; then
+    ps -p "$1" >/dev/null 2>&1
+    return
+  fi
+  (( $(date +%s) - ${2:-0} < 60 ))
+}
+
+# A private working directory under auth/ (mode 700) for files that hold
+# secrets while a command runs, in IDENTITY_TMPDIR; removed by the exit trap
+# (so it is set here, never in a command substitution).
+identity_tmpdir() {
+  mkdir -p "$SCRIPT_DIR/auth"
+  # Only one identity command runs at a time (the lock), so any work directory
+  # found here was left by an interrupted run: it may hold secrets, remove it.
+  rm -rf "$SCRIPT_DIR"/auth/.identity-work.??????
+  IDENTITY_TMPDIR="$(mktemp -d "$SCRIPT_DIR/auth/.identity-work.XXXXXX")" || die "Cannot create a working directory under $SCRIPT_DIR/auth"
+  chmod 700 "$IDENTITY_TMPDIR"
+  trap identity_cleanup EXIT
+}
+
+identity_cleanup() {
+  kcadm_logout
+  if [[ -n "$IDENTITY_TMPDIR" ]]; then
+    rm -rf "$IDENTITY_TMPDIR"
+    IDENTITY_TMPDIR=""
+  fi
+  if [[ -n "$IDENTITY_LOCK" ]]; then
+    rm -rf "$IDENTITY_LOCK"
+    IDENTITY_LOCK=""
+  fi
+}
+
+# Append-only record of identity operations: `<time> <command> <outcome>
+# <detail>`. Details name keys, users and files, never a secret value.
+identity_journal() {
+  local file="$SCRIPT_DIR/auth/identity-journal.log"
+  mkdir -p "$SCRIPT_DIR/auth"
+  printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${3:-}" >> "$file"
+}
+
+# kcadm runs inside the Keycloak container against its own HTTP listener. The
+# session file gets a random name under the container's /tmp and is removed by
+# kcadm_logout (also from the exit trap). Passwords and secrets reach kcadm as
+# environment variables of the exec (KC_CLI_PASSWORD, KC_CLI_CLIENT_SECRET),
+# named on the docker command line but never given as arguments.
+#
+# kcadm [VAR=VALUE ...] -- <kcadm command> [arguments]
+kcadm() {
+  local -a names=() exec_opts=()
+  local rc=0
+  while [[ $# -gt 0 && "$1" != -- ]]; do
+    # shellcheck disable=SC2163  # the NAME=VALUE pair is the argument itself
+    export "$1"
+    names+=("${1%%=*}")
+    exec_opts+=(-e "${1%%=*}")
+    shift
+  done
+  if [[ "${1:-}" == -- ]]; then shift; fi
+  if [[ "${KCADM_STDIN:-}" == 1 ]]; then
+    docker exec -i "${exec_opts[@]}" "$KCADM_CID" /opt/keycloak/bin/kcadm.sh "$@" --config "$KCADM_CONFIG" || rc=$?
+  else
+    docker exec "${exec_opts[@]}" "$KCADM_CID" /opt/keycloak/bin/kcadm.sh "$@" --config "$KCADM_CONFIG" </dev/null || rc=$?
+  fi
+  if [[ ${#names[@]} -gt 0 ]]; then unset "${names[@]}"; fi
+  return "$rc"
+}
+
+# kcadm_login <realm> user <username> <password>
+# kcadm_login <realm> client <client-id> <secret>      (client credentials)
+# Returns kcadm's status; the caller decides whether a refusal is fatal.
+kcadm_login() {
+  local realm="$1" kind="$2" name="$3" secret="$4" cid
+  kcadm_logout
+  cid="$(identity_container keycloak)"
+  [[ -n "$cid" && "$(container_status "$cid")" == running ]] || die "Keycloak is not running. Run: krate identity up"
+  KCADM_CID="$cid"
+  KCADM_CONFIG="/tmp/kcadm-$(random_secret 16).config"
+  trap identity_cleanup EXIT
+  # kcadm announces each login ("Logging into ...") on stdout and stderr; only real
+  # errors reach the operator, so command output (users groups, list) stays clean.
+  local err rc=0
+  err="$(mktemp)" || die "Cannot create a temporary file"
+  case "$kind" in
+    user)   kcadm "KC_CLI_PASSWORD=$secret" -- config credentials --server "$KCADM_SERVER" --realm "$realm" --user "$name" >/dev/null 2>"$err" || rc=$? ;;
+    client) kcadm "KC_CLI_CLIENT_SECRET=$secret" -- config credentials --server "$KCADM_SERVER" --realm "$realm" --client "$name" >/dev/null 2>"$err" || rc=$? ;;
+    *) rm -f "$err"; die "kcadm_login: unknown kind $kind" ;;
+  esac
+  grep -v '^Logging into' "$err" >&2 || true
+  rm -f "$err"
+  return "$rc"
+}
+
+kcadm_logout() {
+  [[ -n "$KCADM_CONFIG" ]] || return 0
+  docker exec "$KCADM_CID" rm -f "$KCADM_CONFIG" >/dev/null 2>&1 || true
+  KCADM_CONFIG=""
+  KCADM_CID=""
+}
+
+# IDs by exact name; empty when not found. A kcadm failure makes the function
+# fail (pipefail), so callers assign with `|| die "Keycloak query failed"`.
+kcadm_user_id() {
+  kcadm -- get users -r "$1" -q "username=$2" -q exact=true --fields id --format csv --noquotes | awk 'NF { print; exit }'
+}
+
+kcadm_group_id() {
+  kcadm -- get groups -r "$1" -q "search=$2" -q exact=true --fields id,name --format csv --noquotes \
+    | awk -F, -v g="$2" '$2 == g { print $1; exit } $1 == g { print $2; exit }'
+}
+
+kcadm_client_id() {
+  kcadm -- get clients -r "$1" -q "clientId=$2" --fields id,clientId --format csv --noquotes \
+    | awk -F, -v c="$2" '$2 == c { print $1; exit } $1 == c { print $2; exit }'
+}
+
+# Log in as the permanent master admin from .env; a refusal is fatal with the
+# recovery options ($1 names the command for the journal).
+identity_verify_admin() {
+  local admin
+  admin="$(env_value KEYCLOAK_ADMIN_USER)"
+  if ! kcadm_login master user "$admin" "$(env_value KEYCLOAK_ADMIN_PASSWORD)"; then
+    identity_journal "$1" failed "admin login as $admin refused"
+    die "Keycloak refused the admin login for $admin with KEYCLOAK_ADMIN_PASSWORD from .env.
+Restore a backup (krate identity restore <file>) or recreate the admin: krate identity down, then krate identity recover-admin"
+  fi
+  kcadm_logout
+  ok "Admin login as $admin verified"
+}
+
+# Log in as the krate-cli service account in the krate realm (what user
+# management uses); a refusal is fatal.
+identity_verify_cli() {
+  if ! kcadm_login "$IDENTITY_REALM" client krate-cli "$(env_value KEYCLOAK_CLI_CLIENT_SECRET)"; then
+    identity_journal "$1" failed "client login krate-cli refused"
+    die "Keycloak refused the krate-cli client login with KEYCLOAK_CLI_CLIENT_SECRET from .env.
+If the secret was changed in Keycloak, put it back in step: krate identity rotate KEYCLOAK_CLI_CLIENT_SECRET
+Otherwise restore a backup: krate identity restore <file>"
+  fi
+  kcadm_logout
+  ok "krate-cli client login verified (realm $IDENTITY_REALM)"
+}
+
+# Turn the one-time bootstrap admin $1 (password $2) into the permanent one:
+# create KEYCLOAK_ADMIN_USER in the master realm when absent, set its password
+# from .env, grant the realm role admin, verify its login, then delete the
+# bootstrap admin and any leftover temp-admin.
+identity_bootstrap_admin() {
+  local temp="$1" temp_pw="$2" admin admin_pw tries=0 uid name
+  admin="$(env_value KEYCLOAK_ADMIN_USER)"
+  admin_pw="$(env_value KEYCLOAK_ADMIN_PASSWORD)"
+  info "Creating the permanent Keycloak admin $admin from the temporary bootstrap admin $temp..."
+  until kcadm_login master user "$temp" "$temp_pw" 2>/dev/null; do
+    tries=$((tries + 1))
+    (( tries < 10 )) || die "Could not log in as the bootstrap admin $temp after $tries attempts. Check: krate logs keycloak"
+    sleep 3
+  done
+  uid="$(kcadm_user_id master "$admin")" || die "Keycloak query failed"
+  if [[ -z "$uid" ]]; then
+    kcadm -- create users -r master -s "username=$admin" -s enabled=true >/dev/null
+  fi
+  kcadm "KC_CLI_PASSWORD=$admin_pw" -- set-password -r master --username "$admin"
+  kcadm -- add-roles -r master --uusername "$admin" --rolename admin
+  kcadm_login master user "$admin" "$admin_pw" || die "The permanent admin $admin cannot log in; the bootstrap admin $temp was kept. Check: krate logs keycloak"
+  # Remove this run's bootstrap admin and every temporary admin an earlier,
+  # interrupted run may have left behind (temp-admin, temp-admin-<random>).
+  local removed="" listing
+  listing="$(kcadm -- get users -r master -q search=temp-admin --fields id,username --format csv --noquotes)" \
+    || die "Keycloak query failed; the bootstrap admin $temp may remain. Check: krate logs keycloak, then: krate identity recover-admin"
+  while IFS=, read -r uid name; do
+    [[ -n "$uid" && "$name" != "$admin" ]] || continue
+    [[ "$name" == "$temp" || "$name" =~ ^temp-admin(-[a-z0-9]{8})?$ ]] || continue
+    kcadm -- delete "users/$uid" -r master
+    removed+=" $name"
+  done <<< "$listing"
+  kcadm_logout
+  ok "Permanent admin $admin ready; temporary admin(s) removed:${removed:- none found}"
+}
+
+# Site files Keycloak needs: identity secrets in .env (generated only for a
+# pristine database), the database TLS material (made once and kept) and the
+# realm plan (a pure function of .env, regenerated on every run). $1 = identity
+# state.
+prepare_identity() {
+  local state="$1" command="${2:-up}" generated key missing=""
+  if [[ "$state" == pristine ]]; then
+    generated="$(fill_secrets "$ENV_FILE" 24 "${IDENTITY_KEYS[@]}" | xargs)"
+    if [[ -n "$generated" ]]; then
+      ok "Generated $generated in .env"
+      IDENTITY_CHANGED=true
+    fi
+  else
+    for key in "${IDENTITY_KEYS[@]}"; do
+      case "$(env_value "$key")" in ""|REPLACE_ME) missing+=" $key" ;; esac
+    done
+    [[ -z "$missing" ]] || die "The identity database exists but .env lacks${missing}.
+This .env or Keycloak database predates \`krate identity\`. See
+'Upgrading from the previous Keycloak setup' in docs/identity-foundation.md (sso/guides/ in a checkout).
+Otherwise restore the .env of this installation, or a backup: krate identity restore <file>"
+  fi
+  prepare_identity_files "$command"
+}
+
+# Directories the containers traverse through bind mounts are created with explicit
+# modes, whatever the operator's umask: under umask 077 they would be 700, and Keycloak
+# then cannot list KC_TRUSTSTORE_PATHS (it dies with "Cannot read the array length
+# because array is null"); Kafbat (user kafkaui) mounts auth/ui the same way. The files
+# inside keep their own modes (db-tls keys 600).
+ensure_identity_dirs() {
+  install -d -m 755 "$SCRIPT_DIR/auth" "$SCRIPT_DIR/auth/ui" "$SCRIPT_DIR/auth/keycloak" "$SCRIPT_DIR/auth/keycloak/truststores" \
+    || die "Could not create the auth directories under $SCRIPT_DIR"
+}
+
+# The database TLS material (generated when absent, never over an incomplete
+# set) and the realm plan (rewritten only when its content differs from .env).
+prepare_identity_files() {
+  local sso plan command="${1:-up}"
+  sso="$(sso_dir)"
+  ensure_identity_dirs
+  if [[ ! -f "$SCRIPT_DIR/auth/keycloak/db-tls/ca.crt" ]]; then IDENTITY_CHANGED=true; fi
+  python3 "$sso/identity.py" db-tls --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" \
+    || { identity_journal "$command" refused "database TLS material incomplete or unwritable"; exit 1; }
+  plan="$(python3 "$sso/identity.py" plan --env-file "$ENV_FILE" --output "$SCRIPT_DIR/auth/keycloak/krate-realm.json")" \
+    || { identity_journal "$command" refused "realm plan not generated"; exit 1; }
+  if [[ "$plan" != *"No changes"* ]]; then
+    [[ -z "$plan" ]] || printf '%s\n' "$plan"
+    IDENTITY_CHANGED=true
+  fi
+}
+
+# .env ready for the identity services, without the rest of prepare (no
+# certificate or UI image is needed to run Keycloak).
+prepare_identity_env() {
+  require_compose; require_compose_file; require_sso_compose
+  command -v python3 >/dev/null || die "python3 is required for krate identity"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    [[ -f "$ENV_TEMPLATE" ]] || die ".env.template not found in $SCRIPT_DIR"
+    cp "$ENV_TEMPLATE" "$ENV_FILE"
+    ok "Created .env from .env.template"
+  fi
+  chmod 600 "$ENV_FILE"
+  sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
+}
+
+identity_up_service() {
+  identity_compose up -d --pull never --no-build --no-deps --wait --wait-timeout "$IDENTITY_TIMEOUT" "$@" \
+    || { identity_journal start failed "$* not healthy within ${IDENTITY_TIMEOUT}s"
+         die "Service $* did not become healthy within the ${IDENTITY_TIMEOUT}s timeout (IDENTITY_TIMEOUT). Check: krate logs $*"; }
+}
+
+# A query over the database's local socket (pg_hba: trust); prints the value.
+identity_db_query() {
+  docker exec "$1" psql -U keycloak -d keycloak -tAc "$2" </dev/null
+}
+
+# What the identity database holds, for a healthy keycloak-db container $1:
+# unbootstrapped (no master realm yet: Keycloak's first start is still to
+# come, even though the volume exists), no-admin (a master realm without the
+# permanent admin KEYCLOAK_ADMIN_USER) or bootstrapped. Any other query
+# failure is fatal.
+identity_db_state() {
+  local cid="$1" admin q="'" out
+  admin="$(env_value KEYCLOAK_ADMIN_USER)"
+  if ! out="$(identity_db_query "$cid" "select count(*) from realm where name='master'" 2>&1)"; then
+    if [[ "$out" == *'relation "realm" does not exist'* ]]; then
+      echo unbootstrapped
+      return 0
+    fi
+    die "Cannot query the identity database: $out"
+  fi
+  if [[ "$out" == 0 ]]; then
+    echo unbootstrapped
+    return 0
+  fi
+  out="$(identity_db_query "$cid" "select count(*) from user_entity u join realm r on u.realm_id=r.id where r.name='master' and u.username='${admin//$q/$q$q}'" 2>&1)" \
+    || die "Cannot query the identity database: $out"
+  if [[ "$out" == 0 ]]; then
+    echo no-admin
+  else
+    echo bootstrapped
+  fi
+}
+
+# Create the master realm and a temporary bootstrap admin $1 (password $2)
+# with Keycloak's own command in a one-off container, before Keycloak starts
+# (its guide: all nodes stopped). The password travels in an exported
+# variable, never in an argument. $3 names the command for the journal.
+identity_bootstrap_master() {
+  local temp="$1" temp_pw="$2" command="$3" kc bootstrap_log
+  kc="$(identity_container keycloak)"
+  if [[ "$(container_status "$kc")" == running ]]; then
+    info "Stopping Keycloak before creating the bootstrap admin..."
+    identity_compose stop keycloak
+  fi
+  info "Creating the master realm and its temporary bootstrap admin $temp..."
+  if ! bootstrap_log="$(KRATE_BOOTSTRAP_PASSWORD="$temp_pw" identity_compose run --rm --no-deps -T -e KRATE_BOOTSTRAP_PASSWORD keycloak \
+      bootstrap-admin user --username "$temp" --password:env KRATE_BOOTSTRAP_PASSWORD --no-prompt 2>&1)"; then
+    printf '%s\n' "$bootstrap_log" >&2
+    identity_journal "$command" failed "bootstrap-admin user failed"
+    die "Keycloak could not create its master realm and bootstrap admin (output above). Check: krate logs keycloak-db"
+  fi
+  printf '%s\n' "$bootstrap_log" | grep -E 'KC-SERVICES0077|temporary admin' | sed 's/^/  /' || true
+}
+
+# The krate-ui client follows .env: when the realm plan and Keycloak differ in
+# redirectUris, webOrigins, frontchannelLogout (off: back-channel logout only)
+# or the client attributes (PKCE, the post-logout URIs, OIDC back-channel
+# logout to Kafbat), Keycloak is updated from the plan. Nothing else of the
+# client is reconciled; the realm policy has identity_reconcile_realm_policy.
+identity_reconcile_ui_urls() {
+  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" id wanted keys current
+  wanted="$(python3 -c '
+import json, sys
+client = next(c for c in json.load(open(sys.argv[1]))["clients"] if c["clientId"] == "krate-ui")
+print(json.dumps({"redirectUris": sorted(client["redirectUris"]), "webOrigins": sorted(client["webOrigins"]),
+                  "frontchannelLogout": client["frontchannelLogout"], "attributes": client["attributes"]}, sort_keys=True))' "$plan")" \
+    || die "Cannot read the krate-ui client from $plan"
+  keys="$(python3 -c 'import json, sys; print(",".join(sorted(json.loads(sys.argv[1])["attributes"])))' "$wanted")"
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+  id="$(kcadm_client_id "$IDENTITY_REALM" krate-ui)" || die "Keycloak query failed"
+  [[ -n "$id" ]] || die "Client krate-ui not found in realm $IDENTITY_REALM"
+  current="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" --fields redirectUris,webOrigins,frontchannelLogout,"attributes($keys)" \
+    | python3 -c '
+import json, sys
+client = json.load(sys.stdin)
+attributes = client.get("attributes") or {}
+print(json.dumps({"redirectUris": sorted(client.get("redirectUris", [])), "webOrigins": sorted(client.get("webOrigins", [])),
+                  "frontchannelLogout": client.get("frontchannelLogout"),
+                  "attributes": {key: attributes.get(key, "") for key in sys.argv[1].split(",")}}, sort_keys=True))' "$keys")" \
+    || die "Keycloak query failed"
+  if [[ "$current" != "$wanted" ]]; then
+    printf '%s\n' "$wanted" | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m \
+      || die "Keycloak refused the krate-ui client update"
+    identity_journal "${1:-up}" reconciled "krate-ui urls and attributes"
+    IDENTITY_CHANGED=true
+    ok "krate-ui client URLs and logout settings updated from the realm plan"
+  fi
+  kcadm_logout
+}
+
+# Realm policy the plan states and Keycloak's import never revisits (an import
+# only creates a realm; a backup restores the old realm): otpPolicyLookAheadWindow.
+# A realm created before the plan stated it keeps the class default 0, which
+# refuses a TOTP code typed across the 30-second boundary. $1 names the command
+# for the journal.
+identity_reconcile_realm_policy() {
+  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" wanted current
+  wanted="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["otpPolicyLookAheadWindow"])' "$plan")" \
+    || die "Cannot read otpPolicyLookAheadWindow from $plan"
+  [[ "$wanted" =~ ^[0-9]+$ ]] || die "$plan: otpPolicyLookAheadWindow must be a whole number"
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+  current="$(kcadm -- get "realms/$IDENTITY_REALM" --fields otpPolicyLookAheadWindow --format csv --noquotes)" \
+    || die "Keycloak query failed"
+  if [[ "$current" != "$wanted" ]]; then
+    kcadm -- update "realms/$IDENTITY_REALM" -s "otpPolicyLookAheadWindow=$wanted" \
+      || die "Keycloak refused the realm policy update"
+    identity_journal "${1:-up}" reconciled "realm policy"
+    IDENTITY_CHANGED=true
+    ok "Realm $IDENTITY_REALM: OTP look-ahead window set to $wanted step(s) from the realm plan"
+  fi
+  kcadm_logout
+}
+
+cmd_identity_up() {
+  prepare_identity_env
+  adopt_legacy_project
+  identity_lock
+  local state reason bootstrap=false bootstrap_pw="" db kc db_state
+  state="$(identity_state)" || exit 1
+  reason="${state#unknown }"
+  state="${state%% *}"
+  if [[ "$state" == unknown ]]; then
+    identity_journal up refused "$reason"
+    die "Cannot tell whether an identity database exists: $reason"
+  fi
+  if [[ "$state" == pristine && "$(env_value KEYCLOAK_ADMIN_USER)" == temp-admin ]]; then
+    die "KEYCLOAK_ADMIN_USER must not be temp-admin (the temporary bootstrap admin). Set another name: krate config set KEYCLOAK_ADMIN_USER=admin"
+  fi
+  prepare_identity "$state" up
+  # Render into the validator's stdin: credentials never reach terminal output.
+  identity_compose config --format json | python3 "$(sso_dir)/preflight.py" --directory "$SCRIPT_DIR" --mode identity \
+    || { identity_journal up refused "preflight failed"; die "Identity preflight failed (see above)."; }
+  require_service_images keycloak-db keycloak
+  identity_network_clash up
+
+  db="$(identity_container keycloak-db)"
+  kc="$(identity_container keycloak)"
+  if [[ "$(container_health "$db")" != healthy || "$(container_health "$kc")" != healthy ]]; then
+    IDENTITY_CHANGED=true
+  fi
+  info "Starting the identity database..."
+  identity_up_service keycloak-db
+  db="$(identity_container keycloak-db)"
+  if [[ "$state" == pristine ]]; then
+    bootstrap=true
+  else
+    db_state="$(identity_db_state "$db")" || exit 1
+    case "$db_state" in
+      unbootstrapped)
+        warn "The identity database volume exists but holds no master realm yet; bootstrapping it"
+        bootstrap=true ;;
+      no-admin)
+        identity_journal up refused "master realm without admin $(env_value KEYCLOAK_ADMIN_USER)"
+        die "The master realm has no admin named $(env_value KEYCLOAK_ADMIN_USER) (KEYCLOAK_ADMIN_USER). Recreate it from .env: krate identity recover-admin" ;;
+    esac
+  fi
+  if $bootstrap; then
+    bootstrap_pw="$(random_secret 24)"
+    identity_bootstrap_master temp-admin "$bootstrap_pw" up
+  fi
+  info "Starting Keycloak..."
+  identity_up_service keycloak
+
+  if $bootstrap; then
+    identity_bootstrap_admin temp-admin "$bootstrap_pw"
+    identity_journal up bootstrapped "database initialised; permanent admin $(env_value KEYCLOAK_ADMIN_USER) created; temp-admin removed"
+  else
+    identity_verify_admin up
+    identity_reconcile_ui_urls
+    identity_reconcile_realm_policy up
+  fi
+  identity_verify_cli up
+  if [[ "$(env_value KEYCLOAK_ENABLED)" != true ]]; then
+    set_env_file_value "$ENV_FILE" KEYCLOAK_ENABLED true
+    ok "Set KEYCLOAK_ENABLED=true in .env (Keycloak now starts and stops with the cluster)"
+    IDENTITY_CHANGED=true
+  fi
+  if $IDENTITY_CHANGED; then
+    identity_journal up ok "state=$state"
+  else
+    identity_journal up no-change ""
+    ok "No changes"
+  fi
+  echo ""
+  cmd_identity_status
+}
+
+# Recreate the permanent master admin from .env: with Keycloak stopped, a
+# temporary bootstrap admin is made with Keycloak's own command, Keycloak is
+# started, the permanent admin is created or re-keyed through it, and the
+# temporary account is deleted. An explicit operator action, never automatic.
+cmd_identity_recover_admin() {
+  prepare_identity_env; require_env
+  identity_lock
+  local state kc db db_state temp temp_pw
+  state="$(identity_state)" || exit 1
+  case "${state%% *}" in
+    existing) ;;
+    pristine) die "No identity database exists yet. Run: krate identity up" ;;
+    *) identity_journal recover-admin refused "${state#unknown }"
+       die "Cannot tell whether an identity database exists: ${state#unknown }" ;;
+  esac
+  kc="$(identity_container keycloak)"
+  [[ "$(container_status "$kc")" != running ]] || die "Keycloak is running; stop it first: krate identity down"
+  # Same name rule as the identity preflight (lower-case, not temp-admin*).
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import identity; identity.admin_user(identity.read_env(sys.argv[2]))' \
+    "$(sso_dir)" "$ENV_FILE" || die "KEYCLOAK_ADMIN_USER is not a valid admin name: krate config set KEYCLOAK_ADMIN_USER=admin"
+  case "$(env_value KEYCLOAK_ADMIN_PASSWORD)" in
+    ""|REPLACE_ME|changeme) die "KEYCLOAK_ADMIN_PASSWORD is not set in .env; the recovered admin takes its password from there" ;;
+  esac
+  prepare_identity_files recover-admin
+  require_service_images keycloak-db keycloak
+  info "Starting the identity database..."
+  identity_up_service keycloak-db
+  db="$(identity_container keycloak-db)"
+  db_state="$(identity_db_state "$db")" || exit 1
+  [[ "$db_state" != unbootstrapped ]] || die "The identity database has no master realm yet; the first start creates it: krate identity up"
+  temp="temp-admin-$(random_secret 8)"
+  temp="${temp,,}"
+  temp_pw="$(random_secret 24)"
+  identity_bootstrap_master "$temp" "$temp_pw" recover-admin
+  info "Starting Keycloak..."
+  identity_up_service keycloak
+  identity_bootstrap_admin "$temp" "$temp_pw"
+  identity_verify_cli recover-admin
+  identity_journal recover-admin ok "permanent admin $(env_value KEYCLOAK_ADMIN_USER) recreated; $temp removed"
+  ok "Admin $(env_value KEYCLOAK_ADMIN_USER) recovered. Next: krate identity up"
+}
+
+# Probe Keycloak from inside its container (it has bash, no curl): the
+# management port 9000 is never published, and 8080 only through the proxy.
+keycloak_http_probe() {
+  docker exec "$1" bash -ec "{ printf 'GET $3 HTTP/1.0\r\nHost: localhost\r\n\r\n' >&0; grep -q 'HTTP/1.0 200'; } 0<>/dev/tcp/127.0.0.1/$2" >/dev/null 2>&1
+}
+
+# One line per probe; exit 1 unless the database is healthy, Keycloak is
+# ready and live, and the realm answers.
+cmd_identity_status() {
+  require_compose; require_compose_file; require_env
+  local db kc ready=true health started=no live=no kc_ready=no realm=absent probe
+  db="$(identity_container keycloak-db)"
+  kc="$(identity_container keycloak)"
+  health="$(container_health "$db")"
+  [[ "$health" == healthy ]] || ready=false
+  printf "  %-22s %s\n" "keycloak-db" "$health"
+  if [[ "$(container_status "$kc")" == running ]]; then
+    for probe in started ready live; do
+      if keycloak_http_probe "$kc" 9000 "/health/$probe"; then
+        case "$probe" in started) started=yes ;; ready) kc_ready=yes ;; live) live=yes ;; esac
+      fi
+    done
+    if keycloak_http_probe "$kc" 8080 "/identity/realms/$IDENTITY_REALM"; then realm=present; fi
+    printf "  %-22s started %s, ready %s, live %s\n" "keycloak" "$started" "$kc_ready" "$live"
+  else
+    printf "  %-22s %s\n" "keycloak" "$(container_status "$kc")"
+  fi
+  [[ "$kc_ready" == yes && "$live" == yes ]] || ready=false
+  printf "  %-22s %s\n" "realm $IDENTITY_REALM" "$realm"
+  [[ "$realm" == present ]] || ready=false
+  printf "  %-22s %s\n" "KEYCLOAK_ENABLED" "$(env_value KEYCLOAK_ENABLED)"
+  if [[ -f "$SCRIPT_DIR/auth/identity-journal.log" ]]; then
+    echo "  journal (last 5):"
+    tail -n 5 "$SCRIPT_DIR/auth/identity-journal.log" | sed 's/^/    /'
+  fi
+  if $ready; then
+    ok "Identity is ready"
+  else
+    warn "Identity is not ready. Run: krate identity up   Logs: krate logs keycloak"
+    return 1
+  fi
+}
+
+# True when Keycloak serves the realm (the status probes, quietly).
+identity_ready() {
+  cmd_identity_status >/dev/null 2>&1
+}
+
+cmd_identity_down() {
+  require_compose; require_compose_file; require_env
+  identity_lock
+  info "Stopping Keycloak and its database (data kept)..."
+  identity_compose stop keycloak keycloak-db
+  identity_journal down ok "keycloak and keycloak-db stopped; volume kept"
+  ok "Stopped. Start again with: krate identity up"
+}
+
+# Usernames are stored lower-case by Keycloak; keep the set simple.
+identity_username() {
+  local u="${1,,}"
+  [[ "$u" =~ ^[a-z0-9][a-z0-9._@-]{0,62}$ ]] || die "Invalid username '$1' (letters, digits, . _ @ -)"
+  echo "$u"
+}
+
+identity_users_usage() {
+  die "Usage: krate identity users list
+       krate identity users add <username> [--admin|--viewer] [--email <address>]
+       krate identity users {enable|disable|reset-password|groups} <username>"
+}
+
+# A user's temporary password: generated, shown once, must be changed at the
+# first login (UPDATE_PASSWORD) which also enrols the authenticator (CONFIGURE_TOTP).
+identity_set_temp_password() {
+  local user="$1" uid="$2" temp
+  temp="$(random_secret 16)"
+  kcadm "KC_CLI_PASSWORD=$temp" -- set-password -r "$IDENTITY_REALM" --username "$user" --temporary
+  kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s 'requiredActions=["UPDATE_PASSWORD","CONFIGURE_TOTP"]'
+  echo ""
+  echo "  Temporary password for $user (shown once; a new one is required at first login):"
+  echo "  $temp"
+  echo ""
+}
+
+cmd_identity_users() {
+  local action="${1:-}" user="" group="" email="" uid gid
+  shift || true
+  case "$action" in
+    list) ;;
+    add)
+      user="$(identity_username "${1:-}")"; shift || identity_users_usage
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --admin)  group="$(env_value KEYCLOAK_ADMIN_GROUP)"; group="${group:-KRATE_ADMINS}"; shift ;;
+          --viewer) group="$(env_value KEYCLOAK_VIEWER_GROUP)"; group="${group:-KRATE_VIEWERS}"; shift ;;
+          --email)
+            email="${2:-}"
+            [[ "$email" == *@* && "$email" != *[[:space:]]* ]] || die "--email needs an address"
+            shift 2 ;;
+          *) identity_users_usage ;;
+        esac
+      done
+      ;;
+    enable|disable|reset-password|groups)
+      [[ $# -eq 1 ]] || identity_users_usage
+      user="$(identity_username "$1")"
+      ;;
+    *) identity_users_usage ;;
+  esac
+  require_compose; require_compose_file; require_env
+  [[ "$action" == list || "$action" == groups ]] || identity_lock
+  kcadm_login "$IDENTITY_REALM" client krate-cli "$(env_value KEYCLOAK_CLI_CLIENT_SECRET)" \
+    || die "Keycloak refused the krate-cli client login. Check: krate identity status"
+  if [[ -n "$user" && "$action" != add ]]; then
+    uid="$(kcadm_user_id "$IDENTITY_REALM" "$user")" || die "Keycloak query failed"
+    [[ -n "$uid" ]] || die "No user $user in realm $IDENTITY_REALM"
+  fi
+  case "$action" in
+    list)
+      printf "  %-32s %-8s %s\n" USERNAME ENABLED EMAIL
+      kcadm -- get users -r "$IDENTITY_REALM" --offset 0 --limit 1000 --fields username,enabled,email --format csv --noquotes \
+        | awk -F, '{ printf "  %-32s %-8s %s\n", $1, $2, $3 }'
+      ;;
+    add)
+      uid="$(kcadm_user_id "$IDENTITY_REALM" "$user")" || die "Keycloak query failed"
+      [[ -z "$uid" ]] || die "User $user already exists"
+      # The group is resolved first: a failure after the user exists would leave a
+      # half-made account that a retry reports as "already exists".
+      if [[ -n "$group" ]]; then
+        gid="$(kcadm_group_id "$IDENTITY_REALM" "$group")" || die "Keycloak query failed"
+        [[ -n "$gid" ]] || die "Group $group does not exist in realm $IDENTITY_REALM (KEYCLOAK_VIEWER_GROUP/KEYCLOAK_ADMIN_GROUP changed after the realm was created? See the guide: rename it in Keycloak, or set .env back)"
+      fi
+      if [[ -n "$email" ]]; then
+        kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true -s "email=$email" >/dev/null
+      else
+        kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true >/dev/null
+      fi
+      uid="$(kcadm_user_id "$IDENTITY_REALM" "$user")" || die "Keycloak query failed"
+      [[ -n "$uid" ]] || die "User $user was not created"
+      if [[ -n "$group" ]]; then
+        kcadm -- update "users/$uid/groups/$gid" -r "$IDENTITY_REALM" -s "realm=$IDENTITY_REALM" -s "userId=$uid" -s "groupId=$gid" -n
+      fi
+      identity_set_temp_password "$user" "$uid"
+      identity_journal "users add" ok "$user${group:+ group=$group}"
+      ok "User $user created${group:+ in group $group}"
+      ;;
+    enable|disable)
+      local enabled=true
+      [[ "$action" == enable ]] || enabled=false
+      kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s "enabled=$enabled"
+      identity_journal "users $action" ok "$user"
+      ok "User $user ${action}d"
+      ;;
+    reset-password)
+      identity_set_temp_password "$user" "$uid"
+      identity_journal "users reset-password" ok "$user"
+      ok "Temporary password set for $user"
+      ;;
+    groups)
+      kcadm -- get "users/$uid/groups" -r "$IDENTITY_REALM" --fields name --format csv --noquotes | sed 's/^/  /'
+      ;;
+  esac
+  kcadm_logout
+}
+
+# Change a Keycloak credential in its authoritative store first, then in .env,
+# then recreate the consumer and verify. A value is generated unless --value
+# reads one from stdin (never from an argument).
+cmd_identity_rotate() {
+  local key="${1:-}" value state client cid id json q
+  case "$key" in
+    KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET) ;;
+    *) die "Usage: krate identity rotate {KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET} [--value]" ;;
+  esac
+  [[ $# -eq 1 || "${2:-}" == --value ]] || die "Usage: krate identity rotate <KEY> [--value]   (--value reads the new value from stdin)"
+  prepare_identity_env; require_env
+  identity_lock
+  state="$(identity_state)" || exit 1
+  [[ "${state%% *}" == existing ]] || die "Nothing to rotate: no identity database (state: $state). Run: krate identity up"
+  if [[ "${2:-}" == --value ]]; then
+    if [[ -t 0 ]]; then
+      read -rsp "  New value for $key: " value; echo ""
+    else
+      IFS= read -r value || true
+    fi
+    # The set .env quoting, Compose interpolation and SQL/JSON bodies all
+    # pass unchanged (generated values are letters and digits).
+    [[ "$value" =~ ^[A-Za-z0-9._-]{16,}$ ]] || die "$key must be at least 16 characters of letters, digits, . _ or -"
+    # The identity preflight requires distinct credentials; refuse reuse before any store changes.
+    local other
+    for other in KEYCLOAK_DB_PASSWORD KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET KAFKA_UI_PASSWORD PING_KEYCLOAK_CLIENT_SECRET; do
+      [[ "$other" == "$key" || "$(env_value "$other")" != "$value" ]] || die "$key must not reuse the value of $other (every identity and UI credential must be distinct)"
+    done
+  else
+    value="$(random_secret 24)"
+  fi
+  case "$key" in
+    KEYCLOAK_DB_PASSWORD)
+      cid="$(identity_container keycloak-db)"
+      [[ "$(container_health "$cid")" == healthy ]] || die "keycloak-db is not healthy. Run: krate identity up"
+      # Over the container's local socket (pg_hba: trust); the statement goes
+      # through stdin. A quote in the value is doubled for SQL.
+      q="'"
+      printf "ALTER ROLE keycloak WITH PASSWORD '%s';\n" "${value//$q/$q$q}" \
+        | docker exec -i "$cid" psql -q -v ON_ERROR_STOP=1 -U keycloak -d keycloak >/dev/null \
+        || { identity_journal rotate failed "$key: ALTER ROLE refused"; die "PostgreSQL refused the new password."; }
+      set_env_file_value "$ENV_FILE" "$key" "$value"
+      info "Recreating Keycloak with the new database password..."
+      identity_compose up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" keycloak
+      identity_verify_admin rotate
+      ;;
+    KEYCLOAK_ADMIN_PASSWORD)
+      identity_verify_admin rotate >/dev/null
+      kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+      kcadm "KC_CLI_PASSWORD=$value" -- set-password -r master --username "$(env_value KEYCLOAK_ADMIN_USER)"
+      kcadm_logout
+      set_env_file_value "$ENV_FILE" "$key" "$value"
+      identity_verify_admin rotate
+      ;;
+    KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET)
+      client=krate-cli
+      [[ "$key" == KEYCLOAK_CLI_CLIENT_SECRET ]] || client=krate-ui
+      identity_verify_admin rotate >/dev/null
+      kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+      id="$(kcadm_client_id "$IDENTITY_REALM" "$client")" || die "Keycloak query failed"
+      [[ -n "$id" ]] || die "Client $client not found in realm $IDENTITY_REALM"
+      # The body goes through stdin (-f -), merged into the client.
+      json="${value//\\/\\\\}"; json="${json//\"/\\\"}"
+      printf '{"secret":"%s"}\n' "$json" | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m
+      kcadm_logout
+      set_env_file_value "$ENV_FILE" "$key" "$value"
+      if [[ "$client" == krate-cli ]]; then
+        identity_verify_cli rotate
+      elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml ]]; then
+        info "Recreating Kafbat UI with the new client secret..."
+        compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" kafka-ui
+      fi
+      ;;
+  esac
+  identity_journal rotate ok "$key"
+  ok "$key rotated in Keycloak and .env"
+}
+
+# The backup passphrase: KRATE_BACKUP_PASSPHRASE, or asked on a terminal
+# (twice when $1 is confirm). Exported for openssl's -pass env:.
+identity_passphrase() {
+  local p1 p2
+  if [[ -n "${KRATE_BACKUP_PASSPHRASE:-}" ]]; then
+    [[ ${#KRATE_BACKUP_PASSPHRASE} -ge 8 ]] || die "KRATE_BACKUP_PASSPHRASE must be at least 8 characters."
+    export KRATE_BACKUP_PASSPHRASE
+    return 0
+  fi
+  [[ -t 0 ]] || die "Set KRATE_BACKUP_PASSPHRASE in the environment, or run on a terminal to be asked for it."
+  read -rsp "  Backup passphrase: " p1; echo ""
+  if [[ "${1:-}" == confirm ]]; then
+    read -rsp "  Repeat the passphrase: " p2; echo ""
+    [[ "$p1" == "$p2" ]] || die "The passphrases differ."
+  fi
+  [[ ${#p1} -ge 8 ]] || die "The passphrase must be at least 8 characters."
+  export KRATE_BACKUP_PASSPHRASE="$p1"
+}
+
+# The .env keys a backup carries beside the database dump: what Keycloak was
+# initialised with and the dump expects. The database password is a role of
+# the database, not part of the dump, so it stays with the volume.
+IDENTITY_BACKUP_KEYS=(KEYCLOAK_ADMIN_USER KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET)
+IDENTITY_ENC=(-aes-256-cbc -pbkdf2 -iter 600000 -salt -pass env:KRATE_BACKUP_PASSPHRASE)
+
+# An encrypted tar of db.dump (pg_dump -Fc) and identity.env (the keys above).
+cmd_identity_backup() {
+  local file="${1:-}" cid tmp work key
+  [[ -n "$file" ]] || die "Usage: krate identity backup <file>"
+  [[ ! -e "$file" ]] || die "$file exists; choose another name."
+  require_compose; require_compose_file; require_env
+  identity_lock
+  cid="$(identity_container keycloak-db)"
+  [[ "$(container_health "$cid")" == healthy ]] || die "keycloak-db is not running. Run: krate identity up"
+  identity_passphrase confirm
+  identity_tmpdir; work="$IDENTITY_TMPDIR"
+  tmp="$(mktemp "$(dirname "$file")/.identity-backup.XXXXXX")" || die "Cannot write beside $file"
+  chmod 600 "$tmp"
+  info "Dumping and encrypting the identity database..."
+  if ! docker exec "$cid" pg_dump -Fc -U keycloak keycloak > "$work/db.dump"; then
+    rm -f "$tmp"
+    identity_journal backup failed "$file: pg_dump"
+    die "Backup failed: pg_dump reported errors above."
+  fi
+  for key in "${IDENTITY_BACKUP_KEYS[@]}"; do
+    printf '%s=%s\n' "$key" "$(env_value "$key")"
+  done > "$work/identity.env"
+  # Encrypt, then seal the ciphertext with an HMAC-SHA256 under a separately
+  # derived key: restore verifies the tag before it decrypts anything.
+  if ! tar -C "$work" -cf - db.dump identity.env | openssl enc "${IDENTITY_ENC[@]}" -out "$work/payload.enc" \
+      || ! python3 "$(sso_dir)/identity.py" backup-seal --input "$work/payload.enc" --output "$tmp"; then
+    rm -f "$tmp"
+    identity_journal backup failed "$file: encryption"
+    die "Backup failed: the archive could not be encrypted and sealed."
+  fi
+  mv -f "$tmp" "$file"
+  identity_journal backup ok "$file $(wc -c < "$file" | xargs) bytes"
+  ok "Encrypted backup written to $file (mode 600). Keep the passphrase: krate identity restore $file needs it."
+}
+
+# Restore a backup into the identity database (keycloak-db is started, a lost
+# volume is recreated), take over the .env keys the backup carries, then
+# start Keycloak and verify the admin and krate-cli logins.
+cmd_identity_restore() {
+  local file="${1:-}" cid kc state reason work key value changed=""
+  [[ -f "$file" ]] || die "Usage: krate identity restore <file>"
+  prepare_identity_env; require_env
+  identity_lock
+  state="$(identity_state)" || exit 1
+  reason="${state#unknown }"
+  state="${state%% *}"
+  case "$state" in
+    existing) ;;
+    pristine) warn "No identity database volume exists (lost or never created); restoring into a new one" ;;
+    *) identity_journal restore refused "$reason"
+       die "Cannot tell whether an identity database exists: $reason" ;;
+  esac
+  kc="$(identity_container keycloak)"
+  [[ "$(container_status "$kc")" != running ]] || die "Keycloak is running; stop it first: krate identity down"
+  identity_passphrase
+  identity_tmpdir; work="$IDENTITY_TMPDIR"
+  info "Verifying and decrypting $file..."
+  # The HMAC tag is checked first; a modified archive never reaches openssl, tar or pg_restore.
+  if ! python3 "$(sso_dir)/identity.py" backup-open --input "$file" --output "$work/payload.enc"; then
+    identity_journal restore refused "$file: integrity check failed"
+    die "Refusing $file: the integrity check failed (modified file or wrong passphrase), or it is not a krate identity backup."
+  fi
+  if ! openssl enc -d "${IDENTITY_ENC[@]}" -in "$work/payload.enc" | tar -C "$work" -xf -; then
+    identity_journal restore failed "$file: cannot decrypt or unpack"
+    die "Cannot read $file: wrong passphrase, or not a krate identity backup."
+  fi
+  [[ -f "$work/db.dump" && -f "$work/identity.env" ]] || die "$file is not a krate identity backup (db.dump and identity.env expected)."
+  # Keys .env lacks (a lost .env, or a new host) come from the backup before
+  # the site files are prepared; the rest is reconciled after the restore.
+  for key in "${IDENTITY_BACKUP_KEYS[@]}"; do
+    value="$(env_value_file "$work/identity.env" "$key")"
+    case "$(env_value "$key")" in ""|REPLACE_ME) ;; *) continue ;; esac
+    [[ -n "$value" ]] || continue
+    set_env_file_value "$ENV_FILE" "$key" "$value"
+    changed+=" $key"
+  done
+  case "$(env_value KEYCLOAK_DB_PASSWORD)" in
+    ""|REPLACE_ME) [[ "$state" == pristine ]] || die "The identity database exists but .env lacks KEYCLOAK_DB_PASSWORD (a database role, not part of a backup). Restore the .env of this installation first." ;;
+  esac
+  prepare_identity "$state" restore
+  cid="$(identity_container keycloak-db)"
+  if [[ "$(container_health "$cid")" != healthy ]]; then
+    require_service_images keycloak-db
+    identity_up_service keycloak-db
+    cid="$(identity_container keycloak-db)"
+  fi
+  info "Restoring the identity database from $file..."
+  if ! docker exec -i "$cid" pg_restore --clean --if-exists --single-transaction --no-owner -U keycloak -d keycloak < "$work/db.dump"; then
+    identity_journal restore failed "$file: pg_restore"
+    die "pg_restore reported errors above; the database may be partially restored.
+Run again: krate identity restore $file
+If that keeps failing, follow the volume-lost procedure in docs/identity-foundation.md (sso/guides/ in a checkout)"
+  fi
+  for key in "${IDENTITY_BACKUP_KEYS[@]}"; do
+    value="$(env_value_file "$work/identity.env" "$key")"
+    [[ -n "$value" && "$value" != "$(env_value "$key")" ]] || continue
+    set_env_file_value "$ENV_FILE" "$key" "$value"
+    changed+=" $key"
+  done
+  if [[ -n "$changed" ]]; then
+    identity_journal restore reconciled ".env:$changed"
+    ok "Set$changed in .env from the backup"
+  fi
+  require_service_images keycloak
+  info "Starting Keycloak..."
+  identity_up_service keycloak
+  identity_verify_admin restore
+  identity_verify_cli restore
+  # The dump carries the backup host's krate-ui URLs; on a recovery host they must
+  # follow this installation's plan before the restore is reported complete.
+  prepare_identity_files restore
+  identity_reconcile_ui_urls restore
+  identity_reconcile_realm_policy restore
+  identity_journal restore ok "$file"
+  ok "Identity database restored from $file"
+}
+
+# Wait until the identity service $1 reports healthy (IDENTITY_TIMEOUT); $2
+# names the command for the journal.
+# Returns 1 when the service is not healthy within IDENTITY_TIMEOUT (no exit).
+identity_health_wait() {
+  local cid waited=0
+  cid="$(identity_container "$1")"
+  until [[ "$(container_health "$cid")" == healthy ]]; do
+    (( waited < IDENTITY_TIMEOUT )) || return 1
+    sleep 3
+    waited=$((waited + 3))
+  done
+}
+
+identity_wait_healthy() {
+  local service="$1" command="$2"
+  identity_health_wait "$service" && return 0
+  identity_journal "$command" failed "$service not healthy within ${IDENTITY_TIMEOUT}s after restart"
+  die "Service $service did not become healthy within the ${IDENTITY_TIMEOUT}s timeout (IDENTITY_TIMEOUT). Check: krate logs $service"
+}
+
+# Put the database TLS files of the last renewal back (.prev) and restart the
+# given services on them, in order, then stop: $1 is the reason for the journal.
+identity_tls_rollback() {
+  local reason="$1" service
+  shift
+  warn "$reason; restoring the previous certificate files"
+  python3 "$(sso_dir)/identity.py" db-tls --rollback --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" \
+    || die "Rollback failed: restore auth/keycloak/db-tls from a backup. Check: krate logs keycloak-db"
+  for service in "$@"; do
+    if ! identity_compose restart --no-deps "$service" || ! identity_health_wait "$service"; then
+      warn "$service is not healthy after the rollback. Check: krate logs $service"
+    fi
+  done
+  identity_journal renew-db-tls "rolled back" "$reason; previous files restored"
+  die "Database TLS renewal rolled back; the previous certificate is in place. Check: krate logs $*"
+}
+
+# Reissue keycloak-db's server key and certificate under the existing CA (398
+# days; the CA, Keycloak's trust store, is unchanged), then restart the
+# database alone so PostgreSQL loads them (the entrypoint wrapper copies the
+# files at container start). Keycloak's connections drop with that restart;
+# it is restarted only when it does not report ready again on its own. When
+# the CA had to be renewed too, Keycloak is restarted, and the previous files
+# are discarded only once it is healthy and accepts the admin login; a failure
+# at either restart rolls both files and services back.
+cmd_identity_renew_db_tls() {
+  prepare_identity_env; require_env
+  identity_lock
+  local state db kc renewed tries=0 keycloak_running=true
+  state="$(identity_state)" || exit 1
+  [[ "${state%% *}" == existing ]] || die "No identity database whose certificate could be renewed (state: $state). Run: krate identity up"
+  db="$(identity_container keycloak-db)"
+  [[ "$(container_status "$db")" == running ]] || die "keycloak-db is not running. Run: krate identity up"
+  kc="$(identity_container keycloak)"
+  [[ "$(container_status "$kc")" == running ]] || keycloak_running=false
+  renewed="$(python3 "$(sso_dir)/identity.py" db-tls --renew-server --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls")" \
+    || { identity_journal renew-db-tls failed "server certificate not reissued"; exit 1; }
+  ok "$renewed"
+  local ca_renewed=false
+  [[ "$renewed" != "renewed CA and"* ]] || ca_renewed=true
+  info "Restarting the identity database with the new certificate..."
+  # The previous files stay beside the new ones (.prev) until the services that
+  # depend on them have proven they work with the new ones.
+  if ! identity_compose restart --no-deps keycloak-db || ! identity_health_wait keycloak-db; then
+    identity_tls_rollback "keycloak-db unhealthy with the renewed certificate" keycloak-db
+  fi
+  if $keycloak_running && $ca_renewed; then
+    # The database's healthcheck never exercises Keycloak's trust in the new CA: Keycloak
+    # must come back healthy and accept the admin login (both read the database over the
+    # new chain) before the previous CA is discarded. Otherwise both roll back.
+    info "The CA changed; restarting Keycloak so it trusts the new one..."
+    if ! identity_compose restart --no-deps keycloak || ! identity_health_wait keycloak \
+        || ! kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)"; then
+      kcadm_logout
+      identity_tls_rollback "keycloak did not accept the renewed CA" keycloak-db keycloak
+    fi
+    kcadm_logout
+    python3 "$(sso_dir)/identity.py" db-tls --discard-previous --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" >/dev/null
+    ok "Admin login as $(env_value KEYCLOAK_ADMIN_USER) verified"
+  elif $keycloak_running; then
+    # Same CA: Keycloak's trust is unchanged, the database's health settles it.
+    python3 "$(sso_dir)/identity.py" db-tls --discard-previous --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" >/dev/null
+    until identity_ready; do
+      tries=$((tries + 1))
+      if (( tries >= 10 )); then
+        info "Keycloak did not reconnect on its own; restarting it..."
+        identity_compose restart --no-deps keycloak
+        identity_wait_healthy keycloak renew-db-tls
+        break
+      fi
+      sleep 3
+    done
+    identity_verify_admin renew-db-tls
+  else
+    python3 "$(sso_dir)/identity.py" db-tls --discard-previous --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" >/dev/null
+    warn "Keycloak is not running; it uses the renewed certificate on its next start (krate identity up)"
+  fi
+  identity_journal renew-db-tls ok "$renewed"
+  ok "Database TLS certificate renewed ($renewed)"
+}
+
+# The logrotate drop-in for the identity journal, rendered from
+# sso/logrotate/krate-identity.conf with this installation's journal path.
+# Replacements are literal (no sed/awk metacharacters in the path matter).
+identity_logrotate_render() {
+  local template
+  template="$(sso_dir)/logrotate/krate-identity.conf"
+  [[ -f "$template" ]] || die "logrotate template not found: $template"
+  KRATE_JOURNAL="$SCRIPT_DIR/auth/identity-journal.log" KRATE_NAME="krate-identity-$KRATE_VARIANT" awk '
+    function repl(s, from, to,    out, i) {
+      out = ""
+      while ((i = index(s, from)) > 0) { out = out substr(s, 1, i - 1) to; s = substr(s, i + length(from)) }
+      return out s
+    }
+    { print repl(repl($0, "__JOURNAL__", ENVIRON["KRATE_JOURNAL"]), "__NAME__", ENVIRON["KRATE_NAME"]) }' "$template"
+}
+
+# Print the drop-in, or install it as /etc/logrotate.d/krate-identity-<edition>
+# (mode 644; sudo when not root, as ensure_home_dir does). logrotate then
+# rotates the journal monthly with copytruncate, so krate's append-only writer
+# needs no reopen; 12 rotations are kept, none older than 400 days.
+cmd_identity_logrotate() {
+  local target="/etc/logrotate.d/krate-identity-$KRATE_VARIANT" rendered
+  local -a sudo_cmd=()
+  case "${1:-}" in
+    "")
+      identity_logrotate_render
+      echo "" >&2
+      echo "Install it as $target with: krate identity logrotate --install" >&2
+      ;;
+    --install)
+      [[ "$SCRIPT_DIR" != *[[:space:]\"\'\\]* ]] || die "The installation path contains whitespace, quotes or a backslash, which the logrotate file cannot carry: $SCRIPT_DIR"
+      [[ -d /etc/logrotate.d ]] || die "/etc/logrotate.d not found; install logrotate first (apt-get install logrotate / dnf install logrotate)"
+      rendered="$(identity_logrotate_render)" || exit 1
+      identity_lock
+      if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+        sudo_cmd=(sudo)
+      fi
+      info "Installing $target"
+      printf '%s\n' "$rendered" | "${sudo_cmd[@]}" tee "$target" >/dev/null || die "Could not write $target (run as root, or with sudo available)"
+      "${sudo_cmd[@]}" chmod 644 "$target" || die "Could not set the mode of $target"
+      identity_journal logrotate installed "$target"
+      ok "Installed $target (monthly, 12 rotations kept, copytruncate). Dry run: sudo logrotate -d $target"
+      ;;
+    *) die "Usage: krate identity logrotate [--install]" ;;
+  esac
+}
+
+cmd_identity() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    up)            cmd_identity_up ;;
+    status)        cmd_identity_status ;;
+    down)          cmd_identity_down ;;
+    recover-admin) cmd_identity_recover_admin ;;
+    renew-db-tls)  cmd_identity_renew_db_tls ;;
+    logrotate)     cmd_identity_logrotate "$@" ;;
+    users)         cmd_identity_users "$@" ;;
+    rotate)        cmd_identity_rotate "$@" ;;
+    backup)        cmd_identity_backup "$@" ;;
+    restore)       cmd_identity_restore "$@" ;;
+    *)
+      echo "Usage: krate identity {up|status|down|recover-admin|users ...|rotate KEY [--value]|backup FILE|restore FILE|renew-db-tls|logrotate [--install]}"
+      return 1 ;;
   esac
 }
 
@@ -607,15 +2051,34 @@ get_fqdn() {
   echo "$f"
 }
 
+# A subjectAltName entry for a name: IP: for an IPv4 or IPv6 literal (brackets dropped),
+# since browsers match an IP host only against an iPAddress SAN; DNS: otherwise.
+san_entry() {
+  local name="${1#[}"; name="${name%]}"
+  if python3 -c 'import ipaddress, sys; ipaddress.ip_address(sys.argv[1])' "$name" 2>/dev/null; then
+    echo "IP:$name"
+  else
+    echo "DNS:$name"
+  fi
+}
+
 # Generate a self-signed TLS cert (CN/SAN = FQDN, plus the host IP) for nginx.
 cmd_gen_cert() {
   command -v openssl &>/dev/null || die "openssl not found — needed to generate the TLS certificate."
   mkdir -p "$CERTS_DIR"
-  local fqdn ip san
+  local fqdn ip san public_host
   fqdn="$(get_fqdn)"
   ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  san="DNS:${fqdn}"; [[ -n "$ip" ]] && san="${san},IP:${ip}"
-  info "Generating self-signed TLS certificate (CN=${fqdn}${ip:+, IP $ip})..."
+  # The browser-facing name is KEYCLOAK_PUBLIC_URL's host (default localhost); the
+  # certificate covers it together with the host FQDN so a fresh install passes the
+  # authentication preflight without a second gen-cert.
+  public_host="$(public_url_host)"
+  san="$(san_entry "$fqdn")"
+  [[ -z "$public_host" || "$public_host" == "${fqdn,,}" ]] || san="${san},$(san_entry "$public_host")"
+  [[ "${fqdn,,}" == localhost || "$public_host" == localhost ]] || san="${san},DNS:localhost"
+  [[ -z "$ip" || ",${san}," == *",IP:${ip},"* ]] || san="${san},IP:${ip}"
+  local san_names="${san//DNS:/}"
+  info "Generating self-signed TLS certificate (CN=${fqdn}; names ${san_names//IP:/})..."
   openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
     -keyout "$CERT_KEY" -out "$CERT_CRT" \
     -subj "/CN=${fqdn}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \
@@ -631,6 +2094,50 @@ ensure_cert() {
   fi
   warn "No TLS certificate found — generating a self-signed one."
   cmd_gen_cert
+}
+
+# The host of KEYCLOAK_PUBLIC_URL, as nginx's $host spells it: lower case, without
+# the port, an IPv6 literal kept in brackets. Empty when the URL has no host.
+public_url_host() {
+  local host
+  host="$(env_value KEYCLOAK_PUBLIC_URL)"; host="${host#*://}"; host="${host%%/*}"
+  if [[ "$host" == \[* ]]; then host="${host%%]*}]"; else host="${host%%:*}"; fi
+  printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+# The Host header a browser sends for KEYCLOAK_PUBLIC_URL: the host, plus :port when
+# the URL names a port other than https's default (browsers omit :443).
+public_url_authority() {
+  local authority port
+  authority="$(env_value KEYCLOAK_PUBLIC_URL)"; authority="${authority#*://}"; authority="${authority%%/*}"
+  if [[ "$authority" == \[* ]]; then port="${authority#*]}"; else port="${authority#"${authority%%:*}"}"; fi
+  port="${port#:}"
+  if [[ -n "$port" && "$port" != 443 ]]; then printf '%s:%s\n' "$(public_url_host)" "$port"; else public_url_host; fi
+}
+
+# The proxy's Compose environment follows its inputs, so `up` recreates it exactly when
+# one changed. KRATE_PROXY_CONF_SHA digests nginx.conf and certs/server.{crt,key}: a new
+# release replaces nginx.conf (a new inode the running proxy, bound to the old one, never
+# sees) and nginx reads the certificate only at start, while Compose recreates a container
+# only when its configuration or image changes. KRATE_PROXY_PUBLIC_HOST is the one Host
+# header value the proxy serves in Keycloak sign-in mode (runtime.yml): the authority of
+# KEYCLOAK_PUBLIC_URL (host, plus :port unless 443), the only one Keycloak accepts redirects
+# for. Empty in local.yml mode: every name is served.
+# $1: the authentication mode to plan for (empty: KAFKA_UI_AUTH_CONFIG in .env).
+sync_proxy_env() {
+  local mode="${1:-}" sha host=""
+  [[ -n "$mode" ]] || mode="$(env_value KAFKA_UI_AUTH_CONFIG)"
+  sha="$(python3 -c '
+import hashlib, sys
+digest = hashlib.sha256()
+for name in sys.argv[1:]:
+    data = open(name, "rb").read()
+    digest.update(b"%d\n" % len(data) + data)
+print(digest.hexdigest()[:32])' "$SCRIPT_DIR/nginx.conf" "$CERT_CRT" "$CERT_KEY")" \
+    || die "Cannot read nginx.conf, certs/server.crt and certs/server.key for the proxy digest"
+  [[ "$mode" != runtime.yml ]] || host="$(public_url_authority)"
+  [[ "$(env_value KRATE_PROXY_CONF_SHA)" == "$sha" ]] || set_env_file_value "$ENV_FILE" KRATE_PROXY_CONF_SHA "$sha"
+  [[ "$(env_value KRATE_PROXY_PUBLIC_HOST)" == "$host" ]] || set_env_file_value "$ENV_FILE" KRATE_PROXY_PUBLIC_HOST "$host"
 }
 
 # Human-readable size from a kilobyte count.
@@ -780,9 +2287,10 @@ cmd_install() {
   step "Krate install"
   echo ""
 
-  # 1. Preflight — fail safe with guidance instead of half-applying
+  # 1. Preflight — fail safe with guidance instead of half-applying. The
+  #    takeover source is passed so its .env and certificate are inspected.
   if [[ -z "${KRATE_DEPLOYED:-}" ]]; then
-    if ! cmd_doctor; then
+    if ! KRATE_INSTALL_FROM="$from" cmd_doctor; then
       echo ""
       die "Preflight checks failed — fix the issues above, then re-run: krate install"
     fi
@@ -799,6 +2307,9 @@ cmd_install() {
     echo ""
     KRATE_DEPLOYED=1 exec "$KRATE_HOME/krate" install
   fi
+  # Taken here, in the installation: from a package the exec above replaces this
+  # process (and its exit trap), so a lock taken earlier would stay behind.
+  identity_lock_if_enabled
 
   # 3. Settings, passwords and certificate
   info "Preparing settings, passwords and the TLS certificate..."
@@ -822,7 +2333,8 @@ cmd_install() {
   echo ""
   echo -e "  ${DIM}Installed in $SCRIPT_DIR; run its ./krate from now on, e.g.:"
   echo -e "  $SCRIPT_DIR/krate status     — check running services"
-  echo -e "  $SCRIPT_DIR/krate logs -f    — follow all logs${RESET}"
+  echo -e "  $SCRIPT_DIR/krate logs -f    — follow all logs"
+  echo -e "  $SCRIPT_DIR/krate identity logrotate --install   — rotate the identity journal with the host's logrotate${RESET}"
   echo ""
 }
 
@@ -849,6 +2361,7 @@ cmd_load_images() {
 
 # ─── start ────────────────────────────────────────────────────────────────────
 cmd_start() {
+  identity_lock_if_enabled
   prepare
   ensure_data_dirs
   info "Starting cluster..."
@@ -860,6 +2373,7 @@ cmd_start() {
 # ─── stop ─────────────────────────────────────────────────────────────────────
 cmd_stop() {
   require_compose; require_compose_file
+  identity_lock_if_enabled
   info "Stopping cluster (containers paused, data preserved)..."
   compose_cmd stop
   ok "Stopped"
@@ -868,6 +2382,7 @@ cmd_stop() {
 # ─── restart ──────────────────────────────────────────────────────────────────
 cmd_restart() {
   require_compose; require_compose_file; require_env
+  identity_lock_if_enabled
   ensure_cert   # proxy won't start without a TLS cert (e.g. after a cert swap)
   local svc="${1:-}"
   if [[ -n "$svc" ]]; then
@@ -883,6 +2398,7 @@ cmd_restart() {
 # ─── down ─────────────────────────────────────────────────────────────────────
 cmd_down() {
   require_compose; require_compose_file
+  identity_lock_if_enabled
   info "Removing containers (named volumes preserved)..."
   compose_cmd down
   ok "Containers removed. Run: krate start"
@@ -976,26 +2492,36 @@ cmd_health() {
   sep
   echo ""
 
-  local all_ok=true
+  local all_ok=true crashing=""
 
   while IFS= read -r cid; do
     [[ -z "$cid" ]] && continue
-    local name status health
-    name=$(docker inspect --format='{{.Name}}' "$cid" | sed 's|^/||')
-    status=$(docker inspect --format='{{.State.Status}}' "$cid")
-    health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid")
+    local name status health restarting restarts service state label
+    # One inspect per container; one that vanished since `ps` reads as gone instead of
+    # stopping the report (errexit).
+    state="$(docker inspect --format '{{.Name}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.Restarting}}|{{.RestartCount}}|{{index .Config.Labels "com.docker.compose.service"}}' "$cid" 2>/dev/null || true)"
+    if [[ -z "$state" ]]; then
+      printf "  %-35s %b\n" "${cid:0:12}" "${RED}gone${RESET}"
+      all_ok=false
+      continue
+    fi
+    IFS='|' read -r name status health restarting restarts service <<< "$state"
+    name="${name#/}"
 
-    local label
     if [[ "$health" == "healthy" ]]; then
       label="${GREEN}healthy${RESET}"
-    elif [[ "$health" == "none" && "$status" == "running" ]]; then
+    elif [[ "$health" == "none" && "$status" == "running" && "$restarting" != true ]]; then
       label="${GREEN}running${RESET}"
-    elif [[ "$health" == "starting" ]]; then
+    elif [[ "$health" == "starting" && "$restarting" != true && "$restarts" == 0 ]]; then
       label="${YELLOW}starting${RESET}"
       all_ok=false
     else
-      label="${RED}${health:-$status}${RESET}"
+      if [[ "$restarting" == true ]]; then label="${RED}restarting${RESET}"; else label="${RED}${health/none/$status}${RESET}"; fi
       all_ok=false
+      # A container its restart policy restarted (RestartCount), or is restarting, is
+      # crash-looping, also when sampled while starting. krate logs takes the Compose
+      # service name, not the container name.
+      if [[ "$restarting" == true || "$restarts" != 0 || "$status" == exited ]]; then crashing+=" ${service:-$name}"; fi
     fi
 
     printf "  %-35s %b\n" "$name" "$label"
@@ -1005,8 +2531,10 @@ cmd_health() {
   if $all_ok; then
     ok "All services healthy"
   else
-    if $wait && (( $(health_pending_count "$container_ids") > 0 )); then
-      warn "Still starting after ${timeout}s — the cluster may just need longer."
+    if [[ -n "$crashing" ]]; then
+      warn "Not healthy:$crashing keeps restarting (restarted by its restart policy) or exited. Check: krate logs${crashing}"
+    elif $wait && (( $(health_pending_count "$container_ids") > 0 )); then
+      warn "Still starting after ${waited}s of ${timeout}s — the cluster may just need longer."
       warn "Retry with a longer wait: krate health --timeout $(( timeout * 2 ))"
     else
       warn "Some services not ready. Run: krate logs <service>"
@@ -1017,7 +2545,7 @@ cmd_health() {
 
 # ─── ui ───────────────────────────────────────────────────────────────────────
 cmd_ui() {
-  local user pass fqdn hp port_suffix=""
+  local user pass fqdn hp port_suffix="" public
   user="$(env_value KAFKA_UI_USER)"
   pass="$(env_value KAFKA_UI_PASSWORD)"
   fqdn="$(get_fqdn)"
@@ -1027,12 +2555,13 @@ cmd_ui() {
   sep
   echo -e "${BOLD}  Kafbat UI${RESET}"
   sep
-  echo "  URL       https://${fqdn}${port_suffix}/"
   if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
-    echo "  Sign-in   Shared app login (Admin) or SSO via Keycloak"
-  elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "pingfederate.yml" ]]; then
-    echo "  Sign-in   PingFederate (company SSO)"
+    # In Keycloak sign-in mode the proxy serves KEYCLOAK_PUBLIC_URL's host only.
+    public="$(env_value KEYCLOAK_PUBLIC_URL)"; public="${public%/}"
+    echo "  URL       ${public%/identity}/"
+    echo "  Sign-in   Keycloak (realm krate) — manage users with krate identity users"
   else
+    echo "  URL       https://${fqdn}${port_suffix}/"
     [[ -n "$user" ]] && echo "  Username  $user"
     [[ -n "$pass" ]] && echo "  Password  $pass"
   fi
@@ -1064,6 +2593,20 @@ cmd_config() {
       local key="${kv%%=*}"
       local val="${kv#*=}"
       [[ "$key" =~ ^[A-Z0-9_]+_IMAGE$ ]] && die "Image pins come from .env.template; change $key there, or export it in the shell for one run."
+      # Keycloak is initialised with these; they may be set here only while
+      # no identity database exists. Afterwards they change in Keycloak and
+      # .env together (krate identity rotate), and an unclear state is refused.
+      case "$key" in
+        KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET)
+          local state
+          state="$(identity_state)" || exit 1
+          case "$state" in
+            pristine) ;;
+            existing) die "The identity database already uses $key (identity state: $state). Change it on both sides with: krate identity rotate $key" ;;
+            *) die "Cannot set $key while the identity state is unclear (identity state: $state)" ;;
+          esac
+          ;;
+      esac
       # Monitoring keys live in monitoring/.env; everything else in .env.
       if ! grep -qE "^${key}=" "$ENV_TEMPLATE" && [[ -f "$MONITOR_DIR/.env.template" ]] \
           && grep -qE "^${key}=" "$MONITOR_DIR/.env.template"; then
@@ -1086,22 +2629,24 @@ cmd_config() {
 # ─── uninstall ────────────────────────────────────────────────────────────────
 cmd_uninstall() {
   require_compose; require_compose_file
+  identity_lock_if_enabled
 
   local purge=false
   [[ "${1:-}" == "--purge" ]] && purge=true
 
   if $purge; then
     echo ""
-    warn "WARNING: --purge will delete all Kafka data (broker logs, ZK state, offsets)."
-    warn "This is irreversible."
+    warn "WARNING: --purge will delete all Kafka data (broker logs, ZK state, offsets)"
+    warn "and the identity database (Keycloak users and settings, volume keycloak_db_data)."
+    warn "This is irreversible. Keep a copy first: krate identity backup <file>"
     echo ""
     read -rp "Type 'yes' to confirm purge: " confirm
     [[ "$confirm" == "yes" ]] || die "Aborted."
     info "Removing containers and volumes..."
-    compose_cmd down -v
+    identity_compose down -v
   else
     info "Removing containers (volumes preserved)..."
-    compose_cmd down
+    identity_compose down
   fi
   ok "Done"
 }
@@ -1116,12 +2661,15 @@ cmd_uninstall() {
 MONITOR_DIR="$SCRIPT_DIR/monitoring"
 [[ -d "$MONITOR_DIR" ]] || MONITOR_DIR="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)/monitoring"
 
-# The docker network the brokers are attached to.
+# The docker network the brokers are attached to, read from the running
+# broker container (container_name is fixed per edition). Only a broker is
+# asked: the proxy and Kafbat also sit on the identity network, which sorts
+# first in a container's network list and must not be handed to the exporter.
 monitor_network() {
-  local cid
-  cid="$(compose_cmd ps -q 2>/dev/null | head -1)"
-  [[ -n "$cid" ]] || return 1
-  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid" 2>/dev/null \
+  local state
+  state="$(docker inspect -f '{{.State.Status}}' "$BROKER_CONTAINER" 2>/dev/null)" || return 1
+  [[ "$state" == running ]] || return 1
+  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$BROKER_CONTAINER" 2>/dev/null \
     | tr ' ' '\n' | grep -v '^$' | head -1
 }
 
@@ -1194,11 +2742,18 @@ This bundle was built without the observability stack."
 
 # Monitoring host ports that something other than the monitoring stack holds.
 monitor_port_conflicts() {
-  local own entry key port
+  local own entry key port seen=""
   own="$(docker ps --filter "label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring" --format '{{.Ports}}')"
   for entry in GRAFANA_PORT:3000 PROM_PORT:9090 LOKI_PORT:3100 PERSES_PORT:3443; do
     key="${entry%%:*}"
     port="$(env_value_file "$MONITOR_DIR/.env" "$key" "${entry#*:}")"
+    # Two monitoring services on one host port fail only after Compose has
+    # started part of the stack; report the duplicate before anything starts.
+    if [[ " $seen " == *" $port "* ]]; then
+      echo "$key=$port(duplicate)"
+      continue
+    fi
+    seen+=" $port"
     [[ "$own" == *":${port}->"* ]] && continue
     if port_in_use "$port"; then
       echo "$key=$port"
@@ -1225,14 +2780,18 @@ cmd_monitor() {
   local sub="${1:-}"; shift || true
   case "$sub" in
     up)
-      require_compose
+      require_compose; require_compose_file; require_env
       info "Starting observability stack..."
       command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
+      # The same preparation as the cluster commands: a cluster still running
+      # under a legacy project name is adopted here too, so monitor_network
+      # finds its brokers instead of looking in the fixed project.
+      adopt_legacy_project
       ensure_cert
       monitor_prepare
       local conflicts
       conflicts="$(monitor_port_conflicts | xargs)"
-      [[ -z "$conflicts" ]] || die "Host ports already in use: $conflicts. Choose free ones, e.g. krate config set GRAFANA_PORT=13000"
+      [[ -z "$conflicts" ]] || die "Host ports already in use or configured twice: $conflicts. Choose free, distinct ones, e.g. krate config set GRAFANA_PORT=13000"
       # Compose leaves a dropped profile's services running. In local mode remove
       # the SSO services first, so the previous mode's guard cannot act on Perses.
       if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
@@ -1242,7 +2801,16 @@ cmd_monitor() {
       python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
       echo ""
       ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
-      ok "Prometheus: http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)"
+      # Prometheus (and Loki) answer on PROM_BIND/LOKI_BIND only, 127.0.0.1 by
+      # default: the address printed is the one that works.
+      local prom_bind prom_host
+      prom_bind="$(env_value_file "$MONITOR_DIR/.env" PROM_BIND 127.0.0.1)"
+      if [[ "$prom_bind" == 0.0.0.0 ]]; then
+        prom_host="$(hostname -f 2>/dev/null || hostname)"
+      else
+        prom_host="$prom_bind"
+      fi
+      ok "Prometheus: http://${prom_host}:$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)$([[ "$prom_bind" == 0.0.0.0 ]] || echo ' (this host only; PROM_BIND)')"
       ok "Perses:     https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443) ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) sign-in)"
       note_smtp
       ;;
@@ -1279,6 +2847,13 @@ env_value_file() {
 monitor_prepare() {
   local env_file="$MONITOR_DIR/.env"
   prepare_monitor_env
+  # prepare_monitor_env only warns here, because it also runs on cluster start;
+  # the monitoring stack itself does not start on the insecure default.
+  if [[ "$(env_value_file "$env_file" GRAFANA_PASSWORD)" == changeme ]]; then
+    die "GRAFANA_PASSWORD is changeme (insecure) and Grafana's volume exists with it.
+Change it in Grafana (docker exec <grafana container> grafana cli admin reset-admin-password <new>),
+record it with: krate config set GRAFANA_PASSWORD=<new>, then: krate monitor up"
+  fi
   mkdir -p "$MONITOR_DIR/auth/perses"
   python3 - "$env_file" <<'PY' || die "monitoring/.env is not ready for the Perses stack (see above)."
 import re, sys
@@ -1368,10 +2943,22 @@ cmd_doctor() {
     problems=$((problems + 1))
   fi
   # A package keeps the site's settings and certificate in its installation.
-  local site_dir="$SCRIPT_DIR"
+  # On a first install they may still sit in the takeover source (`install
+  # --from DIR`, or the package directory itself), which deploy_release copies
+  # into KRATE_HOME; check there, so an existing certificate counts.
+  local site_dir="$SCRIPT_DIR" src
   if is_package; then
     site_dir="$KRATE_HOME"
     ok "installs into $KRATE_HOME"
+    if [[ ! -f "$KRATE_HOME/.env" ]]; then
+      for src in "${KRATE_INSTALL_FROM:-}" "$SCRIPT_DIR"; do
+        if [[ -n "$src" && -f "$src/.env" ]]; then
+          site_dir="$src"
+          ok "site files taken over from $src"
+          break
+        fi
+      done
+    fi
   fi
   if [[ -f "$site_dir/.env" ]]; then
     ok ".env present in $site_dir (kept)"
@@ -1430,7 +3017,7 @@ cmd_doctor() {
       *) warn "Could not determine SELinux state" ;;
     esac
     if command -v rpm &>/dev/null && ! rpm -q container-selinux &>/dev/null; then
-      warn "container-selinux is not installed — 'krate docker-install' will use the bundled copy."
+      warn "container-selinux is not installed — 'krate docker-install' adds the bundled copy when it matches this host's selinux-policy; otherwise install it first from your RHEL media: dnf install container-selinux"
     fi
     echo ""
 
@@ -1631,6 +3218,29 @@ $rebuild_hint"
   ok "Docker installed successfully."
 }
 
+# The capabilities dnf reported missing in its output file $1, one per line:
+# "nothing provides libnftnl.so.11()(64bit) needed by nftables-..." names
+# libnftnl.so.11()(64bit); "nothing provides container-selinux >= 2:2.74 needed
+# by ..." names container-selinux (the version constraint is dnf's to check).
+rpm_missing_capabilities() {
+  sed -n 's/.*nothing provides \([^ ]*\).*/\1/p' "$1" | sort -u
+}
+
+# The RPM files among $2... that provide capability $1: by capability name
+# (rpm -qp --provides, version ignored) or, for a file path, by contents.
+rpm_providers_of() {
+  local need="$1" file listing
+  shift
+  for file in "$@"; do
+    if [[ "$need" == /* ]]; then
+      listing="$(rpm -qpl "$file" 2>/dev/null)" || continue
+    else
+      listing="$(rpm -qp --provides "$file" 2>/dev/null | awk '{print $1}')" || continue
+    fi
+    if [[ $'\n'"$listing"$'\n' == *$'\n'"$need"$'\n'* ]]; then echo "$file"; fi
+  done
+}
+
 # RHEL family. dnf resolves install order and inter-package deps itself, so the
 # whole set goes in one transaction. --disablerepo='*' keeps it strictly offline:
 # every dependency must already be on the box or in the bundle, and we fail
@@ -1667,22 +3277,54 @@ docker_install_rpm() {
 
   info "Installing Docker CE from ${#rpms[@]} bundled RPM packages..."
   echo ""
-  if ! sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}"; then
-    # containerd.io requires container-selinux. A host that has run containers
-    # already has it; a minimal one may not. It is kept out of the main set
-    # because the newest build needs a newer selinux-policy than RHEL 9.6 ships,
-    # so installing it unconditionally would fail on a host that was fine.
-    if [[ ${#optional[@]} -gt 0 ]]; then
-      echo ""
-      info "Retrying with the bundled optional dependencies..."
-      sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" "${optional[@]}" \
-        || die "Offline install failed even with the bundled dependencies.
-A dependency is missing from both this host and the bundle. Install it from your
-RHEL media or Satellite, then re-run: krate docker-install"
-    else
-      die "Offline install failed and no optional/ dependencies are bundled."
+  # dnf names what the host lacks ("nothing provides <capability> needed by <package>").
+  # Base-OS dependencies a minimal host may miss (container-selinux, nftables and the
+  # libraries nftables needs) travel in optional/; only the bundled packages that
+  # provide a named capability are added, so a host that already has them never gets
+  # another distro's build. An added package can name its own missing dependency, so
+  # this repeats for up to three rounds.
+  local attempt_log round rc need file
+  local -a wanted=() added=() missing=() providers=() unresolved=()
+  attempt_log="$(mktemp)" || die "Cannot create a temporary file"
+  for round in 0 1 2 3; do
+    rc=0
+    # dnf's stderr goes to the file and is printed after dnf has exited, so the
+    # file is complete when it is read (a process substitution would race it).
+    sudo "$installer" install -y --allowerasing --disablerepo='*' "${rpms[@]}" "${wanted[@]}" 2>"$attempt_log" || rc=$?
+    cat "$attempt_log" >&2
+    if (( rc == 0 )); then
+      rm -f "$attempt_log"
+      return 0
     fi
+    (( round < 3 )) || break
+    mapfile -t missing < <(rpm_missing_capabilities "$attempt_log")
+    added=()
+    unresolved=()
+    for need in "${missing[@]}"; do
+      mapfile -t providers < <(rpm_providers_of "$need" "${optional[@]}")
+      if [[ ${#providers[@]} -eq 0 ]]; then
+        unresolved+=("$need")
+        continue
+      fi
+      for file in "${providers[@]}"; do
+        local known already=false
+        for known in "${wanted[@]}" "${added[@]}"; do [[ "$known" == "$file" ]] && already=true; done
+        $already || added+=("$file")
+      done
+    done
+    [[ ${#added[@]} -gt 0 ]] || break
+    echo ""
+    info "Adding the bundled dependencies this host lacks: ${added[*]##*/}"
+    wanted+=("${added[@]}")
+  done
+  rm -f "$attempt_log"
+  if [[ ${#wanted[@]} -eq 0 ]]; then
+    die "Offline install failed: this host lacks ${missing[*]:-a dependency dnf did not name}, and the bundle has no package for it.
+Install it from your RHEL media or Satellite, then re-run: krate docker-install"
   fi
+  die "Offline install failed even with the bundled dependencies (${wanted[*]##*/})${unresolved[*]:+; no bundled package provides ${unresolved[*]}}.
+container-selinux must match this host's selinux-policy build; install it from your
+RHEL media or Satellite (dnf install container-selinux), then re-run: krate docker-install"
 }
 
 # Debian/Ubuntu. dpkg does not resolve dependencies, so install in dependency
@@ -1898,8 +3540,23 @@ cmd_help() {
   printf "  %-30s %s\n" "lag"                  "Summary of all consumer group lag"
   printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
   printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
+  printf "  %-30s %s\n" "auth configure [FILE]" "Write auth/ui/runtime.yml (Keycloak login); FILE adds the PingFederate identity-provider plan"
+  printf "  %-30s %s\n" "  [--force] [--[no-]viewer-messages]" "Replace a differing runtime.yml; let viewers read message payloads (or stop)"
+  printf "  %-30s %s\n" "auth apply"           "Validate and activate Kafbat authentication (runtime.yml needs: krate identity up)"
+  printf "  %-30s %s\n" "identity up"          "Start Keycloak and its database; the first run creates admin and realm"
+  printf "  %-30s %s\n" "identity status"      "Database health, Keycloak started/ready/live, realm; exit 1 if not ready"
+  printf "  %-30s %s\n" "identity down"        "Stop Keycloak and its database (data kept)"
+  printf "  %-30s %s\n" "identity recover-admin" "Recreate the master admin from .env via a temporary bootstrap admin (Keycloak stopped)"
+  printf "  %-30s %s\n" "identity users list"  "Users of the krate realm"
+  printf "  %s\n" "identity users add U [--admin|--viewer] [--email A]"
+  printf "  %-30s %s\n" ""                     "Create a user with a one-time temporary password"
+  printf "  %s\n" "identity users {enable|disable|reset-password|groups} U"
+  printf "  %-30s %s\n" "identity rotate KEY [--value]" "Rotate a Keycloak password/secret in Keycloak and .env (--value: from stdin)"
+  printf "  %-30s %s\n" "identity backup FILE" "Encrypted dump of the identity database (KRATE_BACKUP_PASSPHRASE or prompt)"
+  printf "  %-30s %s\n" "identity restore FILE" "Restore that dump with Keycloak stopped, then start and verify it"
+  printf "  %-30s %s\n" "identity renew-db-tls" "Reissue the database TLS server certificate (398 days) under the existing CA and reload it"
+  printf "  %-30s %s\n" "identity logrotate [--install]" "Print, or install under /etc/logrotate.d, the journal's logrotate rules"
   printf "  %-30s %s\n" "ui"                   "Show Kafbat UI URL and credentials"
-  printf "  %-30s %s\n" "auth {configure FILE|apply}" "Generate SSO config; apply validates and activates authentication"
   printf "  %-30s %s\n" "config"               "Show current .env config"
   printf "  %-30s %s\n" "config set KEY=VAL"   "Set a config value in .env"
   printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
@@ -1926,10 +3583,14 @@ cmd_help() {
   echo "  krate lag my-app-consumer             # per-partition detail"
   echo "  krate lag --topic orders              # all groups on 'orders' topic"
   echo "  krate lag my-group --topic payments   # specific group + topic"
+  echo "  krate identity up                     # start Keycloak; first run creates the admin"
+  echo "  krate identity users add jane --admin # realm user with a temporary password"
+  echo "  krate auth configure                  # Kafbat login through Keycloak; then config set KAFKA_UI_AUTH_CONFIG=runtime.yml, auth apply"
   echo "  krate uninstall --purge               # full teardown + data wipe"
   echo ""
   echo -e "${BOLD}SERVICES${RESET}"
   echo "  kafka-92   kafka-93   kafka-ui   proxy"
+  echo "  keycloak-db   keycloak   (identity services; managed with: krate identity ...)"
   echo ""
 }
 
@@ -1966,6 +3627,7 @@ case "$CMD" in
   lag)            cmd_lag "$@" ;;
   ui)             cmd_ui ;;
   auth)           cmd_auth "$@" ;;
+  identity)       cmd_identity "$@" ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
   disk)           cmd_disk ;;

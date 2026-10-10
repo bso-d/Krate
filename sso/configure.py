@@ -8,6 +8,11 @@ import re
 import sys
 from urllib.parse import urlsplit
 
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from identity import kafbat_role  # noqa: E402  (sibling module; explicit path keeps python -I working)
+
 
 def text(settings, key):
     value = settings.get(key)
@@ -62,7 +67,7 @@ def validate(settings, app):
         if any(key in settings for key in endpoints):
             for key in endpoints:
                 url(settings, key)
-        if type(settings.get("viewer_messages", True)) is not bool:
+        if type(settings.get("viewer_messages", False)) is not bool:
             raise ValueError("viewer_messages must be boolean")
     elif app == "perses":
         if urlsplit(public_url).path not in ("", "/"):
@@ -90,27 +95,10 @@ def validate(settings, app):
 
 
 def kafbat(settings):
+    # The two roles are the ones Krate's own Keycloak plan uses (sso/identity.py):
+    # viewers read; message payloads only when the site opts in; KSQL never.
     def role(name, group, admin=False):
-        topic_actions = ["view", "analysis_view"]
-        if settings.get("viewer_messages", True):
-            topic_actions.append("messages_read")
-        permissions = []
-        for resource in ("applicationconfig", "clusterconfig", "topic", "consumer",
-                         "schema", "connect", "connector", "acl", "audit", "client_quotas"):
-            permission = {"resource": resource, "actions": "all" if admin else ["view"]}
-            if resource in ("topic", "consumer", "schema", "connect", "connector"):
-                permission["value"] = ".*"
-            if resource == "topic" and not admin:
-                permission["actions"] = topic_actions
-            permissions.append(permission)
-        # KSQL has execute only, which also permits mutations; never grant it to Viewer.
-        if admin:
-            permissions.append({"resource": "ksql", "actions": "all"})
-        return {
-            "name": name, "clusters": settings["clusters"],
-            "subjects": [{"provider": "oauth", "type": "role", "value": group, "regex": False}],
-            "permissions": permissions,
-        }
+        return kafbat_role(name, group, settings["clusters"], admin, settings.get("viewer_messages", False))
     data = {
         "spring": {"config": {"import": "configtree:/etc/krate/auth/secrets/"}},
         "server": {"reactive": {"session": {
