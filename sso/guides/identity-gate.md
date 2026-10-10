@@ -15,7 +15,21 @@ Phase 1: both run against one candidate commit, in one receipt.
 git -C /path/to/Krate worktree add --detach harness/worktrees/gate HEAD
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe            # Phase 1 + screenshots + Phase 2
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle
+scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo             # the same with the full inventory (see below)
 ```
+
+Full inventory on a bundle host: `--repo DIR` points the static block (S1–S4)
+at a checkout whose HEAD is the `--candidate` commit (a `git clone` of a
+`git bundle` carried into the air gap), so S1–S4 run there with that host's
+`gmake`, `git`, `shellcheck` (the `koalaman/shellcheck:v0.9.0` image behind a
+`shellcheck` wrapper on `PATH`), `docker compose` and the pinned
+`nginx:1.27-alpine@sha256:…` image (saved with its registry digest from a Docker
+engine that uses the containerd image store, or `check-identity` cannot run its
+render check offline). X1 needs the `krate-harness/playwright:1.60.0` image
+loaded from a saved archive (3.8 GB on disk, 0.94 GB gzipped, arm64), and J7
+needs root. Without `--repo`, `--no-static` and `--no-screenshots`, those rows
+are NOT_RUN on that host: not validated there, only on the host whose receipt
+has them PASS.
 
 The runner refuses to start when another Krate installation runs on the host or
 when monitoring volumes of the edition's project already exist, because it would
@@ -41,9 +55,9 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 
 | field | meaning |
 |---|---|
-| candidate commit | `git rev-parse HEAD` of the fixture checkout, or the `--candidate` sha on a host without git; neither → `bound: false` and the verdict is INCOMPLETE |
+| candidate commit | `git rev-parse HEAD` of the fixture checkout, or the `--candidate` sha on a host without git; neither → `bound: false` and the verdict is INCOMPLETE. With `--repo`, the row also names the checkout's HEAD the static block ran on (it must start with the candidate sha) |
 | edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh` of the fixture: what was actually tested, also when the candidate is only stated. To check a bundle-host receipt against the repository: `git show <sha>:epc/<file> \| shasum -a 256` must match for six of the seven; `.env.template` differs by design, because `make bundle` rewrites its five `*_IMAGE` lines to the offline runtime tags (the receipt's `images` row shows them) and nothing else |
-| dirty tracked files | `git status --porcelain --untracked-files=no` of the whole fixture repository at run time, unfiltered (must be empty for a sign-off receipt; `unknown` without git) |
+| dirty tracked files | `git status --porcelain --untracked-files=no` of the whole fixture repository at run time, unfiltered (must be empty for a sign-off receipt; `unknown` without git; with `--repo`, the checkout's dirty state is listed after `--repo:`) |
 | images | every `*_IMAGE` digest of the edition template |
 | runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py` and `*.mjs` (file list, sorted), plus the commit (and dirty state) of the repository the runner was executed from |
 | host | OS, Docker, Compose, python, openssl versions |

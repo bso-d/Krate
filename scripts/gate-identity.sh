@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
     --phase) PHASE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --candidate) CANDIDATE_ARG="$2"; shift 2 ;;
-    --repo) REPO_ARG="$(cd "$2" && pwd)"; shift 2 ;;
+    --repo) [[ -d "$2" ]] || { echo "--repo $2 is not a directory" >&2; exit 2; }; REPO_ARG="$(cd "$2" && pwd)"; shift 2 ;;
     --wipe) WIPE=true; shift ;;
     --keep) KEEP=true; shift ;;
     --no-screenshots) SCREENSHOTS=false; shift ;;
@@ -120,10 +120,11 @@ for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.con
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
 if [[ -n "$REPO_ARG" ]]; then
+  $BOUND && [[ "$CANDIDATE" != *"(stated"* ]] && { echo "--repo is for a bundle install without git; $ED is a git checkout, its static block runs there already" >&2; exit 2; }
+  [[ -n "$CANDIDATE_ARG" ]] || { echo "--repo needs --candidate SHA (the edition directory has no git)" >&2; exit 2; }
   [[ -f "$REPO_ARG/Makefile" ]] || { echo "--repo $REPO_ARG has no Makefile" >&2; exit 2; }
   repo_head="$(git -C "$REPO_ARG" rev-parse HEAD 2>/dev/null)" || { echo "--repo $REPO_ARG is not a git checkout" >&2; exit 2; }
-  [[ -n "$CANDIDATE_ARG" && "$repo_head" == "$CANDIDATE_ARG"* ]] || [[ "$repo_head" == "${CANDIDATE%% *}"* ]] \
-    || { echo "--repo HEAD $repo_head is not the candidate (${CANDIDATE_ARG:-$CANDIDATE})" >&2; exit 2; }
+  [[ "$repo_head" == "$CANDIDATE_ARG"* ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG" >&2; exit 2; }
   TOPLEVEL="$REPO_ARG"
   CANDIDATE="${CANDIDATE%% *} (stated; edition files bound by digest; static block on --repo at $repo_head)"
   DIRTY="edition: unknown (no git); --repo: $(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"
