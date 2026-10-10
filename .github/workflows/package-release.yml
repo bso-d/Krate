@@ -122,6 +122,20 @@ jobs:
           node-version: 22
           # No dependency cache in a release build (see the cache note above).
           package-manager-cache: false
+      # The bundle hosts (RHEL 9 class) run the Python helpers with Python 3.9. Validate them with that
+      # interpreter without changing the one the later steps use (update-environment: false).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: py39
+        with:
+          python-version: '3.9'
+          update-environment: false
+      - name: Validate the Python helpers under Python 3.9
+        env:
+          PY39: ${{ steps.py39.outputs.python-path }}
+        run: |
+          "$PY39" --version
+          "$PY39" -c 'import ast, sys; [ast.parse(open(f, "rb").read(), f) for f in sys.argv[1:]]' $(git ls-files '*.py')
+          "$PY39" -I scripts/check-identity.py
       # The corresponding-source step reads Go build info and downloads Go modules
       # (scripts/collect-sources.py). The arm64 runner image has no Go.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

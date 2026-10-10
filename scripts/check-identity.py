@@ -2377,7 +2377,8 @@ def check_broker_apply(checks):
               f'{edition}/krate: the {verdict} verdict must be captured with || die')
             e(f'identity.py" broker --plan "$plan" {verdict}' in cli and f'== differs' not in cli.split(verdict)[1].split('\n')[0],
               f'{edition}/krate: {verdict} must not be compared inside [[ ]]')
-        e(cli.count('*) die "Unexpected comparison result') == 3, f'{edition}/krate: each verdict case must refuse an unexpected result; got {cli.count("*) die \"Unexpected comparison result")}')
+        unexpected = cli.count('*) die "Unexpected comparison result')  # hoisted: Python 3.9 (RHEL 9) rejects a backslash inside an f-string expression
+        e(unexpected == 3, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
         e('PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3' in cli,
           f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
     if bash_binary() is None:
