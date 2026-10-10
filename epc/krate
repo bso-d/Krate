@@ -1834,9 +1834,10 @@ cmd_install() {
   step "Krate install"
   echo ""
 
-  # 1. Preflight — fail safe with guidance instead of half-applying
+  # 1. Preflight — fail safe with guidance instead of half-applying. The
+  #    takeover source is passed so its .env and certificate are inspected.
   if [[ -z "${KRATE_DEPLOYED:-}" ]]; then
-    if ! cmd_doctor; then
+    if ! KRATE_INSTALL_FROM="$from" cmd_doctor; then
       echo ""
       die "Preflight checks failed — fix the issues above, then re-run: krate install"
     fi
@@ -2088,6 +2089,8 @@ cmd_ui() {
   echo "  URL       https://${fqdn}${port_suffix}/"
   if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
     echo "  Sign-in   Shared app login (Admin) or SSO via Keycloak"
+    [[ -n "$user" ]] && echo "  Username  $user   (shared Admin login)"
+    [[ -n "$pass" ]] && echo "  Password  $pass"
   elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "pingfederate.yml" ]]; then
     echo "  Sign-in   PingFederate (company SSO)"
   else
@@ -2268,11 +2271,18 @@ This bundle was built without the observability stack."
 
 # Monitoring host ports that something other than the monitoring stack holds.
 monitor_port_conflicts() {
-  local own entry key port
+  local own entry key port seen=""
   own="$(docker ps --filter "label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring" --format '{{.Ports}}')"
   for entry in GRAFANA_PORT:3000 PROM_PORT:9090 LOKI_PORT:3100 PERSES_PORT:3443; do
     key="${entry%%:*}"
     port="$(env_value_file "$MONITOR_DIR/.env" "$key" "${entry#*:}")"
+    # Two monitoring services on one host port fail only after Compose has
+    # started part of the stack; report the duplicate before anything starts.
+    if [[ " $seen " == *" $port "* ]]; then
+      echo "$key=$port(duplicate)"
+      continue
+    fi
+    seen+=" $port"
     [[ "$own" == *":${port}->"* ]] && continue
     if port_in_use "$port"; then
       echo "$key=$port"
@@ -2299,14 +2309,18 @@ cmd_monitor() {
   local sub="${1:-}"; shift || true
   case "$sub" in
     up)
-      require_compose
+      require_compose; require_compose_file; require_env
       info "Starting observability stack..."
       command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
+      # The same preparation as the cluster commands: a cluster still running
+      # under a legacy project name is adopted here too, so monitor_network
+      # finds its brokers instead of looking in the fixed project.
+      adopt_legacy_project
       ensure_cert
       monitor_prepare
       local conflicts
       conflicts="$(monitor_port_conflicts | xargs)"
-      [[ -z "$conflicts" ]] || die "Host ports already in use: $conflicts. Choose free ones, e.g. krate config set GRAFANA_PORT=13000"
+      [[ -z "$conflicts" ]] || die "Host ports already in use or configured twice: $conflicts. Choose free, distinct ones, e.g. krate config set GRAFANA_PORT=13000"
       # Compose leaves a dropped profile's services running. In local mode remove
       # the SSO services first, so the previous mode's guard cannot act on Perses.
       if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
@@ -2449,10 +2463,22 @@ cmd_doctor() {
     problems=$((problems + 1))
   fi
   # A package keeps the site's settings and certificate in its installation.
-  local site_dir="$SCRIPT_DIR"
+  # On a first install they may still sit in the takeover source (`install
+  # --from DIR`, or the package directory itself), which deploy_release copies
+  # into KRATE_HOME; check there, so an existing certificate counts.
+  local site_dir="$SCRIPT_DIR" src
   if is_package; then
     site_dir="$KRATE_HOME"
     ok "installs into $KRATE_HOME"
+    if [[ ! -f "$KRATE_HOME/.env" ]]; then
+      for src in "${KRATE_INSTALL_FROM:-}" "$SCRIPT_DIR"; do
+        if [[ -n "$src" && -f "$src/.env" ]]; then
+          site_dir="$src"
+          ok "site files taken over from $src"
+          break
+        fi
+      done
+    fi
   fi
   if [[ -f "$site_dir/.env" ]]; then
     ok ".env present in $site_dir (kept)"
