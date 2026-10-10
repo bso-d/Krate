@@ -56,3 +56,6 @@ __pycache__/
 GOVERNANCE.md
 THIRD_PARTY.md
 licensing/
+
+# Local test harnesses, fixtures and gate receipts (never committed)
+harness/

@@ -175,7 +175,7 @@ Phase 4; Perses (3443) uses the cluster certificate.
 | Network | Driver | Members |
 | --- | --- | --- |
 | `<project>_kafka-network` | bridge | brokers, `kafka-ui`, `proxy`; `kafka-exporter` from the monitoring project joins it as an external network. `keycloak` and `keycloak-db` are no longer on it |
-| `<project>_identity` | bridge, `internal: true`, subnet `KRATE_IDENTITY_SUBNET` (172.29.250.0/24) | `keycloak-db`, `keycloak`, `proxy` (fixed address `KRATE_IDENTITY_PROXY_IP`, 172.29.250.10), `kafka-ui`. No route to the host or outside; nothing from the monitoring project |
+| `<project>_identity` | bridge, `internal: true`, subnet `KRATE_IDENTITY_SUBNET` (172.29.250.0/24), dynamic pool `KRATE_IDENTITY_IP_RANGE` (172.29.250.128/25) | `keycloak-db`, `keycloak`, `proxy` (fixed address `KRATE_IDENTITY_PROXY_IP`, 172.29.250.10, outside the dynamic pool so no other container can take it), `kafka-ui`. Exactly these four (the preflight checks membership). No route to the host or outside; nothing from the monitoring project |
 | `<project>_identity-egress` | bridge | `keycloak` only: its route out of the host for the Phase 3 identity provider (an internal network has none) |
 | `<monitoring project>_monitoring` | bridge | exporters, Prometheus, Loki, Fluent Bit, Grafana, VictoriaLogs, Alertmanager |
 | `<monitoring project>_perses` | bridge | Prometheus, VictoriaLogs, Perses, its gateway, seed and SSO helpers |
@@ -276,7 +276,7 @@ for a running `identity backup`, `restore`, `rotate` or `recover-admin`.
 | --- | --- | --- |
 | Browser to `proxy` (443) | TLS with `certs/server.crt` | Users must trust the certificate's issuer |
 | `proxy` to `kafka-ui` (8080) | plain HTTP inside the Compose bridge network | Accepted boundary |
-| `proxy` to `keycloak` (8080) | plain HTTP inside the internal `identity` network; `KC_PROXY_HEADERS=xforwarded`, `KC_PROXY_TRUSTED_ADDRESSES` = the proxy's fixed address, `KC_HOSTNAME=KEYCLOAK_PUBLIC_URL` | Accepted boundary. Only `/identity/realms/krate/` and `/identity/resources/` are forwarded; `/admin/`, `/realms/master/`, `/metrics`, `/health` are not reachable through the proxy. Forwarded headers are used only when they arrive from the proxy address (owner decision 7) |
+| `proxy` to `keycloak` (8080) | plain HTTP inside the internal `identity` network; `KC_PROXY_HEADERS=xforwarded`, `KC_PROXY_TRUSTED_ADDRESSES` = the proxy's fixed address, `KC_HOSTNAME=KEYCLOAK_PUBLIC_URL` | Accepted boundary. Only `/identity/realms/krate/` and `/identity/resources/` are forwarded; `/admin/`, `/realms/master/`, `/metrics`, `/health` are not reachable through the proxy. Kafbat's unauthenticated `/metrics`, `/actuator/` and its back-channel endpoint `/logout/connect/` are answered 404 by the proxy as well. Forwarded headers are used only when they arrive from the proxy address (owner decision 7) |
 | `keycloak` to `keycloak-db` (5432) | TLS, `KC_DB_TLS_MODE=verify-server`, trust store `ca.crt`, server certificate SAN `DNS:keycloak-db` | Enforced. `pg_hba.conf` rejects plaintext TCP |
 | Keycloak management port 9000 | not published; the Docker healthcheck and `identity status` use it inside the container | Enforced |
 | `kcadm` administration | `docker exec` into the `keycloak` container against `http://localhost:8080/identity` | Host operator only |
@@ -351,11 +351,13 @@ Existing files are kept. The preflight refuses a `server.crt` that is not
 signed by `ca.crt`, lacks the SAN, or expires within a day, and prints a
 warning (the command continues) when it expires within 30 days:
 `warning: auth/keycloak/db-tls/server.crt expires within 30 days (...); run
-krate identity renew-db-tls`. The renewal reissues the server key and
-certificate under the same CA, so Keycloak's trust store does not change (see
-"`./krate identity renew-db-tls`"). To replace the CA itself: `./krate
-identity down`, move the directory away, `./krate identity up`; Keycloak and
-PostgreSQL both read their files at start.
+krate identity renew-db-tls`; the same two checks apply to `ca.crt`. The
+renewal reissues the server key and certificate under the same CA, so
+Keycloak's trust store does not change, unless the CA would expire before the
+new certificate: then the CA is renewed too and Keycloak is restarted to read
+it (see "`./krate identity renew-db-tls`"). To replace the CA by hand:
+`./krate identity down`, move the directory away, `./krate identity up`;
+Keycloak and PostgreSQL both read their files at start.
 
 ## Operator procedures
 
@@ -533,29 +535,36 @@ below for what it does and when to use it.
 
 ### `./krate identity renew-db-tls`
 
-Reissues `auth/keycloak/db-tls/server.key` and `server.crt` under the existing
-CA for 398 days and puts them into use. Requires an existing identity database
-with `keycloak-db` running. Order:
+Reissues `auth/keycloak/db-tls/server.key` and `server.crt` for 398 days and
+puts them into use; when the CA would expire before that new certificate, the
+CA is renewed with it (1825 days). Requires an existing identity database with
+`keycloak-db` running. Order:
 
 1. Takes the lock. `sso/identity.py db-tls --renew-server` checks that the
    full set of five files exists (an incomplete directory is refused: the CA
-   is needed), issues the new key and certificate in a private temporary
-   directory, writes them as `server.key.new` (600) and `server.crt.new`
-   (644) and moves them into place, key first, then certificate. It prints
-   `renewed server certificate, valid until <date>`. `ca.crt`, `ca.key` and
-   `pg_hba.conf` do not change.
+   is needed), removes work directories a killed earlier run left behind,
+   issues the new material in a private temporary directory, keeps the files
+   it replaces as `*.prev` and moves the new ones into place (`*.new`, then
+   rename), key first, then certificate. It prints `renewed server
+   certificate, valid until <date>` or `renewed CA and server certificate,
+   valid until <date>`. `pg_hba.conf` does not change.
 2. Restarts `keycloak-db` alone (`docker compose restart --no-deps`, "Don't
    restart dependent services" [S17]) and waits for its health. The container's
    entrypoint wrapper copies the files at start, which is how PostgreSQL loads
    them: "The server reads these files at server start and whenever the
    server configuration is reloaded" [S8]. Keycloak's open database
-   connections drop with that restart.
-3. Waits up to 30 seconds for Keycloak to report ready again (its readiness
-   includes the database); when it does not, restarts `keycloak` with
-   `--no-deps` and waits for its health. Then verifies the admin login.
-   When `keycloak` was not running at the start, it is left stopped and uses
-   the new files on its next start.
-4. Writes the journal line `renew-db-tls ok <new expiry>`.
+   connections drop with that restart. When the database does not come back
+   healthy, the command restores the `*.prev` files (`db-tls --rollback`),
+   restarts the database again, writes `renew-db-tls rolled back` to the
+   journal and exits 1; the previous certificate is in service.
+3. On success removes the `*.prev` files. When the CA was renewed and
+   `keycloak` is running, restarts `keycloak` with `--no-deps` (its trust
+   store is the mounted `ca.crt`, read at start) and verifies the admin
+   login. Otherwise waits up to 30 seconds for Keycloak to report ready again
+   (its readiness includes the database); when it does not, restarts
+   `keycloak` and verifies the admin login. When `keycloak` was not running
+   at the start, it is left stopped and uses the new files on its next start.
+4. Writes the journal line `renew-db-tls ok <what was renewed, new expiry>`.
 
 Run it when the preflight warns about the 30-day window, or on a site
 schedule. Nothing renews the certificate automatically.
@@ -609,7 +618,12 @@ Keycloak is ready; when it is not, it stops with
 `Keycloak is not ready. Run: krate identity up (then: krate identity status)`.
 When Keycloak is ready it runs `sso/preflight.py --mode runtime.yml` (which
 also checks `runtime.yml` against the plan and the realm's back-channel
-logout attributes), recreates only `kafka-ui` and the proxy, verifies public
+logout attributes, and `kafbat.yml` on EPC for anything beyond the `kafka:`
+section), records the digest of the applied auth file in `.env`
+(`KRATE_UI_AUTH_SHA`, part of `kafka-ui`'s environment) and runs `up -d` for
+`kafka-ui` and the proxy: Compose recreates `kafka-ui` only when that digest
+or the image changed, so an unchanged re-apply keeps every signed-in session
+(`Kafbat UI unchanged ... user sessions kept`). It then verifies public
 discovery and prints the login model (`Sign-in: Keycloak (realm krate)`).
 Brokers must be healthy for that recreation only. The realm client `krate-ui`
 sends OIDC back-channel logout requests to
@@ -758,8 +772,10 @@ gets the loopback default. If something outside the host read those endpoints
 and `LOKI_BIND=0.0.0.0` and run `./krate monitor up` again.
 
 The database certificate issued by an earlier `identity up` keeps its 825-day
-lifetime; the preflight warns 30 days before it expires, and
-`./krate identity renew-db-tls` replaces it with a 398-day one at any time.
+lifetime, and so does its CA (the old code issued both for 825 days); the
+preflight warns 30 days before either expires, and `./krate identity
+renew-db-tls` replaces the certificate with a 398-day one at any time, renewing
+the CA with it when the CA would expire first.
 
 ## Residual risks
 
@@ -982,8 +998,10 @@ internal CA with automation; it adds an external dependency to a private hop.
 **Decided: B, implemented.** New installs get a 398-day server certificate
 and a 1825-day CA (`sso/identity.py`: `SERVER_CERT_DAYS`, `CA_CERT_DAYS`).
 `./krate identity renew-db-tls` reissues the server pair under the existing
-CA and restarts `keycloak-db` alone; the preflight warns 30 days before
-expiry. The restart (not a reload) was chosen because the container's
+CA (or renews the CA too when it would expire first, then restarts Keycloak)
+and restarts `keycloak-db` alone, rolling the files back when the database
+does not come back healthy; the preflight warns 30 days before either
+certificate expires. The restart (not a reload) was chosen because the container's
 entrypoint wrapper copies the key into the container at start, so a reload
 would still see the old copy; the database is down for the seconds of the
 restart and Keycloak reconnects. See "`./krate identity renew-db-tls`".

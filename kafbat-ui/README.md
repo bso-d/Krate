@@ -91,6 +91,14 @@ form. The patch also:
   adds nothing here. `CsrfSpec.configure` also registers
   `CsrfServerLogoutHandler`, which clears the cookie on logout
   (`ServerHttpSecurity.java` 2460-2466); the next GET issues a fresh one.
+  The repository's `setCookieCustomizer(cookie -> cookie.secure(true))`
+  marks `XSRF-TOKEN` `Secure`: the UI is reached only through the HTTPS
+  proxy, and the repository's own `Secure` decision looks at `SslInfo`, which
+  a forwarded `X-Forwarded-Proto` does not set. The token is also rotated at
+  login: the `oauth2Login` success handler calls `saveToken(exchange, null)`
+  (the cookie is expired) before Spring's `RedirectServerAuthenticationSuccessHandler`
+  with its default `WebSessionServerRequestCache` runs, so the first
+  post-login GET receives a token the pre-login page never saw.
 - **Logout is POST-only and ends the session.** The GET `/logout` matcher of
   earlier images is gone; Spring's default applies (`LogoutSpec.logoutUrl`
   builds `pathMatchers(HttpMethod.POST, logoutUrl)`, `ServerHttpSecurity.java`
@@ -104,9 +112,22 @@ form. The patch also:
   security-context handler is re-added explicitly, as the reference does
   (<https://docs.spring.io/spring-security/reference/6.5/reactive/authentication/logout.html>).
   `WebSessionServerLogoutHandler` is `getSession().flatMap(WebSession::invalidate)`
-  (line 35). Upstream's `OAuthLogoutSuccessHandler` stays, so a successful
-  logout still redirects to the provider's `end_session_endpoint` with
-  `id_token_hint` (RP-initiated logout).
+  (line 35). A third handler removes the session from the
+  `ReactiveOidcSessionRegistry` (`removeSessionInformation(sessionId)`), so a
+  locally ended session is not replayed by a later back-channel request.
+  Upstream's `OAuthLogoutSuccessHandler` stays and falls back to the
+  `defaultOidcLogoutHandler` bean, an `OidcClientInitiatedServerLogoutSuccessHandler`.
+  That handler reads `end_session_endpoint` from the registration's
+  `ProviderDetails.getConfigurationMetadata()` (confirmed in the 6.5.9
+  bytecode) and, when it is absent, redirects locally without telling the
+  provider. Because the explicit-endpoint registration runs no discovery, the
+  patch requires the client custom param `end-session-uri` and publishes it
+  as `end_session_endpoint` (`providerConfigurationMetadata`); a registration
+  with explicit endpoints but no `end-session-uri` refuses to start. The
+  handler's `setPostLogoutRedirectUri("{baseUrl}")` sends the user back to
+  the application origin (Spring resolves `{baseUrl}` at request time,
+  <https://docs.spring.io/spring-security/reference/6.5/reactive/oauth2/login/logout.html>),
+  which is exactly what the realm's `post.logout.redirect.uris` allows.
 - **OIDC back-channel logout.** `.oidcLogout(l -> l.backChannel(withDefaults()))`
   exposes `POST /logout/connect/back-channel/{registrationId}` and the patch
   publishes `ReactiveOidcSessionRegistry` and `OidcBackChannelServerLogoutHandler`
@@ -124,20 +145,20 @@ form. The patch also:
 
   Two decisions in that handler:
 
-  1. **`{baseUrl}` is kept; no explicit logout URI.** The handler replays each
-     registered session to `logoutUri = "{baseUrl}/logout/connect/back-channel/{registrationId}"`
-     (line 74) and computes `{baseUrl}` from the back-channel request itself
-     (`computeLogoutEndpoint`, lines 137-166: `UriComponentsBuilder.fromUri(request.getURI())`
-     with the context path). Keycloak calls Kafbat on the Docker network at
-     `http://kafka-ui:8080/...` without forwarded headers, so `{baseUrl}`
-     resolves to `http://kafka-ui:8080` and the self-call stays inside the
-     container network, follows `server.port` and any base path, and needs no
-     TLS trust. A hard-coded `http://localhost:8080/...` would work only while
-     the port and base path match and would ignore how the request arrived.
-     Consequence for the realm: the client's `backchannel.logout.url` must be
-     the internal URL; registering the public HTTPS URL would make the handler
-     call itself through nginx with Spring's plain `WebClient.create()` (line
-     72), which does not trust the site certificate.
+  1. **The self-call goes to this process's own listener.** The handler replays
+     each registered session to its `logoutUri`; the default
+     `{baseUrl}/logout/connect/back-channel/{registrationId}` (line 74) computes
+     `{baseUrl}` from the back-channel request (`computeLogoutEndpoint`, lines
+     137-166), and with Kafbat's `server.forward-headers-strategy=framework`
+     that follows whatever `Host`/`X-Forwarded-Host` the caller sent. The patch
+     therefore sets `setLogoutUri("http://127.0.0.1:<server.port>/logout/connect/back-channel/{registrationId}")`
+     (the documented way to "alter the scheme, server name, or port",
+     <https://docs.spring.io/spring-security/reference/6.5/api/java/org/springframework/security/config/web/server/ServerHttpSecurity.OidcLogoutSpec.BackChannelLogoutConfigurer.html>),
+     so the replay never leaves the container and no header can steer it. In
+     Krate the public proxy additionally answers 404 for `/logout/connect/`, so
+     only Keycloak on the `identity` network reaches the endpoint. The realm
+     client's `backchannel.logout.url` stays the internal
+     `http://kafka-ui:8080/logout/connect/back-channel/keycloak`.
   2. **Cookie name follows the server.** `setSessionCookieName` is given
      `server.reactive.session.cookie.name` with default `SESSION`. The
      reference note says the cookie must be `JSESSIONID`, but in 6.5.9 the
@@ -178,6 +199,14 @@ require review when upgrading upstream.
   deliberately not `HttpOnly`. `SESSION` keeps its `HttpOnly` flag.
 - A GET to `/logout` no longer logs anyone out; a POST without a valid token is
   refused with 403.
+- Every OAuth2 client whose endpoints are explicit (no discovery) must carry
+  `custom-params.end-session-uri`, the provider's `end_session_endpoint`;
+  the application refuses to start without it. Krate's generated
+  `runtime.yml` sets it to `<issuer>/protocol/openid-connect/logout`.
+- `/metrics`, `/actuator/` and `/logout/connect/` are served by the
+  application without authentication by design (Prometheus, health, provider
+  callbacks); the deployment's proxy must not publish them. Krate's
+  `nginx.conf` returns 404 for all three.
 
 ## Build
 

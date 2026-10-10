@@ -157,6 +157,9 @@ services:
       SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD}
       KEYCLOAK_KAFBAT_CLIENT_SECRET: ${KEYCLOAK_KAFBAT_CLIENT_SECRET}
       SPRING_CONFIG_ADDITIONAL_LOCATION: file:/etc/kafbat/kafbat.yml,file:/etc/krate/auth/${KAFKA_UI_AUTH_CONFIG:-local.yml}
+      # Digest of the applied auth file (krate auth apply): a changed file changes
+      # this value, and only then does Compose recreate the container.
+      KRATE_UI_AUTH_SHA: ${KRATE_UI_AUTH_SHA:-}
       JAVA_TOOL_OPTIONS: ${KAFKA_UI_JAVA_OPTS:-}
       KAFKA_UI_CLUSTER_NAME: ${KAFKA_UI_CLUSTER_NAME:-cluster-epc}
       KAFKA_UI_READONLY: "${KAFKA_UI_READONLY:-false}"
@@ -317,6 +320,8 @@ networks:
       driver: default
       config:
         - subnet: ${KRATE_IDENTITY_SUBNET:-172.29.250.0/24}
+          # Dynamic pool; the proxy address (KRATE_IDENTITY_PROXY_IP) lies outside it.
+          ip_range: ${KRATE_IDENTITY_IP_RANGE:-172.29.250.128/25}
   # Keycloak's egress for the Phase 3 identity provider; no other service.
   identity-egress:
     driver: bridge

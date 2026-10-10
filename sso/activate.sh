@@ -28,9 +28,21 @@ apply_auth() {
     image="$(compose_cmd config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' "$service")"
     docker image inspect "$image" >/dev/null 2>&1 || die "Packaged image for $service is missing; run krate load-images first"
   done
-  # Only the UI is recreated. Broker containers and volumes are never reconciled.
-  compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$timeout" kafka-ui
-  compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$timeout" proxy
+  # The digest of the applied auth file is part of kafka-ui's environment, so Compose
+  # recreates the UI (ending its sessions) only when that file or the image changed.
+  # Broker containers and volumes are never reconciled.
+  local auth_sha before after
+  auth_sha="$(python3 -c 'import hashlib, sys; h = hashlib.sha256(sys.argv[1].encode() + b"\n"); h.update(open(sys.argv[2], "rb").read()); print(h.hexdigest()[:32])' "$mode" "$SCRIPT_DIR/auth/ui/$mode")"
+  [[ "$(env_value KRATE_UI_AUTH_SHA)" == "$auth_sha" ]] || set_env_file_value "$ENV_FILE" KRATE_UI_AUTH_SHA "$auth_sha"
+  before="$(compose_cmd ps -q kafka-ui)"
+  compose_cmd up -d --pull never --no-build --no-deps --wait --wait-timeout "$timeout" kafka-ui
+  compose_cmd up -d --pull never --no-build --no-deps --wait --wait-timeout "$timeout" proxy
+  after="$(compose_cmd ps -q kafka-ui)"
+  if [[ "$before" == "$after" && -n "$before" ]]; then
+    ok "Kafbat UI unchanged (same auth file and image); user sessions kept"
+  else
+    ok "Kafbat UI recreated with the applied authentication"
+  fi
   if [[ "$mode" == runtime.yml ]]; then
     python3 "$sso_dir/probe.py" --directory "$SCRIPT_DIR"
   fi

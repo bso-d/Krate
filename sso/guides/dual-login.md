@@ -174,7 +174,9 @@ request.
   Kafbat reads it from `runtime.yml` at every `auth apply`.
 - Back-channel logout: the realm client `krate-ui` registers
   `http://kafka-ui:8080/logout/connect/back-channel/keycloak` (reachable only
-  over the private `identity` network) with "Backchannel logout session
+  over the private `identity` network: the public proxy answers 404 for
+  `/logout/connect/`, and Kafbat posts its own per-session replay to
+  `127.0.0.1:8080`, never to a forwarded host) with "Backchannel logout session
   required" on. When a Keycloak session ends by logout, Keycloak POSTs a
   signed logout token to Kafbat and Kafbat ends the matching session at
   once. This happens when the user logs out (also through Kafbat's own Log
@@ -193,12 +195,16 @@ request.
   expiry after disablement) are measured in the Phase 2 fixture and recorded
   in the pull request.
 - `./krate identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET` recreates `kafka-ui`
-  in this mode, which ends every Kafbat session.
+  in this mode, which ends every Kafbat session. `./krate auth apply` itself
+  recreates `kafka-ui` only when the applied auth file or the image changed
+  (Compose compares the file digest `KRATE_UI_AUTH_SHA` it writes to `.env`);
+  an unchanged re-apply prints `Kafbat UI unchanged ... user sessions kept`.
 
 ## CSRF and logout
 
 - Kafbat requires a CSRF token on every state-changing request (anything but
   GET, HEAD, OPTIONS, TRACE): the token is issued in the cookie `XSRF-TOKEN`
+  (`Secure`, readable by the page script, rotated at every login)
   and must be sent back in the header `X-XSRF-TOKEN`. The bundled UI does
   this itself; a script that reuses a browser session must do the same, or
   it receives 403 before any permission check. Requests authenticated by
@@ -209,7 +215,20 @@ request.
   of the public origin; the realm client accepts only the exact values
   `<origin>` and `<origin>/` (Keycloak stores them as `<origin>##<origin>/`),
   so no other redirect target is honoured. Keycloak then ends its SSO session
-  and sends the back-channel logout to every client of that session.
+  and sends the back-channel logout to every client of that session. Kafbat
+  learns the `end_session_endpoint` from `runtime.yml`
+  (`custom-params.end-session-uri`, written by `krate auth configure`); the
+  preflight refuses a `runtime.yml` without it.
+- The proxy answers 404 for Kafbat's unauthenticated `/metrics`, `/actuator/`
+  and `/logout/connect/` paths; metrics per cluster are read through the
+  signed-in API (`/api/clusters/<name>/metrics`, viewer permission).
+- The viewer role has no `applicationconfig` permission: that view renders
+  the running Kafbat configuration, client secret included. Viewers see
+  clusters, brokers, topics, consumers, schemas, connectors, ACLs, audit and
+  quotas read-only.
+- `./krate auth configure --no-viewer-messages` withdraws the message-payload
+  opt-in (`KAFKA_UI_VIEWER_MESSAGES=false`); re-run `./krate auth configure
+  --force` and `./krate auth apply` so `runtime.yml` and the UI follow.
 - In `local.yml` mode Kafbat is the unmodified upstream shared-login build
   (GET logout, no CSRF token); this guide's statements apply to `runtime.yml`.
 

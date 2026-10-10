@@ -22,7 +22,7 @@ BASE_IMAGE = 'kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65d
 # Runtime base: Temurin publishes its JDK source; upstream's Azul Zulu base does not.
 RUNTIME_IMAGE = 'eclipse-temurin:25-jre-alpine@sha256:3c0a9084927a221ccd1d007fcaf614465672c0af37aaa834c5184483afe56d61'
 RUNTIME_PACKAGES = ('gcompat', 'tzdata')  # upstream's apk add list
-IMAGE = 'krate/kafka-ui:1.5.0-sso.6'
+IMAGE = 'krate/kafka-ui:1.5.0-sso.7'
 JDK_IMAGE = 'eclipse-temurin:25-jdk@sha256:119a3d18f160a3e7655a66034d0f43beee31cd7b3b9142d57a5de29772011de6'
 LOMBOK_SHA256 = '3488a4e9994c26596baaceebee58cad36a50e3bdaec5be72b5834d3c3b560306'
 AUTH_PATCH = ROOT / 'kafbat-ui/native-auth.patch'
@@ -136,7 +136,7 @@ def main():
         'src/components/AuthPage/SignIn/BasicSignIn/__tests__', 'src/components/NavBar/UserInfo/__tests__',
         'src/lib/__tests__', cwd=frontend)
     run(str(bin_dir / 'vite'), 'build', cwd=frontend,
-        env=dict(os.environ, VITE_TAG='v1.5.0-sso.6', VITE_COMMIT=REVISION[:8] + '-sso'))
+        env=dict(os.environ, VITE_TAG='v1.5.0-sso.7', VITE_COMMIT=REVISION[:8] + '-sso'))
     context = output / 'image'
     context.mkdir(exist_ok=True)
     original = output / 'upstream-api.jar'

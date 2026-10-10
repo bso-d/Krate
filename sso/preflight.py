@@ -2,6 +2,7 @@
 """Validate authentication activation before any service mutation."""
 import argparse
 import ipaddress
+import re
 import json
 from pathlib import Path
 import stat
@@ -31,6 +32,20 @@ RENEW_WARNING = 30 * 86400
 
 class Preflight(ValueError):
     """A refusal whose message is safe to print: it never carries a configured value."""
+
+
+IDENTITY_MEMBERS = {'keycloak-db', 'keycloak', 'proxy', 'kafka-ui'}
+EGRESS_NETWORK = 'identity-egress'
+
+
+def validate_kafbat_yml(root):
+    """EPC's kafbat.yml is merged into the same Spring configuration; it may configure clusters only."""
+    path = root / 'kafbat.yml'
+    if not path.is_file():
+        return
+    keys = re.findall(r'^([A-Za-z_][A-Za-z0-9_.-]*):', path.read_text(), re.M)
+    if set(keys) != {'kafka'}:
+        raise Preflight(f'kafbat.yml may define the kafka: section only (clusters); found top-level keys {sorted(set(keys))}')
 
 
 def validate(root, mode, config):
@@ -75,6 +90,7 @@ def validate(root, mode, config):
     except ValueError as exc:
         raise Preflight(str(exc)) from None
     secrets = identity_secrets(site)
+    validate_kafbat_yml(root)
     validate_runtime(root, site, origin)
     # The realm file is the local plan written by `krate identity up`; identity providers are
     # applied to the running realm separately, so their absence here is expected.
@@ -144,6 +160,12 @@ def validate_db_tls(root):
             raise Preflight(f'Protect {TLS_DIR}/{name} with chmod 600')
     if (tls / 'pg_hba.conf').read_text() != identity.PG_HBA:
         raise Preflight(f'{TLS_DIR}/pg_hba.conf differs from the generated policy; run krate identity up to restore it')
+    ca = str(tls / 'ca.crt')
+    if openssl('x509', '-in', ca, '-checkend', '86400', '-noout').returncode:
+        raise Preflight(f'{TLS_DIR}/ca.crt is unreadable or expires within a day; run krate identity renew-db-tls (it renews the CA too)')
+    if openssl('x509', '-in', ca, '-checkend', str(RENEW_WARNING), '-noout').returncode:
+        print(f'warning: {TLS_DIR}/ca.crt expires within {RENEW_WARNING // 86400} days'
+              f' ({openssl("x509", "-in", ca, "-noout", "-enddate").stdout.strip()}); run krate identity renew-db-tls', file=sys.stderr)
     server = str(tls / 'server.crt')
     if openssl('x509', '-in', server, '-checkend', '86400', '-noout').returncode:
         raise Preflight(f'{TLS_DIR}/server.crt is unreadable or expires within a day; run krate identity renew-db-tls')
@@ -178,15 +200,30 @@ def validate_networks(config):
         raise Preflight(f'the Compose file must define the {IDENTITY_NETWORK} network')
     if identity_network.get('internal') is not True:
         raise Preflight(f'network {IDENTITY_NETWORK} must be internal: true')
-    subnets = [entry.get('subnet') for entry in (identity_network.get('ipam') or {}).get('config') or []
+    entries = [entry for entry in (identity_network.get('ipam') or {}).get('config') or []
                if isinstance(entry, dict) and entry.get('subnet')]
-    if len(subnets) != 1:
+    if len(entries) != 1:
         raise Preflight(f'network {IDENTITY_NETWORK} must have exactly one ipam subnet (KRATE_IDENTITY_SUBNET)')
     try:
-        subnet = ipaddress.ip_network(subnets[0], strict=True)
+        subnet = ipaddress.ip_network(entries[0]['subnet'], strict=True)
     except ValueError:
         raise Preflight('KRATE_IDENTITY_SUBNET is not a valid CIDR network') from None
+    if not entries[0].get('ip_range'):
+        raise Preflight(f'network {IDENTITY_NETWORK} must set ipam ip_range (KRATE_IDENTITY_IP_RANGE): the dynamic pool that excludes the proxy address')
+    try:
+        pool = ipaddress.ip_network(entries[0]['ip_range'], strict=True)
+    except ValueError:
+        raise Preflight('KRATE_IDENTITY_IP_RANGE is not a valid CIDR network') from None
+    if not pool.subnet_of(subnet):
+        raise Preflight('KRATE_IDENTITY_IP_RANGE must lie inside KRATE_IDENTITY_SUBNET')
+    gateway = entries[0].get('gateway') or str(next(subnet.hosts()))
     services = config['services']
+    members = {name for name, service in services.items() if IDENTITY_NETWORK in service_networks(service)}
+    if members != IDENTITY_MEMBERS:
+        raise Preflight(f'the {IDENTITY_NETWORK} network must carry exactly {sorted(IDENTITY_MEMBERS)}; rendered: {sorted(members)}')
+    egress = {name for name, service in services.items() if EGRESS_NETWORK in service_networks(service)}
+    if egress != {'keycloak'}:
+        raise Preflight(f'only keycloak may be on the {EGRESS_NETWORK} network; rendered: {sorted(egress)}')
     if set(service_networks(services['keycloak-db'])) != {IDENTITY_NETWORK}:
         raise Preflight(f'keycloak-db must be attached to the {IDENTITY_NETWORK} network only')
     keycloak_networks = service_networks(services['keycloak'])
@@ -206,6 +243,10 @@ def validate_networks(config):
         raise Preflight('KRATE_IDENTITY_PROXY_IP is not a valid IP address') from None
     if proxy_ip not in subnet or proxy_ip in (subnet.network_address, subnet.broadcast_address):
         raise Preflight('KRATE_IDENTITY_PROXY_IP must be a host address inside KRATE_IDENTITY_SUBNET')
+    if proxy_ip in pool:
+        raise Preflight('KRATE_IDENTITY_PROXY_IP must lie outside KRATE_IDENTITY_IP_RANGE, or another container can take the trusted address')
+    if str(proxy_ip) == gateway:
+        raise Preflight('KRATE_IDENTITY_PROXY_IP must not be the network gateway address')
 
 
 
@@ -264,16 +305,16 @@ def validate_runtime(root, env, origin):
     if 'messages_read' in topic_actions and not identity.env_flag(env, identity.VIEWER_MESSAGES_KEY):
         raise Preflight(f'{RUNTIME_FILE}: the viewer role reads message payloads but {identity.VIEWER_MESSAGES_KEY} is not true in .env'
                         + regenerate)
-    # Everything else must be what the planner produces for this .env and cluster list.
+    # The whole document must be what the planner produces for this .env and cluster list:
+    # an extra key (management exposure, dynamic config, a third client) is a change too.
     try:
         expected = identity.runtime(identity.runtime_settings(env, roles['viewer'].get('clusters')))
     except ValueError as exc:
         raise Preflight(str(exc)) from None
-    for section, actual in (('auth', runtime.get('auth')), ('rbac', runtime.get('rbac')),
-                            ('server.reactive.session', runtime.get('server', {}).get('reactive', {}).get('session'))):
-        wanted = expected['server']['reactive']['session'] if section == 'server.reactive.session' else expected[section]
-        if actual != wanted:
-            raise Preflight(f'{RUNTIME_FILE}: section {section} differs from the Krate plan for this .env' + regenerate)
+    if runtime != expected:
+        extra = sorted(set(runtime) - set(expected))
+        raise Preflight(f'{RUNTIME_FILE} differs from the Krate plan for this .env'
+                        + (f' (unexpected top-level keys: {extra})' if extra else '') + regenerate)
 
 
 def validate_realm(root, origin, secrets):

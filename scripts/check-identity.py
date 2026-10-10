@@ -30,6 +30,8 @@ TEMPLATE_VALUES = {
     'KAFKA_UI_AUTH_CONFIG': 'local.yml',
     'KRATE_IDENTITY_SUBNET': '172.29.250.0/24',
     'KRATE_IDENTITY_PROXY_IP': '172.29.250.10',
+    'KRATE_IDENTITY_IP_RANGE': '172.29.250.128/25',
+    'KRATE_UI_AUTH_SHA': '',
 }
 # The identity network as both editions must render it from the template defaults.
 IDENTITY_SUBNET = '172.29.250.0/24'
@@ -76,6 +78,8 @@ UI_ATTRIBUTE_KEYS = {'pkce.code.challenge.method', 'post.logout.redirect.uris', 
                      'backchannel.logout.session.required', 'backchannel.logout.revoke.offline.tokens'}
 # Kafbat RBAC resources a viewer may only `view`; topics add analysis_view (and messages_read on opt-in); ksql never.
 VIEW_RESOURCES = ('applicationconfig', 'clusterconfig', 'topic', 'consumer', 'schema', 'connect', 'connector', 'acl', 'audit', 'client_quotas')
+# The viewer never sees applicationconfig: its view renders the running configuration, client secret included.
+VIEWER_RESOURCES = tuple(resource for resource in VIEW_RESOURCES if resource != 'applicationconfig')
 CLUSTERS = ['cluster-a', 'cluster-b.2']
 # Site keys configure-dual.py no longer reads (they moved to .env): the example must not carry them.
 MOVED_SITE_KEYS = ('viewer_messages', 'session_idle_minutes')
@@ -178,6 +182,7 @@ def check_realm_contract(checks):
     e(attributes.get('backchannel.logout.revoke.offline.tokens') == 'false', 'realm plan: krate-ui backchannel.logout.revoke.offline.tokens must be "false"')
     e(set(attributes) == UI_ATTRIBUTE_KEYS, f'realm plan: krate-ui attributes must be exactly {sorted(UI_ATTRIBUTE_KEYS)}; got {sorted(attributes)}')
     e(attributes == identity.ui_client_attributes(origin), 'realm plan: krate-ui attributes must come from identity.ui_client_attributes')
+    e(ui.get('frontchannelLogout') is False, 'realm plan: krate-ui must state frontchannelLogout false (back-channel only)')
     mappers = [mapper for mapper in ui.get('protocolMappers', []) if mapper.get('protocolMapper') == 'oidc-group-membership-mapper']
     config = mappers[0].get('config', {}) if mappers else {}
     e(config.get('claim.name') == 'groups' and config.get('full.path') == 'false'
@@ -221,7 +226,9 @@ def check_runtime_contract(checks):
     for key, expected in (('provider', 'keycloak'), ('client-id', 'krate-ui'), ('client-secret', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}'),
                           ('scope', ['openid', 'profile', 'email']), ('issuer-uri', realm_url),
                           ('redirect-uri', origin + '/login/oauth2/code/keycloak'), ('authorization-grant-type', 'authorization_code'),
-                          ('user-name-attribute', 'sub'), ('custom-params', {'type': 'oauth', 'roles-field': 'groups'}),
+                          ('user-name-attribute', 'sub'),
+                          ('custom-params', {'type': 'oauth', 'roles-field': 'groups',
+                                             'end-session-uri': realm_url + '/protocol/openid-connect/logout'}),
                           ('authorization-uri', realm_url + '/protocol/openid-connect/auth'), ('token-uri', internal + 'token'),
                           ('user-info-uri', internal + 'userinfo'), ('jwk-set-uri', internal + 'certs')):
         e(client.get(key) == expected, f'client {key} must be {expected!r}; got {client.get(key)!r}')
@@ -240,7 +247,7 @@ def check_runtime_contract(checks):
         e(role.get('subjects') == [{'provider': 'oauth', 'type': 'role', 'value': group, 'regex': False}],
           f'{name} must have the realm group {group} as its only subject; got {role.get("subjects")!r}')
     viewer = {p['resource']: p for p in roles.get('viewer', {}).get('permissions', [])}
-    e(set(viewer) == set(VIEW_RESOURCES), f'viewer resources must be {sorted(VIEW_RESOURCES)} (no ksql); got {sorted(viewer)}')
+    e(set(viewer) == set(VIEWER_RESOURCES), f'viewer resources must be {sorted(VIEWER_RESOURCES)} (no ksql, no applicationconfig); got {sorted(viewer)}')
     for resource, permission in viewer.items():
         expected = ['view', 'analysis_view'] if resource == 'topic' else ['view']
         e(permission.get('actions') == expected, f'viewer {resource} actions must be {expected}; got {permission.get("actions")!r}')
@@ -479,13 +486,55 @@ def check_cli_kafbat(checks):
                  'auth apply must ask for the PingFederate secret only when its plan exists')):
             e(needle in cli, f'{label}: {why} (missing {needle[:60]!r})')
         ui_command = cli[cli.index('\ncmd_ui() {'):]
-        runtime_branch = re.search(r'== "runtime\.yml" \]\]; then\n(.*?)\n  elif', ui_command, re.DOTALL)
+        runtime_branch = re.search(r'== "runtime\.yml" \]\]; then\n(.*?)\n  (?:elif|else)', ui_command, re.DOTALL)
         e(runtime_branch is not None and 'shared' not in runtime_branch.group(1).lower() and '$pass' not in runtime_branch.group(1),
           f'{label}: the runtime.yml branch of cmd_ui must not print a shared login or the shared password')
         e('Shared app login' not in cli, f'{label}: must not describe a shared app login beside Keycloak')
     activate = (ROOT / 'sso/activate.sh').read_text()
     e('Sign-in: Keycloak (realm krate)' in activate and 'no shared form login' in activate,
       'sso/activate.sh: auth apply must print the Keycloak login model after success')
+
+
+def check_exposure(checks):
+    """The public proxy hides Kafbat metrics, actuator and the back-channel endpoint; apply is idempotent; start refuses a clash; the fork ends the Keycloak session."""
+    e = checks.expect
+    for edition in EDITIONS:
+        nginx = (ROOT / edition / 'nginx.conf').read_text()
+        public = nginx.index('    location / {')
+        for path in ('/metrics', '/actuator/', '/logout/connect/'):
+            block = nginx.find('    location ^~ ' + path + ' {\n        return 404;')
+            e(0 <= block < public, f'{edition}/nginx.conf: {path} must return 404 before the catch-all location /')
+        cli = (ROOT / edition / 'krate').read_text()
+        prepare = cli[cli.index('\nprepare() {'):cli.index('\n}', cli.index('\nprepare() {'))]
+        e('identity_network_clash' in prepare and prepare.index('identity_network_clash') < prepare.index('generate_secrets'),
+          f'{edition}/krate: prepare() must check the identity subnet clash before anything creates the network')
+        e('pingfederate.yml' not in cli, f'{edition}/krate: no stale pingfederate.yml auth mode')
+        e('--no-viewer-messages) viewer_messages=false ;;' in cli, f'{edition}/krate: auth configure must accept --no-viewer-messages')
+        e('db-tls --rollback --output-dir' in cli and 'db-tls --discard-previous --output-dir' in cli,
+          f'{edition}/krate: renew-db-tls must roll back on an unhealthy restart and discard .prev files on success')
+        e('renewed CA and' in cli and 'identity_compose restart --no-deps keycloak\n' in cli,
+          f'{edition}/krate: renew-db-tls must restart Keycloak when the CA was renewed')
+        code, rendered = compose_config(ROOT / edition / '.env.template', edition)
+        if e(code == 0, f'{edition}: Compose rendering failed'):
+            config = json.loads(rendered)
+            e('KRATE_UI_AUTH_SHA' in config['services']['kafka-ui']['environment'],
+              f'{edition}/kafka-ui: KRATE_UI_AUTH_SHA must be part of the environment so a changed auth file recreates the container')
+            e(config['networks']['identity']['ipam']['config'][0].get('ip_range') == '172.29.250.128/25',
+              f'{edition}: identity network ip_range must default to 172.29.250.128/25')
+    activate = (ROOT / 'sso/activate.sh').read_text()
+    e('--force-recreate' not in activate, 'sso/activate.sh: apply must not force-recreate (sessions survive an unchanged apply)')
+    e('KRATE_UI_AUTH_SHA' in activate, 'sso/activate.sh: apply must record the auth file digest in .env')
+    patch = (ROOT / 'kafbat-ui/native-auth.patch').read_text()
+    for needle, why in (('END_SESSION_URI = "end-session-uri"', 'the fork reads end_session_endpoint from the end-session-uri custom param'),
+                        ('providerConfigurationMetadata(Map.of("end_session_endpoint", endSession))', 'the registration carries end_session_endpoint'),
+                        ('handler.setPostLogoutRedirectUri("{baseUrl}");', 'RP-initiated logout returns to the application origin'),
+                        ('handler.setLogoutUri("http://127.0.0.1:"', 'the back-channel handler posts to its own listener'),
+                        ('csrfRepository.setCookieCustomizer(cookie -> cookie.secure(true));', 'the XSRF-TOKEN cookie is Secure'),
+                        ('csrfRepository.saveToken(webFilterExchange.getExchange(), null)', 'the CSRF token rotates at login'),
+                        ('oidcSessionRegistry.removeSessionInformation(session.getId())', 'a local logout forgets the OIDC session')):
+        e(needle in patch, f'kafbat-ui/native-auth.patch: {why} (missing {needle[:50]!r})')
+    build = (ROOT / 'kafbat-ui/build.py').read_text()
+    e("IMAGE = 'krate/kafka-ui:1.5.0-sso.7'" in build, 'kafbat-ui/build.py must build sso.7 (the templates pin it)')
 
 
 def check_parity(checks):
@@ -575,8 +624,13 @@ def check_renewal(checks, tls):
     e(identity.SERVER_CERT_DAYS == 398 and identity.CA_CERT_DAYS == 1825, 'server certificates are issued for 398 days, the CA for 1825')
     e(396 <= days_left(tls / 'server.crt') <= 398, f'a fresh server.crt must be valid for 398 days; got {days_left(tls / "server.crt")}')
     e(1823 <= days_left(tls / 'ca.crt') <= 1825, f'a fresh ca.crt must be valid for 1825 days; got {days_left(tls / "ca.crt")}')
-    expiry = identity.renew_server(tls)
+    expiry, renewed_ca = identity.renew_server(tls)
     e(bool(re.fullmatch(r'[A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4} GMT', expiry)), f'returns the new notAfter; got {expiry!r}')
+    e(renewed_ca is False, 'a CA with 1825 days left is not renewed with the server certificate')
+    e(all((tls / (name + '.prev')).read_bytes() == before[name] for name in ('server.key', 'server.crt')),
+      'the replaced server.key and server.crt are kept as .prev until the caller discards them')
+    e(not (tls / 'ca.key.prev').exists(), 'no ca .prev file when the CA was not renewed')
+    e(identity.discard_previous(tls) == ['server.key', 'server.crt'], 'discard_previous removes exactly the two .prev files')
     after = {name: (tls / name).read_bytes() for name in identity.TLS_FILES}
     for name in ('ca.key', 'ca.crt', 'pg_hba.conf'):
         e(after[name] == before[name], f'{name} must not change')
@@ -592,6 +646,39 @@ def check_renewal(checks, tls):
       'the new certificate must keep SAN DNS:keycloak-db')
     e(396 <= days_left(tls / 'server.crt') <= 398, f'the renewed server.crt must be valid for 398 days; got {days_left(tls / "server.crt")}')
     e(identity.db_tls(tls) == [], 'db-tls without the flag must leave the renewed set unchanged')
+    # A CA that would expire before the new server certificate is renewed with it, and a renewal can be rolled back.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        short = Path(tmp) / 'db-tls'
+        saved_days = identity.CA_CERT_DAYS
+        identity.CA_CERT_DAYS = 100
+        try:
+            identity.db_tls(short)
+        finally:
+            identity.CA_CERT_DAYS = saved_days
+        e(98 <= days_left(short / 'ca.crt') <= 100, 'fixture: a 100-day CA')
+        first = {name: (short / name).read_bytes() for name in identity.TLS_FILES}
+        expiry, renewed_ca = identity.renew_server(short)
+        e(renewed_ca is True, 'a CA that expires before the new server certificate must be renewed with it')
+        e(1823 <= days_left(short / 'ca.crt') <= 1825 and 396 <= days_left(short / 'server.crt') <= 398,
+          'the renewed CA is valid for 1825 days and the server certificate for 398')
+        e(openssl('verify', '-CAfile', str(short / 'ca.crt'), str(short / 'server.crt')).returncode == 0, 'the new server.crt chains to the new CA')
+        e(all((short / (name + '.prev')).read_bytes() == first[name] for name in ('ca.key', 'ca.crt', 'server.key', 'server.crt')),
+          'all four replaced files are kept as .prev')
+        e(sorted(identity.rollback(short)) == sorted(['ca.key', 'ca.crt', 'server.key', 'server.crt']), 'rollback restores the four files')
+        e({name: (short / name).read_bytes() for name in identity.TLS_FILES} == first, 'after rollback the files are byte-identical to before')
+        e(sorted(os.listdir(short)) == sorted(identity.TLS_FILES), f'rollback leaves no .prev files; got {sorted(os.listdir(short))}')
+        try:
+            identity.rollback(short)
+            e(False, 'a second rollback must be refused')
+        except ValueError:
+            pass
+        (short / '.renew-stale').mkdir()
+        (short / '.renew-stale' / 'ca.key').write_bytes(b'x')
+        identity.renew_server(short)
+        e(not (short / '.renew-stale').exists(), 'a stale work directory from a killed run is removed before renewing')
+        identity.discard_previous(short)
+        e(sorted(os.listdir(short)) == sorted(identity.TLS_FILES), 'after discard only the five files remain')
 
 
 def site_env(edition, **overrides):
@@ -675,6 +762,13 @@ def network_mutations(rendered):
                lambda c: c['services']['keycloak']['environment'].__setitem__('KC_PROXY_TRUSTED_ADDRESSES', '172.29.250.11')),
         mutate('proxy address outside the subnet', lambda c: set_proxy_ip(c, '172.29.251.10')),
         mutate('proxy address is the network address', lambda c: set_proxy_ip(c, '172.29.250.0')),
+        mutate('identity network without ip_range', lambda c: c['networks']['identity']['ipam']['config'][0].pop('ip_range')),
+        mutate('proxy address inside the dynamic pool', lambda c: set_proxy_ip(c, '172.29.250.200')),
+        mutate('proxy address is the gateway', lambda c: set_proxy_ip(c, '172.29.250.1')),
+        mutate('kafka-ui not on the identity network', lambda c: set_networks(c, 'kafka-ui', {'kafka-network': None})),
+        mutate('keycloak-db on identity-egress', lambda c: set_networks(c, 'keycloak-db', {'identity': None, 'identity-egress': None})),
+        mutate('kafka-exporter-like service on the identity network',
+               lambda c: c['services'].__setitem__('probe', {'image': 'x', 'networks': {'identity': None}})),
     ]
 
 
@@ -818,6 +912,9 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
                       f'{edition}: preflight --mode runtime.yml must refuse: {label} (naming {needle!r});'
                       f' got exit {result.returncode}: {result.stderr.strip()}')
 
+    def viewer_topic(d):
+        return next(p for p in d['rbac']['roles'][0]['permissions'] if p['resource'] == 'topic')
+
     def mutated_runtime(change):
         data = json.loads(original)
         change(data)
@@ -829,16 +926,25 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
         ('require-mapped-role off', 'require-mapped-role', lambda d: d['auth']['oauth2'].__setitem__('require-mapped-role', False)),
         ('session cookie renamed', 'SESSION', lambda d: d['server']['reactive']['session']['cookie'].__setitem__('name', 'JSESSIONID')),
         ('viewer reads messages without the opt-in', 'KAFKA_UI_VIEWER_MESSAGES',
-         lambda d: d['rbac']['roles'][0]['permissions'][2]['actions'].append('messages_read')),
+         lambda d: viewer_topic(d)['actions'].append('messages_read')),
         ('defaultRole present', 'defaultRole', lambda d: d['rbac'].__setitem__('defaultRole', {'permissions': []})),
         ('viewer granted ksql', 'ksql', lambda d: d['rbac']['roles'][0]['permissions'].append({'resource': 'ksql', 'actions': 'all'})),
         ('viewer subject is not the realm group', 'only subject',
          lambda d: d['rbac']['roles'][0]['subjects'].append({'provider': 'oauth', 'type': 'user', 'value': 'alice', 'regex': False})),
-        ('viewer mutates topics', 'differs from the Krate plan', lambda d: d['rbac']['roles'][0]['permissions'][2]['actions'].append('edit')),
+        ('viewer mutates topics', 'differs from the Krate plan', lambda d: viewer_topic(d)['actions'].append('edit')),
+        ('viewer granted applicationconfig view', 'differs from the Krate plan',
+         lambda d: d['rbac']['roles'][0]['permissions'].append({'resource': 'applicationconfig', 'actions': ['view']})),
+        ('end-session-uri removed (logout would not end the Keycloak session)', 'differs from the Krate plan',
+         lambda d: d['auth']['oauth2']['client']['keycloak']['custom-params'].pop('end-session-uri')),
+        ('actuator exposed to signed-in users', 'unexpected top-level keys',
+         lambda d: d.__setitem__('management', {'endpoints': {'web': {'exposure': {'include': '*'}}}})),
+        ('dynamic config enabled', 'unexpected top-level keys', lambda d: d.__setitem__('dynamic', {'config': {'enabled': True}})),
+        ('second client registration', 'differs from the Krate plan',
+         lambda d: d['auth']['oauth2']['client'].__setitem__('other', dict(d['auth']['oauth2']['client']['keycloak']))),
         ('third role added', 'exactly the roles', lambda d: d['rbac']['roles'].append(dict(d['rbac']['roles'][1], name='ops'))),
         ('issuer points elsewhere', 'issuer/callback',
          lambda d: d['auth']['oauth2']['client']['keycloak'].__setitem__('issuer-uri', 'https://evil.example.test/identity/realms/krate')),
-        ('session timeout differs from KEYCLOAK_SESSION_IDLE_MINUTES', 'server.reactive.session',
+        ('session timeout differs from KEYCLOAK_SESSION_IDLE_MINUTES', 'differs from the Krate plan',
          lambda d: d['server']['reactive']['session'].__setitem__('timeout', '240m')),
         ('user name attribute is not sub', 'user-name-attribute',
          lambda d: d['auth']['oauth2']['client']['keycloak'].__setitem__('user-name-attribute', 'preferred_username')),
@@ -847,6 +953,14 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
         mutated_runtime(change)
         expect_refusal(label, needle)
     identity.write_file(runtime_file, original, 0o644)
+    # EPC's kafbat.yml shares the Spring configuration: anything beyond the kafka: section is refused.
+    kafbat = site / 'kafbat.yml'
+    kafbat.write_text('kafka:\n  clusters:\n    - name: x\nrbac:\n  defaultRole:\n    permissions: []\n')
+    expect_refusal('kafbat.yml with an rbac section', 'kafbat.yml')
+    kafbat.write_text('kafka:\n  clusters:\n    - name: x\n')
+    result = preflight(site, 'runtime.yml', rendered)
+    checks.expect(result.returncode == 0, f'{edition}: preflight must accept a kafbat.yml with only the kafka: section; got exit {result.returncode}: {result.stderr.strip()}')
+    kafbat.unlink()
     # The opt-in makes the same messages_read grant acceptable, and only then.
     write_env(site, dict(env, KAFKA_UI_VIEWER_MESSAGES='true'))
     with contextlib.redirect_stdout(io.StringIO()):
@@ -921,7 +1035,7 @@ def check_backup_seal(checks):
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
-                  check_logrotate, check_cli_kafbat, check_parity, check_zk_frozen, check_writers, check_backup_seal,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight):
         try:
             check(checks)

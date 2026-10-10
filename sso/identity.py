@@ -6,6 +6,7 @@ runtime.yml carry ``${VAR}`` placeholders that Keycloak and Kafbat resolve from
 their container environment.
 """
 import argparse
+import datetime
 import hashlib
 import hmac
 import json
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -246,6 +248,8 @@ def realm(values):
         'directAccessGrantsEnabled': False, 'serviceAccountsEnabled': False,
         'redirectUris': [origin + '/login/oauth2/code/keycloak'],
         'webOrigins': [origin],
+        # Back-channel logout only; stated so a changed Keycloak default cannot switch it on.
+        'frontchannelLogout': False,
         'attributes': ui_client_attributes(origin),
         'defaultClientScopes': list(DEFAULT_SCOPES),
         'optionalClientScopes': [],
@@ -322,12 +326,15 @@ def summary(data, path, outcome):
 def kafbat_role(name, group, clusters, admin=False, viewer_messages=False):
     """One Kafbat RBAC role whose only subject is a realm group carried in the `groups` claim.
 
-    The viewer gets `view` on every resource and `analysis_view` on topics;
-    `messages_read` only when the site opted in. KSQL has `execute` only, which
-    also permits mutations, so only the administrator gets it.
+    The viewer gets `view` on every resource except `applicationconfig` (its view
+    renders the running configuration, client secret included) and `analysis_view`
+    on topics; `messages_read` only when the site opted in. KSQL has `execute`
+    only, which also permits mutations, so only the administrator gets it.
     """
     permissions = []
     for resource in RBAC_RESOURCES:
+        if resource == 'applicationconfig' and not admin:
+            continue
         permission = {'resource': resource, 'actions': 'all' if admin else ['view']}
         if resource in PATTERN_RESOURCES:
             permission['value'] = '.*'
@@ -359,7 +366,10 @@ def runtime(values):
         'client-name': UI_CLIENT_NAME, 'scope': list(UI_OIDC_SCOPES), 'issuer-uri': realm_url,
         'redirect-uri': origin + '/login/oauth2/code/' + UI_REGISTRATION,
         'authorization-grant-type': 'authorization_code', 'user-name-attribute': 'sub',
-        'custom-params': {'type': 'oauth', 'roles-field': GROUPS_CLAIM},
+        # end-session-uri: with explicit endpoints there is no discovery, so the fork
+        # reads the provider's end_session_endpoint from here (RP-initiated logout).
+        'custom-params': {'type': 'oauth', 'roles-field': GROUPS_CLAIM,
+                          'end-session-uri': realm_url + '/protocol/openid-connect/logout'},
         'authorization-uri': realm_url + '/protocol/openid-connect/auth',
         'token-uri': internal + 'token',
         'user-info-uri': internal + 'userinfo',
@@ -508,33 +518,76 @@ def not_after(certificate):
     return text.strip().partition('=')[2]
 
 
-def renew_server(directory, days=SERVER_CERT_DAYS):
-    """Reissue server.key and server.crt under the existing CA; returns the new expiry.
+def seconds_left(certificate):
+    """Seconds until the certificate expires (negative when it has)."""
+    text = _openssl(['x509', '-in', str(certificate), '-noout', '-enddate'], None, capture=True).strip().partition('=')[2]
+    expiry = datetime.datetime.strptime(text, '%b %d %H:%M:%S %Y %Z').replace(tzinfo=datetime.timezone.utc)
+    return (expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
 
-    Both files are written beside the current ones as `.new` and then moved into
-    place (key first, then certificate), so no reader ever sees a partial file.
-    The CA, Keycloak's trust store, is untouched.
+
+def remove_stale_work(directory):
+    """Remove work directories a killed earlier run left behind (they hold key copies)."""
+    for stale in Path(directory).glob('.*-*'):
+        if stale.is_dir() and stale.name.split('-')[0] in ('.renew', '.generate'):
+            shutil.rmtree(stale, ignore_errors=True)
+
+
+def renew_server(directory, days=SERVER_CERT_DAYS):
+    """Reissue server.key and server.crt; returns (new expiry, whether the CA was renewed too).
+
+    The CA is renewed as well when it would expire before the new server
+    certificate (Keycloak then needs a restart to trust it). The replaced files
+    stay beside the new ones as `.prev` until rollback() or discard_previous():
+    the caller restarts the database and decides. New files are written as
+    `.new` and moved into place, so no reader ever sees a partial file.
     """
     directory = Path(directory)
     missing = [name for name in TLS_FILES if not (directory / name).is_file()]
     if missing:
         raise IncompleteMaterial(f'{directory} is incomplete; missing ' + ', '.join(missing)
                                  + '. Renewal needs the existing CA; restore the directory from a backup first.')
+    remove_stale_work(directory)
+    renew_ca = seconds_left(directory / 'ca.crt') < days * 86400
+    names = ('ca.key', 'ca.crt', 'server.key', 'server.crt') if renew_ca else ('server.key', 'server.crt')
     previous = os.umask(0o077)
     try:
         with tempfile.TemporaryDirectory(prefix='.renew-', dir=directory) as work:
             work = Path(work)
-            for name in ('ca.crt', 'ca.key'):
-                (work / name).write_bytes((directory / name).read_bytes())
-            issue_server(work, days)
-            material = {name: (work / name).read_bytes() for name in ('server.key', 'server.crt')}
+            if renew_ca:
+                generate_material(work)
+            else:
+                for name in ('ca.crt', 'ca.key'):
+                    (work / name).write_bytes((directory / name).read_bytes())
+                issue_server(work, days)
+            material = {name: (work / name).read_bytes() for name in names}
     finally:
         os.umask(previous)
-    for name in ('server.key', 'server.crt'):
+    for name in names:
         write_file(directory / (name + '.new'), material[name], TLS_MODES[name])
-    for name in ('server.key', 'server.crt'):
+        write_file(directory / (name + '.prev'), (directory / name).read_bytes(), TLS_MODES[name])
+    for name in names:
         os.replace(directory / (name + '.new'), directory / name)
-    return not_after(directory / 'server.crt')
+    return not_after(directory / 'server.crt'), renew_ca
+
+
+def rollback(directory):
+    """Put the `.prev` files of the last renewal back; returns the names restored."""
+    directory = Path(directory)
+    restored = [name for name in TLS_FILES if (directory / (name + '.prev')).is_file()]
+    if not restored:
+        raise ValueError(f'nothing to roll back in {directory}: no .prev files')
+    for name in restored:
+        os.replace(directory / (name + '.prev'), directory / name)
+    return restored
+
+
+def discard_previous(directory):
+    """Remove the `.prev` files once the renewed certificate is in service."""
+    directory = Path(directory)
+    removed = [name for name in TLS_FILES if (directory / (name + '.prev')).is_file()]
+    for name in removed:
+        (directory / (name + '.prev')).unlink()
+    return removed
 
 
 def db_tls(directory):
@@ -552,6 +605,7 @@ def db_tls(directory):
         raise IncompleteMaterial(
             f'{directory} is incomplete; missing ' + ', '.join(missing) + '. Restore the directory from '
             'a backup (or move it aside to issue a new CA and re-import trust) before continuing.')
+    remove_stale_work(directory)
     previous = os.umask(0o077)
     try:
         with tempfile.TemporaryDirectory(prefix='.generate-', dir=directory) as work:
@@ -578,7 +632,14 @@ def cmd_runtime(args):
 
 def cmd_db_tls(args):
     if args.renew_server:
-        print(f'renewed server certificate, valid until {renew_server(args.output_dir)}')
+        expiry, renewed_ca = renew_server(args.output_dir)
+        print(('renewed CA and server certificate' if renewed_ca else 'renewed server certificate') + f', valid until {expiry}')
+        return 0
+    if args.rollback:
+        print('restored previous ' + ', '.join(rollback(args.output_dir)))
+        return 0
+    if args.discard_previous:
+        print('discarded ' + (', '.join(discard_previous(args.output_dir)) or 'nothing'))
         return 0
     written = db_tls(args.output_dir)
     if written:
@@ -663,7 +724,9 @@ def main():
     tls = commands.add_parser('db-tls', help='generate CA, server certificate and pg_hba.conf for keycloak-db')
     tls.add_argument('--output-dir', type=Path, required=True)
     tls.add_argument('--renew-server', action='store_true',
-                     help=f'reissue server.key and server.crt under the existing CA ({SERVER_CERT_DAYS} days)')
+                     help=f'reissue server.key and server.crt ({SERVER_CERT_DAYS} days); the CA too when it would expire first')
+    tls.add_argument('--rollback', action='store_true', help='put the .prev files of the last renewal back')
+    tls.add_argument('--discard-previous', action='store_true', help='remove the .prev files after a successful renewal')
     tls.set_defaults(func=cmd_db_tls)
     seal = commands.add_parser('backup-seal', help='append an HMAC-SHA256 tag to an openssl ciphertext (passphrase from env)')
     seal.add_argument('--input', type=Path, required=True)

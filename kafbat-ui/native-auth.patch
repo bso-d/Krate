@@ -49,7 +49,7 @@ index 0000000..569ec29
 +  }
 +}
 diff --git a/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java b/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
-index 16b75d4..23a280d 100644
+index 16b75d4..fe77ae8 100644
 --- a/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
 +++ b/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
 @@ -5,6 +5,7 @@ import io.kafbat.ui.service.rbac.AccessControlService;
@@ -84,7 +84,7 @@ index 16b75d4..23a280d 100644
  import org.springframework.security.oauth2.client.oidc.userinfo.OidcReactiveOAuth2UserService;
  import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserRequest;
  import org.springframework.security.oauth2.client.oidc.web.server.logout.OidcClientInitiatedServerLogoutSuccessHandler;
-@@ -38,13 +45,25 @@ import org.springframework.security.oauth2.client.registration.ReactiveClientReg
+@@ -38,13 +45,29 @@ import org.springframework.security.oauth2.client.registration.ReactiveClientReg
  import org.springframework.security.oauth2.client.userinfo.DefaultReactiveOAuth2UserService;
  import org.springframework.security.oauth2.client.userinfo.OAuth2UserRequest;
  import org.springframework.security.oauth2.client.userinfo.ReactiveOAuth2UserService;
@@ -98,36 +98,43 @@ index 16b75d4..23a280d 100644
  import org.springframework.security.oauth2.jwt.NimbusReactiveJwtDecoder;
  import org.springframework.security.oauth2.server.resource.introspection.SpringReactiveOpaqueTokenIntrospector;
  import org.springframework.security.web.server.SecurityWebFilterChain;
++import org.springframework.security.web.server.authentication.RedirectServerAuthenticationSuccessHandler;
++import org.springframework.security.web.server.authentication.ServerAuthenticationSuccessHandler;
 +import org.springframework.security.web.server.authentication.logout.DelegatingServerLogoutHandler;
 +import org.springframework.security.web.server.authentication.logout.SecurityContextServerLogoutHandler;
++import org.springframework.security.web.server.authentication.logout.ServerLogoutHandler;
  import org.springframework.security.web.server.authentication.logout.ServerLogoutSuccessHandler;
 +import org.springframework.security.web.server.authentication.logout.WebSessionServerLogoutHandler;
 +import org.springframework.security.web.server.csrf.CookieServerCsrfTokenRepository;
 +import org.springframework.security.web.server.csrf.CsrfToken;
 +import org.springframework.security.web.server.csrf.ServerCsrfTokenRequestAttributeHandler;
++import org.springframework.security.web.server.savedrequest.WebSessionServerRequestCache;
  import org.springframework.web.reactive.function.client.WebClient;
 +import org.springframework.web.server.WebFilter;
  import reactor.core.publisher.Mono;
  import reactor.netty.http.client.HttpClient;
  
-@@ -57,7 +76,10 @@ import reactor.netty.http.client.HttpClient;
+@@ -57,7 +80,12 @@ import reactor.netty.http.client.HttpClient;
  @Slf4j
  public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
  
 +  private static final String REQUIRE_MAPPED_ROLE = "auth.oauth2.require-mapped-role";
++  /** Client custom-param naming the provider's end_session_endpoint when its endpoints are explicit. */
++  static final String END_SESSION_URI = "end-session-uri";
 +
    private final OAuthProperties properties;
 +  private final Environment environment;
  
    /**
     * WebClient configured to use system proxy properties (http.proxyHost/https.proxyHost,
-@@ -78,17 +100,37 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -78,17 +106,38 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
        ReactiveOAuth2AccessTokenResponseClient<OAuth2AuthorizationCodeGrantRequest> tokenResponseClient,
        ReactiveOAuth2UserService<OidcUserRequest, OidcUser> oidcUserService,
        ReactiveOAuth2UserService<OAuth2UserRequest, OAuth2User> oauth2UserService,
 -      @Qualifier("oauthWebClient") WebClient webClient
 +      @Qualifier("oauthWebClient") WebClient webClient,
 +      ReactiveClientRegistrationRepository registrations,
++      ReactiveOidcSessionRegistry oidcSessionRegistry,
 +      AccessControlService acs
    ) {
      log.info("Configuring OAUTH2 authentication.");
@@ -164,7 +171,32 @@ index 16b75d4..23a280d 100644
  
      var oauth2AuthManager =
          new OAuth2LoginReactiveAuthenticationManager(tokenResponseClient, oauth2UserService);
-@@ -102,9 +144,21 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -96,15 +145,45 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+     var delegatingAuthManager =
+         new DelegatingReactiveAuthenticationManager(oidcAuthManager, oauth2AuthManager);
+ 
++    // The SPA reads the XSRF-TOKEN cookie and sends it back as X-XSRF-TOKEN (or as the
++    // _csrf form field of the logout form); the plain handler compares that raw value.
++    // The UI is only reached through the HTTPS proxy, so the cookie is always Secure
++    // (the forwarded scheme does not set SslInfo, which is what the repository checks).
++    var csrfRepository = CookieServerCsrfTokenRepository.withHttpOnlyFalse();
++    csrfRepository.setCookieCustomizer(cookie -> cookie.secure(true));
++    // A fresh CSRF token after each login: drop the pre-login cookie, the next safe request
++    // issues a new one. The redirect handler is Spring's default with its default cache.
++    var redirectAfterLogin = new RedirectServerAuthenticationSuccessHandler();
++    redirectAfterLogin.setRequestCache(new WebSessionServerRequestCache());
++    ServerAuthenticationSuccessHandler loginSuccess = (webFilterExchange, authentication) ->
++        csrfRepository.saveToken(webFilterExchange.getExchange(), null)
++            .then(redirectAfterLogin.onAuthenticationSuccess(webFilterExchange, authentication));
++    // A local logout also forgets the session in the OIDC registry the back-channel uses.
++    ServerLogoutHandler forgetOidcSession = (webFilterExchange, authentication) ->
++        webFilterExchange.getExchange().getSession()
++            .flatMap(session -> oidcSessionRegistry.removeSessionInformation(session.getId()))
++            .then();
++
+     var builder = http.authorizeExchange(spec -> spec
+             .pathMatchers(AUTH_WHITELIST)
+             .permitAll()
              .anyExchange()
              .authenticated()
          )
@@ -172,24 +204,23 @@ index 16b75d4..23a280d 100644
 -        .logout(spec -> spec.logoutSuccessHandler(logoutHandler))
 -        .csrf(ServerHttpSecurity.CsrfSpec::disable);
 +        .oauth2Login(oauth2 -> oauth2.authenticationManager(delegatingAuthManager)
-+            .authorizationRequestResolver(NativeLoginSupport.resolver(registrations)))
++            .authorizationRequestResolver(NativeLoginSupport.resolver(registrations))
++            .authenticationSuccessHandler(loginSuccess))
 +        // The provider posts logout tokens to /logout/connect/back-channel/{registrationId}.
 +        .oidcLogout(logout -> logout.backChannel(Customizer.withDefaults()))
 +        // Spring's default logout matcher accepts POST /logout only; also end the WebSession.
 +        .logout(spec -> spec
 +            .logoutHandler(new DelegatingServerLogoutHandler(
-+                new SecurityContextServerLogoutHandler(), new WebSessionServerLogoutHandler()))
++                forgetOidcSession, new SecurityContextServerLogoutHandler(), new WebSessionServerLogoutHandler()))
 +            .logoutSuccessHandler(logoutHandler))
-+        // The SPA reads the XSRF-TOKEN cookie and sends it back as X-XSRF-TOKEN (or as the
-+        // _csrf form field of the logout form); the plain handler compares that raw value.
 +        .csrf(csrf -> csrf
-+            .csrfTokenRepository(CookieServerCsrfTokenRepository.withHttpOnlyFalse())
++            .csrfTokenRepository(csrfRepository)
 +            .csrfTokenRequestHandler(new ServerCsrfTokenRequestAttributeHandler()));
 +    builder.addFilterAfter(csrfCookieWriter(), SecurityWebFiltersOrder.CSRF);
  
      if (properties.getResourceServer() != null) {
        OAuth2ResourceServerProperties resourceServer = properties.getResourceServer();
-@@ -130,6 +184,26 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -130,6 +209,26 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
      return builder.build();
    }
  
@@ -216,7 +247,7 @@ index 16b75d4..23a280d 100644
    @Bean
    public ReactiveOAuth2AccessTokenResponseClient<OAuth2AuthorizationCodeGrantRequest>
        authorizationCodeTokenResponseClient(@Qualifier("oauthWebClient") WebClient webClient) {
-@@ -151,11 +225,20 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -151,11 +250,20 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
            var provider = getProviderByProviderId(request.getClientRegistration().getRegistrationId());
            final var extractor = getExtractor(provider, acs);
            if (extractor == null) {
@@ -238,7 +269,7 @@ index 16b75d4..23a280d 100644
          });
    }
  
-@@ -170,19 +253,41 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -170,19 +278,56 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
            var provider = getProviderByProviderId(request.getClientRegistration().getRegistrationId());
            final var extractor = getExtractor(provider, acs);
            if (extractor == null) {
@@ -276,17 +307,40 @@ index 16b75d4..23a280d 100644
 +      }
 +    });
 +    final List<ClientRegistration> registrations = new ArrayList<>();
-+    new OAuth2ClientPropertiesMapper(props).asClientRegistrations().forEach((id, registration) ->
-+        registrations.add(explicitIssuers.containsKey(id)
-+            ? ClientRegistration.withClientRegistration(registration).issuerUri(explicitIssuers.get(id)).build()
-+            : registration));
++    new OAuth2ClientPropertiesMapper(props).asClientRegistrations().forEach((id, registration) -> {
++      if (!explicitIssuers.containsKey(id)) {
++        registrations.add(registration);
++        return;
++      }
++      // Without discovery the registration has no end_session_endpoint, so RP-initiated
++      // logout would silently fall back to a local redirect and leave the provider session
++      // alive. The generated configuration names the endpoint; refuse to start without it.
++      var custom = properties.getClient().get(id).getCustomParams();
++      var endSession = custom == null ? null : custom.get(END_SESSION_URI);
++      if (endSession == null || endSession.isBlank()) {
++        throw new IllegalArgumentException("OAuth2 client " + id + " configures its endpoints explicitly but has no custom-params."
++            + END_SESSION_URI + "; RP-initiated logout needs the provider's end_session_endpoint");
++      }
++      registrations.add(ClientRegistration.withClientRegistration(registration)
++          .issuerUri(explicitIssuers.get(id))
++          .providerConfigurationMetadata(Map.of("end_session_endpoint", endSession))
++          .build());
++    });
      if (registrations.isEmpty()) {
        throw new IllegalArgumentException("OAuth2 authentication is enabled but no providers specified.");
      }
-@@ -194,6 +299,22 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
-     return new OidcClientInitiatedServerLogoutSuccessHandler(repository);
-   }
+@@ -191,7 +336,31 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
  
+   @Bean
+   public ServerLogoutSuccessHandler defaultOidcLogoutHandler(final ReactiveClientRegistrationRepository repository) {
+-    return new OidcClientInitiatedServerLogoutSuccessHandler(repository);
++    var handler = new OidcClientInitiatedServerLogoutSuccessHandler(repository);
++    // Back to this application's own origin after the provider ended its session; the
++    // provider's post-logout allowlist carries exactly that origin.
++    handler.setPostLogoutRedirectUri("{baseUrl}");
++    return handler;
++  }
++
 +  @Bean
 +  public ReactiveOidcSessionRegistry oidcSessionRegistry() {
 +    // Shared by oauth2Login, which records each session's ID token, and the back-channel handler.
@@ -300,13 +354,15 @@ index 16b75d4..23a280d 100644
 +    // back-channel endpoint at {baseUrl}, the scheme, host and port the provider's request
 +    // arrived on. The cookie must carry the name WebFlux issues for the session id.
 +    handler.setSessionCookieName(environment.getProperty("server.reactive.session.cookie.name", "SESSION"));
++    // Post to this process's own listener, not to whatever Host the provider's request named:
++    // the public proxy returns 404 for this path, and forwarded headers must not steer it.
++    handler.setLogoutUri("http://127.0.0.1:" + environment.getProperty("server.port", "8080")
++        + "/logout/connect/back-channel/{registrationId}");
 +    return handler;
-+  }
-+
+   }
+ 
    private ProviderAuthorityExtractor getExtractor(final OAuthProperties.OAuth2Provider provider,
-                                                   AccessControlService acs) {
-     Optional<ProviderAuthorityExtractor> extractor = acs.getOauthExtractors()
-@@ -209,4 +330,3 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -209,4 +378,3 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
    }
  
  }

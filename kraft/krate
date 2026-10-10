@@ -436,6 +436,8 @@ prepare() {
   chmod 600 "$ENV_FILE"
   sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
   adopt_legacy_project
+  # Any `up` creates the identity network; refuse a subnet clash here, not with Docker's raw error.
+  identity_network_clash "${KRATE_COMMAND:-start}"
   generate_secrets
   if [[ -d "$MONITOR_DIR" ]]; then
     prepare_monitor_env
@@ -637,23 +639,27 @@ auth_configure_host() {
 # With a PingFederate settings file the same plan is written together with the
 # identity-provider plan (applied to the realm in the SSO phase).
 auth_configure() {
-  local sso_dir="$1" settings="" force=false viewer_messages=false arg public_url
+  local sso_dir="$1" settings="" force=false viewer_messages="" arg public_url
   shift
   for arg in "$@"; do
     case "$arg" in
       --force) force=true ;;
       --viewer-messages) viewer_messages=true ;;
+      --no-viewer-messages) viewer_messages=false ;;
       --local) ;;
-      -*) die "Usage: krate auth configure [settings.json] [--force] [--viewer-messages]" ;;
-      *) [[ -z "$settings" ]] || die "Usage: krate auth configure [settings.json] [--force] [--viewer-messages]"
+      -*) die "Usage: krate auth configure [settings.json] [--force] [--viewer-messages|--no-viewer-messages]" ;;
+      *) [[ -z "$settings" ]] || die "Usage: krate auth configure [settings.json] [--force] [--viewer-messages|--no-viewer-messages]"
          settings="$arg" ;;
     esac
   done
   require_env
   mkdir -p "$SCRIPT_DIR/auth/keycloak/truststores"
-  if $viewer_messages && [[ "$(env_value KAFKA_UI_VIEWER_MESSAGES)" != true ]]; then
+  if [[ "$viewer_messages" == true && "$(env_value KAFKA_UI_VIEWER_MESSAGES)" != true ]]; then
     set_env_file_value "$ENV_FILE" KAFKA_UI_VIEWER_MESSAGES true
     ok "Set KAFKA_UI_VIEWER_MESSAGES=true in .env (viewers may read message payloads)"
+  elif [[ "$viewer_messages" == false && "$(env_value KAFKA_UI_VIEWER_MESSAGES)" == true ]]; then
+    set_env_file_value "$ENV_FILE" KAFKA_UI_VIEWER_MESSAGES false
+    ok "Set KAFKA_UI_VIEWER_MESSAGES=false in .env (viewers no longer read message payloads)"
   fi
   if [[ -n "$settings" ]]; then
     [[ -f "$settings" ]] || die "Settings file not found: $settings"
@@ -694,7 +700,7 @@ cmd_auth() {
       source "$sso_dir/activate.sh"
       apply_auth "$sso_dir"
       ;;
-    *) die "Usage: krate auth {configure [settings.json] [--force] [--viewer-messages]|apply}" ;;
+    *) die "Usage: krate auth {configure [settings.json] [--force] [--viewer-messages|--no-viewer-messages]|apply}" ;;
   esac
 }
 
@@ -1700,17 +1706,22 @@ If that keeps failing, follow the volume-lost procedure in docs/identity-foundat
 
 # Wait until the identity service $1 reports healthy (IDENTITY_TIMEOUT); $2
 # names the command for the journal.
-identity_wait_healthy() {
-  local service="$1" command="$2" cid waited=0
-  cid="$(identity_container "$service")"
+# Returns 1 when the service is not healthy within IDENTITY_TIMEOUT (no exit).
+identity_health_wait() {
+  local cid waited=0
+  cid="$(identity_container "$1")"
   until [[ "$(container_health "$cid")" == healthy ]]; do
-    if (( waited >= IDENTITY_TIMEOUT )); then
-      identity_journal "$command" failed "$service not healthy within ${IDENTITY_TIMEOUT}s after restart"
-      die "Service $service did not become healthy within the ${IDENTITY_TIMEOUT}s timeout (IDENTITY_TIMEOUT). Check: krate logs $service"
-    fi
+    (( waited < IDENTITY_TIMEOUT )) || return 1
     sleep 3
     waited=$((waited + 3))
   done
+}
+
+identity_wait_healthy() {
+  local service="$1" command="$2"
+  identity_health_wait "$service" && return 0
+  identity_journal "$command" failed "$service not healthy within ${IDENTITY_TIMEOUT}s after restart"
+  die "Service $service did not become healthy within the ${IDENTITY_TIMEOUT}s timeout (IDENTITY_TIMEOUT). Check: krate logs $service"
 }
 
 # Reissue keycloak-db's server key and certificate under the existing CA (398
@@ -1731,10 +1742,25 @@ cmd_identity_renew_db_tls() {
   renewed="$(python3 "$(sso_dir)/identity.py" db-tls --renew-server --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls")" \
     || { identity_journal renew-db-tls failed "server certificate not reissued"; exit 1; }
   ok "$renewed"
+  local ca_renewed=false
+  [[ "$renewed" != "renewed CA and"* ]] || ca_renewed=true
   info "Restarting the identity database with the new certificate..."
-  identity_compose restart --no-deps keycloak-db
-  identity_wait_healthy keycloak-db renew-db-tls
-  if $keycloak_running; then
+  if ! identity_compose restart --no-deps keycloak-db || ! identity_health_wait keycloak-db; then
+    # The previous key and certificate are kept beside the new ones until this point.
+    warn "keycloak-db did not come back healthy with the new certificate; restoring the previous one"
+    python3 "$(sso_dir)/identity.py" db-tls --rollback --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" \
+      || die "Rollback failed: restore auth/keycloak/db-tls from a backup. Check: krate logs keycloak-db"
+    identity_compose restart --no-deps keycloak-db || true
+    identity_journal renew-db-tls "rolled back" "keycloak-db unhealthy with the renewed certificate; previous files restored"
+    die "Database TLS renewal rolled back; the previous certificate is in place. Check: krate logs keycloak-db"
+  fi
+  python3 "$(sso_dir)/identity.py" db-tls --discard-previous --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" >/dev/null
+  if $keycloak_running && $ca_renewed; then
+    info "The CA changed; restarting Keycloak so it trusts the new one..."
+    identity_compose restart --no-deps keycloak
+    identity_wait_healthy keycloak renew-db-tls
+    identity_verify_admin renew-db-tls
+  elif $keycloak_running; then
     until identity_ready; do
       tries=$((tries + 1))
       if (( tries >= 10 )); then
@@ -1749,8 +1775,8 @@ cmd_identity_renew_db_tls() {
   else
     warn "Keycloak is not running; it uses the renewed certificate on its next start (krate identity up)"
   fi
-  identity_journal renew-db-tls ok "server.crt reissued under the existing CA, ${renewed#renewed server certificate, }"
-  ok "Database TLS certificate renewed (${renewed#renewed server certificate, })"
+  identity_journal renew-db-tls ok "$renewed"
+  ok "Database TLS certificate renewed ($renewed)"
 }
 
 # The logrotate drop-in for the identity journal, rendered from
@@ -2180,8 +2206,6 @@ cmd_ui() {
   echo "  URL       https://${fqdn}${port_suffix}/"
   if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
     echo "  Sign-in   Keycloak (realm krate) — manage users with krate identity users"
-  elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "pingfederate.yml" ]]; then
-    echo "  Sign-in   PingFederate (company SSO)"
   else
     [[ -n "$user" ]] && echo "  Username  $user"
     [[ -n "$pass" ]] && echo "  Password  $pass"
@@ -2997,7 +3021,7 @@ cmd_help() {
   printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
   printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
   printf "  %-30s %s\n" "auth configure [FILE]" "Write auth/ui/runtime.yml (Keycloak login); FILE adds the PingFederate identity-provider plan"
-  printf "  %-30s %s\n" "  [--force] [--viewer-messages]" "Replace a differing runtime.yml; let viewers read message payloads"
+  printf "  %-30s %s\n" "  [--force] [--[no-]viewer-messages]" "Replace a differing runtime.yml; let viewers read message payloads (or stop)"
   printf "  %-30s %s\n" "auth apply"           "Validate and activate Kafbat authentication (runtime.yml needs: krate identity up)"
   printf "  %-30s %s\n" "identity up"          "Start Keycloak and its database; the first run creates admin and realm"
   printf "  %-30s %s\n" "identity status"      "Database health, Keycloak started/ready/live, realm; exit 1 if not ready"
