@@ -120,6 +120,7 @@ for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.con
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
 if [[ -n "$REPO_ARG" ]]; then
+  $STATIC || { echo "--repo runs the static block on that checkout; it cannot be combined with --no-static (drop one)" >&2; exit 2; }
   $BOUND && [[ "$CANDIDATE" != *"(stated"* ]] && { echo "--repo is for a bundle install without git; $ED is a git checkout, its static block runs there already" >&2; exit 2; }
   [[ -n "$CANDIDATE_ARG" ]] || { echo "--repo needs --candidate SHA (the edition directory has no git)" >&2; exit 2; }
   [[ -f "$REPO_ARG/Makefile" ]] || { echo "--repo $REPO_ARG has no Makefile" >&2; exit 2; }
