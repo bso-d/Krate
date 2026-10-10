@@ -407,21 +407,17 @@ def without_credentials(data: Any) -> Any:
     return data
 
 
-def runtime_summary(data, path, outcome):
-    """Human-readable description of a Kafbat plan; it receives a copy without credential keys."""
-    data = without_credentials(data)
-    client = data['auth']['oauth2']['client'][UI_REGISTRATION]
-    roles = {role['name']: role for role in data['rbac']['roles']}
-    viewer_topic = next(p for p in roles['viewer']['permissions'] if p['resource'] == 'topic')
+def runtime_summary(values, path, outcome):
+    """Human-readable description of a Kafbat plan, built from the plan's inputs (runtime_settings()),
+    never from the rendered plan: the plan carries the client-secret placeholder, and nothing that
+    held it may reach stdout (CodeQL clear-text logging)."""
     lines = [
         'Kafbat plan: Keycloak login only (no shared form login), roles from the groups claim',
-        '  issuer: ' + client['issuer-uri'],
-        '  clusters: ' + ', '.join(roles['viewer']['clusters']),
-        '  roles: ' + '; '.join(f"{name} <- group {role['subjects'][0]['value']}" for name, role in roles.items()),
-        '  viewer message payloads: ' + ('on' if 'messages_read' in viewer_topic['actions']
-                                         else f'off ({VIEWER_MESSAGES_KEY}=true opts in)'),
-        f"  session idle: {data['server']['reactive']['session']['timeout']} (cookie {UI_SESSION_COOKIE};"
-        ' from KEYCLOAK_SESSION_IDLE_MINUTES)',
+        '  issuer: ' + values['public_origin'] + '/identity/realms/' + REALM,
+        '  clusters: ' + ', '.join(values['clusters']),
+        f"  roles: viewer <- group {values['viewer_group']}; administrator <- group {values['admin_group']}",
+        '  viewer message payloads: ' + ('on' if values['viewer_messages'] else f'off ({VIEWER_MESSAGES_KEY}=true opts in)'),
+        f"  session idle: {values['session_idle_minutes']}m (cookie {UI_SESSION_COOKIE}; from KEYCLOAK_SESSION_IDLE_MINUTES)",
         '  placeholders for: KEYCLOAK_KAFBAT_CLIENT_SECRET (value stays in .env)',
         f'  {path}: {outcome}',
     ]
@@ -486,7 +482,8 @@ def plan(env_file, output, show=False):
 def runtime_plan(env_file, clusters, output, force=False, show=False):
     """Write Kafbat's runtime.yml; an existing file that differs is kept unless `force`."""
     env = read_env(env_file)
-    data = runtime(runtime_settings(env, clusters))
+    values = runtime_settings(env, clusters)
+    data = runtime(values)
     text = render(data)
     assert_redacted(text, env)
     path = Path(output)
@@ -495,7 +492,7 @@ def runtime_plan(env_file, clusters, output, force=False, show=False):
     changed = write_if_changed(path, text, 0o644)
     if show:
         sys.stdout.write(text)
-    print(runtime_summary(data, path, 'written' if changed else 'No changes'))
+    print(runtime_summary(values, path, 'written' if changed else 'No changes'))
     return data
 
 

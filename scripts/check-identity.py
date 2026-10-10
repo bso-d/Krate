@@ -1716,14 +1716,20 @@ cmd_identity_renew_db_tls
 
 
 def check_summaries(checks):
-    """S9: the realm and Kafbat summaries receive copies without credential keys."""
+    """S9: the realm summary receives a copy without credential keys; the Kafbat summary is built from the
+    plan's inputs and never touches the rendered plan (CodeQL alert 4: the plan holds the client-secret placeholder)."""
     e = checks.expect
     import inspect
-    for name in ('summary', 'runtime_summary'):
-        body = inspect.getsource(getattr(identity, name))
-        first = [line.strip() for line in body.splitlines()[1:] if line.strip() and not line.strip().startswith(('"""', "'''"))]
-        e(bool(first) and first[0] == 'data = without_credentials(data)',
-          f'sso/identity.py: {name}() must start with data = without_credentials(data) (CodeQL clear-text logging)')
+    body = inspect.getsource(identity.summary)
+    first = [line.strip() for line in body.splitlines()[1:] if line.strip() and not line.strip().startswith(('"""', "'''"))]
+    e(bool(first) and first[0] == 'data = without_credentials(data)',
+      'sso/identity.py: summary() must start with data = without_credentials(data) (CodeQL clear-text logging)')
+    runtime_body = inspect.getsource(identity.runtime_summary)
+    e(runtime_body.startswith('def runtime_summary(values, path, outcome):') and 'data' not in runtime_body
+      and 'UI_SECRET' not in runtime_body and "'client-secret'" not in runtime_body,
+      'sso/identity.py: runtime_summary() takes the runtime_settings() values, never the rendered plan')
+    plan_body = inspect.getsource(identity.runtime_plan)
+    e('print(runtime_summary(values, path,' in plan_body, 'sso/identity.py: runtime_plan prints runtime_summary(values, ...), not the plan data')
 
     def keys(value):
         if isinstance(value, dict):
@@ -1752,9 +1758,12 @@ def check_summaries(checks):
     finally:
         identity.without_credentials = original
     realm_copies = [result for _, result in seen if isinstance(result, dict) and 'clients' in result]
-    runtime_copies = [result for _, result in seen if isinstance(result, dict) and 'auth' in result]
-    e(bool(realm_copies) and bool(runtime_copies), 'identity.plan and runtime_plan must pass their data through without_credentials before summarising')
-    for result in realm_copies + runtime_copies:
+    e(bool(realm_copies), 'identity.plan must pass its data through without_credentials before summarising')
+    printed = out.getvalue()
+    e('Kafbat plan:' in printed and 'client-secret' not in printed and '${' not in printed
+      and not any(secret in printed for secret in SYNTHETIC_SECRETS),
+      'the printed Kafbat summary carries neither a secret value nor the client-secret placeholder')
+    for result in realm_copies:
         leaked = {key for key in keys(result) if 'secret' in key.lower() or 'password' in key.lower()}
         e(not leaked, f'a summary received credential keys {sorted(leaked)}')
 
