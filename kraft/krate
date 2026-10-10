@@ -593,41 +593,108 @@ ensure_ping_secret() {
   ok "Saved PING_KEYCLOAK_CLIENT_SECRET in .env"
 }
 
+# Kafbat's cluster names for the RBAC roles: from kafbat.yml when the edition
+# has one beside the CLI (EPC; Spring placeholders resolved from .env), else
+# from the Compose file's KAFKA_CLUSTERS_<n>_NAME entries. One name per line.
+ui_clusters() {
+  python3 - "$SCRIPT_DIR/kafbat.yml" "$COMPOSE_FILE" "$ENV_FILE" <<'PY'
+import os, re, sys
+kafbat, compose, env_file = sys.argv[1:4]
+env = {}
+for line in open(env_file):
+    key, sep, value = line.strip().partition('=')
+    if sep and not key.startswith('#'):
+        env[key.strip()] = value.strip().strip('"\'')
+if os.path.isfile(kafbat):
+    names = [re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}', lambda m: env.get(m.group(1)) or m.group(2) or '', name)
+             for name in re.findall(r'^\s*-\s*name:\s*"?([^"\n]+?)"?\s*$', open(kafbat).read(), re.M)]
+else:
+    names = re.findall(r'^\s*KAFKA_CLUSTERS_\d+_NAME:\s*"?([^"\n]+?)"?\s*$', open(compose).read(), re.M)
+print('\n'.join(names))
+PY
+}
+
+# Derived .env values and the certificate check shared by both configure paths.
+auth_configure_host() {
+  local public_url="$1" host fqdn
+  if [[ -z "$(env_value KAFKA_UI_FQDN)" ]]; then
+    host="${public_url#*://}"
+    host="${host%%[:/]*}"
+    set_env_file_value "$ENV_FILE" KAFKA_UI_FQDN "$host"
+    ok "Set KAFKA_UI_FQDN=$host in .env"
+  fi
+  fqdn="$(get_fqdn)"
+  if [[ -f "$CERT_CRT" ]] && ! openssl x509 -in "$CERT_CRT" -noout -checkhost "$fqdn" 2>/dev/null | grep -q 'does match'; then
+    warn "certs/server.crt does not cover $fqdn. Install the CA-issued certificate and key in certs/, or run: krate gen-cert"
+  fi
+  echo ""
+  info "Next: krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml, then krate auth apply (Keycloak must be running: krate identity up)"
+}
+
+# Plan Kafbat's Keycloak login, auth/ui/runtime.yml. Without a settings file
+# the realm is the only issuer (local Keycloak users): the plan is a pure
+# function of .env and this edition's cluster list, written by sso/identity.py.
+# With a PingFederate settings file the same plan is written together with the
+# identity-provider plan (applied to the realm in the SSO phase).
+auth_configure() {
+  local sso_dir="$1" settings="" force=false viewer_messages=false arg public_url
+  shift
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=true ;;
+      --viewer-messages) viewer_messages=true ;;
+      --local) ;;
+      -*) die "Usage: krate auth configure [settings.json] [--force] [--viewer-messages]" ;;
+      *) [[ -z "$settings" ]] || die "Usage: krate auth configure [settings.json] [--force] [--viewer-messages]"
+         settings="$arg" ;;
+    esac
+  done
+  require_env
+  mkdir -p "$SCRIPT_DIR/auth/keycloak/truststores"
+  if $viewer_messages && [[ "$(env_value KAFKA_UI_VIEWER_MESSAGES)" != true ]]; then
+    set_env_file_value "$ENV_FILE" KAFKA_UI_VIEWER_MESSAGES true
+    ok "Set KAFKA_UI_VIEWER_MESSAGES=true in .env (viewers may read message payloads)"
+  fi
+  if [[ -n "$settings" ]]; then
+    [[ -f "$settings" ]] || die "Settings file not found: $settings"
+    if $force; then
+      die "--force replaces the local plan only; remove auth/ui/runtime.yml and auth/keycloak/pingfederate-idp.json before rerunning with a settings file"
+    fi
+    python3 "$sso_dir/configure-dual.py" --settings "$settings" --env-file "$ENV_FILE" --output-dir "$SCRIPT_DIR/auth"
+    # Derive the .env values that follow from public_url instead of asking for them.
+    public_url="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["public_url"].rstrip("/"))' "$settings")"
+    set_env_file_value "$ENV_FILE" KEYCLOAK_PUBLIC_URL "$public_url/identity"
+    ok "Set KEYCLOAK_PUBLIC_URL=$public_url/identity in .env"
+  else
+    local -a clusters=() args=()
+    mapfile -t clusters < <(ui_clusters)
+    [[ ${#clusters[@]} -gt 0 ]] || die "No Kafbat cluster name found in $SCRIPT_DIR/kafbat.yml or ${COMPOSE_FILE##*/}"
+    args=(runtime --env-file "$ENV_FILE" --clusters "${clusters[@]}" --output "$SCRIPT_DIR/auth/ui/runtime.yml")
+    if $force; then args+=(--force); fi
+    python3 "$sso_dir/identity.py" "${args[@]}"
+    public_url="$(env_value KEYCLOAK_PUBLIC_URL)"
+    public_url="${public_url%/}"
+    public_url="${public_url%/identity}"
+  fi
+  auth_configure_host "$public_url"
+}
+
 cmd_auth() {
-  local action="${1:-}" sso_dir="$SCRIPT_DIR/sso"
-  [[ -d "$sso_dir" ]] || sso_dir="$SCRIPT_DIR/../sso"
+  local action="${1:-}" sso_dir
+  sso_dir="$(sso_dir)"
+  shift || true
   case "$action" in
-    configure)
-      [[ $# -eq 2 ]] || die "Usage: krate auth configure <settings.json>"
-      python3 "$sso_dir/configure-dual.py" --settings "$2" --output-dir "$SCRIPT_DIR/auth"
-      mkdir -p "$SCRIPT_DIR/auth/keycloak/truststores"
-      # Derive the .env values that follow from public_url instead of asking for them.
-      require_env
-      local public_url
-      public_url="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["public_url"].rstrip("/"))' "$2")"
-      set_env_file_value "$ENV_FILE" KEYCLOAK_PUBLIC_URL "$public_url/identity"
-      ok "Set KEYCLOAK_PUBLIC_URL=$public_url/identity in .env"
-      if [[ -z "$(env_value KAFKA_UI_FQDN)" ]]; then
-        local host="${public_url#*://}"
-        host="${host%%[:/]*}"
-        set_env_file_value "$ENV_FILE" KAFKA_UI_FQDN "$host"
-        ok "Set KAFKA_UI_FQDN=$host in .env"
-      fi
-      local fqdn
-      fqdn="$(get_fqdn)"
-      if [[ -f "$CERT_CRT" ]] && ! openssl x509 -in "$CERT_CRT" -noout -checkhost "$fqdn" 2>/dev/null | grep -q 'does match'; then
-        warn "certs/server.crt does not cover $fqdn. Install the CA-issued certificate and key in certs/, or run: krate gen-cert"
-      fi
-      ;;
+    configure) auth_configure "$sso_dir" "$@" ;;
     apply)
       [[ -f "$sso_dir/activate.sh" ]] || die "Missing packaged SSO activation helper"
       prepare
-      ensure_ping_secret
+      # PingFederate's secret is needed only once its identity-provider plan exists.
+      if [[ -f "$SCRIPT_DIR/auth/keycloak/pingfederate-idp.json" ]]; then ensure_ping_secret; fi
       # shellcheck disable=SC1091
       source "$sso_dir/activate.sh"
       apply_auth "$sso_dir"
       ;;
-    *) die "Usage: krate auth {configure <settings.json>|apply}" ;;
+    *) die "Usage: krate auth {configure [settings.json] [--force] [--viewer-messages]|apply}" ;;
   esac
 }
 
@@ -1113,33 +1180,36 @@ identity_bootstrap_master() {
   printf '%s\n' "$bootstrap_log" | grep -E 'KC-SERVICES0077|temporary admin' | sed 's/^/  /' || true
 }
 
-# The krate-ui client's URLs follow KEYCLOAK_PUBLIC_URL: when the realm plan
-# and Keycloak differ in redirectUris, webOrigins or the post-logout redirect,
-# Keycloak is updated from the plan. Nothing else is reconciled.
+# The krate-ui client follows .env: when the realm plan and Keycloak differ in
+# redirectUris, webOrigins or the client attributes (PKCE, the post-logout
+# URIs, OIDC back-channel logout to Kafbat), Keycloak is updated from the
+# plan. Nothing else is reconciled.
 identity_reconcile_ui_urls() {
-  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" id wanted current
+  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" id wanted keys current
   wanted="$(python3 -c '
 import json, sys
 client = next(c for c in json.load(open(sys.argv[1]))["clients"] if c["clientId"] == "krate-ui")
 print(json.dumps({"redirectUris": sorted(client["redirectUris"]), "webOrigins": sorted(client["webOrigins"]),
-                  "attributes": {"post.logout.redirect.uris": client["attributes"]["post.logout.redirect.uris"]}}, sort_keys=True))' "$plan")" \
+                  "attributes": client["attributes"]}, sort_keys=True))' "$plan")" \
     || die "Cannot read the krate-ui client from $plan"
+  keys="$(python3 -c 'import json, sys; print(",".join(sorted(json.loads(sys.argv[1])["attributes"])))' "$wanted")"
   kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
   id="$(kcadm_client_id "$IDENTITY_REALM" krate-ui)" || die "Keycloak query failed"
   [[ -n "$id" ]] || die "Client krate-ui not found in realm $IDENTITY_REALM"
-  current="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" --fields redirectUris,webOrigins,'attributes(post.logout.redirect.uris)' \
+  current="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" --fields redirectUris,webOrigins,"attributes($keys)" \
     | python3 -c '
 import json, sys
 client = json.load(sys.stdin)
+attributes = client.get("attributes") or {}
 print(json.dumps({"redirectUris": sorted(client.get("redirectUris", [])), "webOrigins": sorted(client.get("webOrigins", [])),
-                  "attributes": {"post.logout.redirect.uris": client.get("attributes", {}).get("post.logout.redirect.uris", "")}}, sort_keys=True))')" \
+                  "attributes": {key: attributes.get(key, "") for key in sys.argv[1].split(",")}}, sort_keys=True))' "$keys")" \
     || die "Keycloak query failed"
   if [[ "$current" != "$wanted" ]]; then
     printf '%s\n' "$wanted" | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m \
       || die "Keycloak refused the krate-ui client update"
-    identity_journal up reconciled "krate-ui urls"
+    identity_journal up reconciled "krate-ui urls and attributes"
     IDENTITY_CHANGED=true
-    ok "krate-ui client URLs updated to match KEYCLOAK_PUBLIC_URL"
+    ok "krate-ui client URLs and logout attributes updated from the realm plan"
   fi
   kcadm_logout
 }
@@ -2109,9 +2179,7 @@ cmd_ui() {
   sep
   echo "  URL       https://${fqdn}${port_suffix}/"
   if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "runtime.yml" ]]; then
-    echo "  Sign-in   Shared app login (Admin) or SSO via Keycloak"
-    [[ -n "$user" ]] && echo "  Username  $user   (shared Admin login)"
-    [[ -n "$pass" ]] && echo "  Password  $pass"
+    echo "  Sign-in   Keycloak (realm krate) — manage users with krate identity users"
   elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == "pingfederate.yml" ]]; then
     echo "  Sign-in   PingFederate (company SSO)"
   else
@@ -2928,7 +2996,8 @@ cmd_help() {
   printf "  %-30s %s\n" "lag"                  "Summary of all consumer group lag"
   printf "  %-30s %s\n" "lag <group>"          "Per-partition lag for a specific group"
   printf "  %-30s %s\n" "lag --topic <topic>"  "Lag filtered to a specific topic"
-  printf "  %-30s %s\n" "auth configure FILE"  "Write auth/ui/runtime.yml and auth/keycloak/pingfederate-idp.json (the realm is owned by identity up)"
+  printf "  %-30s %s\n" "auth configure [FILE]" "Write auth/ui/runtime.yml (Keycloak login); FILE adds the PingFederate identity-provider plan"
+  printf "  %-30s %s\n" "  [--force] [--viewer-messages]" "Replace a differing runtime.yml; let viewers read message payloads"
   printf "  %-30s %s\n" "auth apply"           "Validate and activate Kafbat authentication (runtime.yml needs: krate identity up)"
   printf "  %-30s %s\n" "identity up"          "Start Keycloak and its database; the first run creates admin and realm"
   printf "  %-30s %s\n" "identity status"      "Database health, Keycloak started/ready/live, realm; exit 1 if not ready"
@@ -2971,6 +3040,7 @@ cmd_help() {
   echo "  krate lag my-group --topic payments   # specific group + topic"
   echo "  krate identity up                     # start Keycloak; first run creates the admin"
   echo "  krate identity users add jane --admin # realm user with a temporary password"
+  echo "  krate auth configure                  # Kafbat login through Keycloak; then config set KAFKA_UI_AUTH_CONFIG=runtime.yml, auth apply"
   echo "  krate uninstall --purge               # full teardown + data wipe"
   echo ""
   echo -e "${BOLD}SERVICES${RESET}"

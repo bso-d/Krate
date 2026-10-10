@@ -14,8 +14,6 @@
     "epc-appkfk-01",
     "epc-appkfk-02"
   ],
-  "viewer_messages": true,
-  "session_idle_minutes": 30,
   "authorization_url": "https://ping.example.internal/as/authorization.oauth2",
   "token_url": "https://ping.example.internal/as/token.oauth2",
   "userinfo_url": "https://ping.example.internal/idp/userinfo.openid",

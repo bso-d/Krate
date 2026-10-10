@@ -35,4 +35,10 @@ apply_auth() {
     python3 "$sso_dir/probe.py" --directory "$SCRIPT_DIR"
   fi
   ok "Authentication applied ($mode). Broker services and stored data were unchanged."
+  # The login model now in force, so nobody looks for a form that is not there.
+  if [[ "$mode" == runtime.yml ]]; then
+    echo "  Sign-in: Keycloak (realm krate) — manage users with krate identity users; there is no shared form login"
+  else
+    echo "  Sign-in: shared Admin login (KAFKA_UI_USER / KAFKA_UI_PASSWORD in .env)"
+  fi
 }

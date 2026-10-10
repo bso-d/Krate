@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Plan the local Keycloak realm and generate database TLS material for Krate identity.
+"""Plan the local Keycloak realm, Kafbat's Keycloak login and the database TLS material for Krate identity.
 
-Secrets never enter this program's output: the realm plan carries ``${VAR}``
-placeholders that Keycloak resolves from its environment at import time.
+Secrets never enter this program's output: the realm plan and Kafbat's
+runtime.yml carry ``${VAR}`` placeholders that Keycloak and Kafbat resolve from
+their container environment.
 """
 import argparse
 import hashlib
@@ -30,6 +31,23 @@ PLAN_PLACEHOLDER_KEYS = ('KEYCLOAK_CLI_CLIENT_SECRET', 'KEYCLOAK_KAFBAT_CLIENT_S
 GROUPS_CLAIM = 'groups'
 # Default client scopes without offline_access: no client may mint offline tokens.
 DEFAULT_SCOPES = ['profile', 'email', 'roles', 'web-origins', 'basic']
+# Kafbat's side of the same client (auth/ui/runtime.yml): one OAuth2 registration
+# named `keycloak`, no form login, roles mapped from the realm groups only.
+UI_REGISTRATION = 'keycloak'
+UI_OIDC_SCOPES = ['openid', 'profile', 'email']
+UI_CLIENT_NAME = 'Keycloak'
+# Kafbat talks to Keycloak over the identity network; browsers use the public URL.
+UI_INTERNAL_URL = 'http://keycloak:8080/identity'
+# Spring Security's back-channel logout endpoint ({baseUrl}/logout/connect/back-channel/{registrationId}),
+# reached by Keycloak over the identity network. The handler matches sessions on this cookie name.
+UI_BACKCHANNEL_LOGOUT_URL = 'http://kafka-ui:8080/logout/connect/back-channel/' + UI_REGISTRATION
+UI_SESSION_COOKIE = 'SESSION'
+# The site opts viewers into message payloads with this .env key (default: off).
+VIEWER_MESSAGES_KEY = 'KAFKA_UI_VIEWER_MESSAGES'
+RBAC_RESOURCES = ('applicationconfig', 'clusterconfig', 'topic', 'consumer', 'schema', 'connect',
+                  'connector', 'acl', 'audit', 'client_quotas')
+PATTERN_RESOURCES = ('topic', 'consumer', 'schema', 'connect', 'connector')
+CLUSTER_NAME = re.compile(r'[A-Za-z0-9_.-]+')
 DEFAULTS = {
     'KEYCLOAK_VIEWER_GROUP': 'KRATE_VIEWERS',
     'KEYCLOAK_ADMIN_GROUP': 'KRATE_ADMINS',
@@ -164,7 +182,58 @@ def settings(env):
     }
 
 
+def env_flag(env, key):
+    """A true/false .env switch; empty or absent means false."""
+    value = (env.get(key) or 'false').strip().lower()
+    if value not in ('true', 'false'):
+        raise ValueError(key + ' must be true or false')
+    return value == 'true'
+
+
+def cluster_names(clusters):
+    """Kafbat cluster names for the RBAC roles: explicit, unique, plain tokens (no wildcards)."""
+    names = list(clusters or [])
+    if not names or any(not isinstance(name, str) or not CLUSTER_NAME.fullmatch(name) for name in names):
+        raise ValueError('clusters must be explicit cluster names from letters, digits, . _ - (no wildcards)')
+    if len(set(names)) != len(names):
+        raise ValueError('clusters must be unique')
+    return names
+
+
+def runtime_settings(env, clusters, origin=None):
+    """Inputs of the Kafbat plan from a parsed .env mapping and the edition's cluster list.
+
+    `origin` overrides KEYCLOAK_PUBLIC_URL's origin (the site file's public_url in
+    the PingFederate flow, which the CLI then writes to .env).
+    """
+    viewer_group, admin_group = group_names(env)
+    return {
+        'public_origin': origin or public_origin(env.get('KEYCLOAK_PUBLIC_URL')),
+        'viewer_group': viewer_group,
+        'admin_group': admin_group,
+        'session_idle_minutes': _positive(env, 'KEYCLOAK_SESSION_IDLE_MINUTES'),
+        'clusters': cluster_names(clusters),
+        'viewer_messages': env_flag(env, VIEWER_MESSAGES_KEY),
+    }
+
+
 # ─── Realm plan (pure) ─────────────────────────────────────────────────────────
+
+def ui_client_attributes(origin):
+    """krate-ui client attributes: PKCE, the exact post-logout targets, OIDC back-channel logout to Kafbat.
+
+    Keycloak stores multi-valued client attributes as one string joined with
+    `##` (Constants.CFG_DELIMITER); the two values are the origin with and
+    without a trailing slash, so no wildcard is accepted by the logout endpoint.
+    """
+    return {
+        'pkce.code.challenge.method': 'S256',
+        'post.logout.redirect.uris': origin + '##' + origin + '/',
+        'backchannel.logout.url': UI_BACKCHANNEL_LOGOUT_URL,
+        'backchannel.logout.session.required': 'true',
+        'backchannel.logout.revoke.offline.tokens': 'false',
+    }
+
 
 def realm(values):
     """Local-mode realm from settings(): local users, two groups, two clients, no identity providers."""
@@ -177,8 +246,7 @@ def realm(values):
         'directAccessGrantsEnabled': False, 'serviceAccountsEnabled': False,
         'redirectUris': [origin + '/login/oauth2/code/keycloak'],
         'webOrigins': [origin],
-        'attributes': {'pkce.code.challenge.method': 'S256',
-                       'post.logout.redirect.uris': origin + '/*'},
+        'attributes': ui_client_attributes(origin),
         'defaultClientScopes': list(DEFAULT_SCOPES),
         'optionalClientScopes': [],
         'protocolMappers': [{
@@ -248,6 +316,87 @@ def summary(data, path, outcome):
     return '\n'.join(lines)
 
 
+
+# ─── Kafbat plan (pure) ────────────────────────────────────────────────────────
+
+def kafbat_role(name, group, clusters, admin=False, viewer_messages=False):
+    """One Kafbat RBAC role whose only subject is a realm group carried in the `groups` claim.
+
+    The viewer gets `view` on every resource and `analysis_view` on topics;
+    `messages_read` only when the site opted in. KSQL has `execute` only, which
+    also permits mutations, so only the administrator gets it.
+    """
+    permissions = []
+    for resource in RBAC_RESOURCES:
+        permission = {'resource': resource, 'actions': 'all' if admin else ['view']}
+        if resource in PATTERN_RESOURCES:
+            permission['value'] = '.*'
+        if resource == 'topic' and not admin:
+            permission['actions'] = ['view', 'analysis_view'] + (['messages_read'] if viewer_messages else [])
+        permissions.append(permission)
+    if admin:
+        permissions.append({'resource': 'ksql', 'actions': 'all'})
+    return {
+        'name': name, 'clusters': list(clusters),
+        'subjects': [{'provider': 'oauth', 'type': 'role', 'value': group, 'regex': False}],
+        'permissions': permissions,
+    }
+
+
+def runtime(values):
+    """Kafbat's auth/ui/runtime.yml from runtime_settings(): Keycloak login only, no shared form login.
+
+    The Keycloak client secret appears as the `${KEYCLOAK_KAFBAT_CLIENT_SECRET}`
+    placeholder, which Kafbat resolves from its container environment. The
+    session cookie is named so the back-channel logout handler can end sessions,
+    and its idle timeout is the realm's (one source: KEYCLOAK_SESSION_IDLE_MINUTES).
+    """
+    origin = values['public_origin']
+    realm_url = origin + '/identity/realms/' + REALM
+    internal = UI_INTERNAL_URL + '/realms/' + REALM + '/protocol/openid-connect/'
+    client = {
+        'provider': UI_REGISTRATION, 'client-id': UI_CLIENT, 'client-secret': UI_SECRET,
+        'client-name': UI_CLIENT_NAME, 'scope': list(UI_OIDC_SCOPES), 'issuer-uri': realm_url,
+        'redirect-uri': origin + '/login/oauth2/code/' + UI_REGISTRATION,
+        'authorization-grant-type': 'authorization_code', 'user-name-attribute': 'sub',
+        'custom-params': {'type': 'oauth', 'roles-field': GROUPS_CLAIM},
+        'authorization-uri': realm_url + '/protocol/openid-connect/auth',
+        'token-uri': internal + 'token',
+        'user-info-uri': internal + 'userinfo',
+        'jwk-set-uri': internal + 'certs',
+    }
+    roles = [kafbat_role('viewer', values['viewer_group'], values['clusters'], False, values['viewer_messages']),
+             kafbat_role('administrator', values['admin_group'], values['clusters'], True)]
+    return {
+        'server': {'reactive': {'session': {
+            'timeout': f"{values['session_idle_minutes']}m",
+            'cookie': {'name': UI_SESSION_COOKIE, 'secure': True, 'http-only': True, 'same-site': 'lax'},
+        }}},
+        'auth': {'type': 'OAUTH2', 'oauth2': {'require-mapped-role': True, 'client': {UI_REGISTRATION: client}}},
+        'rbac': {'roles': roles},
+    }
+
+
+def runtime_summary(data, path, outcome):
+    """Human-readable description of a Kafbat plan; it never touches a credential field."""
+    client = data['auth']['oauth2']['client'][UI_REGISTRATION]
+    roles = {role['name']: role for role in data['rbac']['roles']}
+    viewer_topic = next(p for p in roles['viewer']['permissions'] if p['resource'] == 'topic')
+    lines = [
+        'Kafbat plan: Keycloak login only (no shared form login), roles from the groups claim',
+        '  issuer: ' + client['issuer-uri'],
+        '  clusters: ' + ', '.join(roles['viewer']['clusters']),
+        '  roles: ' + '; '.join(f"{name} <- group {role['subjects'][0]['value']}" for name, role in roles.items()),
+        '  viewer message payloads: ' + ('on' if 'messages_read' in viewer_topic['actions']
+                                         else f'off ({VIEWER_MESSAGES_KEY}=true opts in)'),
+        f"  session idle: {data['server']['reactive']['session']['timeout']} (cookie {UI_SESSION_COOKIE};"
+        ' from KEYCLOAK_SESSION_IDLE_MINUTES)',
+        '  placeholders for: KEYCLOAK_KAFBAT_CLIENT_SECRET (value stays in .env)',
+        f'  {path}: {outcome}',
+    ]
+    return '\n'.join(lines)
+
+
 # ─── Writers ───────────────────────────────────────────────────────────────────
 
 def write_file(path, content, mode):
@@ -299,6 +448,23 @@ def plan(env_file, output, show=False):
     if show:
         sys.stdout.write(text)
     print(summary(data, output, 'written' if changed else 'No changes'))
+    return data
+
+
+
+def runtime_plan(env_file, clusters, output, force=False, show=False):
+    """Write Kafbat's runtime.yml; an existing file that differs is kept unless `force`."""
+    env = read_env(env_file)
+    data = runtime(runtime_settings(env, clusters))
+    text = render(data)
+    assert_redacted(text, env)
+    path = Path(output)
+    if path.is_file() and path.read_bytes() != text.encode() and not force:
+        raise ValueError(f'{path} exists and differs from the plan; review it, then rerun with --force to replace it')
+    changed = write_if_changed(path, text, 0o644)
+    if show:
+        sys.stdout.write(text)
+    print(runtime_summary(data, path, 'written' if changed else 'No changes'))
     return data
 
 
@@ -404,6 +570,12 @@ def cmd_plan(args):
     return 0
 
 
+
+def cmd_runtime(args):
+    runtime_plan(args.env_file, args.clusters, args.output, args.force, args.show)
+    return 0
+
+
 def cmd_db_tls(args):
     if args.renew_server:
         print(f'renewed server certificate, valid until {renew_server(args.output_dir)}')
@@ -481,6 +653,13 @@ def main():
     planner.add_argument('--output', type=Path, required=True)
     planner.add_argument('--print', dest='show', action='store_true', help='also print the plan JSON')
     planner.set_defaults(func=cmd_plan)
+    kafbat = commands.add_parser('runtime', help="write Kafbat's auth/ui/runtime.yml (Keycloak login) from .env values")
+    kafbat.add_argument('--env-file', type=Path, required=True)
+    kafbat.add_argument('--clusters', nargs='+', required=True, metavar='NAME', help='Kafbat cluster names the roles apply to')
+    kafbat.add_argument('--output', type=Path, required=True)
+    kafbat.add_argument('--force', action='store_true', help='replace an existing runtime.yml that differs from the plan')
+    kafbat.add_argument('--print', dest='show', action='store_true', help='also print the plan JSON')
+    kafbat.set_defaults(func=cmd_runtime)
     tls = commands.add_parser('db-tls', help='generate CA, server certificate and pg_hba.conf for keycloak-db')
     tls.add_argument('--output-dir', type=Path, required=True)
     tls.add_argument('--renew-server', action='store_true',

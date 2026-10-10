@@ -225,6 +225,7 @@ Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`)
 | `./krate identity up` | Starts the Keycloak identity service and its database, creates its admin on first start |
 | `./krate identity status` / `./krate identity users list` | Shows identity service health; lists local users |
 | `./krate identity renew-db-tls` / `./krate identity logrotate --install` | Renews the identity database certificate; hands the identity journal to the host's logrotate |
+| `./krate auth configure [--force] [--viewer-messages]` / `./krate auth apply` | Plans Kafbat's Keycloak login (`auth/ui/runtime.yml`) from `.env`; validates and applies it to the UI |
 | `./krate help` | Lists the available commands |
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
@@ -257,9 +258,10 @@ inventory of projects, ports, volumes and credentials, the trust boundaries,
 every procedure and the upgrade steps for a Keycloak database from before
 `krate identity`.
 
-The SSO integration uses the same dark Kafbat login page for the shared Admin
-account and Keycloak SSO. Keycloak can connect to PingFederate; AD groups then
-determine Viewer and Admin access. SSO requires Compose 2.20.2 or newer.
+With `KAFKA_UI_AUTH_CONFIG=runtime.yml` Kafbat signs users in through Keycloak
+only (`./krate auth configure` plans it from `.env`; no shared form login; the
+realm groups decide Viewer and Admin access). Keycloak can connect to
+PingFederate in Phase 3. SSO requires Compose 2.20.2 or newer.
 `./krate auth apply` validates the installation and reconciles only the UI
 service, using locally loaded images. It does not start Keycloak: when
 Keycloak is not ready it stops and tells you to run `./krate identity up`.

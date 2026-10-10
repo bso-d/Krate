@@ -21,6 +21,8 @@ OPTIONAL_SECRETS = ('PING_KEYCLOAK_CLIENT_SECRET',)
 INSECURE = ('', 'REPLACE_ME', 'changeme')
 TLS_DIR = 'auth/keycloak/db-tls'
 REALM_FILE = 'auth/keycloak/krate-realm.json'
+RUNTIME_FILE = 'auth/ui/runtime.yml'
+UI_AUTH_DIR = '/etc/krate/auth'
 IDENTITY_NETWORK = 'identity'
 CLUSTER_NETWORK = 'kafka-network'
 # Warn this long before the database server certificate expires (seconds); refuse within one day.
@@ -65,42 +67,35 @@ def validate(root, mode, config):
         if not (root / 'auth/ui/local.yml').is_file():
             raise ValueError('Missing shared-login configuration')
         return
+    # runtime.yml: Kafbat signs users in through the Keycloak realm only.
     site = identity.read_env(root / '.env')
     validate_names(site)
-    runtime = json.loads((root / 'auth/ui/runtime.yml').read_text())
+    try:
+        origin = identity.public_origin(site.get('KEYCLOAK_PUBLIC_URL'))
+    except ValueError as exc:
+        raise Preflight(str(exc)) from None
+    secrets = identity_secrets(site)
+    validate_runtime(root, site, origin)
     # The realm file is the local plan written by `krate identity up`; identity providers are
     # applied to the running realm separately, so their absence here is expected.
-    realm = json.loads((root / REALM_FILE).read_text())
-    client = runtime['auth']['oauth2']['client']['keycloak']
-    ui_clients = [client for client in realm['clients'] if client.get('clientId') == 'krate-ui']
-    public = ui_clients[0]['webOrigins'][0].rstrip('/')
-    host = urlsplit(public).hostname
-    if urlsplit(public).scheme != 'https' or not host:
-        raise ValueError('The public application URL must use HTTPS')
+    validate_realm(root, origin, secrets)
+    validate_ui_mount(root, services['kafka-ui'])
+    host = urlsplit(origin).hostname
     match = subprocess.check_output(['openssl', 'x509', '-in', str(cert), '-checkhost', host, '-noout'], text=True)
     if 'does match certificate' not in match:
-        raise ValueError('TLS certificate does not match the public hostname')
-    expected_issuer = public + '/identity/realms/krate'
-    if client['issuer-uri'] != expected_issuer or client['redirect-uri'] != public + '/login/oauth2/code/keycloak':
-        raise ValueError('Kafbat issuer/callback does not match the imported realm')
+        raise Preflight('TLS certificate does not match the public hostname')
     kc = services['keycloak']['environment']
-    if kc.get('KC_HOSTNAME') != public + '/identity':
-        raise ValueError('KEYCLOAK_PUBLIC_URL must match the generated public_url plus /identity')
+    if kc.get('KC_HOSTNAME') != origin + '/identity':
+        raise Preflight('Rendered KC_HOSTNAME differs from KEYCLOAK_PUBLIC_URL in .env; clear conflicting shell environment variables')
     # A runtime.yml `up` renders the sso profile, so the database TLS contract applies here too.
     if kc.get('KC_DB_TLS_MODE') != 'verify-server':
         raise Preflight('keycloak must render KC_DB_TLS_MODE=verify-server')
     validate_networks(config)
     validate_db_tls(root)
-    # The bootstrap admin is exported only by `krate identity up` on a pristine database;
-    # the permanent admin password lives in .env. The realm also carries the krate-cli secret.
-    secrets = [site.get('KEYCLOAK_ADMIN_PASSWORD', '')] + [kc.get(key, '') for key in (
-        'KC_DB_PASSWORD', 'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'PING_KEYCLOAK_CLIENT_SECRET', 'KEYCLOAK_CLI_CLIENT_SECRET')]
-    if any(len(value) < 16 or value in ('REPLACE_ME', 'changeme') for value in secrets):
-        raise ValueError('Set all five identity secrets to unique values of at least 16 characters')
-    if len(set(secrets + [password])) != 6:
-        raise ValueError('Identity secrets and shared Admin password must be different')
-    if ui.get('KEYCLOAK_KAFBAT_CLIENT_SECRET') != kc['KEYCLOAK_KAFBAT_CLIENT_SECRET']:
-        raise ValueError('Kafbat and Keycloak client secrets differ')
+    # Kafbat resolves ${KEYCLOAK_KAFBAT_CLIENT_SECRET} from its environment; both sides must carry .env's value.
+    expected = secrets['KEYCLOAK_KAFBAT_CLIENT_SECRET']
+    if ui.get('KEYCLOAK_KAFBAT_CLIENT_SECRET') != expected or kc.get('KEYCLOAK_KAFBAT_CLIENT_SECRET') != expected:
+        raise Preflight('Rendered KEYCLOAK_KAFBAT_CLIENT_SECRET differs from .env; clear conflicting shell environment variables')
 
 
 def secure(value):
@@ -213,6 +208,74 @@ def validate_networks(config):
         raise Preflight('KRATE_IDENTITY_PROXY_IP must be a host address inside KRATE_IDENTITY_SUBNET')
 
 
+
+def validate_ui_mount(root, service):
+    """kafka-ui must read runtime.yml from this installation's auth/ui directory."""
+    if not (root / RUNTIME_FILE).is_file():
+        raise Preflight(f'Missing {RUNTIME_FILE}; run krate auth configure')
+    expected = (root / 'auth/ui').resolve()
+    for mount in service.get('volumes') or []:
+        if not isinstance(mount, dict) or mount.get('target') != UI_AUTH_DIR:
+            continue
+        if mount.get('type') == 'bind' and Path(mount.get('source', '')).resolve() == expected and mount.get('read_only'):
+            return
+    raise Preflight(f'kafka-ui must bind-mount auth/ui read-only at {UI_AUTH_DIR} (it carries runtime.yml)')
+
+
+def validate_runtime(root, env, origin):
+    """auth/ui/runtime.yml: the Keycloak client, the two group-mapped roles and nothing that widens access."""
+    path = root / RUNTIME_FILE
+    if not path.is_file():
+        raise Preflight(f'Missing {RUNTIME_FILE}; run krate auth configure')
+    try:
+        runtime = json.loads(path.read_text())
+        oauth = runtime['auth']['oauth2']
+        client = oauth['client'][identity.UI_REGISTRATION]
+        roles = {role['name']: role for role in runtime['rbac']['roles']}
+    except (ValueError, KeyError, TypeError):
+        raise Preflight(f'{RUNTIME_FILE} is not a Krate Kafbat plan; regenerate it with krate auth configure --force') from None
+    regenerate = '; regenerate it with krate auth configure --force'
+    for key in ('allow-shared-login', 'shared-role'):
+        if key in oauth:
+            raise Preflight(f'{RUNTIME_FILE} must not carry {key}: Kafbat has no shared form login in Keycloak mode' + regenerate)
+    if runtime.get('auth', {}).get('type') != 'OAUTH2' or oauth.get('require-mapped-role') is not True:
+        raise Preflight(f'{RUNTIME_FILE} must set auth.type OAUTH2 with require-mapped-role true' + regenerate)
+    cookie = runtime.get('server', {}).get('reactive', {}).get('session', {}).get('cookie', {})
+    if cookie.get('name') != identity.UI_SESSION_COOKIE:
+        raise Preflight(f'{RUNTIME_FILE} must name the session cookie {identity.UI_SESSION_COOKIE} (back-channel logout matches on it)'
+                        + regenerate)
+    if client.get('issuer-uri') != origin + '/identity/realms/' + identity.REALM \
+            or client.get('redirect-uri') != origin + '/login/oauth2/code/' + identity.UI_REGISTRATION:
+        raise Preflight(f'{RUNTIME_FILE}: Kafbat issuer/callback does not match KEYCLOAK_PUBLIC_URL' + regenerate)
+    if client.get('client-id') != identity.UI_CLIENT or client.get('user-name-attribute') != 'sub' \
+            or 'openid' not in (client.get('scope') or []):
+        raise Preflight(f'{RUNTIME_FILE}: the Keycloak client must be {identity.UI_CLIENT} with user-name-attribute sub and the openid scope'
+                        + regenerate)
+    if set(roles) != {'viewer', 'administrator'} or 'defaultRole' in runtime['rbac']:
+        raise Preflight(f'{RUNTIME_FILE} must define exactly the roles viewer and administrator and no defaultRole' + regenerate)
+    viewer_group, admin_group = identity.group_names(env)
+    for name, group in (('viewer', viewer_group), ('administrator', admin_group)):
+        if roles[name].get('subjects') != [{'provider': 'oauth', 'type': 'role', 'value': group, 'regex': False}]:
+            raise Preflight(f'{RUNTIME_FILE}: role {name} must have the realm group from .env as its only subject' + regenerate)
+    viewer = {permission.get('resource'): permission for permission in roles['viewer'].get('permissions', [])}
+    if 'ksql' in viewer:
+        raise Preflight(f'{RUNTIME_FILE}: the viewer role must not grant ksql' + regenerate)
+    topic_actions = viewer.get('topic', {}).get('actions', [])
+    if 'messages_read' in topic_actions and not identity.env_flag(env, identity.VIEWER_MESSAGES_KEY):
+        raise Preflight(f'{RUNTIME_FILE}: the viewer role reads message payloads but {identity.VIEWER_MESSAGES_KEY} is not true in .env'
+                        + regenerate)
+    # Everything else must be what the planner produces for this .env and cluster list.
+    try:
+        expected = identity.runtime(identity.runtime_settings(env, roles['viewer'].get('clusters')))
+    except ValueError as exc:
+        raise Preflight(str(exc)) from None
+    for section, actual in (('auth', runtime.get('auth')), ('rbac', runtime.get('rbac')),
+                            ('server.reactive.session', runtime.get('server', {}).get('reactive', {}).get('session'))):
+        wanted = expected['server']['reactive']['session'] if section == 'server.reactive.session' else expected[section]
+        if actual != wanted:
+            raise Preflight(f'{RUNTIME_FILE}: section {section} differs from the Krate plan for this .env' + regenerate)
+
+
 def validate_realm(root, origin, secrets):
     path = root / REALM_FILE
     if not path.is_file():
@@ -237,6 +300,9 @@ def validate_realm(root, origin, secrets):
     ui = clients[identity.UI_CLIENT]
     if ui.get('webOrigins') != [origin] or ui.get('redirectUris') != [origin + '/login/oauth2/code/keycloak']:
         raise Preflight(f'{REALM_FILE}: krate-ui redirect URI and web origin must match KEYCLOAK_PUBLIC_URL; regenerate the plan')
+    if ui.get('attributes') != identity.ui_client_attributes(origin):
+        raise Preflight(f'{REALM_FILE}: krate-ui attributes must be PKCE S256, the exact post-logout URIs and OIDC back-channel logout'
+                        ' to Kafbat; regenerate the plan with krate identity up')
 
 
 def validate_identity(root, config):
@@ -291,7 +357,9 @@ def main():
             print('Identity preflight failed: check protected .env, the rendered keycloak/keycloak-db/proxy services '
                   'and identity network, auth/keycloak/db-tls and auth/keycloak/krate-realm.json.', file=sys.stderr)
             return 1
-        print('Authentication preflight failed: check protected .env, unique secrets (16+ characters), generated auth files, HTTPS URL and matching unexpired TLS certificate.', file=sys.stderr)
+        print('Authentication preflight failed: check protected .env, unique secrets (16+ characters), generated auth files '
+              '(auth/ui/runtime.yml, auth/keycloak/krate-realm.json), the rendered kafka-ui/keycloak services, HTTPS URL and '
+              'matching unexpired TLS certificate.', file=sys.stderr)
         return 1
     if args.mode == 'identity':
         print('Identity preflight passed; no services changed.')

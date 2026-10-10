@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Static checks for the Krate identity foundation (templates, realm plan, Compose, CLI parity)."""
+import contextlib
 import importlib.util
+import io
 import ipaddress
 import json
 import os
@@ -70,6 +72,13 @@ REFUSED_NAMES = (('KEYCLOAK_ADMIN_USER', 'temp-admin'), ('KEYCLOAK_ADMIN_USER', 
 EXPECTED_EVENTS = {'eventsEnabled': True, 'eventsListeners': ['jboss-logging'], 'enabledEventTypes': [],
                    'eventsExpiration': 2592000, 'adminEventsEnabled': True, 'adminEventsDetailsEnabled': False}
 IDP_PLAN_KEYS = {'identityProviders', 'identityProviderMappers', 'authenticatorConfig', 'authenticationFlows', 'browserFlow'}
+UI_ATTRIBUTE_KEYS = {'pkce.code.challenge.method', 'post.logout.redirect.uris', 'backchannel.logout.url',
+                     'backchannel.logout.session.required', 'backchannel.logout.revoke.offline.tokens'}
+# Kafbat RBAC resources a viewer may only `view`; topics add analysis_view (and messages_read on opt-in); ksql never.
+VIEW_RESOURCES = ('applicationconfig', 'clusterconfig', 'topic', 'consumer', 'schema', 'connect', 'connector', 'acl', 'audit', 'client_quotas')
+CLUSTERS = ['cluster-a', 'cluster-b.2']
+# Site keys configure-dual.py no longer reads (they moved to .env): the example must not carry them.
+MOVED_SITE_KEYS = ('viewer_messages', 'session_idle_minutes')
 
 # kraft/epc parity: every hunk between the two CLIs must be one of the known edition differences.
 FORBIDDEN_IN_HUNK = re.compile(r'identity|keycloak|kcadm', re.IGNORECASE)
@@ -161,7 +170,14 @@ def check_realm_contract(checks):
         e(ui.get(key) == expected, f'realm plan: krate-ui {key} must be {expected!r}')
     attributes = ui.get('attributes', {})
     e(attributes.get('pkce.code.challenge.method') == 'S256', 'realm plan: krate-ui must require PKCE S256')
-    e(attributes.get('post.logout.redirect.uris') == origin + '/*', 'realm plan: krate-ui post-logout redirect must be <origin>/*')
+    e(attributes.get('post.logout.redirect.uris') == origin + '##' + origin + '/',
+      'realm plan: krate-ui post-logout redirect must be the exact values <origin>##<origin>/ (no wildcard)')
+    e(attributes.get('backchannel.logout.url') == 'http://kafka-ui:8080/logout/connect/back-channel/keycloak',
+      'realm plan: krate-ui must register OIDC back-channel logout at http://kafka-ui:8080/logout/connect/back-channel/keycloak')
+    e(attributes.get('backchannel.logout.session.required') == 'true', 'realm plan: krate-ui backchannel.logout.session.required must be "true"')
+    e(attributes.get('backchannel.logout.revoke.offline.tokens') == 'false', 'realm plan: krate-ui backchannel.logout.revoke.offline.tokens must be "false"')
+    e(set(attributes) == UI_ATTRIBUTE_KEYS, f'realm plan: krate-ui attributes must be exactly {sorted(UI_ATTRIBUTE_KEYS)}; got {sorted(attributes)}')
+    e(attributes == identity.ui_client_attributes(origin), 'realm plan: krate-ui attributes must come from identity.ui_client_attributes')
     mappers = [mapper for mapper in ui.get('protocolMappers', []) if mapper.get('protocolMapper') == 'oidc-group-membership-mapper']
     config = mappers[0].get('config', {}) if mappers else {}
     e(config.get('claim.name') == 'groups' and config.get('full.path') == 'false'
@@ -181,6 +197,124 @@ def check_realm_contract(checks):
     e(placeholders == {'${KEYCLOAK_CLI_CLIENT_SECRET}', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}'},
       f'realm plan: placeholders must be exactly the two client secrets; got {sorted(placeholders)}')
     e(not any(secret in text for secret in SYNTHETIC_SECRETS), 'realm plan: a configured secret value leaked into the plan')
+
+
+
+def check_runtime_contract(checks):
+    """Kafbat's runtime.yml plan: Keycloak client only, no shared form login, group-mapped roles, viewer without payloads."""
+    e = lambda cond, msg: checks.expect(cond, 'runtime plan: ' + msg)  # noqa: E731
+    origin = 'https://kafka.example.test'
+    values = identity.runtime_settings(SYNTHETIC, CLUSTERS)
+    data = identity.runtime(values)
+    text = identity.render(data)
+    e(values['viewer_messages'] is False, 'viewer_messages must default to False when KAFKA_UI_VIEWER_MESSAGES is absent')
+    e(set(data) == {'server', 'auth', 'rbac'}, f'top-level keys must be server, auth, rbac; got {sorted(data)}')
+    oauth = data['auth']['oauth2']
+    e(data['auth']['type'] == 'OAUTH2', 'auth.type must be OAUTH2')
+    for key in ('allow-shared-login', 'shared-role'):
+        e(key not in oauth and key not in text, f'{key} must not appear anywhere (no shared form login in Keycloak mode)')
+    e(oauth.get('require-mapped-role') is True, 'require-mapped-role must be true')
+    e(set(oauth['client']) == {'keycloak'}, f'exactly one client registration named keycloak; got {sorted(oauth["client"])}')
+    client = oauth['client']['keycloak']
+    realm_url = origin + '/identity/realms/krate'
+    internal = 'http://keycloak:8080/identity/realms/krate/protocol/openid-connect/'
+    for key, expected in (('provider', 'keycloak'), ('client-id', 'krate-ui'), ('client-secret', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}'),
+                          ('scope', ['openid', 'profile', 'email']), ('issuer-uri', realm_url),
+                          ('redirect-uri', origin + '/login/oauth2/code/keycloak'), ('authorization-grant-type', 'authorization_code'),
+                          ('user-name-attribute', 'sub'), ('custom-params', {'type': 'oauth', 'roles-field': 'groups'}),
+                          ('authorization-uri', realm_url + '/protocol/openid-connect/auth'), ('token-uri', internal + 'token'),
+                          ('user-info-uri', internal + 'userinfo'), ('jwk-set-uri', internal + 'certs')):
+        e(client.get(key) == expected, f'client {key} must be {expected!r}; got {client.get(key)!r}')
+    session = data['server']['reactive']['session']
+    e(session.get('timeout') == '11m', f'session timeout must be KEYCLOAK_SESSION_IDLE_MINUTES (11m); got {session.get("timeout")!r}')
+    e(session.get('cookie') == {'name': 'SESSION', 'secure': True, 'http-only': True, 'same-site': 'lax'},
+      f'session cookie must be SESSION, secure, http-only, same-site lax; got {session.get("cookie")!r}')
+    e('spring' not in data and 'configtree' not in text, 'no spring.config.import (the secret comes from the container environment)')
+    rbac = data['rbac']
+    e('defaultRole' not in rbac and set(rbac) == {'roles'}, 'rbac must define roles only (no defaultRole)')
+    roles = {role['name']: role for role in rbac['roles']}
+    e(set(roles) == {'viewer', 'administrator'}, f'roles must be viewer and administrator; got {sorted(roles)}')
+    for name, group in (('viewer', 'VIEWERS_X'), ('administrator', 'ADMINS_X')):
+        role = roles.get(name, {})
+        e(role.get('clusters') == CLUSTERS, f'{name} clusters must be the given list; got {role.get("clusters")!r}')
+        e(role.get('subjects') == [{'provider': 'oauth', 'type': 'role', 'value': group, 'regex': False}],
+          f'{name} must have the realm group {group} as its only subject; got {role.get("subjects")!r}')
+    viewer = {p['resource']: p for p in roles.get('viewer', {}).get('permissions', [])}
+    e(set(viewer) == set(VIEW_RESOURCES), f'viewer resources must be {sorted(VIEW_RESOURCES)} (no ksql); got {sorted(viewer)}')
+    for resource, permission in viewer.items():
+        expected = ['view', 'analysis_view'] if resource == 'topic' else ['view']
+        e(permission.get('actions') == expected, f'viewer {resource} actions must be {expected}; got {permission.get("actions")!r}')
+        e((permission.get('value') == '.*') == (resource in identity.PATTERN_RESOURCES),
+          f'viewer {resource} value must be ".*" exactly for the pattern resources')
+    admin = {p['resource']: p for p in roles.get('administrator', {}).get('permissions', [])}
+    e(set(admin) == set(VIEW_RESOURCES) | {'ksql'}, f'administrator must get every resource plus ksql; got {sorted(admin)}')
+    e(all(p.get('actions') == 'all' for p in admin.values()), 'administrator actions must be "all" on every resource')
+    e(not any(secret in text for secret in SYNTHETIC_SECRETS), 'a configured secret value leaked into the plan')
+    e(set(re.findall(r'\$\{[A-Z0-9_]+\}', text)) == {'${KEYCLOAK_KAFBAT_CLIENT_SECRET}'}, 'the only placeholder is the Kafbat client secret')
+    # Opt-in: only the viewer's topic permission changes, and only by messages_read.
+    opted = identity.runtime(identity.runtime_settings(dict(SYNTHETIC, KAFKA_UI_VIEWER_MESSAGES='true'), CLUSTERS))
+    opted_viewer = {p['resource']: p for p in opted['rbac']['roles'][0]['permissions']}
+    e(opted_viewer['topic']['actions'] == ['view', 'analysis_view', 'messages_read'],
+      f'opted-in viewer topic actions must add messages_read only; got {opted_viewer["topic"]["actions"]!r}')
+    opted_viewer['topic'] = viewer['topic']
+    e(opted_viewer == viewer and opted['rbac']['roles'][1] == roles['administrator'] and opted['auth'] == data['auth'],
+      'KAFKA_UI_VIEWER_MESSAGES must change nothing but the viewer topic actions')
+    for value in ('yes', '1', 'TRUE ', 'on'):
+        try:
+            identity.runtime_settings(dict(SYNTHETIC, KAFKA_UI_VIEWER_MESSAGES=value), CLUSTERS)
+            flagged = value.strip().lower() == 'true'
+        except ValueError:
+            flagged = False
+        e(flagged == (value.strip().lower() == 'true'), f'KAFKA_UI_VIEWER_MESSAGES={value!r} must be refused unless it is true/false')
+    e(identity.runtime_settings(dict(SYNTHETIC, KAFKA_UI_VIEWER_MESSAGES=''), CLUSTERS)['viewer_messages'] is False,
+      'an empty KAFKA_UI_VIEWER_MESSAGES means off')
+    for bad in ([], ['a', 'a'], ['*'], ['bad name'], ['a/b'], [''], ['x', 3]):
+        try:
+            identity.cluster_names(bad)
+            e(False, f'clusters {bad!r} must be refused')
+        except ValueError:
+            pass
+    e(identity.cluster_names(['cluster-1-kraft', 'epc_02.x']) == ['cluster-1-kraft', 'epc_02.x'], 'plain cluster names are accepted in order')
+    settings_origin = identity.runtime_settings(SYNTHETIC, CLUSTERS, origin='https://other.example.test')
+    e(settings_origin['public_origin'] == 'https://other.example.test', 'an explicit origin overrides KEYCLOAK_PUBLIC_URL')
+    e(identity.runtime(settings_origin)['auth']['oauth2']['client']['keycloak']['issuer-uri'] == 'https://other.example.test/identity/realms/krate',
+      'the issuer follows the explicit origin')
+    check_runtime_writer(checks)
+
+
+def check_runtime_writer(checks):
+    """identity.py runtime: writes 0644, identical rerun is a no-op, a differing file needs --force."""
+    e = lambda cond, msg: checks.expect(cond, 'identity.py runtime: ' + msg)  # noqa: E731
+    with tempfile.TemporaryDirectory() as tmp:
+        site = Path(tmp)
+        write_env(site, dict(SYNTHETIC))
+        output = site / 'auth/ui/runtime.yml'
+
+        def run(*clusters, force=False):
+            command = [sys.executable, '-I', str(ROOT / 'sso/identity.py'), 'runtime', '--env-file', str(site / '.env'),
+                       '--clusters', *clusters, '--output', str(output)] + (['--force'] if force else [])
+            return subprocess.run(command, text=True, capture_output=True)
+
+        first = run(*CLUSTERS)
+        e(first.returncode == 0 and 'written' in first.stdout, f'first run must write the plan; got exit {first.returncode}: {first.stderr.strip()}')
+        e(output.is_file() and mode(output) == 0o644, 'runtime.yml must be created with mode 0644')
+        e(json.loads(output.read_text()) == identity.runtime(identity.runtime_settings(SYNTHETIC, CLUSTERS)),
+          'the written file must be the planner output')
+        e(not any(secret in first.stdout + first.stderr for secret in SYNTHETIC_SECRETS), 'the summary must not leak a secret value')
+        e('no shared form login' in first.stdout and 'KAFKA_UI_VIEWER_MESSAGES' in first.stdout,
+          'the summary names the login model and the viewer opt-in key')
+        second = run(*CLUSTERS)
+        e(second.returncode == 0 and 'No changes' in second.stdout, 'an identical rerun must report No changes')
+        before = output.read_bytes()
+        third = run('other-cluster')
+        e(third.returncode == 1 and '--force' in third.stderr and output.read_bytes() == before,
+          f'a differing plan must be refused without --force and leave the file alone; got exit {third.returncode}: {third.stderr.strip()}')
+        fourth = run('other-cluster', force=True)
+        e(fourth.returncode == 0 and json.loads(output.read_text())['rbac']['roles'][0]['clusters'] == ['other-cluster'],
+          '--force replaces the file with the new plan')
+        e(sorted(os.listdir(output.parent)) == ['runtime.yml'], f'no temporary files may remain; got {sorted(os.listdir(output.parent))}')
+        bad = run('*')
+        e(bad.returncode == 1 and 'clusters' in bad.stderr, 'a wildcard cluster name must be refused')
 
 
 def check_names(checks):
@@ -209,11 +343,12 @@ def check_names(checks):
         rejects(identity.admin_user, 'KEYCLOAK_ADMIN_USER', user)
 
 
-def compose_config(env_file, edition):
-    result = subprocess.run(
-        ['docker', 'compose', '--env-file', str(env_file), '-f', str(ROOT / edition / 'docker-compose.yml'),
-         '--profile', 'sso', 'config', '--format', 'json'],
-        cwd=ROOT, text=True, capture_output=True)
+def compose_config(env_file, edition, project_dir=None):
+    """Render the edition's Compose file; `project_dir` resolves bind-mount sources against a site directory."""
+    command = ['docker', 'compose', '--env-file', str(env_file), '-f', str(ROOT / edition / 'docker-compose.yml')]
+    if project_dir is not None:
+        command += ['--project-directory', str(project_dir)]
+    result = subprocess.run(command + ['--profile', 'sso', 'config', '--format', 'json'], cwd=ROOT, text=True, capture_output=True)
     return result.returncode, result.stdout
 
 
@@ -321,6 +456,36 @@ def check_logrotate(checks):
             e(needle in cli, f'{edition}/krate: missing {needle.splitlines()[0]!r}')
         e('compose_cmd ps -q 2>/dev/null | head -1' not in cli,
           f'{edition}/krate: monitor_network must read the broker container, not the first container of the project')
+
+
+
+def check_cli_kafbat(checks):
+    """Both CLIs and activate.sh carry the Phase 2 Kafbat wiring: local auth configure, Keycloak-only sign-in lines, attribute reconciliation."""
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        label = f'{edition}/krate'
+        for needle, why in (
+                ('args=(runtime --env-file "$ENV_FILE" --clusters "${clusters[@]}" --output "$SCRIPT_DIR/auth/ui/runtime.yml")',
+                 'auth configure without a file must run identity.py runtime with the edition cluster list'),
+                ('mapfile -t clusters < <(ui_clusters)', 'auth configure must take the cluster list from ui_clusters'),
+                ('--env-file "$ENV_FILE" --output-dir "$SCRIPT_DIR/auth"', 'auth configure FILE must pass .env to configure-dual.py'),
+                ('set_env_file_value "$ENV_FILE" KAFKA_UI_VIEWER_MESSAGES true', '--viewer-messages must record the opt-in in .env'),
+                ('echo "  Sign-in   Keycloak (realm krate) — manage users with krate identity users"',
+                 'ui/credentials in runtime.yml mode must show the Keycloak sign-in line'),
+                ('"attributes": client["attributes"]}', 'identity_reconcile_ui_urls must compare the whole krate-ui attribute set'),
+                ('--fields redirectUris,webOrigins,"attributes($keys)"', 'identity_reconcile_ui_urls must fetch every planned attribute'),
+                ('if [[ -f "$SCRIPT_DIR/auth/keycloak/pingfederate-idp.json" ]]; then ensure_ping_secret; fi',
+                 'auth apply must ask for the PingFederate secret only when its plan exists')):
+            e(needle in cli, f'{label}: {why} (missing {needle[:60]!r})')
+        ui_command = cli[cli.index('\ncmd_ui() {'):]
+        runtime_branch = re.search(r'== "runtime\.yml" \]\]; then\n(.*?)\n  elif', ui_command, re.DOTALL)
+        e(runtime_branch is not None and 'shared' not in runtime_branch.group(1).lower() and '$pass' not in runtime_branch.group(1),
+          f'{label}: the runtime.yml branch of cmd_ui must not print a shared login or the shared password')
+        e('Shared app login' not in cli, f'{label}: must not describe a shared app login beside Keycloak')
+    activate = (ROOT / 'sso/activate.sh').read_text()
+    e('Sign-in: Keycloak (realm krate)' in activate and 'no shared form login' in activate,
+      'sso/activate.sh: auth apply must print the Keycloak login model after success')
 
 
 def check_parity(checks):
@@ -572,50 +737,148 @@ def load_configure_dual():
 
 
 def check_configure_dual(checks):
-    """auth configure writes Kafbat runtime.yml and the identity-provider plan; the realm file belongs to identity up."""
+    """auth configure FILE writes the same runtime.yml as the local planner plus the identity-provider plan; the realm file belongs to identity up."""
     e = checks.expect
-    e('"keycloak/krate-realm.json"' not in (ROOT / 'sso/configure-dual.py').read_text(),
-      'configure-dual.py: must not write keycloak/krate-realm.json (owned by krate identity up)')
-    result = load_configure_dual().configs(json.loads((ROOT / 'sso/dual-example.json').read_text()))
+    source = (ROOT / 'sso/configure-dual.py').read_text()
+    e('"keycloak/krate-realm.json"' not in source, 'configure-dual.py: must not write keycloak/krate-realm.json (owned by krate identity up)')
+    for key in ('allow-shared-login', 'shared-role'):
+        e(key not in source, f'configure-dual.py: must not mention {key} (no shared form login in Keycloak mode)')
+    example = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    for key in MOVED_SITE_KEYS:
+        e(key not in example, f'sso/dual-example.json: {key} moved to .env and must not be in the example')
+    module = load_configure_dual()
+    result = module.configs(example, SYNTHETIC)
     e(set(result) == {'ui/runtime.yml', 'keycloak/pingfederate-idp.json'},
       f'configure-dual.configs: must return exactly ui/runtime.yml and keycloak/pingfederate-idp.json; got {sorted(result)}')
+    expected = identity.runtime(identity.runtime_settings(SYNTHETIC, example['clusters'], origin=example['public_url']))
+    e(result.get('ui/runtime.yml') == expected,
+      'configure-dual: runtime.yml must be exactly identity.runtime() for .env, the site clusters and public_url (one generator)')
     idp = result.get('keycloak/pingfederate-idp.json', {})
     e(set(idp) == IDP_PLAN_KEYS, f'configure-dual: pingfederate-idp.json keys must be {sorted(IDP_PLAN_KEYS)}; got {sorted(idp)}')
     e([provider.get('alias') for provider in idp.get('identityProviders', [])] == ['pingfederate'],
       'configure-dual: the identity-provider plan must define exactly the pingfederate provider')
     e(idp.get('browserFlow') == 'krate browser', 'configure-dual: browserFlow must be the krate browser flow')
+    mappers = {json.loads(m['config']['claims'])[0]['value']: m['config']['group'] for m in idp.get('identityProviderMappers', [])}
+    e(mappers == {'KRATE_VIEWERS': '/VIEWERS_X', 'KRATE_ADMINS': '/ADMINS_X'},
+      f'configure-dual: each mapper must put the site AD group into the realm group from .env; got {mappers}')
     placeholders = set(re.findall(r'\$\{[A-Z0-9_]+\}', json.dumps(idp)))
     e(placeholders == {'${PING_KEYCLOAK_CLIENT_SECRET}'},
       f'configure-dual: the identity-provider plan may only reference the PingFederate secret placeholder; got {sorted(placeholders)}')
-    ui = result.get('ui/runtime.yml', {})
-    e('keycloak' in ui.get('auth', {}).get('oauth2', {}).get('client', {}), 'configure-dual: runtime.yml must configure the keycloak client')
+    for key in MOVED_SITE_KEYS:
+        try:
+            module.configs(dict(example, **{key: 5 if key == 'session_idle_minutes' else True}), SYNTHETIC)
+            e(False, f'configure-dual: a site file with {key} must be refused (the value lives in .env)')
+        except ValueError as exc:
+            e('.env' in str(exc), f'configure-dual: the refusal of {key} must point at .env; got {exc}')
 
 
 def check_runtime_preflight(checks):
-    """preflight --mode runtime.yml accepts the identity.py plan as the realm file and applies the name rules."""
+    """preflight --mode runtime.yml accepts the planned site (local planner and configure-dual alike) and refuses what widens access."""
     settings = json.loads((ROOT / 'sso/dual-example.json').read_text())
     settings['public_url'] = 'https://' + PUBLIC_HOST
-    files = load_configure_dual().configs(settings)
-    for edition in EDITIONS:
+    for edition, ping in zip(EDITIONS, (False, True)):
         with tempfile.TemporaryDirectory() as tmp:
-            site = synthetic_site(edition, tmp, **RUNTIME_SITE)
-            env = site_env(edition, **RUNTIME_SITE)
+            overrides = dict(RUNTIME_SITE) if ping else {'KAFKA_UI_AUTH_CONFIG': 'runtime.yml'}
+            site = synthetic_site(edition, tmp, **overrides)
+            env = site_env(edition, **overrides)
             self_signed(site / 'certs', PUBLIC_HOST)
-            for name, data in files.items():
-                identity.write_file(site / 'auth' / name, json.dumps(data, indent=2) + '\n', 0o644)
+            if ping:  # the PingFederate flow: configure-dual writes runtime.yml and the identity-provider plan
+                for name, data in load_configure_dual().configs(settings, env).items():
+                    identity.write_file(site / 'auth' / name, json.dumps(data, indent=2) + '\n', 0o644)
+            else:  # the local flow: identity.py runtime, as krate auth configure runs it
+                with contextlib.redirect_stdout(io.StringIO()):
+                    identity.runtime_plan(site / '.env', CLUSTERS, site / 'auth/ui/runtime.yml')
             planned, _ = run_plan(site)
             if not checks.expect(planned.returncode == 0, f'{edition}: identity.py plan failed on a runtime.yml site'):
                 continue
-            code, rendered = compose_config(site / '.env', edition)
+            code, rendered = compose_config(site / '.env', edition, project_dir=site)
             if not checks.expect(code == 0, f'{edition}: Compose rendering of the runtime.yml site failed'):
                 continue
             result = preflight(site, 'runtime.yml', rendered)
             checks.expect(result.returncode == 0,
-                          f'{edition}: preflight --mode runtime.yml refused the identity.py plan as realm file: {result.stderr.strip()}')
+                          f'{edition}: preflight --mode runtime.yml refused the planned site ({"PingFederate" if ping else "local"} flow,'
+                          f' PING secret {"set" if ping else "placeholder"}): {result.stderr.strip()}')
             checks.expect(not any(secret in result.stdout + result.stderr for secret in ALL_SECRETS),
                           f'{edition}: preflight --mode runtime.yml output leaked a secret value')
             check_name_refusals(checks, edition, site, env, 'runtime.yml', rendered)
             check_network_refusals(checks, edition, site, 'runtime.yml', rendered)
+            check_runtime_refusals(checks, edition, site, env, rendered)
+
+
+def check_runtime_refusals(checks, edition, site, env, rendered):
+    """A runtime.yml, realm file or rendering that widens Kafbat access must be refused by name."""
+    runtime_file = site / 'auth/ui/runtime.yml'
+    realm_file = site / 'auth/keycloak/krate-realm.json'
+    original = runtime_file.read_text()
+    realm_original = realm_file.read_text()
+
+    def expect_refusal(label, needle, auth_mode='runtime.yml', config=rendered):
+        result = preflight(site, auth_mode, config)
+        checks.expect(result.returncode == 1 and needle in result.stderr,
+                      f'{edition}: preflight --mode runtime.yml must refuse: {label} (naming {needle!r});'
+                      f' got exit {result.returncode}: {result.stderr.strip()}')
+
+    def mutated_runtime(change):
+        data = json.loads(original)
+        change(data)
+        identity.write_file(runtime_file, json.dumps(data, indent=2) + '\n', 0o644)
+
+    cases = (
+        ('allow-shared-login present', 'allow-shared-login', lambda d: d['auth']['oauth2'].__setitem__('allow-shared-login', True)),
+        ('shared-role present', 'shared-role', lambda d: d['auth']['oauth2'].__setitem__('shared-role', 'administrator')),
+        ('require-mapped-role off', 'require-mapped-role', lambda d: d['auth']['oauth2'].__setitem__('require-mapped-role', False)),
+        ('session cookie renamed', 'SESSION', lambda d: d['server']['reactive']['session']['cookie'].__setitem__('name', 'JSESSIONID')),
+        ('viewer reads messages without the opt-in', 'KAFKA_UI_VIEWER_MESSAGES',
+         lambda d: d['rbac']['roles'][0]['permissions'][2]['actions'].append('messages_read')),
+        ('defaultRole present', 'defaultRole', lambda d: d['rbac'].__setitem__('defaultRole', {'permissions': []})),
+        ('viewer granted ksql', 'ksql', lambda d: d['rbac']['roles'][0]['permissions'].append({'resource': 'ksql', 'actions': 'all'})),
+        ('viewer subject is not the realm group', 'only subject',
+         lambda d: d['rbac']['roles'][0]['subjects'].append({'provider': 'oauth', 'type': 'user', 'value': 'alice', 'regex': False})),
+        ('viewer mutates topics', 'differs from the Krate plan', lambda d: d['rbac']['roles'][0]['permissions'][2]['actions'].append('edit')),
+        ('third role added', 'exactly the roles', lambda d: d['rbac']['roles'].append(dict(d['rbac']['roles'][1], name='ops'))),
+        ('issuer points elsewhere', 'issuer/callback',
+         lambda d: d['auth']['oauth2']['client']['keycloak'].__setitem__('issuer-uri', 'https://evil.example.test/identity/realms/krate')),
+        ('session timeout differs from KEYCLOAK_SESSION_IDLE_MINUTES', 'server.reactive.session',
+         lambda d: d['server']['reactive']['session'].__setitem__('timeout', '240m')),
+        ('user name attribute is not sub', 'user-name-attribute',
+         lambda d: d['auth']['oauth2']['client']['keycloak'].__setitem__('user-name-attribute', 'preferred_username')),
+    )
+    for label, needle, change in cases:
+        mutated_runtime(change)
+        expect_refusal(label, needle)
+    identity.write_file(runtime_file, original, 0o644)
+    # The opt-in makes the same messages_read grant acceptable, and only then.
+    write_env(site, dict(env, KAFKA_UI_VIEWER_MESSAGES='true'))
+    with contextlib.redirect_stdout(io.StringIO()):
+        identity.runtime_plan(site / '.env', json.loads(original)['rbac']['roles'][0]['clusters'], runtime_file, force=True)
+    result = preflight(site, 'runtime.yml', rendered)
+    checks.expect(result.returncode == 0 and 'messages_read' in runtime_file.read_text(),
+                  f'{edition}: preflight must accept the viewer messages_read grant once KAFKA_UI_VIEWER_MESSAGES=true; got exit {result.returncode}: {result.stderr.strip()}')
+    write_env(site, env)
+    expect_refusal('opted-in file but the opt-in was withdrawn from .env', 'KAFKA_UI_VIEWER_MESSAGES')
+    identity.write_file(runtime_file, original, 0o644)
+    # The realm must carry the back-channel logout attributes; an older plan (wildcard post-logout, no back-channel) is refused.
+    realm = json.loads(realm_original)
+    ui = next(client for client in realm['clients'] if client['clientId'] == 'krate-ui')
+    ui['attributes'] = {'pkce.code.challenge.method': 'S256', 'post.logout.redirect.uris': 'https://' + PUBLIC_HOST + '/*'}
+    identity.write_file(realm_file, json.dumps(realm, indent=2) + '\n', 0o644)
+    expect_refusal('realm krate-ui without back-channel logout attributes', 'back-channel')
+    expect_refusal('realm krate-ui without back-channel logout attributes (identity mode)', 'back-channel', auth_mode='identity')
+    identity.write_file(realm_file, realm_original, 0o644)
+    # kafka-ui must bind-mount this site's auth/ui read-only; runtime.yml must exist.
+    config = json.loads(rendered)
+    config['services']['kafka-ui']['volumes'] = [m for m in config['services']['kafka-ui']['volumes'] if m.get('target') != '/etc/krate/auth']
+    expect_refusal('kafka-ui without the auth/ui mount', '/etc/krate/auth', config=json.dumps(config))
+    config = json.loads(rendered)
+    for mount in config['services']['kafka-ui']['volumes']:
+        if mount.get('target') == '/etc/krate/auth':
+            mount['source'] = str(ROOT / 'kraft/auth/ui')
+    expect_refusal('kafka-ui mounting another directory at /etc/krate/auth', '/etc/krate/auth', config=json.dumps(config))
+    runtime_file.unlink()
+    expect_refusal('runtime.yml missing', 'auth/ui/runtime.yml')
+    identity.write_file(runtime_file, original, 0o644)
+    result = preflight(site, 'runtime.yml', rendered)
+    checks.expect(result.returncode == 0, f'{edition}: preflight must pass again once the site is restored: {result.stderr.strip()}')
 
 
 def check_backup_seal(checks):
@@ -657,9 +920,9 @@ def check_backup_seal(checks):
 
 def main():
     checks = Checks()
-    for check in (check_templates, check_realm_contract, check_names, check_compose, check_monitoring_binds, check_logrotate,
-                  check_parity, check_zk_frozen, check_writers, check_backup_seal, check_plan_and_preflight,
-                  check_configure_dual, check_runtime_preflight):
+    for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
+                  check_logrotate, check_cli_kafbat, check_parity, check_zk_frozen, check_writers, check_backup_seal,
+                  check_plan_and_preflight, check_configure_dual, check_runtime_preflight):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others
@@ -667,8 +930,9 @@ def main():
     if checks.errors:
         print('Identity check failed:\n' + '\n'.join(checks.errors), file=sys.stderr)
         return 1
-    print('Identity foundation verified: templates, realm plan, names, Compose services and identity network, monitoring binds, '
-          'logrotate drop-in, CLI parity, zk frozen, writers and renewal, preflight (identity and runtime.yml), configure-dual.')
+    print('Identity foundation verified: templates, realm plan, Kafbat runtime plan, names, Compose services and identity network, '
+          'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
+          'runtime.yml incl. refusals), configure-dual.')
     return 0
 
 

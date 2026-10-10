@@ -7,8 +7,11 @@ Krate. The frozen ZooKeeper edition has no identity service.
 
 Phase 1 is the foundation only. Keycloak runs, holds local users in the realm
 `krate`, and is managed with `./krate identity`. Kafbat keeps its shared Admin
-login (`auth/ui/local.yml`) until Phase 2 switches it to `runtime.yml`.
-Phase 2 uses local Keycloak users only. PingFederate brokering is Phase 3.
+login (`auth/ui/local.yml`) until Phase 2 switches it to `runtime.yml`, where
+Kafbat signs users in through the realm only (no shared form login; roles from
+the realm groups). Phase 2 uses local Keycloak users only. PingFederate
+brokering is Phase 3. The Kafbat side is described in
+[dual-login.md](dual-login.md).
 
 The first Phase 2 commits implement the owner decisions 7, 8, 9 and 13 (see
 "Open owner decisions"): a private `identity` Compose network with a fixed
@@ -31,13 +34,16 @@ Operator flow, in order:
    `KEYCLOAK_ENABLED=true`. Optionally `./krate identity logrotate --install`
    hands the journal to the host's logrotate (`./krate install` prints the
    hint).
-4. Phase 2: `./krate auth configure` writes `auth/ui/runtime.yml` and the
-   identity-provider plan `auth/keycloak/pingfederate-idp.json`; `./krate auth
-   apply` switches Kafbat to Keycloak login. The realm file
+4. Phase 2: `./krate auth configure` writes `auth/ui/runtime.yml` from `.env`
+   and the edition's cluster list (Keycloak as the only issuer, the two roles
+   mapped from the realm groups, no shared form login);
+   `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml` and
+   `./krate auth apply` switch Kafbat to that login. The realm file
    `auth/keycloak/krate-realm.json` stays owned by `identity up`. See
    [dual-login.md](dual-login.md).
-5. Phase 3: the identity-provider plan is applied to the realm and PingFederate
-   brokering returns.
+5. Phase 3: `./krate auth configure <site.json>` also writes the
+   identity-provider plan `auth/keycloak/pingfederate-idp.json`, which is
+   applied to the realm; PingFederate brokering returns behind the same issuer.
 
 Items marked **PROPOSED** are the lead's defaults. The owner confirms or
 changes them before Phase 2.
@@ -52,7 +58,7 @@ Two `.env` keys describe the identity mode:
 | --- | --- | --- | --- |
 | `false` | `local.yml` | Phase 0. Kafbat shared Admin only. | No |
 | `true` | `local.yml` | Phase 1. Keycloak runs with local users; Kafbat still uses the shared Admin login. | Yes |
-| `true` | `runtime.yml` | Phase 2. Kafbat offers Keycloak login with local Keycloak users only; the realm has no identity providers. PingFederate brokering is Phase 3. | Yes |
+| `true` | `runtime.yml` | Phase 2. Kafbat signs users in through Keycloak only (no shared form login) with local Keycloak users; the realm has no identity providers. PingFederate brokering is Phase 3. | Yes |
 | `false` | `runtime.yml` | Transitional. `krate` still adds the `sso` profile; `auth apply` stops and tells you to run `./krate identity up` when Keycloak is not ready. **PROPOSED:** treat as "identity required" rather than as an error. | Yes |
 
 Rules:
@@ -80,7 +86,7 @@ Rules:
 | `krate-cli` service account | Client `krate-cli` in realm `krate` | Realm `krate` user management only: `manage-users`, `view-users`, `query-users`, `query-groups` | Change clients, groups, flows or the realm; touch `master` |
 | Kafbat administrator | Members of `KEYCLOAK_ADMIN_GROUP` (default `KRATE_ADMINS`) | Kafbat administrator role on the configured clusters (Phase 2) | Anything in Keycloak |
 | Kafbat viewer | Members of `KEYCLOAK_VIEWER_GROUP` (default `KRATE_VIEWERS`) | Kafbat viewer role (Phase 2) | Anything in Keycloak |
-| Shared Admin | `KAFKA_UI_USER` / `KAFKA_UI_PASSWORD` | Kafbat administrator through the local form | Nothing in Keycloak; it is not a Keycloak account |
+| Shared Admin | `KAFKA_UI_USER` / `KAFKA_UI_PASSWORD` | Kafbat administrator through the local form while `KAFKA_UI_AUTH_CONFIG=local.yml` | Sign in while `runtime.yml` is active (Kafbat then has no form login); anything in Keycloak; it is not a Keycloak account |
 
 **PROPOSED:** no human account gets realm-admin rights in realm `krate`. Realm
 changes go through `./krate` or `kcadm` from the host, with a backup first.
@@ -91,12 +97,16 @@ changes go through `./krate` or `kcadm` from the host, with a backup first.
 may see `./krate identity status`, the identity journal, and
 `./krate identity users list`. They do not get `.env`, `./krate credentials`,
 or the backups. In Kafbat (Phase 2) a viewer sees metrics, consumer lag and
-topic metadata, and does not see messages.
+topic metadata, and does not see message payloads unless the site opts in with
+`KAFKA_UI_VIEWER_MESSAGES=true` (the table of what a viewer can and cannot do
+is in [dual-login.md](dual-login.md)).
 
 ### Claim-to-permission contract
 
 Keycloak issues a `groups` claim (group membership mapper, `full.path=false`,
-in ID token, access token and userinfo). Kafbat (Phase 2) reads it:
+in ID token, access token and userinfo). Kafbat (Phase 2) reads it from the
+ID token after validating signature, issuer and audience; the user's identity
+in Kafbat is the OIDC `sub`:
 
 | `groups` contains | Kafbat role |
 | --- | --- |
@@ -213,7 +223,7 @@ survives purge.
 | `auth/ui/` (`local.yml`, generated `runtime.yml`) | `kafka-ui` at `/etc/krate/auth` | read-only |
 | `kafbat.yml` (EPC) | `kafka-ui` | read-only |
 | `auth/keycloak/krate-realm.json` | `keycloak` at `/opt/keycloak/data/import/` | read-only; regenerated from `.env` by every `identity up`; imported only when realm `krate` does not exist |
-| `auth/keycloak/pingfederate-idp.json` (Phase 2, from `auth configure`) | not mounted | identity-provider plan; applied to the realm in Phase 3 |
+| `auth/keycloak/pingfederate-idp.json` (from `auth configure <site.json>`) | not mounted | identity-provider plan; applied to the realm in Phase 3 |
 | `auth/keycloak/truststores/` | `keycloak` at `/opt/keycloak/conf/truststores` | read-only; enterprise CA for PingFederate |
 | `auth/keycloak/db-tls/` (`ca.crt`, `ca.key`, `server.crt`, `server.key`, `pg_hba.conf`) | `keycloak-db` at `/run/krate-db-tls` | read-only; keys 600 |
 | `auth/keycloak/db-tls/ca.crt` | `keycloak` at `/opt/keycloak/conf/db-tls/ca.crt` | read-only |
@@ -405,9 +415,13 @@ secret. The read-only commands `status`, `users list`, `users groups` and
 8. Every run: verifies the admin login and a client-credentials login of
    `krate-cli` against realm `krate`.
 9. Bootstrapped only: compares client `krate-ui` in the realm with the plan
-   and updates its `redirectUris`, `webOrigins` and
-   `post.logout.redirect.uris` when they differ (journal line
-   `up reconciled krate-ui urls`). Nothing else in the realm is reconciled:
+   and updates its `redirectUris`, `webOrigins` and client attributes
+   (`pkce.code.challenge.method`, `post.logout.redirect.uris`,
+   `backchannel.logout.url`, `backchannel.logout.session.required`,
+   `backchannel.logout.revoke.offline.tokens`) when they differ (journal line
+   `up reconciled krate-ui urls and attributes`). A realm created before the
+   back-channel attributes existed receives them on the next `identity up`.
+   Nothing else in the realm is reconciled:
    groups, token lifetimes, session limits and the other clients keep the
    values they were created with.
 10. Sets `KEYCLOAK_ENABLED=true`, writes the journal line and prints
@@ -419,9 +433,10 @@ recovery hint (see "Recovery").
 
 `KEYCLOAK_PUBLIC_URL` should be final before the first `identity up`. It can
 be changed later with `./krate config set`; the next `identity up` reconciles
-the `krate-ui` URLs and `auth apply` (Phase 2) rewrites `runtime.yml`. A
+the `krate-ui` URLs, and `./krate auth configure --force` followed by
+`./krate auth apply` (Phase 2) rewrites and applies `runtime.yml`. A
 changed `KEYCLOAK_*_GROUP` is not applied to an existing realm (owner
-decision 4).
+decision 6).
 
 ### `./krate identity status`
 
@@ -580,12 +595,28 @@ The installation path must not contain whitespace, quotes or backslashes
 
 ### Relationship with `auth apply` (Phase 2)
 
+`./krate auth configure` (no settings file) plans Kafbat's Keycloak login,
+`auth/ui/runtime.yml`, with `sso/identity.py runtime`: the same module that
+plans the realm, so the client, the callback, the `groups` claim, the group
+names and the session idle limit have one source, `.env`. The viewer gets
+message payloads only when `KAFKA_UI_VIEWER_MESSAGES=true`
+(`auth configure --viewer-messages` sets it). A `runtime.yml` that differs
+from the plan is replaced only with `--force`.
+
 `./krate auth apply` does not start Keycloak and does not run the
 `identity up` logic. With `KAFKA_UI_AUTH_CONFIG=runtime.yml` it checks that
 Keycloak is ready; when it is not, it stops with
 `Keycloak is not ready. Run: krate identity up (then: krate identity status)`.
-When Keycloak is ready it recreates only `kafka-ui` and checks the proxy.
-Brokers must be healthy for that recreation only.
+When Keycloak is ready it runs `sso/preflight.py --mode runtime.yml` (which
+also checks `runtime.yml` against the plan and the realm's back-channel
+logout attributes), recreates only `kafka-ui` and the proxy, verifies public
+discovery and prints the login model (`Sign-in: Keycloak (realm krate)`).
+Brokers must be healthy for that recreation only. The realm client `krate-ui`
+sends OIDC back-channel logout requests to
+`http://kafka-ui:8080/logout/connect/back-channel/keycloak` over the
+`identity` network, so a Keycloak logout or admin sign-out ends the Kafbat
+session; disabling a user does not end an existing session (see
+[dual-login.md](dual-login.md), "Revocation and session behaviour").
 
 ## Recovery
 
@@ -692,7 +723,8 @@ Procedure:
    permanent admin is created.
 5. Recreate the local users with `./krate identity users add`.
 6. If Kafbat used Keycloak login (`KAFKA_UI_AUTH_CONFIG=runtime.yml`), run
-   `./krate auth configure <site.json>` and `./krate auth apply` again.
+   `./krate auth configure --force` (or `./krate auth configure <site.json>`
+   after removing the old generated files) and `./krate auth apply` again.
    PingFederate brokering is not available in Phase 1 and Phase 2; it returns
    in Phase 3, when the identity-provider plan is applied to the realm.
 
@@ -807,12 +839,14 @@ covers the required user lifecycle; the master realm stays off the proxy
 ### 3. Support visibility (confirm)
 
 Implemented for Phase 1: `identity status`, the journal and `users list`; no
-`.env`, no `credentials`, no backups. Proposed for Phase 2: Kafbat viewer =
-`view` on every resource plus `analysis_view` on topics, `messages_read` only
-when the site sets `viewer_messages`; never `create`, `edit`, `delete`,
-`messages_produce`, `messages_delete`, `reset_offsets` (the Kafbat action
-names are from its RBAC reference [S12]). Source: the handover ("Default
-support visibility should be metrics, lag and approved metadata").
+`.env`, no `credentials`, no backups. Implemented for Phase 2 (Kafbat side):
+viewer = `view` on every resource plus `analysis_view` on topics,
+`messages_read` only when the site sets `KAFKA_UI_VIEWER_MESSAGES=true` in
+`.env`; never `create`, `edit`, `delete`, `messages_produce`,
+`messages_delete`, `reset_offsets`, and never `ksql` (the Kafbat action names
+are from its RBAC reference [S12]). The preflight refuses a `runtime.yml`
+whose viewer reads messages without that opt-in. Source: the handover
+("Default support visibility should be metrics, lag and approved metadata").
 
 ### 4. MFA and session defaults (confirm)
 
@@ -855,6 +889,10 @@ with the Kafbat role mapping; (B) add `krate identity reconcile-groups`, which
 renames the realm groups to the `.env` values and rewrites `runtime.yml`.
 
 Recommended: A for Phase 1; revisit B when Phase 2 adds the Kafbat side.
+Phase 2 status: `auth configure` plans the Kafbat roles from the same
+`KEYCLOAK_*_GROUP` values and the preflight refuses a `runtime.yml` whose role
+subjects differ from `.env`, so the two sides cannot drift apart; a rename of
+the realm groups themselves is still an administration step (A).
 Why: realm import is skipped for an existing realm ("If a realm already
 exists in the server, the import operation is skipped" [S15]), so any rename
 is an Admin REST operation (`PUT /admin/realms/{realm}/groups/{group-id}`

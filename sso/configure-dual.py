@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Generate Kafbat dual login and the PingFederate identity-provider plan for the Krate realm.
+"""Generate Kafbat's Keycloak login and the PingFederate identity-provider plan for the Krate realm.
 
-The realm itself (auth/keycloak/krate-realm.json) is planned by `krate identity up`;
-this program only adds the pieces that broker PingFederate into that realm.
+The realm itself (auth/keycloak/krate-realm.json) is planned by `krate identity up`
+and Kafbat's runtime.yml by the same module (sso/identity.py); this program adds
+only the pieces that broker PingFederate into that realm.
 """
 import argparse
 import json
@@ -13,37 +14,32 @@ import sys
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
-from configure import kafbat, validate, url  # noqa: E402  (sibling module; explicit path keeps python -I working)
+import identity  # noqa: E402  (sibling modules; explicit path keeps python -I working)
+from configure import validate, url  # noqa: E402
 
 
-def configs(settings):
+def configs(settings, env=None):
+    """{relative path: JSON data} for a site file; `env` is the parsed .env mapping (groups, idle limit, viewer opt-in)."""
     validate(settings, "kafbat")
     for endpoint in ("authorization_url", "token_url", "userinfo_url", "jwks_url"):
         url(settings, endpoint)
     if "offline_access" in settings["scopes"]:
         raise ValueError("dual login does not request refresh tokens; remove offline_access")
+    # One source for both sides of a session limit and for the viewer's message access.
+    for key, env_key in (("session_idle_minutes", "KEYCLOAK_SESSION_IDLE_MINUTES"),
+                         ("viewer_messages", identity.VIEWER_MESSAGES_KEY)):
+        if key in settings:
+            raise ValueError(f"{key} is read from .env: krate config set {env_key}=...; remove it from the site file")
+    env = dict(env or {})
     public_url = settings["public_url"].rstrip("/")
-    keycloak_url = public_url + "/identity"
-    realm_url = keycloak_url + "/realms/krate"
-    internal_realm_url = "http://keycloak:8080/identity/realms/krate"
-    local_settings = dict(settings, issuer=realm_url, client_id="krate-ui",
-                          groups_claim="groups", scopes=["openid", "profile", "email"],
-                          authorization_url=realm_url + "/protocol/openid-connect/auth",
-                          token_url=internal_realm_url + "/protocol/openid-connect/token",
-                          userinfo_url=internal_realm_url + "/protocol/openid-connect/userinfo",
-                          jwks_url=internal_realm_url + "/protocol/openid-connect/certs")
-    app = json.loads(kafbat(local_settings))
-    client = app["auth"]["oauth2"]["client"].pop("pingfederate")
-    client.update({"provider": "keycloak", "client-secret": "${KEYCLOAK_KAFBAT_CLIENT_SECRET}",
-                   "redirect-uri": public_url + "/login/oauth2/code/keycloak"})
-    app["auth"]["oauth2"]["client"]["keycloak"] = client
-    app["spring"].pop("config", None)
-    app["auth"]["oauth2"].update({"allow-shared-login": True,
-                                 "shared-role": "administrator",
-                                 "require-mapped-role": True})
-    groups = (settings["viewer_group"], settings["admin_group"])
+    # Kafbat's runtime.yml is the same plan `krate auth configure` writes without a
+    # site file; the realm stays the Keycloak issuer, PingFederate is brokered behind it.
+    app = identity.runtime(identity.runtime_settings(env, settings["clusters"], origin=public_url))
+    viewer_group, admin_group = identity.group_names(env)
     # Applied to the realm in the SSO phase; the realm plan (local users, clients,
-    # groups, sessions) is owned by sso/identity.py and never written here.
+    # groups, sessions) is owned by sso/identity.py and never written here. The
+    # mappers put a PingFederate user whose claim names the site's AD group into
+    # the realm group of the same role, which is what Kafbat's roles read.
     identity_provider = {
         "identityProviders": [{"alias": "pingfederate", "displayName": "Company sign-in",
                                "providerId": "oidc", "enabled": True,
@@ -65,10 +61,11 @@ def configs(settings):
              "config": {"claims": json.dumps([{"key": settings["groups_claim"],
                                                 "value": group}]),
                         "syncMode": "FORCE", "are.claim.values.regex": "false",
-                        "group": "/" + group}}
-            for group in groups],
+                        "group": "/" + realm_group}}
+            for group, realm_group in ((settings["viewer_group"], viewer_group),
+                                       (settings["admin_group"], admin_group))],
         # The redirector sends SSO users to PingFederate without a second
-        # Keycloak username/password page. The shared Kafbat login is separate.
+        # Keycloak username/password page.
         "authenticatorConfig": [{"alias": "PingFederate redirect",
                                  "config": {"defaultProvider": "pingfederate"}}],
         "authenticationFlows": [{"alias": "krate browser", "providerId": "basic-flow",
@@ -89,11 +86,15 @@ def configs(settings):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--settings", type=Path, required=True)
+    parser.add_argument("--env-file", type=Path, help="the installation's .env (group names, session idle limit, viewer opt-in)")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     created = []
     try:
-        result = configs(json.loads(args.settings.read_text()))
+        env = identity.read_env(args.env_file) if args.env_file else {}
+        result = configs(json.loads(args.settings.read_text()), env)
+        for name, data in result.items():
+            identity.assert_redacted(json.dumps(data), env)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         for name in result:
             if (args.output_dir / name).exists():
@@ -106,7 +107,7 @@ def main():
             with os.fdopen(fd, "w") as output:
                 output.write(json.dumps(data, indent=2) + "\n")
                 os.fchmod(output.fileno(), 0o644)
-        print(f"Created Kafbat dual login and the PingFederate identity-provider plan in {args.output_dir}; "
+        print(f"Created Kafbat's Keycloak login (ui/runtime.yml) and the PingFederate identity-provider plan in {args.output_dir}; "
               "no services changed.")
         print("The realm file auth/keycloak/krate-realm.json is owned by krate identity up; "
               "keycloak/pingfederate-idp.json is applied to the realm in the SSO phase (Phase 3).")
