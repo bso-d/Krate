@@ -610,26 +610,230 @@ Procedure:
 
 ## Open owner decisions
 
-1. Support visibility: confirm the PROPOSED default (status, journal, user
-   list; no `.env`, no credentials, no messages in Kafbat).
-2. Admin scopes: confirm that no human gets realm-admin rights in realm
-   `krate`, and that the master admin is used only by `./krate` and host-side
-   `kcadm`.
-3. Group precedence: a user in both groups is a Kafbat administrator
-   (PROPOSED).
-4. Renaming groups after the realm exists: keep the realm names and document
-   the mismatch, or add a `krate identity` migration.
-5. Network separation: keep Keycloak and its database on the cluster network
-   (current), or move them to an identity-only network in Phase 2 with the
-   proxy and Kafbat as the only peers. The same decision covers
-   `X-Forwarded-*` header trust: whether to give the proxy a fixed address and
-   set `KC_PROXY_TRUSTED_ADDRESSES` to it (see "Residual risks").
-6. Monitoring host ports 9090, 3100 and 3000 over plain HTTP: unchanged in
-   Phase 1 pending the owner gate.
-7. Database TLS certificate lifetime and renewal procedure.
-8. Backup schedule, retention and where the passphrase is kept.
-9. Whether `KEYCLOAK_ENABLED=false` with `KAFKA_UI_AUTH_CONFIG=runtime.yml` is
-   allowed as a transitional state or must be refused.
-10. Whether a failed deletion of `temp-admin` during `identity up` blocks the
-    command or only warns and journals.
-11. Journal retention and rotation.
+Items 1 to 4 confirm what Phase 1 implements. Items 5 to 13 need a choice.
+Each item lists the options, the recommended one, why, and the sources.
+Quotes are from the sources listed at the end of this section.
+
+### 1. Local mode (confirm)
+
+Implemented: local user accounts in realm `krate`; every integrated UI uses
+the same Keycloak issuer whether or not an upstream identity provider is
+enabled. Source: the handover ("apps keep the same Keycloak issuer in both
+modes").
+
+### 2. Administrative scope (confirm)
+
+Implemented: one permanent master-realm admin (`KEYCLOAK_ADMIN_USER`) used by
+`./krate` and host-side `kcadm`; realm user management through the `krate-cli`
+service account with `manage-users`, `view-users`, `query-users`,
+`query-groups`; no human realm-admin in `krate`; Keycloak administration does
+not grant Kafka or host access. Why: the smallest set of permissions that
+covers the required user lifecycle; the master realm stays off the proxy
+(Keycloak: "Exposed admin paths lead to an unnecessary attack vector" [S1]).
+
+### 3. Support visibility (confirm)
+
+Implemented for Phase 1: `identity status`, the journal and `users list`; no
+`.env`, no `credentials`, no backups. Proposed for Phase 2: Kafbat viewer =
+`view` on every resource plus `analysis_view` on topics, `messages_read` only
+when the site sets `viewer_messages`; never `create`, `edit`, `delete`,
+`messages_produce`, `messages_delete`, `reset_offsets` (the Kafbat action
+names are from its RBAC reference [S12]). Source: the handover ("Default
+support visibility should be metrics, lag and approved metadata").
+
+### 4. MFA and session defaults (confirm)
+
+Implemented: TOTP enrolment forced at first login for every local user;
+access token 5 minutes; session idle 15 minutes; session maximum 8 hours; no
+self-registration, no e-mail password reset, no offline tokens. Why: NIST
+SP 800-63B requires two factors at AAL2 ("Proof of possession and control of
+two distinct authentication factors is required") and reauthentication "at
+least once per 12 hours" and "following any period of inactivity lasting 30
+minutes or longer" [S6]; 8 hours and 15 minutes are inside those bounds, and
+15 minutes matches the stricter AAL3 inactivity limit. The 5-minute token
+bounds how long a revoked user keeps a valid bearer token (the handover's
+"residual-access deadline"); Keycloak documents the three realm settings that
+carry these values [S7].
+
+### 5. Group precedence
+
+Options: (A) a user in both groups is an administrator; (B) the viewer group
+wins (membership in both yields viewer); (C) refuse login for a user in both
+groups.
+
+Recommended: A. Why: Kafbat's own authorization computes the union of every
+role whose name is in the user's groups (`.filter(filterRole(user))` then
+`.flatMap(role -> role.getPermissions().stream())`, with `filterRole` =
+`user.groups().contains(role.getName())` [S11]). Option B would need a Kafbat
+code change in the fork, and option C would need a Keycloak flow step; both add
+surface to a Phase 2 patch that is meant to shrink it. Membership in both
+groups is an administration mistake made visible by `users groups <u>`.
+
+### 6. Renaming groups after the realm exists
+
+Options: (A) document that `KEYCLOAK_*_GROUP` in `.env` is read only when the
+realm is created, and rename groups through Keycloak administration together
+with the Kafbat role mapping; (B) add `krate identity reconcile-groups`, which
+renames the realm groups to the `.env` values and rewrites `runtime.yml`.
+
+Recommended: A for Phase 1; revisit B when Phase 2 adds the Kafbat side.
+Why: realm import is skipped for an existing realm ("If a realm already
+exists in the server, the import operation is skipped" [S15]), so any rename
+is an Admin REST operation (`PUT /admin/realms/{realm}/groups/{group-id}`
+[S16]) that must change the Kafbat role subjects in the same step, otherwise
+every user loses access. That coupling belongs to Phase 2, where both sides
+exist.
+
+### 7. Network separation and trusted proxy addresses
+
+Options: (A) keep Keycloak and its database on the cluster network, no
+`KC_PROXY_TRUSTED_ADDRESSES` (current); (B) Phase 2: an identity-only
+Compose network marked `internal: true` with Keycloak, its database, the proxy
+and Kafbat as the only members, the proxy with a static address, and
+`KC_PROXY_TRUSTED_ADDRESSES` set to it; (C) option B plus TLS between the proxy
+and Keycloak.
+
+Recommended: B in Phase 2, on a fresh identity network. Why: Keycloak's guide
+asks for the trusted list ("To ensure that proxy headers are used only from
+proxies you trust, set the `proxy-trusted-addresses` option to a
+comma-separated list of IP addresses", and warns that "rogue clients can
+inject false values" otherwise; it also notes the limit: "this is only weak
+protection because IP addresses can be spoofed" [S1]). A static address needs
+a Compose network with an `ipam` subnet ("Specify a static IP address for a
+service container when joining the network"; the network "must have an
+`ipam` attribute with subnet configurations covering each static address"
+[S2]). Changing the existing cluster network's IPAM would recreate the broker
+containers, which Phase 1 must not do; a new `internal: true` network ("lets
+you create an externally isolated network" [S2]) avoids that. C is not
+recommended now: the hop is inside one Docker host and the certificate
+lifecycle for a second internal CA adds operations without a changed threat.
+
+### 8. Monitoring host ports 9090, 3100, 3000 over plain HTTP
+
+Options: (A) unchanged; (B) bind Prometheus and Loki to `127.0.0.1` on the
+host (`127.0.0.1:9090:9090`, `127.0.0.1:3100:3100`) and keep Grafana on 3000
+until Phase 4; (C) put Prometheus, Loki and Grafana behind the existing nginx
+proxy with TLS and Grafana login, and publish nothing else; (D) C plus
+Keycloak login for Grafana (Phase 4).
+
+Recommended: B now, as the first Phase 2 commit, then D in Phase 4. Why:
+Prometheus states that anyone reaching its HTTP endpoint has "access to all
+time series information contained in the database" and that the endpoints
+"should not be exposed to publicly accessible networks" [S3]; Loki "does not
+come with any included authentication layer" and "You must run an
+authenticating reverse proxy in front of your services" [S4]; Grafana's
+secure cookie "The default value is false" and needs HTTPS [S5]. The handover
+requires reachable unauthenticated backing services to be closed before a
+protected UI is accepted. B removes the unauthenticated endpoints from the
+network with a two-line change and no new component; Grafana keeps its login
+and the dashboards stay reachable. Who needs remote Prometheus or Loki access
+(none is known) decides whether C is needed before Phase 4.
+
+### 9. Database TLS certificate lifetime and renewal
+
+Options: (A) private CA, 825-day server certificate, manual renewal (current);
+(B) 398-day certificate with a `krate identity renew-db-tls` command that
+re-issues the server certificate under the same CA and reloads PostgreSQL;
+(C) certificates from the site CA.
+
+Recommended: A now, B as a Phase 2 addition. Why: the certificate is used on
+one Docker-internal hop between two containers of one host, so public
+certificate-lifetime policy does not apply, and the preflight refuses a
+certificate that expires within a day, so expiry is caught before a start.
+Renewal under the same CA needs no Keycloak trust change, and PostgreSQL
+re-reads the files on reload ("The server reads these files at server start
+and whenever the server configuration is reloaded" [S8]), so B can be done
+without downtime for the database. C is right only when the site runs an
+internal CA with automation; it adds an external dependency to a private hop.
+
+### 10. Backups
+
+Options: (A) operator-run `identity backup` on a site schedule, retention and
+passphrase custody by site policy (current); (B) a `krate identity backup`
+timer (systemd) writing daily to a directory with N retained files; (C) B plus
+off-host copy.
+
+Recommended: A for Phase 1 with a stated minimum: one backup before every
+`rotate`, `restore`, Keycloak upgrade and Phase change, kept with its
+passphrase in the site's secret store, retention at least the last five.
+Why: the archive is consistent while Keycloak runs ("It makes consistent
+backups even if the database is being used concurrently" [S9]); it holds one
+database only, so the database role password is not in it ("pg_dump only dumps
+a single database"; roles need `pg_dumpall` [S9]), which is why the archive
+carries the four identity `.env` keys instead. The passphrase derivation uses
+PBKDF2 with 600,000 iterations, the OWASP figure for PBKDF2-HMAC-SHA256
+("600,000 iterations (recommended)" [S10]). A timer (B) is a small addition
+once the schedule is known; it should not be invented before the owner names
+one.
+
+### 11. Transitional state `KEYCLOAK_ENABLED=false` with `runtime.yml`
+
+Options: (A) tolerate it: `start` refuses until `identity up` has run and
+tells the operator so (current); (B) refuse the combination in `config set`
+and `auth apply` as a contradiction.
+
+Recommended: A. Why: the state arises legitimately when a site `.env` is
+restored on a new host or when `auth configure` runs before `identity up`; the
+current behaviour fails closed (Kafbat is never started without its issuer)
+and names the one command that resolves it. B would only move the same
+message earlier and block `config set` of an unrelated key in the same file.
+
+### 12. Temporary-admin cleanup failure
+
+Options: (A) the command fails when a temporary admin cannot be deleted
+(current); (B) warn, journal and continue.
+
+Recommended: A. Why: Keycloak documents the account as temporary and says
+"After that, the account needs to be removed manually" [S13]; a leftover
+temporary admin with the realm role `admin` is an unaccounted credential. A
+failed deletion means the admin session or the server is in an unexpected
+state, which is a reason to stop and show it, not to continue. The next
+`identity up` or `recover-admin` removes every `temp-admin*` account it finds.
+
+### 13. Journal retention and rotation
+
+Options: (A) append-only file, no rotation (current); (B) rotate with the
+host's logrotate (`rotate 12`, monthly, `copytruncate`, keep under
+`auth/`); (C) ship the lines to the monitoring stack's log pipeline.
+
+Recommended: B, as a drop-in file the package installs under
+`/etc/logrotate.d/` in Phase 2, with `copytruncate` so the append-only writer
+needs no reopen ("Truncate the original log file to zero size in place after
+creating a copy" [S14]); retention `rotate 12` ("Log files are rotated count
+times before being removed") and `maxage 400` [S14]. Why: the journal grows
+by one line per identity operation, so volume is small, but an unbounded
+file on the installation disk is still an operational risk, and logrotate is
+present on Ubuntu and RHEL without a new component. C depends on Phase 4.
+
+### Sources
+
+- [S1] Keycloak 26.8.0, "Using a reverse proxy":
+  <https://github.com/keycloak/keycloak/blob/26.8.0/docs/guides/server/reverseproxy.adoc>
+- [S2] Compose Specification, networks and services:
+  <https://docs.docker.com/reference/compose-file/networks/>,
+  <https://docs.docker.com/reference/compose-file/services/>
+- [S3] Prometheus, "Security model": <https://prometheus.io/docs/operating/security/>
+- [S4] Grafana Loki, "Authentication":
+  <https://grafana.com/docs/loki/latest/operations/authentication/>
+- [S5] Grafana, "Configure security hardening":
+  <https://grafana.com/docs/grafana/latest/setup-grafana/configure-security/configure-security-hardening/>
+- [S6] NIST SP 800-63B, sections 4.2, 4.2.3 and 4.3.3:
+  <https://pages.nist.gov/800-63-3/sp800-63b.html>
+- [S7] Keycloak 26.8.0, session and token timeouts:
+  <https://github.com/keycloak/keycloak/blob/26.8.0/docs/documentation/server_admin/topics/sessions/timeouts.adoc>
+- [S8] PostgreSQL 17, "Secure TCP/IP Connections with SSL", 18.9.4:
+  <https://www.postgresql.org/docs/17/ssl-tcp.html>
+- [S9] PostgreSQL 17, pg_dump: <https://www.postgresql.org/docs/17/app-pgdump.html>
+- [S10] OWASP Password Storage Cheat Sheet:
+  <https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html>
+- [S11] Kafbat v1.5.0 (pinned commit), `AccessControlService.getUserPermissions`:
+  <https://github.com/kafbat/kafka-ui/blob/afc9c918e13c4422268a3a5b7933c7b448746c82/api/src/main/java/io/kafbat/ui/service/rbac/AccessControlService.java>
+- [S12] Kafbat UI, RBAC reference:
+  <https://ui.docs.kafbat.io/configuration/rbac-role-based-access-control>
+- [S13] Keycloak 26.8.0, "Bootstrapping and recovering an admin account":
+  <https://github.com/keycloak/keycloak/blob/26.8.0/docs/guides/server/bootstrap-admin-recovery.adoc>
+- [S14] logrotate(8): <https://man7.org/linux/man-pages/man8/logrotate.8.html>
+- [S15] Keycloak 26.8.0, "Importing and exporting realms":
+  <https://github.com/keycloak/keycloak/blob/26.8.0/docs/guides/server/importExport.adoc>
+- [S16] Keycloak 26.8.0 Admin REST API:
+  <https://www.keycloak.org/docs-api/26.8.0/rest-api/index.html>
