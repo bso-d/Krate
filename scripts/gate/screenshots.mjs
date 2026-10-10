@@ -33,7 +33,10 @@ const DISABLED_PW = process.env.GATE_DISABLED_PASSWORD;
 if (!USER || !TEMP_PW || !DISABLED || !DISABLED_PW) { console.error('need --user, --disabled-user, GATE_TEMP_PASSWORD and GATE_DISABLED_PASSWORD'); process.exit(2); }
 const asserted = [];
 function assert(cond, what) { if (!cond) throw new Error('assert: ' + what); asserted.push(what); }
-async function visibleText(selector) { const l = page.locator(selector); return (await l.count()) ? (await l.first().innerText()).trim() : ''; }
+// Keycloak renders an (empty) error container per field on every form; the message is the first one with text.
+const ERROR_TEXT = '[id^="input-error"], #kc-error-message, .kc-feedback-text';
+function errorLocator() { return page.locator(ERROR_TEXT).filter({ hasText: /\S/ }).first(); }
+async function waitForError() { await errorLocator().waitFor({ state: 'visible', timeout: 30000 }); return (await errorLocator().innerText()).trim(); }
 const NEW_PW = [...Array(18)].map(() => 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'[randomInt(54)]).join('');
 
 function totp(secretBytes, t = Date.now() / 1000) {
@@ -121,8 +124,7 @@ try {
   await shot(page, 'second-login-asks-otp', 'Every later login asks for the one-time code after the password');
   await page.fill('#otp', '000000');
   await page.click('#kc-login');
-  await page.waitForSelector('[id^="input-error"], #kc-error-message, .kc-feedback-text');
-  const otpMsg = await visibleText('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  const otpMsg = await waitForError();
   assert(/invalid authenticator code/i.test(otpMsg) && (await page.locator('#otp').count()), `wrong OTP refused on the OTP form with: ${otpMsg}`);
   await shot(page, 'wrong-otp-refused', 'A wrong one-time code is refused');
   await ctx.clearCookies();
@@ -131,8 +133,7 @@ try {
   await page.fill('#username', USER);
   await page.fill('#password', 'definitely-not-the-password');
   await page.click('#kc-login');
-  await page.waitForSelector('[id^="input-error"], #kc-error-message, .kc-feedback-text');
-  const pwMsg = await visibleText('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  const pwMsg = await waitForError();
   assert(/invalid username or password/i.test(pwMsg) && (await page.locator('#kc-form-login').count()), `wrong password refused on the login form with: ${pwMsg}`);
   await shot(page, 'wrong-password-refused', 'A wrong password is refused with a generic message');
   await ctx.clearCookies();
@@ -141,8 +142,7 @@ try {
   await page.fill('#username', DISABLED);
   await page.fill('#password', DISABLED_PW);
   await page.click('#kc-login');
-  await page.waitForSelector('[id^="input-error"], #kc-error-message, .kc-feedback-text');
-  const disMsg = await visibleText('[id^="input-error"], #kc-error-message, .kc-feedback-text');
+  const disMsg = await waitForError();
   assert(/account is disabled/i.test(disMsg), `disabled user refused with: ${disMsg}`);
   await shot(page, 'disabled-user-refused', `Disabled user ${DISABLED}: the login is refused`);
   await ctx.clearCookies();

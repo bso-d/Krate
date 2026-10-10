@@ -94,7 +94,7 @@ Every id is one row of the receipt.
 | id | test | pass condition |
 |---|---|---|
 | G1 | `docker port` of keycloak and keycloak-db | nothing published |
-| G2 | proxy paths: realm discovery and account console; admin console, master realm, metrics, health, bare `/identity`, dot-segment traversal | 200, 200; the rest 404 (traversal 400) |
+| G2 | proxy paths sent as-is (`curl --path-as-is`): realm discovery and account console; admin console, master realm, metrics, health, bare `/identity`; a dot segment that lands on the master realm; a dot segment that lands on an allowed path; a path parameter (`;x=1`) | 200, 200; the blocked paths 404; `../master` 404 (the normalised target is blocked); `../krate/account` 400 and `;x=1` 400 (refused before any target) |
 | G3 | network membership and addresses: keycloak-db on `identity` only; keycloak on `identity` + `identity-egress`; `identity` internal with the configured subnet and `ip_range`; proxy at `KRATE_IDENTITY_PROXY_IP` = `KC_PROXY_TRUSTED_ADDRESSES` | all equal to the configuration |
 | G4 | a dynamically addressed container on `identity` | its address is inside `KRATE_IDENTITY_IP_RANGE` and is not the proxy address |
 | G5 | name resolution of `keycloak` from the brokers' network | no such name |
@@ -129,6 +129,7 @@ Every id is one row of the receipt.
 | C2 | `docker compose restart keycloak`, then `users list` and `identity up` | users present; `No changes` |
 | C3 | `identity down` + `identity up` | users present; an enrolled user logs in with password + OTP |
 | C4 | `identity renew-db-tls` | new expiry, chains to the CA, `.prev` discarded, journal `renew-db-tls ok`, Keycloak ready |
+| C6 | `otpPolicyLookAheadWindow` set to 0 in Keycloak behind the CLI's back, then `identity up` | window back to 1 from the realm plan; journal `up reconciled realm policy` |
 | C5 | `renew-db-tls` with an injected restart failure (a `docker` wrapper on `PATH` fails `compose restart`) | exit 1; `server.crt` byte-identical to before; `.prev` consumed; journal `renew-db-tls rolled back`; `keycloak-db` reports `healthy` on the old certificate |
 
 ### I: "Implement credential-specific changes through the authoritative store and verify the consumer. Editing .env or regenerating realm JSON is insufficient evidence."
@@ -192,7 +193,11 @@ Every id is one row of the receipt.
 | K1 | `auth configure --local`, `config set KAFKA_UI_AUTH_CONFIG=runtime.yml`, `start`, `auth apply` | all exit 0 (preflight inside apply); broker containers untouched; `runtime.yml` has no shared login |
 | K30 | a second `auth apply` | kafka-ui container unchanged; prints `unchanged … sessions kept` |
 | K2–K26, K31, K32 | the Kafbat authorization ladder, `scripts/gate/phase2_kafbat.py` (viewer reads; every mutation refused by the backend with 403; admin mutates; no-group user refused at login; disabled user refused; shared login absent; ID-token issuer/audience checks; identity = `sub`; CSRF; POST-only logout ending the Keycloak session; back-channel logout measured; disabled user's session lifetime measured; open-redirect and proxy-header spoofing; both-groups user = administrator; group rename in `.env` leaves the realm alone; K31: XSRF cookie `Secure`, not HttpOnly, rotated at login; K32: error bodies carry no stack trace; the viewer's `GET /api/config` 403 is part of K2) | each case PASS with the observed status codes and measured seconds in the evidence |
-| K27/K28, M1/M2 | see G above | |
+| K27 | public proxy paths as-is: `/metrics`, `/actuator`, `/actuator/`, `/actuator/health`, `/actuator/prometheus`, `/actuator;x/prometheus`, `/logout/connect`, `/logout/connect/back-channel/keycloak`, `/api/clusters;x`, `/api/clusters` | 404 for the five blocked paths and the base paths, 400 for the two path parameters, 302 for the API |
+| K28 | anonymous `/api/clusters` | redirects to `/oauth2/authorization/keycloak` on the public origin |
+| K33 | `Host: evil.example.test` on the public port (Keycloak sign-in mode sets `KRATE_PROXY_PUBLIC_HOST` to the public authority, port included; the raw header is compared) | 444: connection closed without a response (curl exit 52); the real host still answers |
+| K34 | `gen-cert` then `auth apply`, then a second `auth apply` | `KRATE_PROXY_CONF_SHA` changed and the proxy container was recreated; the second apply keeps the container; the proxy serves |
+| M1/M2 | see G above | |
 | K17 | EPC | informational row (`owned by runner`): the EPC Compose rendering and CLI parity are S1/S4; the EPC runtime is the Phase 1 gate run inside the Rocky 9 VM (`--no-static --no-screenshots`, receipt under `harness/gate-receipts/epc-vm-<sha>/`) |
 
 ### Not covered by this runner, proven elsewhere

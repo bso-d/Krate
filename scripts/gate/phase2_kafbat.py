@@ -47,6 +47,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import ssl
 import struct
 import subprocess
@@ -449,6 +450,7 @@ class Gate:
         self.fixture_data = None
         self.idle_thread = None
         self.idle_result = None
+        self.terminated = False
         self.cleanup_topics = set()
         self.cleanup_groups = set()
         self.run_id = secrets.token_hex(3)
@@ -1631,6 +1633,11 @@ class Gate:
                     ('K26', self.k26_group_rename), ('K22', self.k22_disabled_session)]
             for name, func in plan:
                 self.case(name, func)
+        except Terminated:
+            # The runner (or an operator) sent SIGTERM: the rows gathered so far are still printed,
+            # the fixture users and stub are removed, and the unreached cases say so.
+            self.terminated = True
+            log('terminated: stopping after the current case')
         finally:
             try:
                 self.cleanup()
@@ -1643,7 +1650,7 @@ class Gate:
         first = True
         for case in CASES:
             if case not in self.results:
-                reason = 'not selected (--only)' if not self.wanted(case) else 'not reached'
+                reason = 'not selected (--only)' if not self.wanted(case) else ('not reached (terminated)' if self.terminated else 'not reached')
                 self.results[case] = ('NOT_RUN', reason)
             status, text = self.results[case]
             if first and self.tls_mode:
@@ -1865,8 +1872,17 @@ def parse_args(argv):
     return args
 
 
+class Terminated(Exception):
+    """SIGTERM reached the helper."""
+
+
+def _on_sigterm(signum, frame):
+    raise Terminated()
+
+
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    signal.signal(signal.SIGTERM, _on_sigterm)
     return Gate(args).main()
 
 

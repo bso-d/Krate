@@ -18,8 +18,9 @@
 # shellcheck disable=SC2319  # `[[ ... ]]; st=$?` reads the condition's status on the very next statement
 set -uo pipefail
 umask 077
+(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || { echo "bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 2; }
 
-GATE_VERSION=2
+GATE_VERSION=4
 RUNNER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 GATE_DIR="$(dirname "$RUNNER")/gate"
 REPO="$(cd "$(dirname "$RUNNER")/.." && pwd)"
@@ -130,15 +131,19 @@ declare -a HOLDERS=()
 declare -A SEEN=()
 PASSES=0; FAILS=0; NOTRUN=0
 CHILD=""
+FIXTURE_OWNED=false  # set by fixture_env: only then may teardown touch Compose projects, volumes and networks
+J7_REQUIRED=false
 
 # ── required inventory (declared before anything runs; a missing row fails the gate) ──
-REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 G7 G8 A1 A2 A3 A4 A5 B1 B2 B3 B4 B5 B6 B7 C1 C2 C3 C4 C5 I1 I2 I3 I4 I5 D1 D2 D3 D4 D5 D6 D7 E1 E2 E3 E4 E5 E6 E7 E8 J1 J2 J3 J4 J5 J6 Z1)
-REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K31 K32 M1 M2 Z2)
+REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 G7 G8 A1 A2 A3 A4 A5 B1 B2 B3 B4 B5 B6 B7 C1 C2 C3 C4 C5 C6 I1 I2 I3 I4 I5 D1 D2 D3 D4 D5 D6 D7 E1 E2 E3 E4 E5 E6 E7 E8 J1 J2 J3 J4 J5 J6 J7 Z1)
+if { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v logrotate >/dev/null 2>&1; then J7_REQUIRED=true; fi
+REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K31 K32 K33 K34 M1 M2 Z2)
 REQUIRED_X=(X1)
 required_ids() { # the inventory that decides the verdict, given the flags
   local id
   for id in "${REQUIRED_P1[@]}"; do
     if ! $STATIC && [[ "$id" == S* ]]; then continue; fi
+    if [[ "$id" == J7 ]] && ! $J7_REQUIRED; then continue; fi
     echo "$id"
   done
   if [[ "$PHASE" != 1 ]]; then for id in "${REQUIRED_P2[@]}"; do echo "$id"; done; fi
@@ -205,7 +210,7 @@ compose() { docker compose -p "$PROJECT" --project-directory "$ED" --env-file "$
 cid() { docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=$1" | head -1; }
 mon_cid() { docker ps -aq --filter "label=com.docker.compose.project=$MON_PROJECT" --filter "label=com.docker.compose.service=$1" | head -1; }
 running_services() { docker ps --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Label "com.docker.compose.service"}}' | sort | tr '\n' ' '; }
-hc() { curl -sk -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
+hc() { curl -sk --path-as-is -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }  # as-is: dot segments and ; reach the proxy unnormalised
 post_secret_form() { # URL BODY → HTTP status; the body (it carries a secret) reaches curl through a 0600 file
   local body_file="$STATE/body.$$"
   printf '%s' "$2" > "$body_file"; chmod 600 "$body_file"
@@ -268,6 +273,7 @@ fixture_reset() {
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
 }
 fixture_env() {
+  FIXTURE_OWNED=true
   cp "$ED/.env.template" "$ENVF" && chmod 600 "$ENVF"
   "$KRATE" config set "KRATE_PROJECT=$PROJECT" >/dev/null
   "$KRATE" config set "KAFKA_UI_HTTPS_PORT=$HTTPS_PORT" >/dev/null
@@ -290,6 +296,7 @@ host_conflicts() { # other krate installations on this Docker host block a run (
 }
 
 # ═══════════════════════════ static ═══════════════════════════
+gmake_check_in() { ( cd "$1" && gmake check ); }  # env -C is GNU-only
 run_static() {
   section "S: static checks on the candidate"
   local id
@@ -298,7 +305,7 @@ run_static() {
     return
   fi
   if [[ -f "$TOPLEVEL/Makefile" ]]; then
-    cap env -C "$TOPLEVEL" gmake check; st=$?; ok_if S1 static S "$st" "gmake check (syntax, lint, compose-check, offline-check, identity-check): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
+    cap gmake_check_in "$TOPLEVEL"; st=$?; ok_if S1 static S "$st" "gmake check (syntax, lint, compose-check, offline-check, identity-check): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
   else
     record S1 static S NOT_RUN "no Makefile beside the edition (bundle host); run on the repository"
   fi
@@ -354,10 +361,10 @@ run_phase1() {
   [[ "$rc" == 200 ]]; st=$?; ok_if F4 1 F "$st" "authentication probe (krate-cli client_credentials via proxy) HTTP $rc; health probes are separate (F3)"
   # ── G: proxy exposure ──
   ev=""; codes=0
-  for p in "/identity/realms/krate/.well-known/openid-configuration:200" "/identity/realms/krate/account:200" "/identity/admin/:404" "/identity/admin/master/console/:404" "/identity/realms/master:404" "/identity/realms/master/account:404" "/identity/metrics:404" "/identity/health:404" "/identity/health/ready:404" "/identity:404" "/identity/realms/krate/../master:400"; do
+  for p in "/identity/realms/krate/.well-known/openid-configuration:200" "/identity/realms/krate/account:200" "/identity/admin/:404" "/identity/admin/master/console/:404" "/identity/realms/master:404" "/identity/realms/master/account:404" "/identity/metrics:404" "/identity/health:404" "/identity/health/ready:404" "/identity:404" "/identity/realms/krate/../master:404" "/identity/realms/krate/../krate/account:400" "/identity/realms/krate;x=1/account:400"; do
     rc="$(hc "$BASE${p%%:*}")"; ev="$ev ${p%%:*}=$rc"; [[ "$rc" == "${p##*:}" ]] || codes=1
   done
-  ok_if G2 1 G $codes "proxy paths (realm discovery and account 200; admin, master realm, metrics, health, bare /identity 404; dot-segment traversal 400):$ev"
+  ok_if G2 1 G $codes "proxy paths sent as-is (realm discovery and account 200; admin, master realm, metrics, health, bare /identity 404; a dot segment onto the master realm 404; a dot segment onto an allowed path 400; a path parameter 400):$ev"
   # networks
   ev="db=[$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$dbid")] kc=[$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$kcid")] identity.internal=$(docker network inspect "${PROJECT}_identity" -f '{{.Internal}}') subnet=$(docker network inspect "${PROJECT}_identity" -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}') range=$(docker network inspect "${PROJECT}_identity" -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}') proxy=$(docker inspect -f "{{(index .NetworkSettings.Networks \"${PROJECT}_identity\").IPAddress}}" "$(cid proxy)") trusted=$(docker exec "$kcid" printenv KC_PROXY_TRUSTED_ADDRESSES)"
   [[ "$ev" == "db=[${PROJECT}_identity ] kc=[${PROJECT}_identity ${PROJECT}_identity-egress ] identity.internal=true subnet=$SUBNET range=$IP_RANGE proxy=$PROXY_IP trusted=$PROXY_IP" ]]; st=$?; ok_if G3 1 G "$st" "$ev"
@@ -419,7 +426,7 @@ run_phase1() {
   cap "$KRATE" identity users reset-password gatev; rc=$?; TEMP_PW="$(temp_password "$CAP")"; add_secret "$TEMP_PW" temp
   [[ $rc -eq 0 && -n "$TEMP_PW" ]]; st=$?; ok_if B6 1 B "$st" "reset-password sets a new temporary password (exit $rc; shown once)"
   cap flow login --base "$BASE" --state "$STATE/gatev.json" --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect refused --reason 'Invalid username or password.'; st=$?; ok_if A4 1 A "$st" "old password refused after reset-password ($(flow_reason "$CAP"))"
-  ! grep -E ' users (add|reset-password) ok ' "$JOURNAL" | grep -qF -f "$SECRETS_FILE"; st=$?; ok_if J5 1 J "$st" "journal lines of users add/reset-password carry no secret value: $(grep -E ' users add ok gatev' "$JOURNAL" | head -1 | cut -c1-80)"
+  [[ "$(grep -c -E ' users (add|reset-password) ok ' "$JOURNAL")" -ge 5 ]] && ! grep -E ' users (add|reset-password) ok ' "$JOURNAL" | grep -qF -f "$SECRETS_FILE"; st=$?; ok_if J5 1 J "$st" "journal lines of users add/reset-password carry no secret value: $(grep -E ' users add ok gatev' "$JOURNAL" | head -1 | cut -c1-80)"
 
   # ── C: restart / down-up preserve identity ──
   compose restart --no-deps keycloak >/dev/null 2>&1; wait_status 180
@@ -543,14 +550,18 @@ EOF
   PATH="$STATE/fakebin:$PATH" cap "$KRATE" identity renew-db-tls; rc=$?
   after="$(sha256file "$TLS/server.crt")"; ev="$(docker inspect -f '{{.State.Health.Status}}' "$(cid keycloak-db)" 2>/dev/null)"
   [[ $rc -ne 0 && "$before" == "$after" && ! -f "$TLS/server.crt.prev" && "$ev" == healthy ]] && journal_has ' renew-db-tls rolled back '; st=$?; ok_if C5 1 C "$st" "injected restart failure: renew-db-tls exit=$rc, server.crt byte-identical to before ($before), .prev consumed, journal 'rolled back'; database healthy on the old certificate ($ev)"
+  # C6: realm policy changed behind the CLI's back is reconciled from the plan by identity up.
+  kcadm_master update realms/krate -s otpPolicyLookAheadWindow=0 >/dev/null 2>&1; before="$(kcadm_master get realms/krate --fields otpPolicyLookAheadWindow --format csv --noquotes | tr -d '[:space:]')"
+  cap "$KRATE" identity up; rc=$?; after="$(kcadm_master get realms/krate --fields otpPolicyLookAheadWindow --format csv --noquotes | tr -d '[:space:]')"
+  [[ "$before" == 0 && $rc -eq 0 && "$after" == 1 && "$CAP" == *"look-ahead window"* ]] && journal_has ' up reconciled realm policy'; st=$?; ok_if C6 1 C "$st" "otpPolicyLookAheadWindow set to $before in Keycloak; identity up (exit $rc) reconciled it to $after; journal 'up reconciled realm policy'"
   cap "$KRATE" identity logrotate; rc=$?; ev="$(printf '%s' "$CAP" | grep -F "$JOURNAL" | head -1 | xargs) $(printf '%s' "$CAP" | grep -E '^\s*(rotate|maxage|copytruncate)' | xargs)"
   [[ $rc -eq 0 && "$ev" == *"$JOURNAL"* ]]; st=$?; ok_if J6 1 J "$st" "logrotate render names this journal: $ev"
-  if [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; then
+  if $J7_REQUIRED; then
     cap sudo "$KRATE" identity logrotate --install; rc=$?; cap sudo logrotate -d "/etc/logrotate.d/krate-identity-$EDITION"; st=$?
-    ok_if J7 1 J "$st" "logrotate --install (exit $rc) and 'logrotate -d' dry run accepted; the installed drop-in is removed again by the gate"
+    [[ $rc -eq 0 && $st -eq 0 ]]; st=$?; ok_if J7 1 J "$st" "logrotate --install (exit $rc) and 'logrotate -d' dry run accepted; the installed drop-in is removed again by the gate"
     sudo rm -f "/etc/logrotate.d/krate-identity-$EDITION"
   else
-    record J7 1 J NOT_RUN "needs root (informational; proven by the Linux VM receipt)"
+    record J7 1 J NOT_RUN "needs root (or sudo) and a logrotate binary: outside the inventory on this host; decided by the Linux VM receipt"
   fi
   cap "$KRATE" identity users list; st=$?; ok_if A5 1 A "$st" "users list after the whole ladder: $(printf '%s' "$CAP" | grep -c -E '^  gate') gate users"
   # D6: recovery host with another public URL: restore reconciles the krate-ui client with this host's plan.
@@ -609,10 +620,18 @@ run_phase2() {
   before="$(cid kafka-ui)"; cap "$KRATE" auth apply; rc=$?; after="$(cid kafka-ui)"
   [[ $rc -eq 0 && "$before" == "$after" && "$CAP" == *"unchanged"* ]]; st=$?; ok_if K30 2 K "$st" "second auth apply: exit $rc, kafka-ui container unchanged ($before == $after), prints 'unchanged ... sessions kept'"
   ev=""; rc=0
-  for p in "/metrics:404" "/actuator/health:404" "/actuator/prometheus:404" "/logout/connect/back-channel/keycloak:404" "/api/clusters:302"; do
+  for p in "/metrics:404" "/actuator:404" "/actuator/:404" "/actuator/health:404" "/actuator/prometheus:404" "/actuator;x/prometheus:400" "/logout/connect:404" "/logout/connect/back-channel/keycloak:404" "/api/clusters;x:400" "/api/clusters:302"; do
     after="$(hc "$BASE${p%%:*}")"; ev="$ev ${p%%:*}=$after"; [[ "$after" == "${p##*:}" ]] || rc=1
   done
-  ok_if K27 2 K $rc "public proxy:$ev (metrics/actuator/back-channel 404; API redirects anonymous callers to login)"
+  ok_if K27 2 K $rc "public proxy, paths as-is:$ev (metrics/actuator/back-channel 404; path parameters 400; API redirects anonymous callers to login)"
+  # K33: a foreign Host is refused with 444 (connection closed without a response) in Keycloak sign-in mode.
+  after="$(curl -sk --max-time 20 -H 'Host: evil.example.test' -o /dev/null -w '%{http_code}' "$BASE/api/clusters")"; rc=$?
+  ev="$(hc -H "Host: localhost:$HTTPS_PORT" "$BASE/api/clusters")"
+  [[ "$after" == 000 && $rc -eq 52 && "$ev" == 302 ]]; st=$?; ok_if K33 2 K "$st" "Host: evil.example.test → HTTP $after, curl exit $rc (444: empty reply); Host: localhost:$HTTPS_PORT → $ev (KRATE_PROXY_PUBLIC_HOST=$(envv KRATE_PROXY_PUBLIC_HOST))"
+  # K34: a changed certificate changes KRATE_PROXY_CONF_SHA and auth apply recreates the proxy; a second apply keeps it.
+  before="$(cid proxy)"; names="$(envv KRATE_PROXY_CONF_SHA)"; cap "$KRATE" gen-cert; cap "$KRATE" auth apply; rc=$?
+  after="$(cid proxy)"; ev="$(envv KRATE_PROXY_CONF_SHA)"; cap "$KRATE" auth apply; rc2=$?
+  [[ $rc -eq 0 && $rc2 -eq 0 && -n "$before" && "$before" != "$after" && "$names" != "$ev" && "$after" == "$(cid proxy)" && "$(hc "$BASE/api/clusters")" == 302 ]]; st=$?; ok_if K34 2 K "$st" "gen-cert changed KRATE_PROXY_CONF_SHA ($names → $ev); auth apply recreated the proxy (${before:0:12} → ${after:0:12}, exit $rc); second apply kept it (exit $rc2); proxy serves"
   after="$(curl -sk -o /dev/null -w '%{redirect_url}' --max-time 20 "$BASE/api/clusters")"; [[ "$after" == "$BASE/oauth2/authorization/keycloak" ]]; st=$?; ok_if K28 2 K "$st" "anonymous API call redirects to $after"
   # monitoring binds and exporter network (the monitoring project is this fixture's: host_conflicts refused pre-existing volumes)
   cap "$KRATE" monitor up; rc=$?; collect_secrets
@@ -620,6 +639,7 @@ run_phase2() {
   [[ $rc -eq 0 && "$ev" == *"prom=[9090/tcp -> 127.0.0.1:19090"* && "$ev" == *"loki=[3100/tcp -> 127.0.0.1:13100"* && "$ev" == *"grafana=[3000/tcp -> 0.0.0.0:13000"* && "$ev" != *"9090/tcp -> 0.0.0.0"* && "$ev" != *"3100/tcp -> 0.0.0.0"* ]]; st=$?; ok_if M1 2 M "$st" "monitor up exit=$rc; Prometheus and Loki bound to 127.0.0.1 only, Grafana on all interfaces: $ev"
   after="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$(mon_cid kafka-exporter)" 2>/dev/null)"
   [[ "$after" == *"${PROJECT}_kafka-network"* && "$after" != *"${PROJECT}_identity"* ]]; st=$?; ok_if M2 2 M "$st" "kafka-exporter networks: [$after] (brokers' network, not identity)"
+  local svc; for svc in prometheus grafana loki; do [[ -z "$(mon_cid "$svc")" ]] || docker logs "$(mon_cid "$svc")" > "$STATE/mon-$svc.log" 2>&1 || true; done
   cap "$KRATE" monitor down
   # Kafbat authorization ladder (a background child, so an interrupt reaches it)
   if [[ -f "$GATE_DIR/phase2_kafbat.py" ]]; then
@@ -644,9 +664,8 @@ leak_scan() {
     [[ -n "$(cid "$svc")" ]] || continue
     docker logs "$(cid "$svc")" > "$STATE/$svc.log" 2>&1 || true; places+=("$STATE/$svc.log")
   done
-  for svc in prometheus grafana loki; do
-    [[ -n "$(mon_cid "$svc")" ]] || continue
-    docker logs "$(mon_cid "$svc")" > "$STATE/mon-$svc.log" 2>&1 || true; places+=("$STATE/mon-$svc.log")
+  for svc in prometheus grafana loki; do  # captured by run_phase2 before monitor down
+    [[ -f "$STATE/mon-$svc.log" ]] && places+=("$STATE/mon-$svc.log")
   done
   local raw_without_display="$STATE/raw-without-display.log"
   awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display"
@@ -665,13 +684,16 @@ teardown() {
   section "teardown"
   [[ -z "$CHILD" ]] || { kill "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; CHILD=""; }
   local h; for h in "${HOLDERS[@]}"; do kill "$h" 2>/dev/null; done
+  if ! $FIXTURE_OWNED; then log "no fixture was created; nothing to tear down"; return; fi
   if $KEEP; then log "--keep: fixture left running (project $PROJECT)"; return; fi
   "$KRATE" monitor down >/dev/null 2>&1 || true
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   local v; for v in $(docker volume ls -q | grep -E "^${MON_PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" >/dev/null 2>&1 || true
+  local n; for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-"); do docker network rm "$n" >/dev/null 2>&1; done
+  for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-"); do docker rm -f "$n" >/dev/null 2>&1; done
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
-  local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
+  local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
   log "fixture resources left: $left"
 }
 finish() {
@@ -682,7 +704,7 @@ finish() {
   done < <(required_ids)
   (( FAILS == 0 )) || verdict=FAIL
   if (( notrun_required > 0 || ${#missing[@]} > 0 )) && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
-  $BOUND || verdict=INCOMPLETE
+  if ! $BOUND && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
   # Redact and publish: the secret values go to python through the 0600 list, never through a
   # shell expression; the raw log stays (0600) when the redacted copy could not be written.
   if python3 -I - "$RAW" "$OUT/run.log" "$RECEIPT" "$OUT/screenshots/manifest.json" "$SECRETS_FILE" <<'PYEOF'
@@ -699,7 +721,7 @@ for path in (receipt, manifest):
     if os.path.isfile(path):
         text = open(path, encoding='utf-8', errors='replace').read()
         open(path, 'w', encoding='utf-8').write(redact(text))
-sys.exit(0 if data else 1)
+sys.exit(0)
 PYEOF
   then
     rm -f "$RAW"; RAW_CLOSED=1
@@ -736,14 +758,13 @@ PYEOF
 FINISHED=false
 on_signal() { log "interrupted"; trap - EXIT HUP INT TERM; FINISHED=true; teardown; finish; exit 130; }
 on_exit() { $FINISHED || { log "unexpected exit"; FINISHED=true; teardown; finish; }; }
+host_conflicts
 trap on_signal HUP INT TERM
 trap on_exit EXIT
-host_conflicts
 run_static
 case "$PHASE" in
   1) run_phase1; run_screenshots; leak_scan Z1 1 ;;
-  2) run_phase1; leak_scan Z1 1; run_phase2; leak_scan Z2 2 ;;
-  all) run_phase1; run_screenshots; leak_scan Z1 1; run_phase2; leak_scan Z2 2 ;;
+  2|all) run_phase1; run_screenshots; leak_scan Z1 1; run_phase2; leak_scan Z2 2 ;;  # Phase 2 is accepted only with Phase 1
 esac
 FINISHED=true
 trap - EXIT HUP INT TERM
