@@ -110,7 +110,7 @@ Every id is one row of the receipt.
 |---|---|---|
 | A1 | `users add` (viewer, admin with email, no group, viewer) then `users list` | all four listed, enabled |
 | A2 | `users groups`; `users add 'bad name'`; duplicate `users add` | admin group shown; both refusals |
-| A3 | first login through the proxy with the temporary password (headless browser flow, `scripts/gate/keycloak_login_flow.py`): TOTP enrolment, forced password change, second login asks for the OTP, wrong OTP refused, old password refused | all steps observed; ID token `aud=krate-ui`, `groups=[viewer group]`, `expires_in=300` |
+| A3 | first login through the proxy with the temporary password (headless browser flow, `scripts/gate/keycloak_login_flow.py`): TOTP enrolment, forced password change, second login asks for the OTP, wrong OTP refused, old password refused | all steps observed; ID token `aud=krate-ui`, `groups=[viewer group]`, `expires_in` 300 or 299 (the 300 s lifespan less the second that may pass between issue and read) |
 | A4 | `reset-password` then login with the previous password | refused |
 | A5 | `users list` at the end of the ladder | exit 0 |
 | B1 | claims contract: admin user → `groups=[admin group]`; user without group → no `groups` claim | as stated (nothing to map a role from) |
