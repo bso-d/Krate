@@ -424,10 +424,48 @@ def check_runtime_preflight(checks):
             check_name_refusals(checks, edition, site, env, 'runtime.yml', rendered)
 
 
+def check_backup_seal(checks):
+    """The backup envelope must detect any modification before decryption and reject a wrong passphrase."""
+    import os
+    e = lambda cond, msg: checks.expect(cond, 'backup seal: ' + msg)  # noqa: E731
+    ciphertext = b'Salted__' + os.urandom(8) + os.urandom(96)
+    sealed = identity.backup_seal(ciphertext, b'correct horse')
+    e(sealed.startswith(identity.BACKUP_MAGIC), 'sealed file starts with the format marker')
+    e(identity.backup_open(sealed, b'correct horse') == ciphertext, 'round trip returns the ciphertext')
+    for offset in (len(identity.BACKUP_MAGIC) + 20, len(sealed) - 1):
+        flipped = bytearray(sealed)
+        flipped[offset] ^= 0x01
+        try:
+            identity.backup_open(bytes(flipped), b'correct horse')
+            e(False, f'a flipped bit at offset {offset} must be refused')
+        except ValueError as exc:
+            e('integrity check failed' in str(exc), f'flipped bit at {offset} reports an integrity failure; got {exc}')
+    try:
+        identity.backup_open(sealed, b'wrong passphrase')
+        e(False, 'a wrong passphrase must be refused before decryption')
+    except ValueError as exc:
+        e('integrity check failed' in str(exc), f'wrong passphrase reports an integrity failure; got {exc}')
+    for bad in (ciphertext, b'', b'x' * 100):
+        try:
+            identity.backup_open(bad, b'correct horse')
+            e(False, 'a file without the marker must be refused')
+        except ValueError:
+            pass
+    try:
+        identity.backup_seal(b'not an openssl output', b'correct horse')
+        e(False, 'sealing requires an openssl Salted__ ciphertext')
+    except ValueError:
+        pass
+    key_a = identity.backup_mac_key(b'p', b'12345678')
+    key_b = identity.backup_mac_key(b'p', b'12345679')
+    e(key_a != key_b, 'the MAC key depends on the per-file salt')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_names, check_compose, check_parity, check_zk_frozen,
-                  check_writers, check_plan_and_preflight, check_configure_dual, check_runtime_preflight):
+                  check_writers, check_backup_seal, check_plan_and_preflight, check_configure_dual,
+                  check_runtime_preflight):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others

@@ -1497,10 +1497,13 @@ cmd_identity_backup() {
   for key in "${IDENTITY_BACKUP_KEYS[@]}"; do
     printf '%s=%s\n' "$key" "$(env_value "$key")"
   done > "$work/identity.env"
-  if ! tar -C "$work" -cf - db.dump identity.env | openssl enc "${IDENTITY_ENC[@]}" -out "$tmp"; then
+  # Encrypt, then seal the ciphertext with an HMAC-SHA256 under a separately
+  # derived key: restore verifies the tag before it decrypts anything.
+  if ! tar -C "$work" -cf - db.dump identity.env | openssl enc "${IDENTITY_ENC[@]}" -out "$work/payload.enc" \
+      || ! python3 "$(sso_dir)/identity.py" backup-seal --input "$work/payload.enc" --output "$tmp"; then
     rm -f "$tmp"
     identity_journal backup failed "$file: encryption"
-    die "Backup failed: the archive could not be encrypted."
+    die "Backup failed: the archive could not be encrypted and sealed."
   fi
   mv -f "$tmp" "$file"
   identity_journal backup ok "$file $(wc -c < "$file" | xargs) bytes"
@@ -1528,8 +1531,13 @@ cmd_identity_restore() {
   [[ "$(container_status "$kc")" != running ]] || die "Keycloak is running; stop it first: krate identity down"
   identity_passphrase
   identity_tmpdir; work="$IDENTITY_TMPDIR"
-  info "Decrypting $file..."
-  if ! openssl enc -d "${IDENTITY_ENC[@]}" -in "$file" | tar -C "$work" -xf -; then
+  info "Verifying and decrypting $file..."
+  # The HMAC tag is checked first; a modified archive never reaches openssl, tar or pg_restore.
+  if ! python3 "$(sso_dir)/identity.py" backup-open --input "$file" --output "$work/payload.enc"; then
+    identity_journal restore refused "$file: integrity check failed"
+    die "Refusing $file: the integrity check failed (modified file or wrong passphrase), or it is not a krate identity backup."
+  fi
+  if ! openssl enc -d "${IDENTITY_ENC[@]}" -in "$work/payload.enc" | tar -C "$work" -xf -; then
     identity_journal restore failed "$file: cannot decrypt or unpack"
     die "Cannot read $file: wrong passphrase, or not a krate identity backup."
   fi

@@ -5,6 +5,8 @@ Secrets never enter this program's output: the realm plan carries ``${VAR}``
 placeholders that Keycloak resolves from its environment at import time.
 """
 import argparse
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -364,6 +366,63 @@ def cmd_db_tls(args):
     return 0
 
 
+# ─── Backup integrity (encrypt-then-MAC) ───────────────────────────────────────
+# `openssl enc` cannot produce an authenticated mode ("This command does not
+# support authenticated encryption modes like CCM and GCM", openssl-enc(1)), so
+# the CLI encrypts with AES-256-CBC and this module seals the ciphertext with an
+# HMAC-SHA256 whose key is derived separately from the same passphrase. The tag
+# is verified before any byte is decrypted, unpacked or restored.
+BACKUP_MAGIC = b'krate-identity-backup/1\n'
+BACKUP_MAC_SALT = b'krate-identity-backup-mac:'
+BACKUP_ITERATIONS = 600000
+BACKUP_PASSPHRASE_ENV = 'KRATE_BACKUP_PASSPHRASE'
+OPENSSL_SALTED = b'Salted__'
+
+
+def backup_mac_key(passphrase, salt):
+    """Independent MAC key: PBKDF2-HMAC-SHA256 over a salt that differs from openssl's own derivation."""
+    return hashlib.pbkdf2_hmac('sha256', passphrase, BACKUP_MAC_SALT + salt, BACKUP_ITERATIONS, 32)
+
+
+def backup_seal(ciphertext, passphrase):
+    """Return magic || ciphertext || HMAC-SHA256(ciphertext) for an openssl `Salted__` ciphertext."""
+    if not ciphertext.startswith(OPENSSL_SALTED) or len(ciphertext) < 32:
+        raise ValueError('ciphertext is not an openssl enc -salt output')
+    tag = hmac.new(backup_mac_key(passphrase, ciphertext[8:16]), ciphertext, hashlib.sha256).digest()
+    return BACKUP_MAGIC + ciphertext + tag
+
+
+def backup_open(sealed, passphrase):
+    """Verify the tag and return the ciphertext; any mismatch raises before decryption."""
+    if not sealed.startswith(BACKUP_MAGIC) or len(sealed) < len(BACKUP_MAGIC) + 32 + 32:
+        raise ValueError('not a krate identity backup')
+    body = sealed[len(BACKUP_MAGIC):]
+    ciphertext, tag = body[:-32], body[-32:]
+    if not ciphertext.startswith(OPENSSL_SALTED):
+        raise ValueError('not a krate identity backup')
+    expected = hmac.new(backup_mac_key(passphrase, ciphertext[8:16]), ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(expected, tag):
+        raise ValueError('integrity check failed: the backup was modified or the passphrase is wrong')
+    return ciphertext
+
+
+def backup_passphrase():
+    value = os.environ.get(BACKUP_PASSPHRASE_ENV, '')
+    if not value:
+        raise ValueError(f'{BACKUP_PASSPHRASE_ENV} is not set')
+    return value.encode()
+
+
+def cmd_backup_seal(args):
+    write_file(args.output, backup_seal(Path(args.input).read_bytes(), backup_passphrase()), 0o600)
+    return 0
+
+
+def cmd_backup_open(args):
+    write_file(args.output, backup_open(Path(args.input).read_bytes(), backup_passphrase()), 0o600)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest='command', required=True)
@@ -375,6 +434,14 @@ def main():
     tls = commands.add_parser('db-tls', help='generate CA, server certificate and pg_hba.conf for keycloak-db')
     tls.add_argument('--output-dir', type=Path, required=True)
     tls.set_defaults(func=cmd_db_tls)
+    seal = commands.add_parser('backup-seal', help='append an HMAC-SHA256 tag to an openssl ciphertext (passphrase from env)')
+    seal.add_argument('--input', type=Path, required=True)
+    seal.add_argument('--output', type=Path, required=True)
+    seal.set_defaults(func=cmd_backup_seal)
+    opener = commands.add_parser('backup-open', help='verify a sealed backup and write the ciphertext for decryption')
+    opener.add_argument('--input', type=Path, required=True)
+    opener.add_argument('--output', type=Path, required=True)
+    opener.set_defaults(func=cmd_backup_open)
     args = parser.parse_args()
     try:
         return args.func(args)

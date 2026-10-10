@@ -174,7 +174,8 @@ actual enterprise federation acceptance is performed on the production network.
 ## Backup, restore and upgrades
 
 Before an identity upgrade, take a backup. `./krate identity backup <file>`
-writes an encrypted archive (AES-256, passphrase from
+writes an encrypted and integrity-sealed archive (AES-256 plus an HMAC-SHA256
+tag that `restore` verifies before decrypting; passphrase from
 `KRATE_BACKUP_PASSPHRASE` or prompted) with mode 600. It holds the `pg_dump`
 and the admin user, admin password and the two client secrets that were valid
 at that time. Protect the backup and its passphrase as identity data under

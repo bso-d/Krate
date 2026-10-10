@@ -410,7 +410,11 @@ Writes an encrypted archive that holds `db.dump` (`pg_dump -Fc` from
 `keycloak-db`) and `identity.env` with exactly four keys:
 `KEYCLOAK_ADMIN_USER`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`
 and `KEYCLOAK_KAFBAT_CLIENT_SECRET`. The archive is encrypted with
-`openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt`. The passphrase comes
+`openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt` and then sealed with an
+HMAC-SHA256 tag whose key is derived from the same passphrase with a separate
+PBKDF2 salt (encrypt-then-MAC; `openssl enc` offers no authenticated mode).
+`restore` verifies the tag before any byte is decrypted, unpacked or restored
+and refuses a modified file. The passphrase comes
 from `KRATE_BACKUP_PASSPHRASE` or is asked twice on a terminal. The file is
 written with mode 600. Keycloak may stay running. Keep the passphrase with the
 backup under site policy; without it the backup cannot be read.
