@@ -1,11 +1,12 @@
-# Identity acceptance gate (Phase 1 and Phase 2)
+# Identity acceptance gate (Phase 1, Phase 2 and Phase 3)
 
 This is the executable gate for the Keycloak-first programme. It answers, per
 acceptance criterion of the owner's handover, which test proves it, how that
 test is run, and what the last run produced. The gate is a script,
 `scripts/gate-identity.sh`; its receipt is the evidence, and the owner signs
 off on the receipt, not on prose. Phase 2 is accepted only together with
-Phase 1: both run against one candidate commit, in one receipt.
+Phase 1, and Phase 3 (PingFederate brokering, proven against a stand-in IdP)
+only together with both: they run against one candidate commit, in one receipt.
 
 ## How to run it
 
@@ -13,7 +14,9 @@ Phase 1: both run against one candidate commit, in one receipt.
 # a disposable checkout, or a fixture installation made for the gate (the run creates and destroys
 # .env, auth/keycloak, certs, the journal, monitoring/.env and the monitoring volumes of that edition)
 git -C /path/to/Krate worktree add --detach harness/worktrees/gate HEAD
-scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe            # Phase 1 + screenshots + Phase 2
+scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe            # Phase 1 + screenshots + Phase 2 + Phase 3 (--phase all)
+scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 2  # Phases 1 and 2 only
+scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 3 --stub-port 18444   # all three; the stand-in IdP on another port
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo             # the same with the full inventory (see below)
 ```
@@ -53,10 +56,19 @@ kafbat-ui`); nothing else from Krate running on the host (the product allows
 one Keycloak deployment per Docker host: a second `keycloak_db_data` volume or
 the fixed `krate-proxy` name makes `identity up` refuse). The screenshot story
 builds a small harness image once (`krate-harness/playwright:1.60.0`, network
-needed that one time).
+needed that one time). Phase 3 (`--phase 3` or `all`) adds a stand-in enterprise
+IdP, `scripts/gate/stub_idp.sh`: a second Keycloak started from the edition's own
+`KEYCLOAK_IMAGE` (on a bundle host the loaded offline tag; nothing is pulled),
+realm `pingstub`, published on `127.0.0.1:18443` only (`--stub-port N` when that
+port is taken) and joined to the fixture's `identity-egress` network under the alias
+`pingstub`; its certificate and secrets are generated per run under the receipt's
+state directory (0600) and removed with it. A missing image, a taken port or a
+missing network fails every Phase 3 row with that reason (the rows stay in the
+inventory; they are never silently NOT_RUN).
 
-The run takes about 35 minutes for Phase 1 (eleven Keycloak start cycles) and
-about 15 minutes for Phase 2. Output: `harness/gate-receipts/<edition>-<sha>-<time>/`
+The run takes about 35 minutes for Phase 1 (eleven Keycloak start cycles),
+about 15 minutes for Phase 2 and about 10 minutes for Phase 3 (the stand-in's
+start and three Keycloak recreations). Output: `harness/gate-receipts/<edition>-<sha>-<time>/`
 with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 (every command output, secret values replaced by `<redacted>`) and
 `screenshots/*.png` with `manifest.json` captions.
@@ -66,15 +78,15 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 | field | meaning |
 |---|---|
 | candidate commit | `git rev-parse HEAD` of the fixture checkout, or the `--candidate` sha on a host without git; neither → `bound: false` and the verdict is INCOMPLETE. With `--repo`, the row also names the checkout's HEAD the static block ran on (it must start with the candidate sha) |
-| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh` of the fixture: what was actually tested, also when the candidate is only stated. To check a bundle-host receipt against the repository: `git show <sha>:epc/<file> \| shasum -a 256` must match for six of the seven; `.env.template` differs by design, because `make bundle` rewrites its five `*_IMAGE` lines to the offline runtime tags (the receipt's `images` row shows them) and nothing else |
+| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh`, `sso/configure-dual.py` of the fixture: what was actually tested, also when the candidate is only stated. To check a bundle-host receipt against the repository: `git show <sha>:epc/<file> \| shasum -a 256` must match for seven of the eight; `.env.template` differs by design, because `make bundle` rewrites its five `*_IMAGE` lines to the offline runtime tags (the receipt's `images` row shows them) and nothing else |
 | dirty tracked files | `git status --porcelain --untracked-files=no` of the whole fixture repository at run time, unfiltered (must be empty for a sign-off receipt; `unknown` without git; with `--repo`, the checkout's dirty state is listed after `--repo:`) |
 | images | every `*_IMAGE` digest of the edition template |
-| runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py` and `*.mjs` (file list, sorted), plus the commit (and dirty state) of the repository the runner was executed from |
+| runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py`, `*.mjs` and `*.sh` (file list, sorted; `stub_idp.sh` is bound by this digest and linted by S3 with the runner), plus the commit (and dirty state) of the repository the runner was executed from |
 | host | OS, Docker, Compose, python, openssl versions |
-| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
+| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `REQUIRED_P3` with `--phase 3` or `all`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
 
 The required inventory is declared in the runner before anything runs
-(`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_X`): a test that never reports cannot
+(`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_P3`, `REQUIRED_X`): a test that never reports cannot
 pass by absence. Secret values never travel on a command line (the runner reads
 `.env` in the shell, passes secrets through the environment or 0600 files, runs
 every helper with `python3 -I`, and works under `umask 077`); the receipt files
@@ -91,7 +103,7 @@ Every id is one row of the receipt.
 |---|---|---|
 | S1 | `gmake check` (syntax, shellcheck, digest pinning, Compose rendering of every stack, offline policy, `scripts/check-identity.py`) | exit 0 |
 | S2 | `git diff --check` | clean |
-| S3 | shellcheck 0.9.0 (the CI version) on both CLIs, `sso/activate.sh` and the runner | exit 0 |
+| S3 | shellcheck 0.9.0 (the CI version) on both CLIs, `sso/activate.sh`, the runner and `scripts/gate/stub_idp.sh` | exit 0 |
 | S4 | `scripts/check-identity.py` alone (templates, realm plan, runtime plan, names, Compose, networks, monitoring binds, logrotate, CLI wiring, parity, zk frozen, writers, renewal incl. CA path and rollback, backup seal tamper, preflight refusals, exposure) | exit 0 |
 
 ### H: "Bootstrap only proven-pristine state using securely generated independent credentials. Missing environment text is not evidence that a stored credential is unused."
@@ -224,6 +236,51 @@ Every id is one row of the receipt.
 | M1/M2 | see G above | |
 | K17 | EPC | informational row (`owned by runner`): the EPC Compose rendering and CLI parity are S1/S4; the EPC runtime is the Phase 1 gate run inside the Rocky 9 VM (`--no-static --no-screenshots`, receipt under `harness/gate-receipts/epc-vm-<sha>/`) |
 
+### P: Phase 3, "PingFederate brokering applied to the realm" (owner decisions D1–D4 of the Phase 3 contract)
+
+The stand-in IdP (`scripts/gate/stub_idp.sh`, above) plays PingFederate: users
+`ping-viewer` (AD group APP-KAFKA-VIEWERS), `ping-admin` (APP-KAFKA-ADMINS),
+`ping-both` (both), `ping-none` (none), a `groups` claim, client `krate-keycloak`
+whose redirect is the realm's broker endpoint. The rows run on the Phase 2 stack
+(brokers, Kafbat in `runtime.yml` mode, proxy, identity). P1–P4, P14 and P15 are
+the runner's (CLI, `.env`, journal, container state and `scripts/gate/phase3_realm.py`,
+which reads the realm's brokering state through kcadm as the master admin and
+compares it with the plan file); P5–P13 are `scripts/gate/phase3_broker.py`, a
+headless browser that starts every sign-in at Kafbat's `/oauth2/authorization/keycloak`,
+follows the hops through the realm to the stand-in's login form, posts the
+credentials there and follows the way back, recording each hop; its TLS is pinned on
+`certs/server.crt` and the stand-in's certificate, and a certificate that does not
+verify fails every row (no unverified fallback). Secret values
+(the stand-in's passwords and client secret, the local users' temporary
+passwords) travel through 0600 files and the environment and are redacted
+from every published line.
+
+| id | test | pass condition |
+|---|---|---|
+| P1 | `auth configure <site.json>` with the stand-in's site file (after removing the Phase 2 `runtime.yml`, which configure refuses to replace) | exit 0; `auth/keycloak/pingfederate-idp.json` has the D2/D3 shape (`phase3_realm.py --shape`): provider `pingfederate` with `firstBrokerLoginFlowAlias` `krate first broker login`, `syncMode FORCE`; flow `krate browser` = `auth-cookie` ALTERNATIVE 10, `identity-provider-redirector` ALTERNATIVE 20 with config `PingFederate redirect` → `defaultProvider pingfederate`, sub-flow `krate forms` ALTERNATIVE 30 = `auth-username-password-form` REQUIRED 10 + sub-flow `krate otp` CONDITIONAL 20 = `conditional-user-configured` REQUIRED + `auth-otp-form` REQUIRED; flow `krate first broker login` = `idp-create-user-if-unique` REQUIRED; `browserFlow` `krate browser`; two `oidc-advanced-group-idp-mapper` mappers with `syncMode FORCE`; the file carries the `${PING_KEYCLOAK_CLIENT_SECRET}` placeholder and none of the run's secret values |
+| P2 | preflight `--mode runtime.yml` in ping mode (the stand-in's PEM in `auth/keycloak/truststores`, 644): without `PING_KEYCLOAK_CLIENT_SECRET`; with the PEM at 600; with the plan's `tokenUrl` rewritten to `http://`; then restored | the three runs exit non-zero naming `PING_KEYCLOAK_CLIENT_SECRET is not set`, `must be world-readable (chmod 644)` and `tokenUrl must be an https URL`; the restored run exits 0 (positive control). The secret is written into `.env` through the environment, never on a command line |
+| P3 | `auth apply` with the plan, then a second `auth apply` | first apply exit 0; `phase3_realm.py --expect <plan>`: the provider (every non-secret config key), its two mappers (type, claims, group, syncMode), the four flows with each execution's authenticator or sub-flow, requirement and priority, the redirector's config and the realm `browserFlow` equal the plan (a top-level plan key outside these, such as `truststore`, is not compared); journal `apply reconciled identity provider`; the second apply exits 0, prints the line `Identity provider pingfederate: No changes` and adds no reconciliation line |
+| P4 | the PEM added before P3; a second PEM added after P3; container ids and `KRATE_TRUSTSTORE_SHA` around each apply | the first apply recreated Keycloak (new container id) and set `KRATE_TRUSTSTORE_SHA` in `.env` and in the container's environment; the second apply (nothing changed) kept the container; a second PEM → recreated again with a new digest; journal `apply recreated keycloak: truststores changed`; the Keycloak log's truststore line is quoted |
+| P5 | `ping-viewer` through the stand-in | lands in Kafbat with a session; permissions `TOPIC:VIEW,ANALYSIS_VIEW` only (no CREATE); `POST …/topics` 403; `GET …/topics` 200; hops recorded |
+| P6 | `ping-admin` | topic create 200 (the topic is deleted again) |
+| P7 | `ping-both` | topic create 200; its permission entries include every entry of `ping-admin`'s set (union of viewer and administrator = administrator) |
+| P8 | `ping-none` | refused at Kafbat's callback: `/login?error` (no mapped role) |
+| P9 | `ping-both` removed from APP-KAFKA-ADMINS and `ping-admin` removed from it in the stand-in (`stub_idp.sh remove-group`), then new sign-ins | `ping-both`: viewer only (create 403, list 200, realm groups = the viewer group); `ping-admin`: `/login?error`; syncMode FORCE re-evaluated the mappers at sign-in |
+| P10 | the hop trails of P5–P7 and the brokered users' `requiredActions` | no realm hop answered 200 (every realm step is a redirect), no hop names `required-action`, `update-profile` or `review-profile`; `requiredActions` empty for the three users (D1: no Keycloak TOTP or profile page for SSO users) |
+| P11 | break-glass (D3): Kafbat's authorization request to the realm as is; the same with `&kc_idp_hint=` (empty); the local user `gate3local` (made by `identity users add --admin`) posted on that form; the hint-less path again afterwards | default path 303 to `…/broker/pingfederate/login`; with the empty hint 200 with the login form; the local user's temporary password is accepted and the next step is its required action (`CONFIGURE_TOTP` or `UPDATE_PASSWORD`); the hint-less path still answers 303 to the broker login |
+| P12 | local user `gate3clash` (`identity users add --viewer`) and a stand-in user of the same name signing in through the broker (D2) | the first-broker-login flow answers HTTP 409 at `…/login-actions/first-broker-login` with "User with username gate3clash already exists. Please login to account management to link the account." (seen live on the development fixture); the local user has no federated identity; the realm still holds exactly one `gate3clash` |
+| P13 | `ping-viewer` signed in, Kafbat `POST /logout` (XSRF token), the realm end-session, then a new sign-in in the same browser | the logout redirects to Keycloak's end-session; exactly the session this browser made is gone from the user's realm sessions; the next sign-in's hops include `…/broker/pingfederate/login` and the stand-in (the realm asked the IdP; no cookie login) |
+| P16 | the stand-in's client secret rotated (`stub_idp.sh rotate-secret`, new value in its 0600 file); a brokered sign-in; `identity rotate PING_KEYCLOAK_CLIENT_SECRET --value` with the value on stdin (the Phase 1 convention); a brokered sign-in | before the rotate the realm presents the old secret and `ping-viewer`'s sign-in fails at the realm (status and hop recorded); the rotate exits 0, prints the line `Identity provider pingfederate: secret updated`, journals `rotate PING_KEYCLOAK_CLIENT_SECRET applied to identity provider pingfederate` and `.env` carries the new value; afterwards `ping-viewer` signs in again with its federated identity kept (1 link, no clash page) |
+| P14 | the plan file removed, `auth apply`, then Kafbat's default path | exit 0; `phase3_realm.py --expect-absent`: no `pingfederate` provider, no `krate …` flow, `browserFlow` `browser`; journal `apply removed identity provider`; the realm's authorization endpoint answers 200 with the login form (local login on the default path) |
+| P15 | the plan file restored, `CONFIGURE_TOTP` `defaultAction` set to true behind the CLI's back (full representation PUT), `identity up` | drift confirmed before; `identity up` exit 0; afterwards `defaultAction` false and the realm matches the plan again (the provider re-applied after P14's removal); journal `up reconciled required action CONFIGURE_TOTP` and `up reconciled identity provider` |
+| Z3 | the leak scan of Z1/Z2 after Phase 3, with the stand-in's log and its admin password, client secrets (both) and user password in the searched set | 0 hits |
+
+`REQUIRED_P3` is P1–P16 and Z3 (17 ids); with screenshots and the static block the
+full inventory of `--phase 3`/`all` is 119 ids (113 with `--no-static --no-screenshots`).
+The rows run in the order P1, P2, P3, P4, P5–P13 (helper), P16, P14, P15, Z3.
+On an EPC edition directory the Phase 3 rows are NOT_RUN for the same reason as
+Phase 2 (the Kafbat runtime fixture is KRaft on this runner).
+
 ### Not covered by this runner, proven elsewhere
 
 | what | where | result |
@@ -233,6 +290,11 @@ Every id is one row of the receipt.
 | amd64 image builds | CI `broker-ci.yml` matrix; the Kafbat image is built per arch with `make kafbat-ui ARCH=amd64` on the bundling host | CI |
 
 ## Last run
+
+Phase 3 (runner v6, rows P1–P16 and Z3) has no receipt yet: the rows were
+exercised by hand and through `phase3_broker.py --only …` against the Phase 3
+development fixture (`harness/phase3/`), and the first full receipt is pasted
+here when the owner's Phase 3 candidate is final.
 
 The receipt tables below are pasted verbatim from the two receipts of candidate
 cda07a0 (2026-10-10, gate runner v4, each run alone on its host). Both verdicts

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Krate identity acceptance gate: Phase 1 (identity foundation) and Phase 2 (Kafbat
-# authorization) against a disposable fixture. Each acceptance criterion of the
+# Krate identity acceptance gate: Phase 1 (identity foundation), Phase 2 (Kafbat
+# authorization) and Phase 3 (PingFederate brokering, with a stand-in IdP from the
+# edition's Keycloak image) against a disposable fixture. Each acceptance criterion of the
 # owner's handover has numbered tests; every test ends PASS, FAIL or NOT_RUN with
 # evidence, and the receipt binds the results to the candidate (commit or file
 # digests), the dirty files, the tool versions and this runner's own digest. The
 # verdict is PASS only when every required test passed and the candidate is bound.
 # See sso/guides/identity-gate.md.
 #
-#   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe [--phase 1|2|all]
+#   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe [--phase 1|2|3|all] [--stub-port N]
 #   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>
 #
 # The fixture directory is a disposable checkout or a fixture installation whose
@@ -20,7 +21,7 @@ set -uo pipefail
 umask 077
 (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || { echo "bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 2; }
 
-GATE_VERSION=5
+GATE_VERSION=6
 RUNNER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 GATE_DIR="$(dirname "$RUNNER")/gate"
 REPO="$(cd "$(dirname "$RUNNER")/.." && pwd)"
@@ -33,6 +34,7 @@ SUBNET=172.29.250.0/24
 PROXY_IP=172.29.250.10
 IP_RANGE=172.29.250.128/25
 PHASE=all
+STUB_PORT=18443
 OUT=""
 KEEP=false
 WIPE=false
@@ -44,13 +46,14 @@ REPO_ARG=""
 usage() {
   cat <<EOF
 Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
-          [--subnet CIDR --proxy-ip IP --ip-range CIDR] [--phase 1|2|all] [--out DIR]
-          [--candidate SHA] [--wipe] [--keep] [--no-screenshots] [--no-static]
+          [--subnet CIDR --proxy-ip IP --ip-range CIDR] [--phase 1|2|3|all] [--out DIR]
+          [--candidate SHA] [--stub-port N] [--wipe] [--keep] [--no-screenshots] [--no-static]
   --edition-dir    kraft or epc checkout or fixture installation (default: $REPO/kraft)
   --candidate SHA  the commit the edition files come from, when the directory has no git (a bundle install);
                    the receipt also records the sha256 of the edition files and is INCOMPLETE without a binding
   --repo DIR       a checkout of the candidate for the static block (S1-S4) when the edition directory is a bundle
                    install without Makefile or git; its HEAD must be the --candidate commit
+  --stub-port N    Phase 3: the stand-in IdP's port on 127.0.0.1 (default $STUB_PORT; must be free)
   --wipe           remove an existing .env/auth/certs in that directory first (required when present)
   --keep           leave the fixture running at the end (no teardown)
   --no-screenshots skip the end-user screenshot story (X1 leaves the required inventory)
@@ -68,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --proxy-ip) PROXY_IP="$2"; shift 2 ;;
     --ip-range) IP_RANGE="$2"; shift 2 ;;
     --phase) PHASE="$2"; shift 2 ;;
+    --stub-port) STUB_PORT="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --candidate) CANDIDATE_ARG="$2"; shift 2 ;;
     --repo) [[ -d "$2" ]] || { echo "--repo $2 is not a directory" >&2; exit 2; }; REPO_ARG="$(cd "$2" && pwd)"; shift 2 ;;
@@ -79,7 +83,8 @@ while [[ $# -gt 0 ]]; do
     *) usage; exit 2 ;;
   esac
 done
-[[ "$PHASE" == 1 || "$PHASE" == 2 || "$PHASE" == all ]] || { echo "--phase must be 1, 2 or all" >&2; exit 2; }
+[[ "$PHASE" == 1 || "$PHASE" == 2 || "$PHASE" == 3 || "$PHASE" == all ]] || { echo "--phase must be 1, 2, 3 or all" >&2; exit 2; }
+[[ "$STUB_PORT" =~ ^[0-9]+$ ]] || { echo "--stub-port must be a number" >&2; exit 2; }
 
 ED="$EDITION_DIR"
 EDITION="$(basename "$ED")"
@@ -116,7 +121,7 @@ else
   BOUND=false
 fi
 EDITION_DIGESTS=""
-for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh"; do
+for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/configure-dual.py"; do
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
 if [[ -n "$REPO_ARG" ]]; then
@@ -141,6 +146,7 @@ RUNNER_DIRTY="$(git -C "$REPO" status --porcelain --untracked-files=no -- script
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 [[ -n "$OUT" ]] || OUT="$REPO/harness/gate-receipts/${EDITION}-${CANDIDATE:0:7}-${STAMP}"
 RAW="$OUT/.raw.log"; RECEIPT="$OUT/receipt.tsv"; STATE="$OUT/.state"; SECRETS_FILE="$STATE/secrets.txt"
+STUB="$GATE_DIR/stub_idp.sh"; STUB_DIR="$STATE/stub"  # the stand-in IdP's secrets and certificate live under the receipt's state directory
 open_receipt() { # the receipt folder exists only once the host accepted the run (a refused run leaves nothing behind)
   if ! { mkdir -p "$OUT" "$OUT/screenshots" && chmod 700 "$OUT"; }; then echo "cannot create $OUT" >&2; exit 2; fi
   : > "$RAW"; chmod 600 "$RAW" || exit 2
@@ -162,6 +168,7 @@ REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 G7 G8 A1 A
 as_root() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 if { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v logrotate >/dev/null 2>&1; then J7_REQUIRED=true; fi
 REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K31 K32 K33 K34 M1 M2 Z2)
+REQUIRED_P3=(P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 Z3)
 REQUIRED_X=(X1)
 required_ids() { # the inventory that decides the verdict, given the flags
   local id
@@ -171,6 +178,7 @@ required_ids() { # the inventory that decides the verdict, given the flags
     echo "$id"
   done
   if [[ "$PHASE" != 1 ]]; then for id in "${REQUIRED_P2[@]}"; do echo "$id"; done; fi
+  if [[ "$PHASE" == 3 || "$PHASE" == all ]]; then for id in "${REQUIRED_P3[@]}"; do echo "$id"; done; fi
   if $SCREENSHOTS; then for id in "${REQUIRED_X[@]}"; do echo "$id"; done; fi
 }
 
@@ -292,6 +300,7 @@ hold_lock() { # a live process holds the identity lock until release_lock
 release_lock() { kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; }
 
 fixture_reset() {
+  local n; for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
@@ -335,8 +344,8 @@ run_static() {
   fi
   cap git -C "$TOPLEVEL" diff --check; st=$?; ok_if S2 static S "$st" "git diff --check clean"
   if docker image inspect koalaman/shellcheck:v0.9.0 >/dev/null 2>&1; then
-    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh "scripts/$(basename "$RUNNER")"; st=$?
-    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh and this runner"
+    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh; st=$?
+    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner and scripts/gate/stub_idp.sh"
   else
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
@@ -681,6 +690,138 @@ run_phase2() {
   for id in "${REQUIRED_P2[@]}"; do [[ "$id" == Z* || -n "${SEEN[$id]:-}" ]] || record "$id" 2 K NOT_RUN "no result produced (scripts/gate/phase2_kafbat.py missing or incomplete)"; done
 }
 
+# ═══════════════════════════ phase 3 ═══════════════════════════
+kcadm_master_in() { # FILE kcadm-args...: kcadm_master with the JSON body FILE on stdin (full representations, never -n)
+  local c rc file="$1"; shift; c="$(cid keycloak)"
+  KC_CLI_PASSWORD="$(envv KEYCLOAK_ADMIN_PASSWORD)" docker exec -e KC_CLI_PASSWORD "$c" /opt/keycloak/bin/kcadm.sh config credentials \
+    --server http://localhost:8080/identity --realm master --user "$(envv KEYCLOAK_ADMIN_USER)" --config /tmp/kcadm-gate.config >/dev/null 2>&1 || return 1
+  docker exec -i "$c" /opt/keycloak/bin/kcadm.sh "$@" --config /tmp/kcadm-gate.config < "$file" 2>>"$RAW"; rc=$?
+  docker exec "$c" rm -f /tmp/kcadm-gate.config >/dev/null 2>&1
+  return $rc
+}
+realm_state() { # phase3_realm.py args...: the realm's brokering state (admin password through the environment); diffs on stderr into CAP
+  KC_CLI_PASSWORD="$(envv KEYCLOAK_ADMIN_PASSWORD)" python3 -I "$GATE_DIR/phase3_realm.py" --project "$PROJECT" --admin-user "$(envv KEYCLOAK_ADMIN_USER)" "$@"
+}
+realm_diffs() { printf '%s\n' "$1" | grep -E '^phase3_realm:' | sed 's/^phase3_realm: //' | head -3 | tr '\n' ';'; }
+preflight_runtime() { compose config --format json 2>>"$RAW" | python3 -I "$SSO/preflight.py" --directory "$ED" --mode runtime.yml; }
+run_phase3() {
+  local rc rc2 rc3 ev before after names id result evidence plan pem pem2 sha sha2 cluster a b c j kc1 kc2 kc3 local_pw reason
+  section "Phase 3 fixture: the Phase 2 stack + the stand-in IdP (stub_idp.sh, port $STUB_PORT) brokered into realm krate"
+  if [[ "$EDITION" != kraft ]]; then
+    for id in "${REQUIRED_P3[@]}"; do [[ "$id" == Z* ]] || record "$id" 3 P NOT_RUN "Phase 3 runtime fixture is KRaft on this runner (Phase 2's Kafbat stack); EPC runtime is covered by the Phase 1 receipt inside the Linux VM"; done
+    return
+  fi
+  plan="$ED/auth/keycloak/pingfederate-idp.json"
+  cluster="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["rbac"]["roles"][0]["clusters"][0])' "$ED/auth/ui/runtime.yml" 2>/dev/null)"
+  # ── the stand-in IdP is a prerequisite inside the inventory: when it cannot start, every row fails with the reason ──
+  cap "$STUB" up --project "$PROJECT" --edition-dir "$ED" --base "$BASE" --port "$STUB_PORT" --out "$STUB_DIR" --cluster "${cluster:-cluster-1-kraft}"; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    reason="$(printf '%s' "$CAP" | grep -E '^stub:' | tail -1 | cut -c1-160)"
+    for id in "${REQUIRED_P3[@]}"; do [[ "$id" == Z* ]] || record "$id" 3 P FAIL "stand-in IdP not started (exit $rc): ${reason:-see run.log}"; done
+    return
+  fi
+  for ev in .admin-pw .client-secret .user-pw; do add_secret "$(tr -d '\n' < "$STUB_DIR/$ev")"; done
+  log "stand-in: $(printf '%s' "$CAP" | grep -E '^stub: realm' | cut -c1-200)"
+
+  # ── P1: auth configure with the stand-in's site file writes the D3 plan with the secret placeholder only ──
+  rm -f "$ED/auth/ui/runtime.yml" "$plan"  # configure refuses to replace an existing runtime.yml
+  cap "$KRATE" auth configure "$STUB_DIR/site.json"; rc=$?
+  cap realm_state --shape "$plan"; rc2=$?; ev="$(realm_diffs "$CAP")"
+  ! grep -rqF -f "$SECRETS_FILE" "$ED/auth/keycloak/" && grep -q 'PING_KEYCLOAK_CLIENT_SECRET}' "$plan" 2>/dev/null; rc3=$?
+  [[ $rc -eq 0 && $rc2 -eq 0 && $rc3 -eq 0 && -f "$ED/auth/ui/runtime.yml" ]]; st=$?; ok_if P1 3 P "$st" "auth configure site.json exit $rc; plan ${plan#"$ED"/} shape (provider → krate first broker login; krate browser = cookie ALT 10, redirector ALT 20 → pingfederate, krate forms ALT 30 = password REQ 10 + krate otp CONDITIONAL 20; create-user-if-unique REQUIRED; browserFlow; 2 FORCE mappers): ${ev:-as planned}; placeholder only, none of the ${#SECRETS[@]} secret values"
+
+  # ── P2: preflight in ping mode refuses a missing secret, a 600 PEM and an http endpoint; passes once they are right ──
+  pem="$ED/auth/keycloak/truststores/gate3-stand-in.crt"; cp "$STUB_DIR/stub.crt" "$pem"; chmod 644 "$pem"
+  cap preflight_runtime; rc=$?; [[ $rc -ne 0 && "$CAP" == *PING_KEYCLOAK_CLIENT_SECRET* ]]; a=$?
+  ev="secret missing: exit $rc ($(printf '%s' "$CAP" | grep -o -E 'PING_KEYCLOAK_CLIENT_SECRET is not set[^;]*' | head -1))"
+  set_env_raw PING_KEYCLOAK_CLIENT_SECRET "$(tr -d '\n' < "$STUB_DIR/.client-secret")"; collect_secrets  # the value travels through the environment, never argv
+  chmod 600 "$pem"; cap preflight_runtime; rc=$?; [[ $rc -ne 0 && "$CAP" == *"chmod 644"* ]]; b=$?
+  ev="$ev; PEM 600: exit $rc ($(printf '%s' "$CAP" | grep -o -E 'must be world-readable[^:]*' | head -1))"; chmod 644 "$pem"
+  cp "$plan" "$STATE/plan.saved"
+  python3 -I - "$plan" <<'EOF'
+import json, sys
+path = sys.argv[1]; plan = json.load(open(path))
+plan['identityProviders'][0]['config']['tokenUrl'] = 'http://' + plan['identityProviders'][0]['config']['tokenUrl'].split('://', 1)[1]
+open(path, 'w').write(json.dumps(plan, indent=2) + '\n')
+EOF
+  cap preflight_runtime; rc=$?; [[ $rc -ne 0 && "$CAP" == *https* ]]; c=$?
+  ev="$ev; http tokenUrl: exit $rc ($(printf '%s' "$CAP" | grep -o -E 'tokenUrl must be an https URL' | head -1))"; cp "$STATE/plan.saved" "$plan"; chmod 644 "$plan"
+  cap preflight_runtime; rc2=$?
+  [[ $a -eq 0 && $b -eq 0 && $c -eq 0 && $rc2 -eq 0 ]]; st=$?; ok_if P2 3 P "$st" "$ev; restored: exit $rc2 (positive control)"
+
+  # ── P3/P4: auth apply applies the plan (Keycloak recreated first for the new PEM); the second apply changes nothing ──
+  kc1="$(cid keycloak)"; sha="$(envv KRATE_TRUSTSTORE_SHA)"
+  cap "$KRATE" auth apply; rc=$?
+  kc2="$(cid keycloak)"; sha2="$(envv KRATE_TRUSTSTORE_SHA)"
+  cap realm_state --expect "$plan"; rc2=$?; ev="$(realm_diffs "$CAP")"
+  journal_has ' apply reconciled identity provider'; j=$?
+  cap "$KRATE" auth apply; rc3=$?; kc3="$(cid keycloak)"
+  [[ $rc -eq 0 && $rc2 -eq 0 && $j -eq 0 && $rc3 -eq 0 && "$(grep -c ' apply reconciled identity provider' "$JOURNAL")" == 1 ]] && printf '%s\n' "$CAP" | grep -q -E 'Identity provider pingfederate: No changes$'; st=$?
+  ok_if P3 3 P "$st" "auth apply exit $rc: realm vs plan (provider, 2 mappers, flows with requirement/priority, redirector config, browserFlow): ${ev:-identical}; journal 'apply reconciled identity provider'; second apply exit $rc3 prints the line 'Identity provider pingfederate: No changes' and journals nothing more"
+  # P4: the first apply saw a new PEM (digest changed → recreated); the second kept the container; another PEM → recreated again
+  [[ -n "$kc1" && "$kc1" != "$kc2" && "$sha" != "$sha2" && -n "$sha2" && "$(docker exec "$kc2" printenv KRATE_TRUSTSTORE_SHA 2>/dev/null)" == "$sha2" && "$kc3" == "$kc2" ]]; a=$?
+  pem2="$ED/auth/keycloak/truststores/gate3-stand-in-copy.crt"; cp "$STUB_DIR/stub.crt" "$pem2"; chmod 644 "$pem2"
+  cap "$KRATE" auth apply; rc=$?; after="$(cid keycloak)"; names="$(envv KRATE_TRUSTSTORE_SHA)"
+  ev="$(docker logs "$after" 2>&1 | grep -i -m1 -o -E 'truststore files[^"]{0,120}' | tr -s ' ' | cut -c1-120)"
+  [[ $a -eq 0 && $rc -eq 0 && "$after" != "$kc2" && "$names" != "$sha2" && "$(docker exec "$after" printenv KRATE_TRUSTSTORE_SHA 2>/dev/null)" == "$names" ]] && journal_has ' apply recreated keycloak: truststores changed'; st=$?
+  ok_if P4 3 P "$st" "PEM added: apply recreated Keycloak (${kc1:0:12} → ${kc2:0:12}), KRATE_TRUSTSTORE_SHA ${sha:-unset} → $sha2 in .env and the container; unchanged PEMs: second apply kept ${kc2:0:12}; a second PEM: recreated again (→ ${after:0:12}, sha $names, exit $rc); journal 'apply recreated keycloak: truststores changed'; Keycloak log: ${ev:-no truststore line found}"
+
+  # ── P5–P13: the brokered sign-ins (a background child, so an interrupt reaches it) ──
+  add_user gate3local --admin; local_pw="${TEMP_PW:-}"
+  add_user gate3clash --viewer
+  if [[ -f "$GATE_DIR/phase3_broker.py" ]]; then
+    GATE3_LOCAL_PW="$local_pw" python3 -I "$GATE_DIR/phase3_broker.py" --edition-dir "$ED" --base-url "$BASE" --project "$PROJECT" \
+      --stub-dir "$STUB_DIR" --stub-port "$STUB_PORT" --stub-script "$STUB" --local-user gate3local --local-password-env GATE3_LOCAL_PW \
+      --clash-user gate3clash > "$STATE/p.tsv" 2>>"$RAW" & CHILD=$!
+    wait "$CHILD"; rc=$?; CHILD=""
+    while IFS=$'\t' read -r id result evidence; do
+      [[ "$id" =~ ^P[0-9]+$ ]] || continue
+      [[ -n "${SEEN[$id]:-}" ]] && continue
+      record "$id" 3 P "$result" "$evidence"
+    done < "$STATE/p.tsv"
+    log "phase3_broker.py exit=$rc"
+  fi
+
+  # ── P16: the client secret rotated at the IdP → sign-in fails until `identity rotate` carries the new value; the link survives ──
+  login_probe() { python3 -I "$GATE_DIR/phase3_broker.py" --edition-dir "$ED" --base-url "$BASE" --project "$PROJECT" --stub-dir "$STUB_DIR" --stub-port "$STUB_PORT" --stub-script "$STUB" --login-probe "$1" 2>>"$RAW" | grep -E '^LOGIN' | cut -f2-; }
+  cap "$STUB" rotate-secret --project "$PROJECT" --out "$STUB_DIR"; rc=$?; add_secret "$(tr -d '\n' < "$STUB_DIR/.client-secret")"
+  before="$(login_probe ping-viewer)"  # the realm still presents the old secret to the stand-in
+  cap_in "$STUB_DIR/.client-secret" "$KRATE" identity rotate PING_KEYCLOAK_CLIENT_SECRET --value; rc2=$?; collect_secrets
+  printf '%s\n' "$CAP" | grep -q -E 'Identity provider pingfederate: secret updated$'; a=$?
+  journal_has ' rotate PING_KEYCLOAK_CLIENT_SECRET applied to identity provider pingfederate'; j=$?
+  after="$(login_probe ping-viewer)"
+  [[ $rc -eq 0 && "$before" == error* && $rc2 -eq 0 && $a -eq 0 && $j -eq 0 && "$after" == ok* && "$after" == *"federated identities 1"* && "$(envv PING_KEYCLOAK_CLIENT_SECRET)" == "$(tr -d '\n' < "$STUB_DIR/.client-secret")" ]]; st=$?
+  ok_if P16 3 P "$st" "stand-in secret rotated (exit $rc); before identity rotate the brokered sign-in fails at the realm: ${before%%; hops*}; identity rotate PING_KEYCLOAK_CLIENT_SECRET --value (stdin) exit $rc2, line 'Identity provider pingfederate: secret updated', journal 'rotate … applied to identity provider pingfederate', .env carries the new value; afterwards ping-viewer signs in again with its link kept: ${after%%; hops*}"
+
+  # ── P14: the plan removed + auth apply → provider, mappers and flows gone, browser flow rebound, local login on the default path ──
+  rm -f "$plan"
+  cap "$KRATE" auth apply; rc=$?
+  cap realm_state --expect-absent; rc2=$?; ev="$(realm_diffs "$CAP")"
+  journal_has ' apply removed identity provider'; j=$?
+  before="$(curl -sk -o /dev/null -w '%{redirect_url}' --max-time 20 "$BASE/oauth2/authorization/keycloak")"
+  after="$(curl -sk -o "$STATE/p14.html" -w '%{http_code}' --max-time 20 "$before")"; names="$(grep -c 'kc-form-login' "$STATE/p14.html")"; rm -f "$STATE/p14.html"
+  [[ $rc -eq 0 && $rc2 -eq 0 && $j -eq 0 && "$after" == 200 && "$names" -ge 1 ]]; st=$?
+  ok_if P14 3 P "$st" "plan file removed; auth apply exit $rc; realm: ${ev:-provider gone, no krate flow, browserFlow browser}; journal 'apply removed identity provider'; Kafbat's default path → realm auth answers HTTP $after with the login form ($names form) instead of the broker redirect"
+
+  # ── P15: identity up on the existing realm reconciles CONFIGURE_TOTP default=false and re-applies the provider from the plan ──
+  cp "$STATE/plan.saved" "$plan"; chmod 644 "$plan"
+  kcadm_master get authentication/required-actions/CONFIGURE_TOTP -r krate > "$STATE/totp.json" 2>/dev/null
+  python3 -I - "$STATE/totp.json" <<'EOF'
+import json, sys
+path = sys.argv[1]; action = json.load(open(path)); action['defaultAction'] = True
+open(path, 'w').write(json.dumps(action))
+EOF
+  kcadm_master_in "$STATE/totp.json" update authentication/required-actions/CONFIGURE_TOTP -r krate -f - >/dev/null 2>&1; rm -f "$STATE/totp.json"
+  cap realm_state --required-action CONFIGURE_TOTP=true; before=$?
+  cap "$KRATE" identity up; rc=$?
+  cap realm_state --expect "$plan" --required-action CONFIGURE_TOTP=false; rc2=$?; ev="$(realm_diffs "$CAP")"
+  journal_has ' up reconciled required action CONFIGURE_TOTP' && journal_has ' up reconciled identity provider'; j=$?
+  [[ $before -eq 0 && $rc -eq 0 && $rc2 -eq 0 && $j -eq 0 ]]; st=$?
+  ok_if P15 3 P "$st" "CONFIGURE_TOTP defaultAction set to true behind the CLI's back (drift confirmed: $before); identity up exit $rc; afterwards defaultAction false and the realm matches the plan again (provider re-applied after P14's removal): ${ev:-identical}; journal 'up reconciled required action CONFIGURE_TOTP' and 'up reconciled identity provider'"
+  for id in "${REQUIRED_P3[@]}"; do [[ "$id" == Z* || -n "${SEEN[$id]:-}" ]] || record "$id" 3 P FAIL "no result produced (scripts/gate/phase3_broker.py missing or incomplete)"; done
+  docker logs "${PROJECT}-gate3-pingstub" > "$STATE/pingstub.log" 2>&1 || true
+}
+
 # ═══════════════════════════ leak scan, teardown, verdict ═══════════════════════════
 leak_scan() {
   section "Z: secret-leak scan over every captured output, the journal, plan files, receipt files and container logs"
@@ -693,6 +834,7 @@ leak_scan() {
   for svc in prometheus grafana loki; do  # captured by run_phase2 before monitor down
     [[ -f "$STATE/mon-$svc.log" ]] && places+=("$STATE/mon-$svc.log")
   done
+  [[ -f "$STATE/pingstub.log" ]] && places+=("$STATE/pingstub.log")  # captured by run_phase3 before the stand-in goes down
   local raw_without_display="$STATE/raw-without-display.log"
   awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display"
   local one="$STATE/one-secret.txt"
@@ -713,11 +855,12 @@ teardown() {
   if ! $FIXTURE_OWNED; then log "no fixture was created; nothing to tear down"; return; fi
   if $KEEP; then log "--keep: fixture left running (project $PROJECT)"; return; fi
   "$KRATE" monitor down >/dev/null 2>&1 || true
+  "$STUB" down --project "$PROJECT" >/dev/null 2>&1 || true  # before compose down: the stand-in is attached to identity-egress
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   local v; for v in $(docker volume ls -q | grep -E "^${MON_PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" >/dev/null 2>&1 || true
   local n; for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-"); do docker network rm "$n" >/dev/null 2>&1; done
-  for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-"); do docker rm -f "$n" >/dev/null 2>&1; done
+  for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-"); do docker rm -f "$n" >/dev/null 2>&1; done
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
   local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
   log "fixture resources left: $left"
@@ -756,7 +899,7 @@ PYEOF
   fi
   rm -rf "$STATE"
   local gate_digest
-  gate_digest="$(find "$GATE_DIR" -type f \( -name '*.py' -o -name '*.mjs' \) | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)"
+  gate_digest="$(find "$GATE_DIR" -type f \( -name '*.py' -o -name '*.mjs' -o -name '*.sh' \) | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)"
   {
     echo "# Krate identity gate receipt"
     echo
@@ -791,7 +934,8 @@ trap on_exit EXIT
 run_static
 case "$PHASE" in
   1) run_phase1; run_screenshots; leak_scan Z1 1 ;;
-  2|all) run_phase1; run_screenshots; leak_scan Z1 1; run_phase2; leak_scan Z2 2 ;;  # Phase 2 is accepted only with Phase 1
+  2) run_phase1; run_screenshots; leak_scan Z1 1; run_phase2; leak_scan Z2 2 ;;  # Phase 2 is accepted only with Phase 1
+  3|all) run_phase1; run_screenshots; leak_scan Z1 1; run_phase2; leak_scan Z2 2; run_phase3; leak_scan Z3 3 ;;  # Phase 3 reuses the Phase 2 stack
 esac
 FINISHED=true
 trap - EXIT HUP INT TERM
