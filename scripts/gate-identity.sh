@@ -124,7 +124,13 @@ if [[ -n "$REPO_ARG" ]]; then
   [[ -n "$CANDIDATE_ARG" ]] || { echo "--repo needs --candidate SHA (the edition directory has no git)" >&2; exit 2; }
   [[ -f "$REPO_ARG/Makefile" ]] || { echo "--repo $REPO_ARG has no Makefile" >&2; exit 2; }
   repo_head="$(git -C "$REPO_ARG" rev-parse HEAD 2>/dev/null)" || { echo "--repo $REPO_ARG is not a git checkout" >&2; exit 2; }
-  [[ "$repo_head" == "$CANDIDATE_ARG"* ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG" >&2; exit 2; }
+  # --candidate must name exactly one commit of that checkout (at least 7 hex characters, resolved
+  # by git, never a prefix match), and that commit must be HEAD.
+  [[ "$CANDIDATE_ARG" =~ ^[0-9a-f]{7,40}$ ]] || { echo "--candidate must be a commit id of 7 to 40 hex characters" >&2; exit 2; }
+  resolved="$(git -C "$REPO_ARG" rev-parse --verify --quiet "${CANDIDATE_ARG}^{commit}" 2>/dev/null)" \
+    || { echo "--candidate $CANDIDATE_ARG is not one commit of --repo $REPO_ARG" >&2; exit 2; }
+  [[ "$resolved" == "$repo_head" ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG ($resolved)" >&2; exit 2; }
+  CANDIDATE_ARG="$resolved"
   TOPLEVEL="$REPO_ARG"
   CANDIDATE="${CANDIDATE%% *} (stated; edition files bound by digest; static block on --repo at $repo_head)"
   DIRTY="edition: unknown (no git); --repo: $(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"

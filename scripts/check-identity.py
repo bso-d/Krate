@@ -1401,6 +1401,9 @@ def check_nginx_edge(checks):
         e(head.index('return 444') < head.index('return 400'), f'{label}: the host check comes first')
 
 
+RENDER_IMAGE_NOTE: list = []
+
+
 def check_nginx_render(checks):
     """nginx.conf is a template: render it the way the proxy image does (envsubst with the filter) and run nginx -t, for both modes."""
     e = checks.expect
@@ -1410,6 +1413,15 @@ def check_nginx_render(checks):
         e(False, 'kraft/.env.template: NGINX_IMAGE missing')
         return
     image = found.group(1)
+    # An air-gapped host cannot resolve the pinned registry reference (docker load keeps no registry
+    # digest): KRATE_CHECK_NGINX_IMAGE names the loaded image to render with; the final line says so.
+    override = os.environ.get('KRATE_CHECK_NGINX_IMAGE')
+    if override:
+        known = subprocess.run(['docker', 'image', 'inspect', override], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if not e(known.returncode == 0, f'KRATE_CHECK_NGINX_IMAGE={override!r} is not a local image: {known.stderr.strip()[:120]}'):
+            return
+        image = override
+        RENDER_IMAGE_NOTE.append(f'nginx render image: {override} (KRATE_CHECK_NGINX_IMAGE, in place of the pinned {found.group(1)[:30]}...)')
     with tempfile.TemporaryDirectory() as tmp:
         certs = Path(tmp) / 'certs'
         certs.mkdir()
@@ -1913,7 +1925,8 @@ def main():
     print('Identity foundation verified: templates, realm plan, Kafbat runtime plan, names, Compose services and identity network, '
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
           'runtime.yml incl. refusals), configure-dual, proxy environment and edge rules, release permissions, RPM dependency '
-          'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock.')
+          'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock.'
+          + ('' if not RENDER_IMAGE_NOTE else ' [' + '; '.join(RENDER_IMAGE_NOTE) + ']'))
     return 0
 
 

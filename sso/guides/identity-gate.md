@@ -18,18 +18,26 @@ scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-sc
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo             # the same with the full inventory (see below)
 ```
 
-Full inventory on a bundle host: `--repo DIR` points the static block (S1–S4)
-at a checkout whose HEAD is the `--candidate` commit (a `git clone` of a
-`git bundle` carried into the air gap), so S1–S4 run there with that host's
-`gmake`, `git`, `shellcheck` (the `koalaman/shellcheck:v0.9.0` image behind a
-`shellcheck` wrapper on `PATH`), `docker compose` and the pinned
-`nginx:1.27-alpine@sha256:…` image (saved with its registry digest from a Docker
-engine that uses the containerd image store, or `check-identity` cannot run its
-render check offline). X1 needs the `krate-harness/playwright:1.60.0` image
-loaded from a saved archive (3.8 GB on disk, 0.94 GB gzipped, arm64), and J7
-needs root. Without `--repo`, `--no-static` and `--no-screenshots`, those rows
-are NOT_RUN on that host: not validated there, only on the host whose receipt
-has them PASS.
+Two invocations exist for a bundle host. The reduced one, `--no-static
+--no-screenshots --candidate <sha>`, leaves S1–S4 and X1 out of the inventory
+(NOT_RUN: not validated on that host, only on the host whose receipt has them
+PASS); run it when the prerequisites below are not on the host, because
+without the two skip flags those rows do not become NOT_RUN, they FAIL (no
+Makefile, no git metadata, no browser image). The full one adds `--repo DIR`:
+the static block (S1–S4) runs against a checkout whose HEAD is the
+`--candidate` commit. The bundle's edition directory itself carries no git
+metadata (the receipt binds it by file digests); the full inventory needs, in
+addition, a `git` executable and that separate checkout (a `git clone -b
+<branch>` of a `git bundle` carried into the air gap), `gmake`, `shellcheck`
+(the `koalaman/shellcheck:v0.9.0` image behind a `shellcheck` wrapper on
+`PATH`), `docker compose`, and an nginx image for `check-identity`'s render
+check: the pinned `nginx:1.27-alpine@sha256:…` reference does not resolve after
+`docker load` (the registry digest is not preserved), so set
+`KRATE_CHECK_NGINX_IMAGE` to the image the bundle loaded (the `NGINX_IMAGE`
+value of the installed `.env.template`); the check's last line, and so the S4
+evidence, names the image it rendered with. X1 needs the
+`krate-harness/playwright:1.60.0` image loaded from a saved archive (3.8 GB on
+disk, 0.94 GB gzipped, arm64), and J7 needs root.
 
 The runner refuses to start when another Krate installation runs on the host or
 when monitoring volumes of the edition's project already exist, because it would
