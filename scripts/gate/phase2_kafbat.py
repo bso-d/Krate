@@ -1498,7 +1498,10 @@ class Gate:
         for label, response in (('missing', missing), ('invalid', invalid), ('denied', denied)):
             body = response.json() or {}
             trace = body.get('stackTrace') if isinstance(body, dict) else None
-            if trace or 'at io.kafbat' in response.text or 'Exception' in response.text and 'at ' in response.text:
+            # A leak is a non-empty stackTrace field or Java frames in the body; a message that
+            # merely names an exception class (e.g. TopicNotFoundException) is not one.
+            frames = re.search(r'\n\s+at [\w.$]+\(', response.text) or 'at io.kafbat.ui.' in response.text
+            if (isinstance(trace, str) and trace.strip()) or frames:
                 leaks.append('%s=%s (%d bytes)' % (label, response.status, len(response.body)))
         text = 'missing topic=%s invalid body=%s viewer denied=%s; bodies without stackTrace=%s' % (
             missing.status, invalid.status, denied.status, not leaks)

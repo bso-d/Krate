@@ -98,7 +98,7 @@ REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 A1 A2 A3 A
 REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K32 M1 M2 Z2)
 REQUIRED_X=(X1)
 
-log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$RAW" >&2; }
+log() { if [[ -n "${RAW_CLOSED:-}" ]]; then printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; else printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$RAW" >&2; fi; }
 section() { log ""; log "=== $* ==="; }
 record() { # id phase criterion result evidence
   local id="$1" phase="$2" crit="$3" result="$4" evidence="$5"
@@ -158,9 +158,16 @@ wait_status() { # wait until `identity status` exits 0 (max $1 s)
   until "$KRATE" identity status >/dev/null 2>&1; do (( waited >= ${1:-180} )) && return 1; sleep 5; waited=$((waited+5)); done
 }
 temp_password() { printf '%s\n' "$1" | awk '/Temporary password for/{getline; print $1; exit}'; }
+add_secret() { # a value seen outside .env (temporary passwords): redacted and scanned like the .env secrets
+  local s
+  [[ -n "$1" ]] || return 0
+  for s in "${SECRETS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
+  SECRETS+=("$1")
+}
 add_user() { # name [--viewer|--admin] → temp password in TEMP_PW
   cap "$KRATE" identity users add "$@" || return 1
   TEMP_PW="$(temp_password "$CAP")"
+  add_secret "$TEMP_PW"
   [[ -n "$TEMP_PW" ]]
 }
 flow() { # keycloak_login_flow.py wrapper; secrets through the environment
@@ -303,7 +310,7 @@ run_phase1() {
   add_user gated --viewer; GATED_TEMP="${TEMP_PW:-}"
   cap "$KRATE" identity users list; ev="$(printf '%s' "$CAP" | grep -E '^  (gatev|gatea|gaten|gated) ' | awk '{print $1":"$2}' | tr '\n' ' ')"
   [[ "$ev" == "gatea:true gated:true gaten:true gatev:true " ]]; st=$?; ok_if A1 1 A "$st" "users add (viewer, admin+email, no group, viewer) then list: [$ev]"
-  cap "$KRATE" identity users groups gatea; ev="$(printf '%s' "$CAP" | grep -v '^Logging into' | xargs)"
+  cap "$KRATE" identity users groups gatea; ev="$(printf '%s' "$CAP" | grep -E '^  [A-Za-z0-9_.-]+$' | xargs)"
   cap "$KRATE" identity users add 'bad name'; rc=$?; cap "$KRATE" identity users add gatev --viewer; after=$?
   [[ "$ev" == "$(envv KEYCLOAK_ADMIN_GROUP)" && $rc -ne 0 && $after -ne 0 ]]; st=$?; ok_if A2 1 A "$st" "gatea groups=[$ev]; 'bad name' refused (exit $rc); duplicate gatev refused (exit $after)"
   TEMP_PW="$GATEV_TEMP"; cap flow enrol --base "$BASE" --user gatev --password-env GATE_TEMP_PW --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --state "$STATE/gatev.json"; rc=$?
@@ -331,7 +338,7 @@ run_phase1() {
   sleep 61  # a code is single-use: let the step gatea's B1 login consumed expire before using "the previous step"
   cap flow login --base "$BASE" --state "$STATE/gatea.json" --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect ok --totp-offset -1; st=$?; ok_if B7 1 B "$st" "a one-time code from the previous 30-second step is accepted (realm look-ahead window 1, Keycloak's documented default): $(printf '%s' "$CAP" | tail -1 | cut -c1-60)"
   cap "$KRATE" identity users reset-password gatev; rc=$?; [[ -n "$(temp_password "$CAP")" ]]; st=$?; ok_if B6 1 B "$st" "reset-password sets a new temporary password (exit $rc; shown once)"
-  TEMP_PW="$(temp_password "$CAP")"
+  TEMP_PW="$(temp_password "$CAP")"; add_secret "$TEMP_PW"
   cap flow login --base "$BASE" --state "$STATE/gatev.json" --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect refused; st=$?; ok_if A4 1 A "$st" "old password refused after reset-password ($(printf '%s' "$CAP" | tail -1 | cut -c1-80))"
   cap "$KRATE" identity users list; ev="$(grep -c -E 'password|secret' <<< "$(grep -i -E 'users (add|reset-password)' "$JOURNAL")")"
   grep -i -E ' users (add|reset-password) ok ' "$JOURNAL" | grep -q -v -i -E "$(IFS='|'; printf '%s' "${SECRETS[*]}")" ; st=$?; ok_if J5 1 J "$st" "journal names users only: $(grep -E ' users add ok gatev' "$JOURNAL" | head -1 | cut -c1-80)"
@@ -597,7 +604,7 @@ open(out, 'w', encoding='utf-8').write(data)
 sys.exit(0 if data else 1)
 PYEOF
   then
-    rm -f "$RAW"
+    rm -f "$RAW"; RAW_CLOSED=1
   else
     log "WARNING: redaction failed; the raw log is kept at $RAW (mode 600) and must be redacted by hand"
   fi
