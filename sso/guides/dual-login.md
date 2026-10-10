@@ -110,8 +110,12 @@ decision 6); the Kafbat roles must name the groups that exist in the realm.
   issuer and audience (`krate-ui`); a token minted for another client is
   refused.
 - The user's identity in Kafbat is the OIDC `sub` (the Keycloak user id), not
-  the username: audit log lines name the `sub`, and a renamed user keeps its
-  identity.
+  the username or email: audit log lines name the `sub`. The realm's user
+  profile keeps the username read-only (an admin cannot rename it; kcadm
+  answers `error-user-attribute-read-only`); a changed email or display name
+  keeps the same identity and the same permissions (gate case K10).
+- Kafbat's error bodies carry no stack trace (`http.error.excludeStackTraces`
+  in both auth files); a signed-in viewer sees the code and message only.
 - Roles come only from the `groups` claim of the ID token (group membership
   mapper, `full.path=false`):
 

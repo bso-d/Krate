@@ -282,6 +282,11 @@ def realm(values):
         'ssoSessionMaxLifespan': values['session_max_hours'] * 3600,
         'otpPolicyType': 'totp', 'otpPolicyAlgorithm': 'HmacSHA1',
         'otpPolicyDigits': 6, 'otpPolicyPeriod': 30,
+        # The import builds `new OTPPolicy()` whenever otpPolicyType is set and copies the
+        # window only when given (DefaultExportImportManager.toPolicy, 26.8.0); the class
+        # default is 0, which refuses a code typed across the 30-second boundary. Keep
+        # Keycloak's documented default of one step either side.
+        'otpPolicyLookAheadWindow': 1,
         **EVENTS,
         'requiredActions': [
             {'alias': 'CONFIGURE_TOTP', 'name': 'Configure OTP', 'providerId': 'CONFIGURE_TOTP',
@@ -378,6 +383,9 @@ def runtime(values):
     roles = [kafbat_role('viewer', values['viewer_group'], values['clusters'], False, values['viewer_messages']),
              kafbat_role('administrator', values['admin_group'], values['clusters'], True)]
     return {
+        # Kafbat's error bodies carry the stack trace unless told otherwise; signed-in
+        # viewers must not read it (http.error.excludeStackTraces, GlobalErrorWebExceptionHandler).
+        'http': {'error': {'excludeStackTraces': True}},
         'server': {'reactive': {'session': {
             'timeout': f"{values['session_idle_minutes']}m",
             'cookie': {'name': UI_SESSION_COOKIE, 'secure': True, 'http-only': True, 'same-site': 'lax'},

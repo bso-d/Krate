@@ -149,6 +149,7 @@ def check_realm_contract(checks):
                           ('accessTokenLifespan', 7 * 60), ('ssoSessionIdleTimeout', 11 * 60),
                           ('ssoSessionMaxLifespan', 3 * 3600), ('otpPolicyType', 'totp'),
                           ('otpPolicyAlgorithm', 'HmacSHA1'), ('otpPolicyDigits', 6), ('otpPolicyPeriod', 30),
+                          ('otpPolicyLookAheadWindow', 1),
                           ('browserFlow', 'browser'), *EXPECTED_EVENTS.items()):
         e(realm.get(key) == expected, f'realm plan: {key} must be {expected!r}; got {realm.get(key)!r}')
     for key in ('offlineSessionIdleTimeout', 'identityProviders', 'identityProviderMappers',
@@ -214,7 +215,8 @@ def check_runtime_contract(checks):
     data = identity.runtime(values)
     text = identity.render(data)
     e(values['viewer_messages'] is False, 'viewer_messages must default to False when KAFKA_UI_VIEWER_MESSAGES is absent')
-    e(set(data) == {'server', 'auth', 'rbac'}, f'top-level keys must be server, auth, rbac; got {sorted(data)}')
+    e(set(data) == {'http', 'server', 'auth', 'rbac'}, f'top-level keys must be http, server, auth, rbac; got {sorted(data)}')
+    e(data['http'] == {'error': {'excludeStackTraces': True}}, 'Kafbat error bodies must not carry stack traces (http.error.excludeStackTraces)')
     oauth = data['auth']['oauth2']
     e(data['auth']['type'] == 'OAUTH2', 'auth.type must be OAUTH2')
     for key in ('allow-shared-login', 'shared-role'):

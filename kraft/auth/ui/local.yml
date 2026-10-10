@@ -1,3 +1,7 @@
-# Default authentication. Set KAFKA_UI_AUTH_CONFIG=pingfederate.yml to opt in.
+# Shared Admin login (default). Set KAFKA_UI_AUTH_CONFIG=runtime.yml for Keycloak sign-in (krate auth configure, krate auth apply).
 auth:
   type: LOGIN_FORM
+# Error bodies without stack traces (Kafbat GlobalErrorWebExceptionHandler).
+http:
+  error:
+    excludeStackTraces: true

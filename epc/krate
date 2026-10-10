@@ -995,12 +995,18 @@ kcadm_login() {
   KCADM_CID="$cid"
   KCADM_CONFIG="/tmp/kcadm-$(random_secret 16).config"
   trap identity_cleanup EXIT
+  # kcadm announces each login ("Logging into ...") on stdout and stderr; only real
+  # errors reach the operator, so command output (users groups, list) stays clean.
+  local err rc=0
+  err="$(mktemp)" || die "Cannot create a temporary file"
   case "$kind" in
-    # kcadm announces each login on stdout; errors still reach stderr.
-    user)   kcadm "KC_CLI_PASSWORD=$secret" -- config credentials --server "$KCADM_SERVER" --realm "$realm" --user "$name" >/dev/null ;;
-    client) kcadm "KC_CLI_CLIENT_SECRET=$secret" -- config credentials --server "$KCADM_SERVER" --realm "$realm" --client "$name" >/dev/null ;;
-    *) die "kcadm_login: unknown kind $kind" ;;
+    user)   kcadm "KC_CLI_PASSWORD=$secret" -- config credentials --server "$KCADM_SERVER" --realm "$realm" --user "$name" >/dev/null 2>"$err" || rc=$? ;;
+    client) kcadm "KC_CLI_CLIENT_SECRET=$secret" -- config credentials --server "$KCADM_SERVER" --realm "$realm" --client "$name" >/dev/null 2>"$err" || rc=$? ;;
+    *) rm -f "$err"; die "kcadm_login: unknown kind $kind" ;;
   esac
+  grep -v '^Logging into' "$err" >&2 || true
+  rm -f "$err"
+  return "$rc"
 }
 
 kcadm_logout() {
