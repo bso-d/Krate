@@ -5,6 +5,7 @@
   "viewer_group": "KRATE_VIEWERS",
   "admin_group": "KRATE_ADMINS",
   "groups_claim": "groups",
+  "idp_truststore": "local",
   "scopes": [
     "openid",
     "profile",

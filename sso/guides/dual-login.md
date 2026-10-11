@@ -363,8 +363,11 @@ controlled realm migration.
 
 To switch Kafbat back to the shared login, set
 `KAFKA_UI_AUTH_CONFIG=local.yml` with `./krate config set` and run
-`./krate auth apply`. The same command recreates only the UI and checks the
-proxy. Identity services and their database are retained for recovery. Do not
+`./krate auth apply`. In `local.yml` mode the command recreates only the UI
+and checks the proxy; in `runtime.yml` mode it also recreates Keycloak when its
+trust material or service definition changed and reconciles the PingFederate
+plan (see "Company SSO through PingFederate"). Identity services and their
+database are retained for recovery. Do not
 use `down -v` on a live cluster.
 
 Both image references are fixed by version and SHA-256 digest in
@@ -422,30 +425,256 @@ minutes and 8 hours); Kafbat's session idle limit is the same
 The same Kafbat configuration serves the brokered login: Keycloak stays the
 issuer and sends the user on to PingFederate. Agree the values in the
 [IAM guide](pingfederate-iam-guide.md); the VM and the user's browser must
-reach PingFederate on the ports in its approved endpoint URLs. Place the
-enterprise CA PEM file in `auth/keycloak/truststores/` with mode 644 (the
-Keycloak container reads it as its own user; a file written under a 077 umask is
-600 and invisible to it); Keycloak uses it to check PingFederate TLS. Do not turn
-off certificate checks.
+reach PingFederate on the ports in its approved endpoint URLs.
 
-Copy `sso/dual-example.json` to a private site file. Set `public_url`, the
-PingFederate issuer, client ID and endpoints, the two AD group names and
-`groups_claim`, and `clusters` to every exact Kafbat cluster name this UI
-shows (including remote clusters). The session idle limit and the viewer
-message opt-in are not site-file keys: they come from `.env`
-(`KEYCLOAK_SESSION_IDLE_MINUTES`, `KAFKA_UI_VIEWER_MESSAGES`) so that both
-flows plan the same `runtime.yml`. `./krate auth configure /path/to/site.json`
-then writes `auth/ui/runtime.yml` (identical to the local plan for that
-origin and cluster list) and `auth/keycloak/pingfederate-idp.json`: the
-identity provider, the browser flow that redirects to PingFederate, and two
-mappers that place a user whose `groups_claim` carries the site's AD group
-into the realm group of the same role (`KEYCLOAK_VIEWER_GROUP`,
-`KEYCLOAK_ADMIN_GROUP`), which is what Kafbat's roles read. It does not
-replace existing files, sets `KEYCLOAK_PUBLIC_URL` from `public_url`, and the
-plan is applied to the realm in Phase 3. `./krate auth apply` asks for the one
-value it cannot generate, the client secret PingFederate issued for Keycloak,
-only when that plan exists (or set it beforehand with
-`./krate config set PING_KEYCLOAK_CLIENT_SECRET=<secret-from-IAM>`).
+### Set up
+
+1. Place the enterprise CA file in `auth/keycloak/truststores/` with mode
+   644: a PEM file (`.pem`, `.crt`) or a PKCS12 file (`.p12`, `.pfx`,
+   `.pkcs12`), at the top or in a sub-directory (mode 755); Keycloak scans
+   the directory recursively and loads only those file types, so the
+   preflight refuses any other file there by name. The Keycloak container
+   reads the files as its own user, so a file written under a 077 umask
+   (mode 600) is invisible to it, and the preflight refuses it. Keycloak uses
+   the file to check PingFederate's TLS; do not turn off certificate checks.
+   When PingFederate presents a chain the JVM already trusts (a public CA),
+   set `"idp_truststore": "system"` in the site file instead (below) and
+   leave the directory empty. Keycloak reads the directory at start only
+   (`KC_TRUSTSTORE_PATHS`): see "Trust material and the Keycloak restart"
+   below for how `auth apply` handles a change.
+2. Copy `sso/dual-example.json` to a private site file. Set `public_url`, the
+   PingFederate issuer, client ID and the four endpoints (all `https`), the
+   two AD group names and `groups_claim`, and `clusters` to every exact
+   Kafbat cluster name this UI shows (including remote clusters). The session
+   idle limit and the viewer message opt-in are not site-file keys: they
+   come from `.env` (`KEYCLOAK_SESSION_IDLE_MINUTES`,
+   `KAFKA_UI_VIEWER_MESSAGES`) so that both flows plan the same
+   `runtime.yml`. The optional key `"idp_truststore"` is `"local"` (default:
+   a CA file in `auth/keycloak/truststores/` is required when an endpoint is
+   not on the public host and port) or `"system"` (the JVM default truststore
+   is relied on; the preflight then prints one line saying so). It is carried
+   into the plan as the top-level key `truststore`.
+3. `./krate auth configure /path/to/site.json` writes `auth/ui/runtime.yml`
+   (identical to the local plan for that origin and cluster list) and the
+   broker plan `auth/keycloak/pingfederate-idp.json` (schema in
+   `sso/configure-dual.py`): the identity provider `pingfederate`, two
+   mappers that place a user whose `groups_claim` carries the site's AD group
+   into the realm group of the same role (`KEYCLOAK_VIEWER_GROUP`,
+   `KEYCLOAK_ADMIN_GROUP`), which is what Kafbat's roles read, and the realm
+   flows below. The plan carries the client secret only as the
+   `${PING_KEYCLOAK_CLIENT_SECRET}` placeholder. It does not replace existing
+   files (remove `auth/ui/runtime.yml` and the plan file to regenerate them)
+   and sets `KEYCLOAK_PUBLIC_URL` from `public_url`.
+4. `./krate identity up` (the realm must exist before the plan is applied).
+   With the plan file present and the secret still unset it says so and
+   applies nothing; `auth apply` does.
+5. `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml`, then
+   `./krate auth apply`. On a terminal it asks for the one value it cannot
+   generate, the client secret PingFederate issued for Keycloak, only when
+   the plan exists. Without a terminal (automation) feed it on standard
+   input first: `printf '%s\n' "$SECRET" | ./krate identity rotate
+   PING_KEYCLOAK_CLIENT_SECRET --value` (the value never appears on a command
+   line; the same command rotates it later, see "Rotating the PingFederate
+   client secret").
+
+### What `auth apply` does with the plan (ping mode)
+
+With the plan file present, `sso/preflight.py --mode runtime.yml` runs in
+ping mode: besides the Phase 2 checks it requires `PING_KEYCLOAK_CLIENT_SECRET`
+set in `.env` (16+ characters, different from every other identity secret),
+every endpoint URL in the plan `https`, the two mappers targeting exactly the
+realm groups from `.env` with `syncMode` `FORCE`, `auth/keycloak/truststores/`
+and its sub-directories with mode 755, every file there a world-readable
+(644) PEM or PKCS12 file (anything else is refused by name), and, when an
+endpoint's host or port differs from the public URL's and the plan's
+`truststore` is `local`, at least one such file; with `truststore` `system`
+no file is required and the preflight prints a note that the JVM default
+truststore is relied on. `runtime.yml` must equal the Krate plan for this
+`.env` (Phase 2 check), which also excludes a `kc_idp_hint` in it. The realm
+file `auth/keycloak/krate-realm.json` still must not define
+`identityProviders`: the realm plan is local-only in both modes.
+
+`auth apply` then takes the identity lock, records the truststore digest
+(below), reconciles Keycloak, and applies the plan to realm `krate` with
+`kcadm` inside the Keycloak container (logged in as `KEYCLOAK_ADMIN_USER`;
+the client secret reaches `kcadm` through the environment of the helper that
+substitutes the placeholder and through `kcadm`'s standard input, never as a
+command argument). Each piece is created when absent and updated when it
+differs from the plan, in this order:
+
+1. The flows. Top-level flows `krate browser` and `krate first broker login`
+   are created when absent; their executions are added by provider id, their
+   `requirement` and `priority` set through the executions path (the only
+   place a no-merge `-n` update is used, as Keycloak's CLI guide does), the
+   redirector's configuration `PingFederate redirect`
+   (`defaultProvider=pingfederate`) created or updated, sub-flows `krate
+   forms` and `krate otp` added from their parent and reconciled the same
+   way, and a level-0 execution the plan does not name removed.
+2. The identity provider `pingfederate` (`PUT` by alias when any planned
+   field differs; the plan's fields are compared, Keycloak's own additions
+   are ignored). A changed `PING_KEYCLOAK_CLIENT_SECRET` alone is not visible
+   in that comparison (Keycloak masks the stored secret): rotate it with the
+   command in "Rotating the PingFederate client secret" below, never by
+   removing the plan.
+3. The two mappers, matched by name; a mapper of this provider the plan does
+   not name is removed.
+4. The realm's browser binding (`browserFlow`), set to `krate browser`.
+
+The journal (`auth/identity-journal.log`) records `apply reconciled identity
+provider pingfederate: <changes>`; a second run reports `Identity provider
+pingfederate: No changes` and makes no change. `./krate identity up`
+re-applies the plan the same way on an existing realm (journal line `up
+reconciled identity provider pingfederate: ...`), after it reconciles the
+`krate-ui` client, the realm policy and the required-action defaults
+([identity foundation guide](identity-foundation.md)).
+
+### Rotating the PingFederate client secret
+
+When IAM issues a new client secret for Keycloak, apply it on both sides with
+
+```bash
+printf '%s\n' "$NEW_SECRET" | ./krate identity rotate PING_KEYCLOAK_CLIENT_SECRET --value
+```
+
+(on a terminal without a pipe the command asks for the value; `--value` is
+required for this key because Krate cannot generate it). The value is taken
+as PingFederate issued it: 16 or more printable ASCII characters; whitespace,
+quotes, backslash, backtick and `$` are refused because `.env` quoting, Compose
+interpolation or the shell would alter them. It writes `.env`
+(mode 600), then, when the provider exists in the realm, `PUT`s the provider
+from the plan with the new secret and prints `Identity provider pingfederate:
+secret updated` (journal line `rotate PING_KEYCLOAK_CLIENT_SECRET applied to
+identity provider pingfederate`, then `rotate ok PING_KEYCLOAK_CLIENT_SECRET`).
+The provider is never removed, so every user's federated-identity link
+survives and the next sign-in simply uses the new secret. The key is also part
+of the `keycloak` service's Compose environment (the realm import substitutes
+it), so the command then runs `up` for `keycloak`, which recreates the
+container once (ending its sessions, as every rotation that recreates a
+consumer does); nothing else is restarted. Before the plan was applied it
+writes `.env` only and prints `Identity provider pingfederate: not applied yet
+(krate auth apply)`, and the Keycloak recreation happens all the same. The value travels on standard input and in
+the environment of the helper that substitutes it into the provider, never
+on a command line.
+
+The realm flows the plan states:
+
+| Flow | Executions (requirement, priority) |
+| --- | --- |
+| `krate browser` (bound as the realm's browser flow) | Cookie (ALTERNATIVE, 10); Identity Provider Redirector with `PingFederate redirect` (ALTERNATIVE, 20); sub-flow `krate forms` (ALTERNATIVE, 30) |
+| `krate forms` | Username Password Form (REQUIRED, 10); sub-flow `krate otp` (CONDITIONAL, 20) |
+| `krate otp` | Condition - user configured (REQUIRED, 10); OTP Form (REQUIRED, 20) |
+| `krate first broker login` (the provider's first-login flow) | Create User If Unique, `idp-create-user-if-unique` (REQUIRED, 10) |
+
+### How users sign in
+
+- Kafbat's button goes to Keycloak, whose browser flow has no cookie for a
+  new session and so redirects straight to PingFederate (no second Keycloak
+  username/password page). After PingFederate, Keycloak creates the realm user
+  on the first login (`krate first broker login`), places the user in the
+  realm groups the mappers derive from the `groups_claim`, and returns to
+  Kafbat, where the roles are read from the `groups` claim as in Phase 2:
+  viewer group only = `viewer`, admin group = `administrator`, both =
+  `administrator`, neither = refused at Kafbat's login (`/login?error`), no
+  session.
+- SSO users get no Keycloak TOTP and no profile page: MFA is the enterprise
+  identity provider's (D1).
+- Revocation: the mappers and the provider sync with `syncMode` `FORCE`, so
+  removing the user from the AD group takes effect at the user's next
+  sign-in through Keycloak (Keycloak recomputes the group memberships from
+  the claim at every login). An existing Kafbat session lasts until the idle
+  limit or a sign-out (see "Revocation and session behaviour").
+- Logout (Kafbat's Log out) ends the Keycloak session as in Phase 2; the next
+  login goes to PingFederate again, because the realm has no cookie.
+
+### Break-glass: local users
+
+Local users (`./krate identity users add <name> --admin`) are not reachable
+through the default path, which always redirects to PingFederate. The
+Identity Provider Redirector honours the standard `kc_idp_hint` query
+parameter of the authorization request, and an empty value disables the
+redirect (Keycloak server administration guide, "Client suggested identity
+provider"): the browser flow then continues with `krate forms`, the
+username/password form and, for a user who enrolled one, the OTP form.
+The procedure (the one gate row P11 tests; verified on the fixture):
+
+1. Open Kafbat (`https://<fqdn>/`) and press "Log in with Keycloak".
+2. The browser is sent to the realm's authorization URL,
+   `https://<fqdn>/identity/realms/krate/protocol/openid-connect/auth?client_id=krate-ui&...`,
+   and from there on to PingFederate. Go back to that Keycloak URL in the
+   address bar (or copy it from the browser history before PingFederate
+   answers) and append `&kc_idp_hint=` to it, then load it.
+3. Keycloak shows its login form: sign in with the local user's password,
+   then the OTP code. Keycloak returns to Kafbat as for any login; the roles
+   come from the user's realm group as in Phase 2.
+
+`runtime.yml` itself never carries the hint (the preflight refuses any
+`runtime.yml` that differs from the plan): every ordinary login goes to
+PingFederate. The Keycloak account console URL is not a break-glass path: it
+does not pass the hint on to the authorization request.
+
+A local user whose username or email equals an identity PingFederate
+presents is not merged (D2): the first-broker-login flow has no "handle
+existing account" step, so that login ends on a Keycloak error page.
+
+### Trust material and the Keycloak restart
+
+Keycloak loads `auth/keycloak/truststores/` at start only. `./krate identity
+up` and `./krate auth apply` digest every file under that directory
+(relative names and content, sub-directories included; an empty directory
+digests to the empty string, so an installation from before Phase 3 is not
+recreated on its first upgrade) into `KRATE_TRUSTSTORE_SHA` in `.env`, which
+is part of the `keycloak` service's Compose environment, so `up` recreates
+Keycloak exactly when a file was added, replaced, renamed or removed
+(`Keycloak recreated with the trust material in auth/keycloak/truststores`;
+journal line `apply recreated keycloak: truststores changed`) and leaves it
+alone otherwise (`Keycloak unchanged (same trust material and image)`). A
+recreation for another reason (a new image pin, a container that was not
+running) is reported as `Keycloak recreated (its service definition, image or
+container changed)` with the journal line
+`apply recreated keycloak: service definition changed`. The same mechanism as
+`KRATE_PROXY_CONF_SHA` for the proxy. Recreating Keycloak ends its sessions; Kafbat sessions survive until
+their idle limit.
+
+### Back to local sign-in
+
+Remove the plan file `auth/keycloak/pingfederate-idp.json` and
+`auth/ui/runtime.yml`, run `./krate auth configure --local` (the plan without
+a site file) and `./krate auth apply`: with the plan file absent and the
+provider still in the realm, `auth apply` (and `identity up`) rebinds the
+realm's browser flow to Keycloak's `browser`, removes the provider's mappers,
+the provider and the four flows (journal line `apply removed identity
+provider pingfederate, its mappers and flows; browser flow rebound to
+browser`). Deleting the provider deletes every user's federated-identity
+link to it (Keycloak removes the links with the provider): the users
+PingFederate created stay in the realm without a credential or link, cannot
+sign in, and after a later re-apply their brokered login ends in the D2
+clash error until an administrator deletes them in Keycloak. This is why a
+secret rotation must never go through plan removal (see "Rotating the
+PingFederate client secret"). The default path then shows the Keycloak login
+form again.
+
+### Decisions (owner to confirm)
+
+- D1: SSO users get no Keycloak TOTP; MFA belongs to the enterprise identity
+  provider. `CONFIGURE_TOTP` stays enabled in the realm but is no longer a
+  realm default action; `identity users add` assigns `CONFIGURE_TOTP` and
+  `UPDATE_PASSWORD` to the local user it creates, and `identity up`
+  reconciles the defaults on an existing realm. A user created in the
+  Keycloak admin console (not with `identity users add`) gets `CONFIGURE_TOTP`
+  only when it is set on that user or through `identity users reset-password`;
+  a Phase 1 console-created user who never signed in loses the realm-default
+  demand when `identity up` reconciles the realm.
+- D2: SSO identities never link to local accounts (`krate first broker login`
+  = Create User If Unique, REQUIRED). A username/email clash with a local
+  user is an error page, not a merge.
+- D3: local login stays reachable only through `?kc_idp_hint=` (empty); the
+  `krate browser` flow keeps the forms alternative (password, conditional
+  OTP) after the redirector. Kafbat's button always goes to PingFederate.
+- D4: the plan is applied and reconciled by `auth apply` (ping mode = the
+  plan file present) and re-reconciled by `identity up`; removing the plan
+  file and applying removes the provider, mappers and flows and rebinds the
+  `browser` flow. Keycloak is recreated by `apply` and `identity up` when the
+  truststore content changed since it started.
 
 ## Package and release checks
 

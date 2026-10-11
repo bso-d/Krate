@@ -611,6 +611,15 @@ compose_cmd() {
   "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+# The shape of the client secret PingFederate issues: taken as issued, except
+# for whitespace and the characters .env quoting, Compose interpolation ($) and
+# the shell would alter. Every path that stores the secret goes through it.
+ping_secret_valid() {
+  [[ ${#1} -ge 16 ]] || return 1
+  ! printf '%s' "$1" | LC_ALL=C grep -q -E '[^!-~]|[\\$"'"'"'`]'
+}
+PING_SECRET_RULE="must be at least 16 printable ASCII characters without spaces, quotes, backslash, backtick or \$ (as issued by PingFederate)"
+
 # The one secret that cannot be generated: PingFederate issues it for Keycloak.
 # Ask for it when SSO is applied interactively; otherwise say how to set it.
 ensure_ping_secret() {
@@ -619,10 +628,10 @@ ensure_ping_secret() {
     ""|REPLACE_ME) ;;
     *) return 0 ;;
   esac
-  [[ -t 0 ]] || die "Set the client secret PingFederate issued for Keycloak: krate config set PING_KEYCLOAK_CLIENT_SECRET=..."
+  [[ -t 0 ]] || die "Set the client secret PingFederate issued for Keycloak without a terminal: krate identity rotate PING_KEYCLOAK_CLIENT_SECRET --value (reads it from stdin)"
   read -rsp "  Client secret PingFederate issued for Keycloak: " secret
   echo ""
-  [[ -n "$secret" ]] || die "No secret entered."
+  ping_secret_valid "$secret" || die "PING_KEYCLOAK_CLIENT_SECRET $PING_SECRET_RULE"
   set_env_file_value "$ENV_FILE" PING_KEYCLOAK_CLIENT_SECRET "$secret"
   ok "Saved PING_KEYCLOAK_CLIENT_SECRET in .env"
 }
@@ -761,6 +770,14 @@ cmd_auth() {
 # through `krate identity rotate`, which updates both sides.
 IDENTITY_KEYS=(KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_CLI_CLIENT_SECRET)
 IDENTITY_REALM=krate
+# Required actions a local user gets from `identity users add` and `reset-password`
+# (identity.USER_REQUIRED_ACTIONS): the authenticator is enrolled and the temporary
+# password replaced at the first login. Not realm defaults: those would also apply
+# to users PingFederate brokers in.
+IDENTITY_USER_ACTIONS='["CONFIGURE_TOTP","UPDATE_PASSWORD"]'
+IDENTITY_IDP_PLAN=auth/keycloak/pingfederate-idp.json
+IDENTITY_IDP_ALIAS=pingfederate
+IDENTITY_IDP_CHANGES=()
 IDENTITY_TIMEOUT=180
 IDENTITY_LOCK=""
 IDENTITY_TMPDIR=""
@@ -1298,12 +1315,16 @@ print(json.dumps({"redirectUris": sorted(client.get("redirectUris", [])), "webOr
 }
 
 # Realm policy the plan states and Keycloak's import never revisits (an import
-# only creates a realm; a backup restores the old realm): otpPolicyLookAheadWindow.
-# A realm created before the plan stated it keeps the class default 0, which
-# refuses a TOTP code typed across the 30-second boundary. $1 names the command
+# only creates a realm; a backup restores the old realm): otpPolicyLookAheadWindow
+# and the required actions' enabled/defaultAction. A realm created before the plan
+# stated them keeps the class default window 0, which refuses a TOTP code typed
+# across the 30-second boundary, and CONFIGURE_TOTP as a default action, which
+# a user PingFederate brokers in would be asked for too. A required action is
+# updated from its full GET representation (never a partial `-n` update: that
+# replaces the representation and wipes alias and name). $1 names the command
 # for the journal.
 identity_reconcile_realm_policy() {
-  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" wanted current
+  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" wanted current line alias
   wanted="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["otpPolicyLookAheadWindow"])' "$plan")" \
     || die "Cannot read otpPolicyLookAheadWindow from $plan"
   [[ "$wanted" =~ ^[0-9]+$ ]] || die "$plan: otpPolicyLookAheadWindow must be a whole number"
@@ -1317,7 +1338,330 @@ identity_reconcile_realm_policy() {
     IDENTITY_CHANGED=true
     ok "Realm $IDENTITY_REALM: OTP look-ahead window set to $wanted step(s) from the realm plan"
   fi
+  # Each planned required action: `alias enabled defaultAction` as the plan states it.
+  while IFS=' ' read -r alias line; do
+    [[ -n "$alias" ]] || continue
+    current="$(kcadm -- get "authentication/required-actions/$alias" -r "$IDENTITY_REALM")" || die "Keycloak query failed (required action $alias)"
+    if [[ "$(printf '%s' "$current" | python3 -c 'import json, sys; a = json.load(sys.stdin); print(str(a.get("enabled")).lower(), str(a.get("defaultAction")).lower())')" != "$line" ]]; then
+      printf '%s' "$current" | python3 -c '
+import json, sys
+action = json.load(sys.stdin)
+action["enabled"], action["defaultAction"] = (value == "true" for value in sys.argv[1].split())
+json.dump(action, sys.stdout)' "$line" | KCADM_STDIN=1 kcadm -- update "authentication/required-actions/$alias" -r "$IDENTITY_REALM" -f - \
+        >/dev/null || die "Keycloak refused the required action update for $alias"
+      identity_journal "${1:-up}" reconciled "required action $alias"
+      IDENTITY_CHANGED=true
+      ok "Realm $IDENTITY_REALM: required action $alias set to enabled/default ${line// //} from the realm plan"
+    fi
+  done < <(python3 -c '
+import json, sys
+for action in json.load(open(sys.argv[1]))["requiredActions"]:
+    print(action["alias"], str(action["enabled"]).lower(), str(action["defaultAction"]).lower())' "$plan")
   kcadm_logout
+}
+
+# ─── PingFederate broker (Phase 3): the plan applied to the realm ────────────
+# auth/keycloak/pingfederate-idp.json (written by `auth configure <site.json>`,
+# schema in sso/configure-dual.py) is applied to realm krate by `auth apply`
+# and re-applied by `identity up`: the flows and their executions, the
+# identity provider, its mappers and the realm's browser-flow binding, each
+# created when absent and updated when it differs, so a second run changes
+# nothing. The client secret reaches kcadm from .env through the environment
+# of `identity.py broker provider --with-secret`, whose output is piped into
+# kcadm's stdin; it is never an argument. Without the plan file, a provider
+# that still exists is removed with its mappers and flows and the browser
+# flow is rebound to Keycloak's `browser`. $1 names the command for the journal.
+
+# Percent-encode a flow alias for a kcadm path (`krate browser` -> `krate%20browser`).
+url_path_encode() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$1"
+}
+
+# A top-level field of the JSON object on stdin; booleans print as true/false, absent as empty.
+json_field() {
+  python3 -c '
+import json, sys
+value = json.load(sys.stdin).get(sys.argv[1], "")
+print(str(value).lower() if isinstance(value, bool) else value)' "$1"
+}
+
+identity_apply_idp() {
+  local command="$1" plan="$SCRIPT_DIR/$IDENTITY_IDP_PLAN" sso provider changes
+  sso="$(sso_dir)"
+  IDENTITY_IDP_CHANGES=()
+  if [[ -f "$plan" ]]; then
+    case "$(env_value PING_KEYCLOAK_CLIENT_SECRET)" in
+      ""|REPLACE_ME)
+        warn "PING_KEYCLOAK_CLIENT_SECRET is not set; the PingFederate plan is applied when it is (krate auth apply asks for it, or: krate identity rotate PING_KEYCLOAK_CLIENT_SECRET --value)"
+        return 0 ;;
+    esac
+  fi
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+  # The provider's representation (its secret masked by Keycloak) or an absence; any other
+  # failure is fatal. The variable is compared and never printed.
+  if provider="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" 2>&1)"; then
+    :
+  elif [[ "$provider" == *"not found"* ]]; then
+    provider=""
+  else
+    die "Keycloak query failed for identity provider $IDENTITY_IDP_ALIAS"
+  fi
+  if [[ -f "$plan" ]]; then
+    identity_apply_idp_plan "$plan" "$sso" "$provider"
+    if [[ ${#IDENTITY_IDP_CHANGES[@]} -gt 0 ]]; then
+      changes="$(printf '%s; ' "${IDENTITY_IDP_CHANGES[@]}")"; changes="${changes%; }"
+      identity_journal "$command" reconciled "identity provider $IDENTITY_IDP_ALIAS: $changes"
+      IDENTITY_CHANGED=true
+      ok "Identity provider $IDENTITY_IDP_ALIAS applied to realm $IDENTITY_REALM (${#IDENTITY_IDP_CHANGES[@]} change(s): $changes)"
+    else
+      ok "Identity provider $IDENTITY_IDP_ALIAS: No changes"
+    fi
+  elif [[ -n "$provider" ]]; then
+    identity_remove_idp
+    identity_journal "$command" removed "identity provider $IDENTITY_IDP_ALIAS, its mappers and flows; browser flow rebound to browser"
+    IDENTITY_CHANGED=true
+    ok "Identity provider $IDENTITY_IDP_ALIAS removed from realm $IDENTITY_REALM (no plan file); the browser flow is Keycloak's browser again"
+  fi
+  kcadm_logout
+}
+
+# Apply the plan $1 (helpers in $2) to the realm; $3 is the provider's current
+# representation ("" when absent). Order: flows first (the provider names its
+# first-broker-login flow), then the provider, its mappers, the realm binding.
+identity_apply_idp_plan() {
+  local plan="$1" sso="$2" provider="$3" line alias existing current id name wanted verdict
+  existing="$(kcadm -- get authentication/flows -r "$IDENTITY_REALM" --fields alias --format csv --noquotes)" || die "Keycloak query failed (flows)"
+  while IFS= read -r line; do
+    alias="$(printf '%s' "$line" | json_field alias)"
+    [[ "$(printf '%s' "$line" | json_field topLevel)" == true ]] || continue  # sub-flows are made from their parent
+    if ! grep -qxF -- "$alias" <<< "$existing"; then
+      printf '%s\n' "$line" | KCADM_STDIN=1 kcadm -- create authentication/flows -r "$IDENTITY_REALM" -f - >/dev/null \
+        || die "Keycloak refused to create flow '$alias'"
+      IDENTITY_IDP_CHANGES+=("flow '$alias' created")
+    fi
+    identity_apply_flow "$plan" "$sso" "$alias"
+  done < <(python3 "$sso/identity.py" broker --plan "$plan" flows)
+  if [[ -z "$provider" ]]; then
+    identity_put_idp_provider "$plan" "$sso" create
+    IDENTITY_IDP_CHANGES+=("provider created")
+  else
+    # A helper failure must never read as "same" (that would print No changes over a stale provider).
+    verdict="$(printf '%s' "$provider" | python3 "$sso/identity.py" broker --plan "$plan" provider-differs)" \
+      || die "Cannot compare identity provider $IDENTITY_IDP_ALIAS with $IDENTITY_IDP_PLAN"
+    case "$verdict" in
+      differs) identity_put_idp_provider "$plan" "$sso" update; IDENTITY_IDP_CHANGES+=("provider updated") ;;
+      same) ;;
+      *) die "Unexpected comparison result for identity provider $IDENTITY_IDP_ALIAS" ;;
+    esac
+  fi
+  current="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers" -r "$IDENTITY_REALM")" || die "Keycloak query failed (mappers)"
+  local -a planned=()
+  while IFS= read -r line; do
+    name="$(printf '%s' "$line" | json_field name)"
+    planned+=("$name")
+    id="$(printf '%s' "$current" | python3 -c 'import json, sys; print(next((m["id"] for m in json.load(sys.stdin) if m.get("name") == sys.argv[1]), ""))' "$name")"
+    if [[ -z "$id" ]]; then
+      printf '%s\n' "$line" | KCADM_STDIN=1 kcadm -- create "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers" -r "$IDENTITY_REALM" -f - >/dev/null \
+        || die "Keycloak refused to create mapper '$name'"
+      IDENTITY_IDP_CHANGES+=("mapper '$name' created")
+    else
+      verdict="$(printf '%s' "$current" | python3 -c 'import json, sys; json.dump(next(m for m in json.load(sys.stdin) if m.get("name") == sys.argv[1]), sys.stdout)' "$name" \
+        | python3 "$sso/identity.py" broker --plan "$plan" mapper-differs "$name")" || die "Cannot compare mapper '$name' with $IDENTITY_IDP_PLAN"
+      case "$verdict" in
+        differs)
+          printf '%s\n' "$line" | python3 -c 'import json, sys; m = json.load(sys.stdin); m["id"] = sys.argv[1]; json.dump(m, sys.stdout)' "$id" \
+            | KCADM_STDIN=1 kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers/$id" -r "$IDENTITY_REALM" -f - >/dev/null \
+            || die "Keycloak refused to update mapper '$name'"
+          IDENTITY_IDP_CHANGES+=("mapper '$name' updated") ;;
+        same) ;;
+        *) die "Unexpected comparison result for mapper '$name'" ;;
+      esac
+    fi
+  done < <(python3 "$sso/identity.py" broker --plan "$plan" mappers)
+  # Mappers of this provider the plan does not name widen or change the group mapping: removed.
+  while IFS=, read -r id name; do
+    [[ -n "$id" ]] || continue
+    kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete mapper '$name'"
+    IDENTITY_IDP_CHANGES+=("mapper '$name' removed")
+  done < <(printf '%s' "$current" | python3 -c '
+import json, sys
+for mapper in json.load(sys.stdin):
+    if mapper.get("name") not in sys.argv[1:]:
+        print(mapper["id"] + "," + mapper.get("name", ""))' "${planned[@]}")
+  wanted="$(python3 "$sso/identity.py" broker --plan "$plan" browser-flow)"
+  current="$(kcadm -- get "realms/$IDENTITY_REALM" --fields browserFlow --format csv --noquotes)" || die "Keycloak query failed (realm)"
+  if [[ "$current" != "$wanted" ]]; then
+    kcadm -- update "realms/$IDENTITY_REALM" -s "browserFlow=$wanted" >/dev/null || die "Keycloak refused to bind the browser flow '$wanted'"
+    IDENTITY_IDP_CHANGES+=("browser flow bound to '$wanted'")
+  fi
+}
+
+# The executions of flow $3 as the plan $1 states them (helpers in $2): a missing
+# authenticator or sub-flow is added, requirement and priority set (the executions
+# path with `-n` and the execution id, as Keycloak's own CLI guide does), the
+# redirector's configuration created or updated, and a level-0 execution the plan
+# does not name removed. Planned sub-flows are reconciled the same way, recursively.
+identity_apply_flow() {
+  local plan="$1" sso="$2" flow="$3" executions line current kind name req prio cfg id cur_req cur_prio cfg_id verdict description
+  local -a planned=()
+  executions="authentication/flows/$(url_path_encode "$flow")/executions"
+  current="$(kcadm -- get "$executions" -r "$IDENTITY_REALM")" || die "Keycloak query failed (flow '$flow')"
+  while IFS= read -r line; do
+    if [[ "$(printf '%s' "$line" | json_field authenticatorFlow)" == true ]]; then
+      kind=flow; name="$(printf '%s' "$line" | json_field flowAlias)"
+    else
+      kind=authenticator; name="$(printf '%s' "$line" | json_field authenticator)"
+    fi
+    req="$(printf '%s' "$line" | json_field requirement)"
+    prio="$(printf '%s' "$line" | json_field priority)"
+    cfg="$(printf '%s' "$line" | json_field authenticatorConfig)"
+    planned+=("$kind:$name")
+    read -r id cur_req cur_prio cfg_id <<< "$(printf '%s' "$current" | identity_find_execution "$kind" "$name")"
+    if [[ -z "$id" ]]; then
+      if [[ "$kind" == flow ]]; then
+        description="$(python3 "$sso/identity.py" broker --plan "$plan" flows \
+          | python3 -c 'import json, sys; print(next(f["description"] for f in map(json.loads, sys.stdin) if f["alias"] == sys.argv[1]))' "$name")" \
+          || die "Sub-flow '$name' of flow '$flow' is not in $IDENTITY_IDP_PLAN"
+        kcadm -- create "${executions}/flow" -r "$IDENTITY_REALM" -s "alias=$name" -s type=basic-flow -s provider=basic-flow -s "description=$description" >/dev/null \
+          || die "Keycloak refused to add sub-flow '$name' to flow '$flow'"
+      else
+        kcadm -- create "${executions}/execution" -r "$IDENTITY_REALM" -s "provider=$name" >/dev/null \
+          || die "Keycloak refused to add $name to flow '$flow'"
+      fi
+      IDENTITY_IDP_CHANGES+=("'$flow': $name added")
+      current="$(kcadm -- get "$executions" -r "$IDENTITY_REALM")" || die "Keycloak query failed (flow '$flow')"
+      read -r id cur_req cur_prio cfg_id <<< "$(printf '%s' "$current" | identity_find_execution "$kind" "$name")"
+      [[ -n "$id" ]] || die "$name did not appear in flow '$flow' after it was added"
+    fi
+    if [[ "$cur_req" != "$req" || "$cur_prio" != "$prio" ]]; then
+      kcadm -- update "$executions" -r "$IDENTITY_REALM" -n -s "id=$id" -s "requirement=$req" -s "priority=$prio" >/dev/null \
+        || die "Keycloak refused to set $name in flow '$flow' to $req/$prio"
+      IDENTITY_IDP_CHANGES+=("'$flow': $name $req $prio")
+    fi
+    if [[ -n "$cfg" ]]; then
+      if [[ -z "$cfg_id" ]]; then
+        python3 "$sso/identity.py" broker --plan "$plan" config "$cfg" \
+          | KCADM_STDIN=1 kcadm -- create "authentication/executions/$id/config" -r "$IDENTITY_REALM" -f - >/dev/null \
+          || die "Keycloak refused the configuration '$cfg' of $name"
+        IDENTITY_IDP_CHANGES+=("'$flow': $name configured ($cfg)")
+      else
+        verdict="$(kcadm -- get "authentication/config/$cfg_id" -r "$IDENTITY_REALM" | python3 "$sso/identity.py" broker --plan "$plan" config-differs "$cfg")" \
+          || die "Keycloak query failed (configuration '$cfg' of $name in flow '$flow')"
+        case "$verdict" in
+          differs)
+            python3 "$sso/identity.py" broker --plan "$plan" config "$cfg" \
+              | python3 -c 'import json, sys; c = json.load(sys.stdin); c["id"] = sys.argv[1]; json.dump(c, sys.stdout)' "$cfg_id" \
+              | KCADM_STDIN=1 kcadm -- update "authentication/config/$cfg_id" -r "$IDENTITY_REALM" -f - >/dev/null \
+              || die "Keycloak refused to update the configuration '$cfg' of $name"
+            IDENTITY_IDP_CHANGES+=("'$flow': $name reconfigured ($cfg)") ;;
+          same) ;;
+          *) die "Unexpected comparison result for the configuration '$cfg' of $name" ;;
+        esac
+      fi
+    fi
+    if [[ "$kind" == flow ]]; then identity_apply_flow "$plan" "$sso" "$name"; fi
+  done < <(python3 "$sso/identity.py" broker --plan "$plan" executions "$flow")
+  while IFS=, read -r id name; do
+    [[ -n "$id" ]] || continue
+    kcadm -- delete "authentication/executions/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to remove $name from flow '$flow'"
+    IDENTITY_IDP_CHANGES+=("'$flow': $name removed")
+  done < <(printf '%s' "$current" | python3 -c '
+import json, sys
+for e in json.load(sys.stdin):
+    if e.get("level") != 0:
+        continue
+    key = ("flow:" + e.get("displayName", "")) if e.get("authenticationFlow") else ("authenticator:" + e.get("providerId", ""))
+    if key not in sys.argv[1:]:
+        print(e["id"] + "," + key.split(":", 1)[1])' "${planned[@]}")
+}
+
+# Create ($3 create) or replace ($3 update) the provider from the plan $1 (helpers in $2)
+# with the client secret from .env: the secret enters `identity.py broker provider
+# --with-secret` through that process's environment and kcadm through its stdin.
+identity_put_idp_provider() {
+  local plan="$1" sso="$2" action="$3"
+  if [[ "$action" == create ]]; then
+    PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3 "$sso/identity.py" broker --plan "$plan" provider --with-secret \
+      | KCADM_STDIN=1 kcadm -- create identity-provider/instances -r "$IDENTITY_REALM" -f - >/dev/null \
+      || die "Keycloak refused to create identity provider $IDENTITY_IDP_ALIAS"
+  else
+    PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3 "$sso/identity.py" broker --plan "$plan" provider --with-secret \
+      | KCADM_STDIN=1 kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" -f - >/dev/null \
+      || die "Keycloak refused to update identity provider $IDENTITY_IDP_ALIAS"
+  fi
+}
+
+# `identity rotate PING_KEYCLOAK_CLIENT_SECRET`: .env already carries the new value; when
+# the provider exists it is replaced from the plan with that value (Keycloak masks the
+# stored secret, so apply cannot detect a rotation by comparison). The provider is never
+# removed: the users' federated-identity links survive. Without a provider, .env alone
+# changes and `auth apply` creates the provider with the new value.
+identity_rotate_ping_secret() {
+  local plan="$SCRIPT_DIR/$IDENTITY_IDP_PLAN" sso provider
+  sso="$(sso_dir)"
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+  if provider="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" 2>&1)"; then
+    [[ -f "$plan" ]] || die "Identity provider $IDENTITY_IDP_ALIAS exists but $IDENTITY_IDP_PLAN is missing; restore the plan (krate auth configure <site.json>) before rotating"
+    identity_put_idp_provider "$plan" "$sso" update
+    identity_journal rotate PING_KEYCLOAK_CLIENT_SECRET "applied to identity provider $IDENTITY_IDP_ALIAS"
+    ok "Identity provider $IDENTITY_IDP_ALIAS: secret updated"
+  elif [[ "$provider" == *"not found"* ]]; then
+    ok "Identity provider $IDENTITY_IDP_ALIAS: not applied yet (krate auth apply)"
+  else
+    die "Keycloak query failed for identity provider $IDENTITY_IDP_ALIAS"
+  fi
+  kcadm_logout
+}
+
+# From a flow's execution listing on stdin: `id requirement priority configId` of the
+# level-0 entry that is the sub-flow ($1 flow, $2 alias) or authenticator ($1
+# authenticator, $2 provider id); nothing when absent.
+identity_find_execution() {
+  python3 -c '
+import json, sys
+kind, name = sys.argv[1:3]
+for e in json.load(sys.stdin):
+    if e.get("level") != 0:
+        continue
+    found = (e.get("authenticationFlow") and e.get("displayName") == name) if kind == "flow" \
+        else (not e.get("authenticationFlow") and e.get("providerId") == name)
+    if found:
+        print(e["id"], e.get("requirement", ""), e.get("priority", 0), e.get("authenticationConfig", ""))
+        break' "$1" "$2"
+}
+
+# The plan file is gone: unbind the browser flow, remove the provider with its
+# mappers, then the top-level flows the plan owns (their sub-flows go with them).
+identity_remove_idp() {
+  local current id alias
+  current="$(kcadm -- get "realms/$IDENTITY_REALM" --fields browserFlow --format csv --noquotes)" || die "Keycloak query failed (realm)"
+  if [[ "$current" != browser ]]; then
+    kcadm -- update "realms/$IDENTITY_REALM" -s browserFlow=browser >/dev/null || die "Keycloak refused to rebind the browser flow"
+  fi
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete a mapper of $IDENTITY_IDP_ALIAS"
+  done < <(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers" -r "$IDENTITY_REALM" --fields id --format csv --noquotes)
+  kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" || die "Keycloak refused to delete identity provider $IDENTITY_IDP_ALIAS"
+  while IFS=, read -r id alias; do
+    case "$alias" in
+      "krate browser"|"krate first broker login"|"krate forms"|"krate otp")
+        kcadm -- delete "authentication/flows/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete flow '$alias'" ;;
+    esac
+  done < <(kcadm -- get authentication/flows -r "$IDENTITY_REALM" --fields id,alias --format csv --noquotes)
+}
+
+# Keycloak's Compose environment carries KRATE_TRUSTSTORE_SHA, a digest of the PEM
+# set in auth/keycloak/truststores (names and content; `none` when empty): Keycloak
+# reads KC_TRUSTSTORE_PATHS at start only, so `up` recreates it exactly when a
+# certificate was added, replaced or removed. Returns 0 when the digest changed
+# (the caller reports the recreation), 1 when it is current.
+sync_truststore_env() {
+  local sha
+  sha="$(python3 "$(sso_dir)/identity.py" truststore-digest --directory "$SCRIPT_DIR/auth/keycloak/truststores")" \
+    || die "Cannot digest $SCRIPT_DIR/auth/keycloak/truststores"
+  [[ "$(env_value KRATE_TRUSTSTORE_SHA)" != "$sha" ]] || return 1
+  set_env_file_value "$ENV_FILE" KRATE_TRUSTSTORE_SHA "$sha"
 }
 
 cmd_identity_up() {
@@ -1336,6 +1680,11 @@ cmd_identity_up() {
     die "KEYCLOAK_ADMIN_USER must not be temp-admin (the temporary bootstrap admin). Set another name: krate config set KEYCLOAK_ADMIN_USER=admin"
   fi
   prepare_identity "$state" up
+  # Keycloak reads auth/keycloak/truststores at start: a changed PEM set recreates it below.
+  if sync_truststore_env; then
+    IDENTITY_CHANGED=true
+    info "Trust material in auth/keycloak/truststores changed; Keycloak will be recreated"
+  fi
   # Render into the validator's stdin: credentials never reach terminal output.
   identity_compose config --format json | python3 "$(sso_dir)/preflight.py" --directory "$SCRIPT_DIR" --mode identity \
     || { identity_journal up refused "preflight failed"; die "Identity preflight failed (see above)."; }
@@ -1379,6 +1728,9 @@ cmd_identity_up() {
     identity_reconcile_realm_policy up
   fi
   identity_verify_cli up
+  # The PingFederate plan, when it exists, is applied to the realm here as well
+  # (auth apply does it first); without the plan a leftover provider is removed.
+  identity_apply_idp up
   if [[ "$(env_value KEYCLOAK_ENABLED)" != true ]]; then
     set_env_file_value "$ENV_FILE" KEYCLOAK_ENABLED true
     ok "Set KEYCLOAK_ENABLED=true in .env (Keycloak now starts and stops with the cluster)"
@@ -1512,7 +1864,7 @@ identity_set_temp_password() {
   local user="$1" uid="$2" temp
   temp="$(random_secret 16)"
   kcadm "KC_CLI_PASSWORD=$temp" -- set-password -r "$IDENTITY_REALM" --username "$user" --temporary
-  kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s 'requiredActions=["UPDATE_PASSWORD","CONFIGURE_TOTP"]'
+  kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s "requiredActions=$IDENTITY_USER_ACTIONS"
   echo ""
   echo "  Temporary password for $user (shown once; a new one is required at first login):"
   echo "  $temp"
@@ -1607,7 +1959,10 @@ cmd_identity_rotate() {
   local key="${1:-}" value state client cid id json q
   case "$key" in
     KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET) ;;
-    *) die "Usage: krate identity rotate {KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET} [--value]" ;;
+    PING_KEYCLOAK_CLIENT_SECRET)
+      # Issued by PingFederate, never generated here: the value comes from stdin (or a terminal prompt).
+      [[ "${2:-}" == --value ]] || die "PING_KEYCLOAK_CLIENT_SECRET is issued by PingFederate: krate identity rotate PING_KEYCLOAK_CLIENT_SECRET --value (reads it from stdin, or asks on a terminal)" ;;
+    *) die "Usage: krate identity rotate {KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET} [--value] | PING_KEYCLOAK_CLIENT_SECRET --value" ;;
   esac
   [[ $# -eq 1 || "${2:-}" == --value ]] || die "Usage: krate identity rotate <KEY> [--value]   (--value reads the new value from stdin)"
   prepare_identity_env; require_env
@@ -1621,8 +1976,14 @@ cmd_identity_rotate() {
       IFS= read -r value || true
     fi
     # The set .env quoting, Compose interpolation and SQL/JSON bodies all
-    # pass unchanged (generated values are letters and digits).
-    [[ "$value" =~ ^[A-Za-z0-9._-]{16,}$ ]] || die "$key must be at least 16 characters of letters, digits, . _ or -"
+    # pass unchanged (generated values are letters and digits). A secret issued
+    # by PingFederate is taken as issued, except for whitespace and the
+    # characters .env quoting, Compose interpolation ($) and the shell alter.
+    if [[ "$key" == PING_KEYCLOAK_CLIENT_SECRET ]]; then
+      ping_secret_valid "$value" || die "$key $PING_SECRET_RULE"
+    else
+      [[ "$value" =~ ^[A-Za-z0-9._-]{16,}$ ]] || die "$key must be at least 16 characters of letters, digits, . _ or -"
+    fi
     # The identity preflight requires distinct credentials; refuse reuse before any store changes.
     local other
     for other in KEYCLOAK_DB_PASSWORD KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET KAFKA_UI_PASSWORD PING_KEYCLOAK_CLIENT_SECRET; do
@@ -1672,6 +2033,14 @@ cmd_identity_rotate() {
         info "Recreating Kafbat UI with the new client secret..."
         compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" kafka-ui
       fi
+      ;;
+    PING_KEYCLOAK_CLIENT_SECRET)
+      set_env_file_value "$ENV_FILE" "$key" "$value"
+      identity_rotate_ping_secret
+      # The key is part of keycloak's Compose environment (the realm import substitutes it), so
+      # `up` recreates the container now rather than at the next start or apply.
+      info "Reconciling Keycloak's environment with the new secret..."
+      identity_up_service keycloak
       ;;
   esac
   identity_journal rotate ok "$key"
@@ -3551,7 +3920,7 @@ cmd_help() {
   printf "  %s\n" "identity users add U [--admin|--viewer] [--email A]"
   printf "  %-30s %s\n" ""                     "Create a user with a one-time temporary password"
   printf "  %s\n" "identity users {enable|disable|reset-password|groups} U"
-  printf "  %-30s %s\n" "identity rotate KEY [--value]" "Rotate a Keycloak password/secret in Keycloak and .env (--value: from stdin)"
+  printf "  %-30s %s\n" "identity rotate KEY [--value]" "Rotate a Keycloak password/secret in Keycloak and .env (--value: from stdin; PING_KEYCLOAK_CLIENT_SECRET needs --value)"
   printf "  %-30s %s\n" "identity backup FILE" "Encrypted dump of the identity database (KRATE_BACKUP_PASSPHRASE or prompt)"
   printf "  %-30s %s\n" "identity restore FILE" "Restore that dump with Keycloak stopped, then start and verify it"
   printf "  %-30s %s\n" "identity renew-db-tls" "Reissue the database TLS server certificate (398 days) under the existing CA and reload it"

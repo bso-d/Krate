@@ -36,6 +36,7 @@ TEMPLATE_VALUES = {
     'KRATE_UI_AUTH_SHA': '',
     'KRATE_PROXY_CONF_SHA': '',
     'KRATE_PROXY_PUBLIC_HOST': '',
+    'KRATE_TRUSTSTORE_SHA': '',
 }
 # The identity network as both editions must render it from the template defaults.
 IDENTITY_SUBNET = '172.29.250.0/24'
@@ -77,7 +78,7 @@ REFUSED_NAMES = (('KEYCLOAK_ADMIN_USER', 'temp-admin'), ('KEYCLOAK_ADMIN_USER', 
                  ('KEYCLOAK_ADMIN_USER', 'Admin'), ('KEYCLOAK_VIEWER_GROUP', 'bad group'))
 EXPECTED_EVENTS = {'eventsEnabled': True, 'eventsListeners': ['jboss-logging'], 'enabledEventTypes': [],
                    'eventsExpiration': 2592000, 'adminEventsEnabled': True, 'adminEventsDetailsEnabled': False}
-IDP_PLAN_KEYS = {'identityProviders', 'identityProviderMappers', 'authenticatorConfig', 'authenticationFlows', 'browserFlow'}
+IDP_PLAN_KEYS = {'identityProviders', 'identityProviderMappers', 'authenticatorConfig', 'authenticationFlows', 'browserFlow', 'truststore'}
 UI_ATTRIBUTE_KEYS = {'pkce.code.challenge.method', 'post.logout.redirect.uris', 'backchannel.logout.url',
                      'backchannel.logout.session.required', 'backchannel.logout.revoke.offline.tokens'}
 # Kafbat RBAC resources a viewer may only `view`; topics add analysis_view (and messages_read on opt-in); ksql never.
@@ -161,9 +162,15 @@ def check_realm_contract(checks):
         e(key not in realm, f'realm plan: {key} must not be set in local mode')
     actions = {action['alias']: action for action in realm.get('requiredActions', [])}
     totp = actions.get('CONFIGURE_TOTP', {})
-    e(totp.get('enabled') is True and totp.get('defaultAction') is True,
-      'realm plan: CONFIGURE_TOTP must be enabled with defaultAction true')
-    e(actions.get('UPDATE_PASSWORD', {}).get('enabled') is True, 'realm plan: UPDATE_PASSWORD must be enabled')
+    # Phase 3, D1: the realm has no default required action (a default would also apply to brokered
+    # users); the local user gets CONFIGURE_TOTP and UPDATE_PASSWORD from `identity users add`.
+    e(totp.get('enabled') is True and totp.get('defaultAction') is False,
+      'realm plan: CONFIGURE_TOTP must be enabled and not a default action (D1: SSO users get no Keycloak TOTP)')
+    e(actions.get('UPDATE_PASSWORD', {}).get('enabled') is True and actions['UPDATE_PASSWORD'].get('defaultAction') is False,
+      'realm plan: UPDATE_PASSWORD must be enabled and not a default action')
+    e(all(action.get('defaultAction') is False for action in actions.values()), 'realm plan: no required action may be a realm default')
+    e(identity.USER_REQUIRED_ACTIONS == ['CONFIGURE_TOTP', 'UPDATE_PASSWORD'] and set(identity.USER_REQUIRED_ACTIONS) == set(actions),
+      'identity.USER_REQUIRED_ACTIONS must be exactly the planned required actions CONFIGURE_TOTP and UPDATE_PASSWORD')
     e([group.get('name') for group in realm.get('groups', [])] == ['VIEWERS_X', 'ADMINS_X'],
       'realm plan: groups must be [KEYCLOAK_VIEWER_GROUP, KEYCLOAK_ADMIN_GROUP]')
     clients = {client['clientId']: client for client in realm.get('clients', [])}
@@ -987,12 +994,132 @@ def check_configure_dual(checks):
     placeholders = set(re.findall(r'\$\{[A-Z0-9_]+\}', json.dumps(idp)))
     e(placeholders == {'${PING_KEYCLOAK_CLIENT_SECRET}'},
       f'configure-dual: the identity-provider plan may only reference the PingFederate secret placeholder; got {sorted(placeholders)}')
+    check_broker_plan_shape(checks, idp)
     for key in MOVED_SITE_KEYS:
         try:
             module.configs(dict(example, **{key: 5 if key == 'session_idle_minutes' else True}), SYNTHETIC)
             e(False, f'configure-dual: a site file with {key} must be refused (the value lives in .env)')
         except ValueError as exc:
             e('.env' in str(exc), f'configure-dual: the refusal of {key} must point at .env; got {exc}')
+
+
+def check_broker_plan_shape(checks, idp):
+    """The broker plan as the contract states it: D2 first-broker-login flow, D3 browser flow with its priorities, the mappers."""
+    e = lambda cond, msg: checks.expect(cond, 'configure-dual plan: ' + msg)  # noqa: E731
+    provider = idp['identityProviders'][0]
+    e(provider.get('firstBrokerLoginFlowAlias') == 'krate first broker login',
+      f'the provider must use the flow "krate first broker login" (D2); got {provider.get("firstBrokerLoginFlowAlias")!r}')
+    e(provider.get('config', {}).get('syncMode') == 'FORCE', 'the provider syncs on every login (syncMode FORCE: group removal takes effect at the next sign-in)')
+    e(all(m.get('config', {}).get('syncMode') == 'FORCE' and m.get('identityProviderMapper') == 'oidc-advanced-group-idp-mapper'
+          for m in idp['identityProviderMappers']), 'both mappers are oidc-advanced-group-idp-mapper with syncMode FORCE')
+    e(idp.get('authenticatorConfig') == [{'alias': 'PingFederate redirect', 'config': {'defaultProvider': 'pingfederate'}}],
+      f'the redirector configuration must be "PingFederate redirect" with defaultProvider pingfederate; got {idp.get("authenticatorConfig")!r}')
+    flows = {flow['alias']: flow for flow in idp.get('authenticationFlows', [])}
+    e(list(flows) == ['krate browser', 'krate forms', 'krate otp', 'krate first broker login'],
+      f'the flows must be krate browser, krate forms, krate otp, krate first broker login (parents before sub-flows); got {list(flows)}')
+    e(all(flow.get('providerId') == 'basic-flow' and flow.get('builtIn') is False for flow in flows.values()), 'every flow is a basic-flow, not builtIn')
+    e({alias: flow.get('topLevel') for alias, flow in flows.items()} == {'krate browser': True, 'krate forms': False, 'krate otp': False,
+                                                                        'krate first broker login': True},
+      'krate browser and krate first broker login are top-level; krate forms and krate otp are sub-flows')
+
+    def shape(alias):
+        return [((x['flowAlias'], 'flow') if x.get('authenticatorFlow') else (x['authenticator'], x.get('authenticatorConfig')),
+                 x['requirement'], x['priority']) for x in flows.get(alias, {}).get('authenticationExecutions', [])]
+    e(shape('krate browser') == [(('auth-cookie', None), 'ALTERNATIVE', 10), (('identity-provider-redirector', 'PingFederate redirect'), 'ALTERNATIVE', 20),
+                                 (('krate forms', 'flow'), 'ALTERNATIVE', 30)],
+      f'D3 krate browser: cookie ALT 10, redirector ALT 20 with the PingFederate config, sub-flow krate forms ALT 30; got {shape("krate browser")}')
+    e(shape('krate forms') == [(('auth-username-password-form', None), 'REQUIRED', 10), (('krate otp', 'flow'), 'CONDITIONAL', 20)],
+      f'D3 krate forms: username-password form REQUIRED 10, sub-flow krate otp CONDITIONAL 20; got {shape("krate forms")}')
+    e(shape('krate otp') == [(('conditional-user-configured', None), 'REQUIRED', 10), (('auth-otp-form', None), 'REQUIRED', 20)],
+      f'D3 krate otp: condition user configured REQUIRED 10, OTP form REQUIRED 20; got {shape("krate otp")}')
+    e(shape('krate first broker login') == [(('idp-create-user-if-unique', None), 'REQUIRED', 10)],
+      f'D2 krate first broker login: Create User If Unique REQUIRED 10 only; got {shape("krate first broker login")}')
+    e(all(x.get('userSetupAllowed') is False for flow in flows.values() for x in flow.get('authenticationExecutions', [])),
+      'no execution allows user setup')
+    e(idp.get('truststore') == 'local', f'the plan declares truststore local by default (site key idp_truststore); got {idp.get("truststore")!r}')
+    module = load_configure_dual()
+    example = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    e(module.configs(dict(example, idp_truststore='system'), SYNTHETIC)['keycloak/pingfederate-idp.json'].get('truststore') == 'system',
+      'idp_truststore: system is carried into the plan as truststore system')
+    try:
+        module.configs(dict(example, idp_truststore='none'), SYNTHETIC)
+        e(False, 'configure-dual must refuse an unknown idp_truststore value')
+    except ValueError as exc:
+        e('idp_truststore' in str(exc), f'the idp_truststore refusal names the key; got {exc}')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'plan.json'
+        path.write_text(json.dumps(idp))
+        try:
+            plan = identity.broker_plan(path)
+            e(plan == idp, 'identity.broker_plan accepts the planned file unchanged')
+        except ValueError as exc:
+            e(False, f'identity.broker_plan must accept the planned file; got {exc}')
+        for label, mutate, needle in (
+                ('an http token endpoint', lambda p: p['identityProviders'][0]['config'].__setitem__('tokenUrl', 'http://ping.example.internal/t'), 'https'),
+                ('a literal secret', lambda p: p['identityProviders'][0]['config'].__setitem__('clientSecret', 'literal'), 'placeholder'),
+                ('the built-in first broker login', lambda p: p['identityProviders'][0].__setitem__('firstBrokerLoginFlowAlias', 'first broker login'),
+                 'firstBrokerLoginFlowAlias'),
+                ('a third mapper', lambda p: p['identityProviderMappers'].append(dict(p['identityProviderMappers'][0], name='x')), 'two'),
+                ('a missing flow', lambda p: p['authenticationFlows'].pop(), 'authenticationFlows'),
+                ('an unknown sub-flow', lambda p: p['authenticationFlows'][0]['authenticationExecutions'][2].__setitem__('flowAlias', 'other'), 'not planned'),
+                ('a non-integer priority', lambda p: p['authenticationFlows'][0]['authenticationExecutions'][0].__setitem__('priority', '10'), 'priority'),
+                ('another browser flow', lambda p: p.__setitem__('browserFlow', 'browser'), 'browserFlow'),
+                ('an unknown truststore mode', lambda p: p.__setitem__('truststore', 'none'), 'truststore')):
+            mutated = json.loads(json.dumps(idp))
+            mutate(mutated)
+            path.write_text(json.dumps(mutated))
+            try:
+                identity.broker_plan(path)
+                e(False, f'identity.broker_plan must refuse {label}')
+            except ValueError as exc:
+                e(needle in str(exc), f'identity.broker_plan refusing {label} must name {needle!r}; got {exc}')
+        for accepted in ({'truststore': 'system'}, {}):
+            mutated = dict(idp, **accepted)
+            mutated.pop('truststore', None) if not accepted else None
+            path.write_text(json.dumps(mutated))
+            try:
+                identity.broker_plan(path)
+            except ValueError as exc:
+                e(False, f'identity.broker_plan must accept truststore {accepted or "absent (defaults to local)"}; got {exc}')
+    # The provider for kcadm: the secret only from the environment, never from the plan or an argument.
+    env_backup = os.environ.pop('PING_KEYCLOAK_CLIENT_SECRET', None)
+    try:
+        try:
+            identity.broker_provider(idp, with_secret=True)
+            e(False, 'broker_provider --with-secret must refuse an unset PING_KEYCLOAK_CLIENT_SECRET')
+        except ValueError as exc:
+            e('PING_KEYCLOAK_CLIENT_SECRET' in str(exc), f'broker_provider names the missing key; got {exc}')
+        os.environ['PING_KEYCLOAK_CLIENT_SECRET'] = RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']
+        with_secret = identity.broker_provider(idp, with_secret=True)
+        e(with_secret['config']['clientSecret'] == RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET'], 'broker_provider --with-secret substitutes the environment value')
+        e('clientSecret' not in identity.broker_provider(idp)['config'], 'broker_provider without the secret carries no clientSecret key')
+        e(idp['identityProviders'][0]['config']['clientSecret'] == '${PING_KEYCLOAK_CLIENT_SECRET}', 'the plan keeps its placeholder')
+    finally:
+        os.environ.pop('PING_KEYCLOAK_CLIENT_SECRET', None)
+        if env_backup is not None:
+            os.environ['PING_KEYCLOAK_CLIENT_SECRET'] = env_backup
+    current = {'alias': 'pingfederate', 'internalId': 'x', 'providerId': 'oidc', 'enabled': True, 'trustEmail': False, 'storeToken': False,
+               'displayName': 'Company sign-in', 'firstBrokerLoginFlowAlias': 'krate first broker login', 'types': ['USER_AUTHENTICATION'],
+               'config': dict(idp['identityProviders'][0]['config'], clientSecret='**********', extra='ignored')}
+    e(identity.differs(identity.broker_provider(idp), current) is False, 'differs(): Keycloak extras (internalId, types, masked secret, extra config) are not a difference')
+    e(identity.differs(identity.broker_provider(idp), dict(current, firstBrokerLoginFlowAlias='first broker login')) is True,
+      'differs(): a changed first-broker-login alias is a difference')
+    e(identity.differs(identity.broker_provider(idp), dict(current, config=dict(current['config'], tokenUrl='https://x'))) is True,
+      'differs(): a changed endpoint is a difference')
+
+
+def truststore_pem(site, name='enterprise-ca.pem', mode=0o644):
+    """A placeholder PEM in auth/keycloak/truststores (755), as the operator places the enterprise CA."""
+    trust = site / 'auth/keycloak/truststores'
+    trust.mkdir(parents=True, exist_ok=True)
+    trust.chmod(0o755)
+    # Every directory on the way gets 755 explicitly: the gate runner runs under umask 077.
+    for parent in reversed((trust / name).relative_to(trust).parents):
+        if str(parent) != '.':
+            (trust / parent).mkdir(exist_ok=True)
+            (trust / parent).chmod(0o755)
+    identity.write_file(trust / name, '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n', mode)
+    return trust / name
 
 
 def check_runtime_preflight(checks):
@@ -1005,9 +1132,10 @@ def check_runtime_preflight(checks):
             site = synthetic_site(edition, tmp, **overrides)
             env = site_env(edition, **overrides)
             self_signed(site / 'certs', PUBLIC_HOST)
-            if ping:  # the PingFederate flow: configure-dual writes runtime.yml and the identity-provider plan
+            if ping:  # the PingFederate flow: configure-dual writes runtime.yml and the identity-provider plan; the operator adds the CA
                 for name, data in load_configure_dual().configs(settings, env).items():
                     identity.write_file(site / 'auth' / name, json.dumps(data, indent=2) + '\n', 0o644)
+                truststore_pem(site)
             else:  # the local flow: identity.py runtime, as krate auth configure runs it
                 with contextlib.redirect_stdout(io.StringIO()):
                     identity.runtime_plan(site / '.env', CLUSTERS, site / 'auth/ui/runtime.yml')
@@ -1026,6 +1154,171 @@ def check_runtime_preflight(checks):
             check_name_refusals(checks, edition, site, env, 'runtime.yml', rendered)
             check_network_refusals(checks, edition, site, 'runtime.yml', rendered)
             check_runtime_refusals(checks, edition, site, env, rendered)
+            if ping:
+                check_broker_refusals(checks, edition, site, env, rendered)
+            else:
+                check_local_mode_unchanged(checks, edition, site, env, rendered)
+
+
+def check_local_mode_unchanged(checks, edition, site, env, rendered):
+    """Without the plan file preflight ignores the PingFederate inputs: no secret, no truststore PEM, a stray 600 PEM."""
+    e = checks.expect
+    env_file = site / '.env'
+    write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET='REPLACE_ME'))
+    result = preflight(site, 'runtime.yml', rendered)
+    e(result.returncode == 0, f'{edition}: local mode must pass with PING_KEYCLOAK_CLIENT_SECRET at REPLACE_ME and no truststore; got {result.stderr.strip()}')
+    pem = truststore_pem(site, mode=0o600)
+    result = preflight(site, 'runtime.yml', rendered)
+    e(result.returncode == 0, f'{edition}: local mode must not inspect truststore PEM modes; got {result.stderr.strip()}')
+    pem.unlink()
+    write_env(site, env)
+    realm_file = site / 'auth/keycloak/krate-realm.json'
+    realm_original = realm_file.read_text()
+    realm = json.loads(realm_original)
+    realm['identityProviders'] = [{'alias': 'pingfederate', 'providerId': 'oidc', 'config': {}}]
+    identity.write_file(realm_file, json.dumps(realm) + '\n', 0o644)
+    result = preflight(site, 'runtime.yml', rendered)
+    e(result.returncode == 1 and 'identityProviders' in result.stderr,
+      f'{edition}: identityProviders in the realm file are refused in local mode; got exit {result.returncode}: {result.stderr.strip()}')
+    identity.write_file(realm_file, realm_original, 0o644)
+    assert env_file.is_file()
+
+
+def check_broker_refusals(checks, edition, site, env, rendered):
+    """Ping mode (the plan exists): the secret, https endpoints, group mappers, trust material and the hint are checked by name."""
+    plan_file = site / 'auth/keycloak/pingfederate-idp.json'
+    runtime_file = site / 'auth/ui/runtime.yml'
+    realm_file = site / 'auth/keycloak/krate-realm.json'
+    plan_original = plan_file.read_text()
+    runtime_original = runtime_file.read_text()
+    realm_original = realm_file.read_text()
+    trust = site / 'auth/keycloak/truststores'
+
+    def expect_refusal(case, wanted):
+        outcome = preflight(site, 'runtime.yml', rendered)
+        checks.expect(outcome.returncode == 1 and wanted in outcome.stderr,
+                      f'{edition}: ping-mode preflight must refuse: {case} (naming {wanted!r}); got exit {outcome.returncode}: {outcome.stderr.strip()}')
+        checks.expect(not any(secret in outcome.stdout + outcome.stderr for secret in ALL_SECRETS), f'{edition}: ping-mode refusal leaked a secret ({case})')
+
+    def expect_pass(case):
+        outcome = preflight(site, 'runtime.yml', rendered)
+        checks.expect(outcome.returncode == 0, f'{edition}: ping-mode preflight must accept: {case}; got exit {outcome.returncode}: {outcome.stderr.strip()}')
+
+    def mutated_plan(mutation):
+        data = json.loads(plan_original)
+        mutation(data)
+        identity.write_file(plan_file, json.dumps(data, indent=2) + '\n', 0o644)
+
+    write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET='REPLACE_ME'))
+    expect_refusal('PING_KEYCLOAK_CLIENT_SECRET not set', 'PING_KEYCLOAK_CLIENT_SECRET')
+    write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET=env['KEYCLOAK_CLI_CLIENT_SECRET']))
+    expect_refusal('PING_KEYCLOAK_CLIENT_SECRET equal to another identity secret', 'different')
+    # PR #41 review: `config set` bypasses the CLI's prompt/rotate validation, so preflight checks the shape too.
+    for label, value in (('a space', 'has a space 1234567890'), ('a dollar sign', 'abc$defghijklmnopq'), ('a double quote', 'abc"defghijklmnopq')):
+        write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET=value))
+        expect_refusal(f'PING_KEYCLOAK_CLIENT_SECRET with {label}', 'printable ASCII')
+    write_env(site, env)
+    for label, mutation, needle in (
+            ('an http token endpoint', lambda p: p['identityProviders'][0]['config'].__setitem__('tokenUrl', 'http://ping.example.internal/as/token.oauth2'), 'https'),
+            ('a literal client secret', lambda p: p['identityProviders'][0]['config'].__setitem__('clientSecret', 'literal-value-0123456789'), 'placeholder'),
+            ('the plan carrying the configured secret value', lambda p: p['identityProviders'][0].__setitem__('displayName', env['PING_KEYCLOAK_CLIENT_SECRET']), 'secret'),
+            ('a mapper targeting another realm group', lambda p: p['identityProviderMappers'][0]['config'].__setitem__('group', '/OTHER'), 'realm groups'),
+            ('a mapper without syncMode FORCE', lambda p: p['identityProviderMappers'][1]['config'].__setitem__('syncMode', 'IMPORT'), 'FORCE'),
+            ('the built-in first broker login flow', lambda p: p['identityProviders'][0].__setitem__('firstBrokerLoginFlowAlias', 'first broker login'), 'krate first broker login'),
+            ('browserFlow bound to browser', lambda p: p.__setitem__('browserFlow', 'browser'), 'browserFlow')):
+        mutated_plan(mutation)
+        expect_refusal(label, needle)
+    identity.write_file(plan_file, plan_original, 0o644)
+    expect_pass('the planned ping site')
+    pem = trust / 'enterprise-ca.pem'
+    pem.chmod(0o600)
+    expect_refusal('a 600 PEM in the truststores', 'chmod 644')
+    pem.chmod(0o666)
+    expect_refusal('a group/other-writable PEM (666)', 'writable by its owner only')
+    pem.chmod(0o644)
+    pem.unlink()
+    expect_refusal('no PEM while the identity provider is on another host', 'holds no truststore file')
+    truststore_pem(site, name='enterprise-ca.crt')
+    expect_pass('a .crt PEM instead of .pem')
+    trust.chmod(0o700)
+    expect_refusal('a 700 truststores directory', '755')
+    trust.chmod(0o777)
+    expect_refusal('a group/other-writable truststores directory (777)', 'must not write')
+    trust.chmod(0o755)
+    # PR #41 review: `krate identity up` applies the plan too, so identity mode validates it (a mutated plan is
+    # refused there as well) while an unset secret only skips the application.
+    mutated_plan(lambda p: p['identityProviderMappers'][0]['config'].__setitem__('group', '/OTHER'))
+    outcome = preflight(site, 'identity', rendered)
+    checks.expect(outcome.returncode == 1 and 'realm groups' in outcome.stderr,
+                  f'{edition}: identity-mode preflight must refuse a plan whose mapper targets another realm group; got exit {outcome.returncode}: {outcome.stderr.strip()}')
+    identity.write_file(plan_file, plan_original, 0o644)
+    write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET='REPLACE_ME'))
+    outcome = preflight(site, 'identity', rendered)
+    checks.expect(outcome.returncode == 0,
+                  f'{edition}: identity-mode preflight must accept the plan while PING_KEYCLOAK_CLIENT_SECRET is unset (identity up skips the application); got exit {outcome.returncode}: {outcome.stderr.strip()}')
+    write_env(site, env)
+    (trust / 'enterprise-ca.crt').unlink()
+    # Keycloak scans the directory recursively and loads PEM and PKCS12 files; anything else is refused by name.
+    truststore_pem(site, name='enterprise-ca.p12')
+    expect_pass('a PKCS12 file as the only truststore file')
+    (trust / 'enterprise-ca.p12').chmod(0o600)
+    expect_refusal('a 600 PKCS12 file', 'enterprise-ca.p12 must be world-readable')
+    (trust / 'enterprise-ca.p12').unlink()
+    truststore_pem(site, name='ca/root.pem')  # creates ca/ with 755 (the gate runner runs under umask 077)
+    expect_pass('a PEM in a sub-directory')
+    (trust / 'ca/root.pem').chmod(0o600)
+    expect_refusal('a 600 PEM in a sub-directory', 'ca/root.pem must be world-readable')
+    (trust / 'ca/root.pem').chmod(0o644)
+    (trust / 'ca').chmod(0o700)
+    expect_refusal('a 700 sub-directory', 'truststores/ca must have mode 755')
+    (trust / 'ca').chmod(0o755)
+    identity.write_file(trust / 'notes.txt', 'not a certificate\n', 0o644)  # refused by name, whatever its mode
+    expect_refusal('a stray non-truststore file', 'notes.txt is not a truststore file')
+    (trust / 'notes.txt').unlink()
+    (trust / 'ca/root.pem').unlink()
+    (trust / 'ca').rmdir()
+    # The identity provider on the public host:port itself needs no extra trust material; another port does (N5).
+    public = 'https://' + PUBLIC_HOST
+    def endpoints_on(base):
+        return lambda p: p['identityProviders'][0]['config'].update(
+            {'issuer': base + '/as', 'authorizationUrl': base + '/as/authorization.oauth2', 'tokenUrl': base + '/as/token.oauth2',
+             'userInfoUrl': base + '/idp/userinfo.openid', 'jwksUrl': base + '/pf/JWKS'})
+    mutated_plan(endpoints_on(public))
+    expect_pass('the identity provider on the public host without a truststore PEM')
+    mutated_plan(endpoints_on(public + ':8443'))
+    expect_refusal('the identity provider on the public host but another port, without a PEM', 'holds no truststore file')
+    mutated_plan(endpoints_on(public))
+    truststore_pem(site, mode=0o600)
+    expect_refusal('a 600 PEM even when the provider is on the public host', 'chmod 644')
+    (trust / 'enterprise-ca.pem').unlink()
+    # truststore system (site key idp_truststore): no CA file required, the note names the JVM truststore; the mode rules stay.
+    mutated_plan(lambda p: p.__setitem__('truststore', 'system'))
+    outcome = preflight(site, 'runtime.yml', rendered)
+    checks.expect(outcome.returncode == 0 and 'JVM default truststore' in outcome.stderr,
+                  f'{edition}: truststore system without a PEM must pass with a note naming the JVM default truststore; got exit {outcome.returncode}: {outcome.stderr.strip()}')
+    truststore_pem(site, mode=0o600)
+    expect_refusal('a 600 PEM under truststore system', 'chmod 644')
+    (trust / 'enterprise-ca.pem').unlink()
+    trust.chmod(0o700)
+    expect_refusal('a 700 truststores directory under truststore system', '755')
+    trust.chmod(0o755)
+    identity.write_file(plan_file, plan_original, 0o644)
+    truststore_pem(site)
+    # N1: a hint in runtime.yml is refused by the plan-equality check (the document differs from the Krate plan).
+    runtime = json.loads(runtime_original)
+    runtime['auth']['oauth2']['client']['keycloak']['custom-params']['kc_idp_hint'] = ''
+    identity.write_file(runtime_file, json.dumps(runtime, indent=2) + '\n', 0o644)
+    expect_refusal('a kc_idp_hint in runtime.yml', 'differs from the Krate plan')
+    identity.write_file(runtime_file, runtime_original, 0o644)
+    realm = json.loads(realm_original)
+    realm['identityProviders'] = [{'alias': 'pingfederate', 'providerId': 'oidc', 'config': {}}]
+    identity.write_file(realm_file, json.dumps(realm) + '\n', 0o644)
+    expect_refusal('identityProviders in the realm file (ping mode)', 'identityProviders')
+    identity.write_file(realm_file, realm_original, 0o644)
+    plan_file.write_text('{not json')
+    expect_refusal('an unreadable plan file', 'not valid JSON')
+    identity.write_file(plan_file, plan_original, 0o644)
+    expect_pass('the ping site restored')
 
 
 def check_runtime_refusals(checks, edition, site, env, rendered):
@@ -1839,6 +2132,9 @@ kcadm() {
     "update realms/krate") log "update realm ${*:3}" ;;
     "get clients/id-1") echo "$CUR_CLIENT" ;;
     "update clients/id-1") log "update client $(cat)" ;;
+    "get authentication/required-actions/CONFIGURE_TOTP") echo "$CUR_TOTP" ;;
+    "get authentication/required-actions/UPDATE_PASSWORD") echo '{"alias":"UPDATE_PASSWORD","name":"Update Password","providerId":"UPDATE_PASSWORD","enabled":true,"defaultAction":false,"priority":30,"config":{}}' ;;
+    "update authentication/required-actions/CONFIGURE_TOTP") log "update totp ${*:3} $(cat)" ;;
     *) log "unexpected kcadm $*"; return 1 ;;
   esac
 }
@@ -1849,14 +2145,18 @@ identity_reconcile_realm_policy "$2"
         site = Path(tmp)
         (site / 'auth/keycloak').mkdir(parents=True)
         (site / 'auth/keycloak/krate-realm.json').write_text(identity.render(plan))
-        for window, frontchannel, command in (('0', True, 'up'), ('1', False, 'restore'), ('0', False, 'restore')):
+        for window, frontchannel, totp_default, command in (('0', True, True, 'up'), ('1', False, False, 'restore'), ('0', False, True, 'restore')):
             calls_file = site / 'calls'
             calls_file.unlink(missing_ok=True)
             client = {'redirectUris': ui['redirectUris'], 'webOrigins': ui['webOrigins'], 'frontchannelLogout': frontchannel,
                       'attributes': ui['attributes']}
-            result = run_bash(script, site, command, env=dict(os.environ, CALLS=str(calls_file), CUR_WINDOW=window, CUR_CLIENT=json.dumps(client)))
+            # A Phase 1 realm: CONFIGURE_TOTP is a default action; the full representation is what Keycloak returns.
+            totp = {'alias': 'CONFIGURE_TOTP', 'name': 'Configure OTP', 'providerId': 'CONFIGURE_TOTP', 'enabled': True,
+                    'defaultAction': totp_default, 'priority': 10, 'config': {}}
+            result = run_bash(script, site, command, env=dict(os.environ, CALLS=str(calls_file), CUR_WINDOW=window, CUR_CLIENT=json.dumps(client),
+                                                              CUR_TOTP=json.dumps(totp)))
             calls = calls_file.read_text().splitlines() if calls_file.exists() else []
-            label = f'{command} with look-ahead {window}, frontchannelLogout {frontchannel}'
+            label = f'{command} with look-ahead {window}, frontchannelLogout {frontchannel}, CONFIGURE_TOTP default {totp_default}'
             e(result.returncode == 0 and not any(line.startswith('unexpected') for line in calls), f'{label}: failed: {result.stderr.strip()[:200]} {calls}')
             realm_update = [line for line in calls if line.startswith('update realm')]
             e(realm_update == (['update realm -s otpPolicyLookAheadWindow=1'] if window == '0' else []),
@@ -1866,7 +2166,558 @@ identity_reconcile_realm_policy "$2"
             client_update = [line for line in calls if line.startswith('update client')]
             e(bool(client_update) == frontchannel and all('"frontchannelLogout": false' in line for line in client_update),
               f'{label}: krate-ui is updated with frontchannelLogout false exactly when Keycloak has it on; got {client_update}')
+            totp_update = [line for line in calls if line.startswith('update totp')]
+            e(bool(totp_update) == totp_default, f'{label}: CONFIGURE_TOTP is updated exactly when it is still a default action; got {totp_update}')
+            for line in totp_update:
+                body = json.loads(line[line.index('{'):])
+                e(line.split('{')[0].split() == ['update', 'totp', '-r', 'krate', '-f', '-'], f'{label}: the required action is PUT from a file without -n; got {line[:60]!r}')
+                e(body == dict(totp, defaultAction=False),
+                  f'{label}: the PUT carries the FULL representation (alias, name, providerId, priority kept) with defaultAction false; got {body}')
+            e((f'journal {command} reconciled required action CONFIGURE_TOTP' in calls) == totp_default,
+              f'{label}: the journal records the required-action reconcile exactly when it changed; got {calls}')
 
+
+FAKE_KCADM = r'''
+import json, os, sys, uuid
+# A stand-in for kcadm.sh over a JSON state file: the endpoints identity_apply_idp uses, with Keycloak's observed
+# shapes (fixture krate-p3, 26.8.0): GET flows lists top-level flows; a new execution is DISABLED/priority 0;
+# executions are listed recursively with level; the provider's clientSecret reads back masked.
+state_file, calls_file = os.environ['KC_STATE'], os.environ['KC_CALLS']
+state = json.load(open(state_file))
+args = sys.argv[1:]
+with open(calls_file, 'a') as log:
+    log.write(json.dumps(args) + '\n')
+command, path = args[0], args[1]
+opts = args[2:]
+# Failure injection for the tests: KC_FAIL_GET (prefix) makes a GET exit 1 with an error line; KC_EMPTY_GET makes it print nothing.
+if command == 'get' and os.environ.get('KC_FAIL_GET') and path.startswith(os.environ['KC_FAIL_GET']):
+    print('HTTP error - 503 Service Unavailable', file=sys.stderr)
+    sys.exit(1)
+if command == 'get' and os.environ.get('KC_EMPTY_GET') and path.startswith(os.environ['KC_EMPTY_GET']):
+    sys.exit(0)
+def setting(key):
+    for index, item in enumerate(opts):
+        if item == '-s' and opts[index + 1].startswith(key + '='):
+            value = opts[index + 1][len(key) + 1:]
+            try:
+                return json.loads(value)
+            except ValueError:
+                return value
+    return None
+def body():
+    return json.load(sys.stdin) if '-f' in opts else None
+def fields(items):
+    if '--fields' not in opts:
+        return items
+    names = opts[opts.index('--fields') + 1].split(',')
+    if '--format' in opts:
+        return '\n'.join(','.join(str(item.get(name, '')) for name in names) for item in items)
+    return [{name: item.get(name) for name in names} for item in items]
+def out(value):
+    if isinstance(value, str):
+        print(value)
+    else:
+        print(json.dumps(value))
+def save():
+    json.dump(state, open(state_file, 'w'))
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+def flow_by_alias(alias):
+    return next((f for f in state['flows'] if f['alias'] == alias), None)
+def listing(flow, level=0, result=None):
+    result = [] if result is None else result
+    for index, e in enumerate(sorted(flow['executions'], key=lambda e: (e['priority'], e['index']))):
+        item = {'id': e['id'], 'requirement': e['requirement'], 'level': level, 'index': index, 'priority': e['priority']}
+        if e.get('flowAlias'):
+            item.update({'authenticationFlow': True, 'displayName': e['flowAlias'], 'flowId': flow_by_alias(e['flowAlias'])['id']})
+            result.append(item)
+            listing(flow_by_alias(e['flowAlias']), level + 1, result)
+        else:
+            item['providerId'] = e['providerId']
+            if e.get('config'):
+                item['authenticationConfig'] = e['config']
+            result.append(item)
+    return result
+def remove_flow(flow):
+    for e in flow['executions']:
+        if e.get('flowAlias'):
+            remove_flow(flow_by_alias(e['flowAlias']))
+    state['flows'].remove(flow)
+parts = path.split('/')
+if path == 'identity-provider/instances/pingfederate' and command == 'get':
+    p = state.get('provider')
+    if not p:
+        fail('Resource not found for url: .../identity-provider/instances/pingfederate')
+    out(dict(p, internalId='internal-1', types=['USER_AUTHENTICATION'], config=dict(p['config'], clientSecret='**********')))
+elif path == 'identity-provider/instances' and command == 'create':
+    p = body()
+    if state.get('provider'):
+        fail('Identity Provider pingfederate already exists')
+    if flow_by_alias(p['firstBrokerLoginFlowAlias']) is None:
+        fail('No available authentication flow with alias: ' + p['firstBrokerLoginFlowAlias'])
+    state['provider'] = p; state['mappers'] = []; save()
+elif path == 'identity-provider/instances/pingfederate' and command == 'update':
+    p = body(); state['provider'].update(p); save()
+elif path == 'identity-provider/instances/pingfederate' and command == 'delete':
+    state['provider'] = None; state['mappers'] = []; save()
+elif path == 'identity-provider/instances/pingfederate/mappers' and command == 'get':
+    out(fields(state['mappers']))
+elif path == 'identity-provider/instances/pingfederate/mappers' and command == 'create':
+    m = body(); m['id'] = str(uuid.uuid4()); state['mappers'].append(m); save()
+elif path.startswith('identity-provider/instances/pingfederate/mappers/') and command == 'update':
+    m = body(); current = next(x for x in state['mappers'] if x['id'] == parts[-1]); current.update(m); save()
+elif path.startswith('identity-provider/instances/pingfederate/mappers/') and command == 'delete':
+    state['mappers'] = [x for x in state['mappers'] if x['id'] != parts[-1]]; save()
+elif path == 'authentication/flows' and command == 'get':
+    out(fields([f for f in state['flows'] if f['topLevel']]))
+elif path == 'authentication/flows' and command == 'create':
+    f = body(); state['flows'].append({'id': str(uuid.uuid4()), 'alias': f['alias'], 'description': f.get('description', ''),
+                                      'providerId': f.get('providerId', 'basic-flow'), 'topLevel': True, 'executions': []}); save()
+elif path.startswith('authentication/flows/') and parts[-1] == 'executions' and command == 'get':
+    import urllib.parse
+    flow = flow_by_alias(urllib.parse.unquote(parts[2]))
+    if flow is None:
+        fail('Resource not found')
+    out(fields(listing(flow)))
+elif path.startswith('authentication/flows/') and parts[-1] == 'executions' and command == 'update':
+    assert '-n' in opts, 'executions update needs -n'
+    for flow in state['flows']:
+        for e in flow['executions']:
+            if e['id'] == setting('id'):
+                e['requirement'] = setting('requirement'); e['priority'] = int(setting('priority')); save(); sys.exit(0)
+    fail('Illegal execution')
+elif path.startswith('authentication/flows/') and parts[-1] in ('execution', 'flow') and command == 'create':
+    import urllib.parse
+    parent = flow_by_alias(urllib.parse.unquote(parts[2]))
+    execution = {'id': str(uuid.uuid4()), 'requirement': 'DISABLED', 'priority': 0, 'index': len(parent['executions'])}
+    if parts[-1] == 'flow':
+        assert setting('type') == 'basic-flow' and setting('provider') == 'basic-flow', 'sub-flow create needs type and provider basic-flow'
+        state['flows'].append({'id': str(uuid.uuid4()), 'alias': setting('alias'), 'description': setting('description') or '',
+                               'providerId': 'basic-flow', 'topLevel': False, 'executions': []})
+        execution['flowAlias'] = setting('alias')
+    else:
+        execution['providerId'] = setting('provider')
+    parent['executions'].append(execution); save()
+    print("Created new execution with id '%s'" % execution['id'], file=sys.stderr)
+elif path.startswith('authentication/flows/') and command == 'delete':
+    remove_flow(next(f for f in state['flows'] if f['id'] == parts[-1])); save()
+elif path.startswith('authentication/executions/') and parts[-1] == 'config' and command == 'create':
+    c = body(); c['id'] = str(uuid.uuid4()); state['configs'][c['id']] = c
+    for flow in state['flows']:
+        for e in flow['executions']:
+            if e['id'] == parts[2]:
+                e['config'] = c['id']
+    save()
+elif path.startswith('authentication/executions/') and command == 'delete':
+    for flow in state['flows']:
+        flow['executions'] = [e for e in flow['executions'] if e['id'] != parts[-1]]
+    save()
+elif path.startswith('authentication/config/') and command == 'get':
+    out(state['configs'][parts[-1]])
+elif path.startswith('authentication/config/') and command == 'update':
+    c = body(); state['configs'][parts[-1]].update(c); save()
+elif path == 'realms/krate' and command == 'get':
+    out(fields([{'browserFlow': state['browserFlow']}]))
+elif path == 'realms/krate' and command == 'update':
+    if flow_by_alias(setting('browserFlow')) is None:
+        fail('Illegal browserFlow')
+    state['browserFlow'] = setting('browserFlow'); save()
+else:
+    fail('unexpected kcadm call: ' + ' '.join(args))
+'''
+
+APPLY_FUNCTIONS = ('env_value', 'url_path_encode', 'json_field', 'identity_apply_idp', 'identity_apply_idp_plan', 'identity_apply_flow',
+                   'identity_put_idp_provider', 'identity_find_execution', 'identity_remove_idp')
+
+
+def flow_shape(state, alias):
+    """(name, requirement, priority, config alias) of the level-0 executions of a flow in the fake realm, in priority order."""
+    flow = next((f for f in state['flows'] if f['alias'] == alias), None)
+    if flow is None:
+        return None
+    return [(e.get('flowAlias') or e.get('providerId'), e['requirement'], e['priority'],
+             state['configs'].get(e.get('config', ''), {}).get('alias')) for e in sorted(flow['executions'], key=lambda e: e['priority'])]
+
+
+def check_broker_apply(checks):
+    """identity_apply_idp against a stand-in kcadm: creates the planned realm pieces, is idempotent, repairs drift, removes without the plan."""
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        e('identity_apply_idp apply' in (ROOT / 'sso/activate.sh').read_text(), 'sso/activate.sh: apply must call identity_apply_idp apply')
+        up = function_body(cli, 'cmd_identity_up')
+        e('identity_verify_cli up\n' in up and up.index('identity_apply_idp up') > up.index('identity_verify_cli up'),
+          f'{edition}/krate: identity up must apply the broker plan after the realm is verified')
+        declared = re.search(r"IDENTITY_USER_ACTIONS='(\[.*?\])'", cli)
+        e(declared is not None and json.loads(declared.group(1)) == identity.USER_REQUIRED_ACTIONS
+          and 'kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s "requiredActions=$IDENTITY_USER_ACTIONS"' in function_body(cli, 'identity_set_temp_password'),
+          f'{edition}/krate: users add/reset-password must assign exactly identity.USER_REQUIRED_ACTIONS to the user')
+        add = cli[cli.index('\n    add)\n      uid='):cli.index('identity_journal "users add"')]
+        e('identity_set_temp_password "$user" "$uid"' in add, f'{edition}/krate: users add sets the temporary password and required actions on the created user')
+        # -n (no-merge PUT) only where Keycloak's CLI guide uses it: the executions path and the user-group membership path.
+        for line in cli.splitlines():
+            if 'kcadm' in line and re.search(r'\s-n(\s|$)', line):
+                e('executions' in line or 'users/$uid/groups/$gid' in line, f'{edition}/krate: -n is used outside the executions/group paths: {line.strip()[:90]}')
+        e('required-actions' not in ''.join(l for l in cli.splitlines() if re.search(r'\s-n(\s|$)', l)),
+          f'{edition}/krate: required-actions must never be updated with -n (it replaces the representation)')
+        # kcadm inside `while read` loops: the helper's default branch gives docker exec /dev/null (an -i exec eats the loop's stdin).
+        kcadm_helper = function_body(cli, 'kcadm')
+        e('/opt/keycloak/bin/kcadm.sh "$@" --config "$KCADM_CONFIG" </dev/null' in kcadm_helper and kcadm_helper.count('docker exec -i') == 1
+          and kcadm_helper.index('docker exec -i') < kcadm_helper.index('</dev/null'),
+          f'{edition}/krate: kcadm must read stdin only with KCADM_STDIN=1 and otherwise exec with </dev/null')
+        for name in ('identity_apply_idp', 'identity_apply_idp_plan', 'identity_apply_flow', 'identity_remove_idp', 'identity_put_idp_provider', 'identity_rotate_ping_secret'):
+            e('docker ' not in function_body(cli, name), f'{edition}/krate: {name} must go through the kcadm helper, never docker exec directly')
+        e('--with-secret \\\n      | KCADM_STDIN=1 kcadm -- create identity-provider/instances' in cli
+          and '--with-secret \\\n      | KCADM_STDIN=1 kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS"' in cli,
+          f'{edition}/krate: the provider with its secret reaches kcadm through stdin (-f -), never an argument')
+        # B2: every comparison verdict is captured with || die and consumed by a case that refuses anything but same/differs.
+        for verdict in ('provider-differs', 'mapper-differs', 'config-differs'):
+            e(re.search(r'verdict="\$\((?:[^\n]*\\\n)*[^\n]*' + verdict + r'[^\n]*\)"( \\\n\s*)?\s*\|\| die', cli) is not None,
+              f'{edition}/krate: the {verdict} verdict must be captured with || die')
+            e(f'identity.py" broker --plan "$plan" {verdict}' in cli and f'== differs' not in cli.split(verdict)[1].split('\n')[0],
+              f'{edition}/krate: {verdict} must not be compared inside [[ ]]')
+        unexpected = cli.count('*) die "Unexpected comparison result')  # hoisted: Python 3.9 (RHEL 9) rejects a backslash inside an f-string expression
+        e(unexpected == 3, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
+        e('PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3' in cli,
+          f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
+    if bash_binary() is None:
+        return
+    plan = load_configure_dual().configs(json.loads((ROOT / 'sso/dual-example.json').read_text()), SYNTHETIC)['keycloak/pingfederate-idp.json']
+    secret = RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']
+    script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', *APPLY_FUNCTIONS) + r'''
+SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; IDENTITY_REALM=krate; IDENTITY_CHANGED=false
+IDENTITY_IDP_PLAN=auth/keycloak/pingfederate-idp.json; IDENTITY_IDP_ALIAS=pingfederate; IDENTITY_IDP_CHANGES=()
+sso_dir() { echo "$SSO_DIR"; }
+kcadm_login() { echo "login $*" >> "$KC_CALLS"; }
+kcadm_logout() { :; }
+identity_journal() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$JOURNAL"; }
+kcadm() {
+  local -a names=()
+  while [[ $# -gt 0 && "$1" != -- ]]; do export "$1"; names+=("${1%%=*}"); shift; done
+  shift
+  if [[ "${KCADM_STDIN:-}" == 1 ]]; then python3 -I "$FAKE" "$@"; else python3 -I "$FAKE" "$@" </dev/null; fi
+}
+identity_apply_idp "$2"
+echo "changed=$IDENTITY_CHANGED"
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        site = Path(tmp)
+        (site / 'auth/keycloak').mkdir(parents=True)
+        plan_file = site / 'auth/keycloak/pingfederate-idp.json'
+        plan_file.write_text(json.dumps(plan, indent=2) + '\n')
+        fake = site / 'fake_kcadm.py'
+        fake.write_text(FAKE_KCADM)
+        state_file, calls_file, journal = site / 'state.json', site / 'calls.log', site / 'journal.log'
+        realm = {'provider': None, 'mappers': [], 'flows': [{'id': 'browser-id', 'alias': 'browser', 'topLevel': True, 'executions': []},
+                                                             {'id': 'fbl-id', 'alias': 'first broker login', 'topLevel': True, 'executions': []}],
+                 'configs': {}, 'browserFlow': 'browser'}
+        state_file.write_text(json.dumps(realm))
+
+        def run(command='apply', env_secret=secret, **extra):
+            calls_file.write_text('')
+            write_env(site, dict(SYNTHETIC, PING_KEYCLOAK_CLIENT_SECRET=env_secret))
+            environment = dict(os.environ, KC_STATE=str(state_file), KC_CALLS=str(calls_file), JOURNAL=str(journal), FAKE=str(fake), SSO_DIR=str(ROOT / 'sso'), **extra)
+            environment.pop('PING_KEYCLOAK_CLIENT_SECRET', None)
+            outcome = run_bash(script, site, command, env=environment)
+            calls = [json.loads(line) for line in calls_file.read_text().splitlines() if line.startswith('[')]
+            return outcome, calls, json.loads(state_file.read_text())
+
+        def mutating(calls):
+            return [c for c in calls if c[0] in ('create', 'update', 'delete')]
+
+        result, calls, state = run()
+        label = 'apply on an empty realm'
+        e(result.returncode == 0, f'{label}: failed: {result.stderr.strip()[:300]} {result.stdout.strip()[-300:]}')
+        e(flow_shape(state, 'krate browser') == [('auth-cookie', 'ALTERNATIVE', 10, None), ('identity-provider-redirector', 'ALTERNATIVE', 20, 'PingFederate redirect'),
+                                                 ('krate forms', 'ALTERNATIVE', 30, None)],
+          f'{label}: krate browser must be cookie ALT 10, redirector ALT 20 (configured), krate forms ALT 30; got {flow_shape(state, "krate browser")}')
+        e(flow_shape(state, 'krate forms') == [('auth-username-password-form', 'REQUIRED', 10, None), ('krate otp', 'CONDITIONAL', 20, None)],
+          f'{label}: krate forms must be the password form REQUIRED 10 and krate otp CONDITIONAL 20; got {flow_shape(state, "krate forms")}')
+        e(flow_shape(state, 'krate otp') == [('conditional-user-configured', 'REQUIRED', 10, None), ('auth-otp-form', 'REQUIRED', 20, None)],
+          f'{label}: krate otp must be condition REQUIRED 10 and OTP form REQUIRED 20; got {flow_shape(state, "krate otp")}')
+        e(flow_shape(state, 'krate first broker login') == [('idp-create-user-if-unique', 'REQUIRED', 10, None)],
+          f'{label}: krate first broker login must be Create User If Unique REQUIRED 10; got {flow_shape(state, "krate first broker login")}')
+        e({f['alias']: f['topLevel'] for f in state['flows'] if f['alias'].startswith('krate')} == {'krate browser': True, 'krate forms': False, 'krate otp': False,
+                                                                                                   'krate first broker login': True},
+          f'{label}: sub-flows are created through their parent (not top-level); got {[(f["alias"], f["topLevel"]) for f in state["flows"]]}')
+        e([c['config'] for c in state['configs'].values()] == [{'defaultProvider': 'pingfederate'}], f'{label}: one redirector configuration; got {state["configs"]}')
+        provider = state['provider'] or {}
+        e(provider.get('firstBrokerLoginFlowAlias') == 'krate first broker login' and provider.get('config', {}).get('clientSecret') == secret,
+          f'{label}: the provider is created with the first-broker-login flow and the secret from .env')
+        e(provider.get('config', {}).get('tokenUrl') == plan['identityProviders'][0]['config']['tokenUrl'], f'{label}: the provider carries the planned endpoints')
+        e(sorted(m['name'] for m in state['mappers']) == sorted(m['name'] for m in plan['identityProviderMappers']), f'{label}: both mappers are created')
+        e(state['browserFlow'] == 'krate browser', f'{label}: the realm browser flow is bound to krate browser')
+        e(not any(secret in arg for call in calls for arg in call), f'{label}: the secret must never be a kcadm argument')
+        e(secret not in result.stdout + result.stderr, f'{label}: the secret must never be printed')
+        e('reconciled identity provider pingfederate' in journal.read_text() and 'changed=true' in result.stdout,
+          f'{label}: the journal records the reconcile and IDENTITY_CHANGED is set; got {journal.read_text()!r}')
+        flow_creates = [c for c in calls if c[0] == 'create' and c[1] == 'authentication/flows']
+        provider_create = next((i for i, c in enumerate(calls) if c[0] == 'create' and c[1] == 'identity-provider/instances'), -1)
+        e(flow_creates and provider_create > max(i for i, c in enumerate(calls) if c in flow_creates),
+          f'{label}: the flows are created before the provider that names one of them')
+        result, calls, state_after = run()
+        label = 'second apply'
+        e(result.returncode == 0 and 'No changes' in result.stdout and mutating(calls) == [] and state_after == state and 'changed=false' in result.stdout,
+          f'{label}: must report No changes, make no create/update/delete call and leave the realm as it was; got exit {result.returncode}'
+          f' {result.stdout.strip()[-200:]} {mutating(calls)}')
+        # Drift as the hand-applied fixture had it: zeroed priorities, the built-in first-broker-login flow, a stale redirector config,
+        # an extra mapper and a third execution in krate otp.
+        drift = json.loads(state_file.read_text())
+        browser = next(f for f in drift['flows'] if f['alias'] == 'krate browser')
+        for execution in browser['executions']:
+            if execution.get('providerId') in ('auth-cookie', 'identity-provider-redirector'):
+                execution['priority'] = 0
+        drift['provider']['firstBrokerLoginFlowAlias'] = 'first broker login'
+        next(iter(drift['configs'].values()))['config']['defaultProvider'] = 'other'
+        drift['mappers'].append({'id': 'extra', 'name': 'extra mapper', 'identityProviderAlias': 'pingfederate', 'config': {}})
+        drift['mappers'][0]['config']['group'] = '/WRONG'
+        otp = next(f for f in drift['flows'] if f['alias'] == 'krate otp')
+        otp['executions'].append({'id': 'stray', 'requirement': 'REQUIRED', 'priority': 30, 'index': 2, 'providerId': 'auth-x509'})
+        drift['browserFlow'] = 'browser'
+        state_file.write_text(json.dumps(drift))
+        result, calls, state_fixed = run('up')
+        label = 'apply after drift'
+        e(result.returncode == 0, f'{label}: failed: {result.stderr.strip()[:300]}')
+        e(state_fixed == state, f'{label}: the realm must be back to the planned state; differences: {_dict_diff(state, state_fixed)}')
+        kinds = sorted(set((c[0], c[1].split('/')[0] + ('/' + c[1].split('/')[1] if c[1].startswith('authentication/') else '')) for c in mutating(calls)))
+        e(('create', 'authentication/flows') not in kinds and ('create', 'identity-provider') not in kinds, f'{label}: nothing is recreated; got {kinds}')
+        e('up reconciled identity provider pingfederate' in journal.read_text().splitlines()[-1], f'{label}: the journal line names the command (up)')
+        # B2: a failing or empty helper answer must stop the apply, never read as "same" and print No changes.
+        for label, extra, needle in (('config GET fails', {'KC_FAIL_GET': 'authentication/config/'}, 'configuration'),
+                                     ('config GET answers nothing', {'KC_EMPTY_GET': 'authentication/config/'}, 'configuration'),
+                                     ('mappers GET fails', {'KC_FAIL_GET': 'identity-provider/instances/pingfederate/mappers'}, 'mappers'),
+                                     ('provider GET answers nothing', {'KC_EMPTY_GET': 'identity-provider/instances/pingfederate'}, 'identity provider')):
+            result, calls, state_kept = run(**extra)
+            e(result.returncode != 0 and 'No changes' not in result.stdout and needle in result.stderr and state_kept == state,
+              f'apply with {label}: must die naming the step (not report No changes); got exit {result.returncode} stdout {result.stdout.strip()[-120:]!r}'
+              f' stderr {result.stderr.strip()[-160:]!r}')
+        # Secret still a placeholder: identity up warns and touches nothing.
+        result, calls, state_same = run('up', env_secret='REPLACE_ME')
+        e(result.returncode == 0 and calls == [] and state_same == state and 'PING_KEYCLOAK_CLIENT_SECRET' in result.stdout + result.stderr,
+          f'{label}: with the secret unset the plan is skipped with a warning and no kcadm call; got {result.stdout.strip()[-200:]} {calls}')
+        # Removal: plan file gone, provider present.
+        plan_file.unlink()
+        result, calls, state_removed = run()
+        label = 'apply without the plan file'
+        e(result.returncode == 0, f'{label}: failed: {result.stderr.strip()[:300]}')
+        e(state_removed['provider'] is None and state_removed['mappers'] == [] and state_removed['browserFlow'] == 'browser'
+          and sorted(f['alias'] for f in state_removed['flows']) == ['browser', 'first broker login'],
+          f'{label}: the provider, mappers and the four flows are removed and the browser flow rebound; got {state_removed}')
+        rebind = next((i for i, c in enumerate(calls) if c[0] == 'update' and c[1] == 'realms/krate'), None)
+        provider_delete = next((i for i, c in enumerate(calls) if c[0] == 'delete' and c[1] == 'identity-provider/instances/pingfederate'), None)
+        flow_deletes = [i for i, c in enumerate(calls) if c[0] == 'delete' and c[1].startswith('authentication/flows/')]
+        e(rebind is not None and provider_delete is not None and flow_deletes and rebind < provider_delete < min(flow_deletes),
+          f'{label}: order must be rebind, delete provider, delete flows; got rebind {rebind}, provider {provider_delete}, flows {flow_deletes}')
+        e('removed identity provider pingfederate' in journal.read_text().splitlines()[-1], f'{label}: the journal records the removal')
+        result, calls, state_again = run()
+        e(result.returncode == 0 and mutating(calls) == [] and state_again == state_removed, f'{label} (second run): nothing left to do; got {mutating(calls)}')
+        # B3/Q9: identity rotate PING_KEYCLOAK_CLIENT_SECRET re-PUTs the provider with the new .env value, never removes it.
+        rotate_script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'identity_put_idp_provider', 'identity_rotate_ping_secret') + r'''
+SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; IDENTITY_REALM=krate
+IDENTITY_IDP_PLAN=auth/keycloak/pingfederate-idp.json; IDENTITY_IDP_ALIAS=pingfederate
+sso_dir() { echo "$SSO_DIR"; }
+kcadm_login() { :; }
+kcadm_logout() { :; }
+identity_journal() { printf '%s %s %s\n' "$1" "$2" "$3" >> "$JOURNAL"; }
+kcadm() {
+  while [[ $# -gt 0 && "$1" != -- ]]; do shift; done
+  shift
+  if [[ "${KCADM_STDIN:-}" == 1 ]]; then python3 -I "$FAKE" "$@"; else python3 -I "$FAKE" "$@" </dev/null; fi
+}
+identity_rotate_ping_secret
+'''
+        rotated = 'synthetic-rotated-ping-secret-7a1b2c3d4e'
+
+        def rotate(env_secret=rotated):
+            calls_file.write_text('')
+            write_env(site, dict(SYNTHETIC, PING_KEYCLOAK_CLIENT_SECRET=env_secret))
+            environment = dict(os.environ, KC_STATE=str(state_file), KC_CALLS=str(calls_file), JOURNAL=str(journal), FAKE=str(fake), SSO_DIR=str(ROOT / 'sso'))
+            environment.pop('PING_KEYCLOAK_CLIENT_SECRET', None)
+            outcome = run_bash(rotate_script, site, env=environment)
+            calls = [json.loads(line) for line in calls_file.read_text().splitlines() if line.startswith('[')]
+            return outcome, calls, json.loads(state_file.read_text())
+
+        result, calls, state_norotate = rotate()
+        e(result.returncode == 0 and 'Identity provider pingfederate: not applied yet (krate auth apply)' in result.stdout and mutating(calls) == []
+          and state_norotate == state_removed, f'rotate without a provider: .env only, prints not applied yet; got {result.stdout.strip()[-120:]!r} {mutating(calls)}')
+        plan_file.write_text(json.dumps(plan, indent=2) + '\n')
+        result, calls, state_back = run()
+        e(result.returncode == 0 and state_back['provider']['config']['clientSecret'] == secret, 'provider recreated for the rotation test')
+        result, calls, state_rotated = rotate()
+        e(result.returncode == 0 and 'Identity provider pingfederate: secret updated' in result.stdout,
+          f'rotate with the provider present: prints exactly "Identity provider pingfederate: secret updated"; got exit {result.returncode} {result.stdout.strip()[-160:]!r} {result.stderr.strip()[-160:]!r}')
+        e(state_rotated['provider']['config']['clientSecret'] == rotated and dict(state_rotated['provider'], config=None) == dict(state_back['provider'], config=None)
+          and state_rotated['mappers'] == state_back['mappers'] and state_rotated['flows'] == state_back['flows'],
+          'rotate replaces only the provider secret: mappers, flows and the other provider fields are untouched')
+        e([c[0:2] for c in mutating(calls)] == [['update', 'identity-provider/instances/pingfederate']], f'rotate makes exactly one PUT of the provider, no delete/create; got {mutating(calls)}')
+        e(not any(rotated in arg for call in calls for arg in call) and rotated not in result.stdout + result.stderr, 'the rotated secret is never an argument or printed')
+        e(journal.read_text().splitlines()[-1] == 'rotate PING_KEYCLOAK_CLIENT_SECRET applied to identity provider pingfederate',
+          f'the journal line is exactly "rotate PING_KEYCLOAK_CLIENT_SECRET applied to identity provider pingfederate"; got {journal.read_text().splitlines()[-1]!r}')
+        plan_file.unlink()
+        result, calls, state_kept = rotate()
+        e(result.returncode != 0 and 'pingfederate-idp.json is missing' in result.stderr and mutating(calls) == [] and state_kept == state_rotated,
+          f'rotate with the provider present but no plan file must stop; got exit {result.returncode} {result.stderr.strip()[-160:]!r}')
+        for edition in EDITIONS:
+            cli = (ROOT / edition / 'krate').read_text()
+            rotate_body = function_body(cli, 'cmd_identity_rotate')
+            e('PING_KEYCLOAK_CLIENT_SECRET)\n      # Issued by PingFederate' in rotate_body and '[[ "${2:-}" == --value ]] || die "PING_KEYCLOAK_CLIENT_SECRET is issued by PingFederate' in rotate_body,
+              f'{edition}/krate: identity rotate accepts PING_KEYCLOAK_CLIENT_SECRET only with --value (stdin), never generated')
+            e('    PING_KEYCLOAK_CLIENT_SECRET)\n      set_env_file_value "$ENV_FILE" "$key" "$value"\n      identity_rotate_ping_secret\n' in rotate_body
+              and rotate_body.index('identity_rotate_ping_secret\n') < rotate_body.index('identity_up_service keycloak'),
+              f'{edition}/krate: identity rotate writes .env, re-PUTs the provider through identity_rotate_ping_secret, then reconciles keycloak (its environment carries the key)')
+            e('krate identity rotate PING_KEYCLOAK_CLIENT_SECRET --value' in function_body(cli, 'ensure_ping_secret'),
+              f'{edition}/krate: ensure_ping_secret names identity rotate --value as the non-terminal path')
+            # Review NEW1: a PingFederate-issued secret is accepted as issued (base64 and punctuation included);
+            # only whitespace and the characters .env quoting, Compose interpolation and the shell alter are refused.
+            ping_rule = 'if [[ "$key" == PING_KEYCLOAK_CLIENT_SECRET ]]; then\n      ping_secret_valid "$value" || die "$key $PING_SECRET_RULE"\n    else'
+            e(ping_rule in rotate_body and rotate_body.index(ping_rule) < rotate_body.index('[[ "$value" =~ ^[A-Za-z0-9._-]{16,}$ ]]'),
+              f'{edition}/krate: identity rotate validates a PingFederate secret through ping_secret_valid and keeps the generated-value rule for the other keys')
+            validator = function_body(cli, 'ping_secret_valid')
+            e('[[ ${#1} -ge 16 ]] || return 1' in validator and "grep -q -E '[^!-~]|[\\\\$\"'\"'\"'`]'" in validator,
+              f'{edition}/krate: ping_secret_valid = 16+ printable ASCII, none of whitespace, quotes, backslash, backtick or $')
+            # PR #41 review: the interactive prompt stores the secret through the same validator (no short or dotenv-sensitive value reaches .env).
+            e('ping_secret_valid "$secret" || die "PING_KEYCLOAK_CLIENT_SECRET $PING_SECRET_RULE"' in function_body(cli, 'ensure_ping_secret'),
+              f'{edition}/krate: ensure_ping_secret validates the prompted secret with ping_secret_valid before writing .env')
+
+
+def _dict_diff(a, b):
+    return [key for key in set(a) | set(b) if a.get(key) != b.get(key)]
+
+
+def check_truststore_env(checks):
+    """Item 4: the truststore digest in keycloak's environment; identity up and auth apply keep it current and recreate Keycloak."""
+    e = checks.expect
+    for edition in EDITIONS:
+        code, rendered = compose_config(ROOT / edition / '.env.template', edition)
+        if e(code == 0, f'{edition}: Compose rendering failed'):
+            keycloak = json.loads(rendered)['services']['keycloak']
+            e('KRATE_TRUSTSTORE_SHA' in (keycloak.get('environment') or {}),
+              f'{edition}/keycloak: KRATE_TRUSTSTORE_SHA must be part of the environment so a changed truststore recreates Keycloak')
+            mounts = {mount.get('target'): mount for mount in keycloak.get('volumes') or []}
+            e('/opt/keycloak/conf/truststores' in mounts and keycloak['environment'].get('KC_TRUSTSTORE_PATHS') == '/opt/keycloak/conf/truststores',
+              f'{edition}/keycloak: auth/keycloak/truststores is mounted at KC_TRUSTSTORE_PATHS')
+        cli = (ROOT / edition / 'krate').read_text()
+        up = function_body(cli, 'cmd_identity_up')
+        e('if sync_truststore_env; then' in up and up.index('sync_truststore_env') < up.index('--mode identity')
+          and up.index('sync_truststore_env') < up.index('identity_up_service keycloak'),
+          f'{edition}/krate: identity up must record the truststore digest before rendering and starting Keycloak')
+        e('KRATE_TRUSTSTORE_SHA=' in (ROOT / edition / '.env.template').read_text(), f'{edition}/.env.template: KRATE_TRUSTSTORE_SHA must be listed')
+    activate = (ROOT / 'sso/activate.sh').read_text()
+    e('if sync_truststore_env; then' in activate and activate.index('sync_truststore_env') < activate.index('--wait-timeout "$timeout" keycloak')
+      < activate.index('identity_apply_idp apply') < activate.index('--wait-timeout "$timeout" kafka-ui'),
+      'sso/activate.sh: apply must sync the digest, recreate Keycloak when it changed, apply the plan, then reconcile Kafbat')
+    e('--pull never --no-build --no-deps --wait --wait-timeout "$timeout" keycloak' in activate, 'sso/activate.sh: Keycloak is reconciled with --pull never, no deps')
+    e('identity_lock\n' in activate, 'sso/activate.sh: apply takes the identity lock before changing Keycloak and the realm')
+    with tempfile.TemporaryDirectory() as tmp:
+        trust = Path(tmp) / 'truststores'
+        e(identity.truststore_digest(trust) == '', 'truststore_digest: a missing directory digests to the empty string (what an absent .env key renders)')
+        trust.mkdir()
+        e(identity.truststore_digest(trust) == '', 'truststore_digest: an empty directory digests to the empty string')
+        (trust / 'a.pem').write_text('one\n')
+        first = identity.truststore_digest(trust)
+        e(re.fullmatch(r'[0-9a-f]{32}', first) is not None, f'truststore_digest: 32 hex characters; got {first!r}')
+        (trust / 'notes.txt').write_text('stray\n')
+        with_stray = identity.truststore_digest(trust)
+        e(with_stray != first, 'truststore_digest: every regular file counts (a stray file changes the digest; the preflight refuses it)')
+        (trust / 'notes.txt').unlink()
+        (trust / 'sub').mkdir()
+        (trust / 'sub/root.p12').write_bytes(b'pkcs12')
+        nested = identity.truststore_digest(trust)
+        e(nested not in (first, with_stray), 'truststore_digest: a nested PKCS12 file counts (Keycloak scans recursively)')
+        e([str(p.relative_to(trust)) for p in identity.truststore_files(trust)] == ['a.pem', 'sub/root.p12'], 'truststore_files lists files recursively by relative path')
+        (trust / 'sub/root.p12').unlink()
+        (trust / 'sub').rmdir()
+        e(identity.truststore_digest(trust) == first, 'truststore_digest: back to the first digest once the extra files are gone')
+        (trust / 'a.pem').write_text('two\n')
+        second = identity.truststore_digest(trust)
+        e(second != first, 'truststore_digest: changed content changes the digest')
+        (trust / 'a.pem').write_text('one\n')
+        (trust / 'b.crt').write_text('one\n')
+        third = identity.truststore_digest(trust)
+        e(third not in (first, second), 'truststore_digest: an added .crt changes the digest')
+        (trust / 'b.crt').rename(trust / 'c.crt')
+        e(identity.truststore_digest(trust) != third, 'truststore_digest: a renamed file changes the digest (names are part of it)')
+    if bash_binary() is None:
+        return
+    script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'replace_env_file', 'set_env_file_value', 'sync_truststore_env') + r'''
+SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; SSO="$2"
+sso_dir() { echo "$SSO"; }
+if sync_truststore_env; then echo changed; else echo same; fi
+grep -E '^KRATE_TRUSTSTORE_SHA=' "$ENV_FILE"
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        site = Path(tmp)
+        (site / 'auth/keycloak/truststores').mkdir(parents=True)
+        # A Phase 1/2 .env has no KRATE_TRUSTSTORE_SHA line: with an empty directory nothing is written and nothing is recreated (S3).
+        write_env(site, {'KEYCLOAK_ENABLED': 'true'})
+        before = (site / '.env').read_bytes()
+        result = run_bash(script, site, ROOT / 'sso')
+        e(result.returncode == 1 and result.stdout.split() == ['same'] and (site / '.env').read_bytes() == before,
+          f'sync_truststore_env: an empty set on a .env without the key is unchanged (no first-upgrade recreation); got {result.returncode} {result.stdout.split()} {result.stderr.strip()[:120]}')
+        write_env(site, {'KRATE_TRUSTSTORE_SHA': ''})
+        before = (site / '.env').read_bytes()
+        result = run_bash(script, site, ROOT / 'sso')
+        e(result.stdout.split()[0] == 'same' and (site / '.env').read_bytes() == before, 'sync_truststore_env: unchanged set leaves .env byte-identical and returns 1')
+        (site / 'auth/keycloak/truststores/ca.pem').write_text('cert\n')
+        result = run_bash(script, site, ROOT / 'sso')
+        sha = result.stdout.split()[1].partition('=')[2]
+        e(result.stdout.split()[0] == 'changed' and re.fullmatch(r'[0-9a-f]{32}', sha) is not None, f'sync_truststore_env: an added PEM records a new digest; got {result.stdout.split()}')
+        result = run_bash(script, site, ROOT / 'sso')
+        e(result.stdout.split()[0] == 'same', 'sync_truststore_env: the same PEM set is reported unchanged')
+        (site / 'auth/keycloak/truststores/ca.pem').unlink()
+        result = run_bash(script, site, ROOT / 'sso')
+        e(result.stdout.split() == ['changed', 'KRATE_TRUSTSTORE_SHA='], f'sync_truststore_env: removing the last file records the empty digest; got {result.stdout.split()}')
+        e(sorted(path.name for path in site.iterdir()) == ['.env', 'auth'], 'sync_truststore_env: no temporary file remains')
+    activate = (ROOT / 'sso/activate.sh').read_text()
+    e('identity_journal apply recreated "keycloak: truststores changed"' in activate and 'identity_journal apply recreated "keycloak: service definition changed"' in activate
+      and activate.index('trust_changed=true') < activate.index('elif $trust_changed; then'),
+      'sso/activate.sh: the journal says truststores changed only when the digest changed, otherwise service definition changed (N3)')
+
+
+def check_broker_docs(checks):
+    """Item 6: the guides and README describe what apply does, the break-glass URL, the decisions and the trust restart."""
+    e = checks.expect
+    dual = (ROOT / 'sso/guides/dual-login.md').read_text()
+    for forbidden in ('account/?kc_idp_hint', 'creates the Keycloak session'):
+        e(forbidden not in dual and forbidden not in (ROOT / 'README.md').read_text() and forbidden not in (ROOT / 'sso/guides/pingfederate-sso.md').read_text(),
+          f'docs must not describe the unverified account-console break-glass URL ({forbidden!r}); only the proven authorization-URL procedure (B1)')
+    for needle, why in (('&kc_idp_hint=', 'the proven break-glass procedure: the empty hint appended to the realm authorization URL'),
+                        ('Log in with Keycloak', 'the break-glass procedure starts from Kafbat\'s button'),
+                        ('identity rotate PING_KEYCLOAK_CLIENT_SECRET --value', 'secret rotation through identity rotate (B3/Q9)'),
+                        ('federated-identity link', 'removing the plan deletes every federated-identity link'),
+                        ('idp_truststore', 'the site key for a publicly trusted identity provider (S1)'),
+                        ('.p12', 'the PKCS12 truststore files Keycloak also loads (S2)'),
+                        ('service definition changed', 'the journal line for a recreation that is not a truststore change (N3)'),
+                        ('admin console', 'console-created users and the TOTP demand (N7)'),
+                        ('krate first broker login', 'the first-broker-login flow (D2)'),
+                        ('krate browser', 'the browser flow (D3)'), ('krate forms', 'the forms sub-flow'), ('krate otp', 'the OTP sub-flow'),
+                        ('owner to confirm', 'the decisions are marked owner to confirm'),
+                        ('syncMode', 'revocation through syncMode FORCE at the next sign-in'),
+                        ('KRATE_TRUSTSTORE_SHA', 'the truststore digest and Keycloak recreation'),
+                        ('idp-create-user-if-unique', 'the no-linking authenticator'), ('No changes', 'the idempotent second apply'),
+                        ('identity provider pingfederate', 'the journal line'), ('auth configure --local', 'the way back to local sign-in')):
+        e(needle in dual, f'sso/guides/dual-login.md must describe {why} (missing {needle!r})')
+    for decision in ('D1', 'D2', 'D3', 'D4'):
+        e(re.search(r'\b' + decision + r'\b', dual) is not None, f'sso/guides/dual-login.md must state decision {decision}')
+    foundation = (ROOT / 'sso/guides/identity-foundation.md').read_text()
+    e('not a realm default' in foundation or 'no longer a realm default' in foundation,
+      'sso/guides/identity-foundation.md must say CONFIGURE_TOTP is not a realm default action')
+    e('requiredActions' in foundation and 'users add' in foundation, 'sso/guides/identity-foundation.md must say users add assigns the required actions')
+    e('required action CONFIGURE_TOTP' in foundation, 'sso/guides/identity-foundation.md must describe the required-action reconcile of identity up')
+    readme = (ROOT / 'README.md').read_text()
+    e('kc_idp_hint=' in readme and 'auth/keycloak/pingfederate-idp.json' in readme, 'README.md must describe the PingFederate apply and the break-glass hint')
+    sso = (ROOT / 'sso/guides/pingfederate-sso.md').read_text()
+    e('kc_idp_hint=' in sso and 'krate browser' in sso, 'sso/guides/pingfederate-sso.md must describe the realm flow and the break-glass hint')
+    e('PING_KEYCLOAK_CLIENT_SECRET' in foundation and 'identity rotate' in foundation, 'sso/guides/identity-foundation.md must list PING_KEYCLOAK_CLIENT_SECRET under identity rotate')
+    # PR #41 review: the README/guide overview must not claim apply never touches Keycloak (it recreates it on
+    # trust-material or service changes and reconciles the plan).
+    readme = (ROOT / 'README.md').read_text()
+    checks.expect('reconciles only the UI' not in readme and 'It does not start Keycloak' not in readme and 'trust material in `auth/keycloak/truststores`' in readme,
+                  'README.md: the auth apply overview must describe the Keycloak recreation and plan reconcile, not "reconciles only the UI"')
+    dual = (ROOT / 'sso/guides/dual-login.md').read_text()
+    checks.expect('In `local.yml` mode the command recreates only the UI' in dual,
+                  'dual-login.md: the switch-back paragraph must scope "recreates only the UI" to local.yml mode')
 
 def check_health(checks):
     """N4: health names the Compose service of a crash-looping container (RestartCount, Restarting) and survives a vanished one."""
@@ -1914,7 +2765,8 @@ def main():
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_deploy_release, check_rpm_install, check_gen_cert_ip,
-                  check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock):
+                  check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
+                  check_broker_apply, check_truststore_env, check_broker_docs):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others
@@ -1925,7 +2777,8 @@ def main():
     print('Identity foundation verified: templates, realm plan, Kafbat runtime plan, names, Compose services and identity network, '
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
           'runtime.yml incl. refusals), configure-dual, proxy environment and edge rules, release permissions, RPM dependency '
-          'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock.')
+          'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
+          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs.')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
         print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0
