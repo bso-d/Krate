@@ -694,6 +694,90 @@ def db_tls(directory):
 # sub-flow by `flowAlias`. These readers hand the CLI one item at a time; the secret enters
 # the provider only through the environment (BROKER_SECRET_KEY), never an argument.
 
+# ─── The planned flows: one source for the writer and the validator ─────────────
+# sso/configure-dual.py writes these into the plan; broker_plan() refuses a plan that differs
+# from them in any field (PR #41 review: a generic "some authenticator" check let `idp-auto-link`
+# replace the sole first-broker execution, which links a brokered identity to a local account).
+
+def _execution(authenticator, requirement, priority, config=None):
+    item = {"authenticator": authenticator, "requirement": requirement, "priority": priority,
+            "authenticatorFlow": False, "userSetupAllowed": False}
+    if config:
+        item["authenticatorConfig"] = config
+    return item
+
+
+def _subflow(alias, requirement, priority):
+    return {"authenticatorFlow": True, "flowAlias": alias, "requirement": requirement,
+            "priority": priority, "userSetupAllowed": False}
+
+
+def _flow(alias, description, executions, top_level):
+    return {"alias": alias, "description": description, "providerId": "basic-flow",
+            "topLevel": top_level, "builtIn": False, "authenticationExecutions": executions}
+
+
+def planned_flows():
+    """The realm's browser flow (D3) and first-broker-login flow (D2); parents before their sub-flows."""
+    return [
+        _flow(BROWSER_FLOW, "Krate: cookie, then PingFederate; local users with ?kc_idp_hint= (empty)",
+             [_execution("auth-cookie", "ALTERNATIVE", 10),
+              _execution("identity-provider-redirector", "ALTERNATIVE", 20, REDIRECT_CONFIG),
+              _subflow(FORMS_FLOW, "ALTERNATIVE", 30)], True),
+        _flow(FORMS_FLOW, "local users: password, then OTP when enrolled",
+             [_execution("auth-username-password-form", "REQUIRED", 10),
+              _subflow(OTP_FLOW, "CONDITIONAL", 20)], False),
+        _flow(OTP_FLOW, "OTP when the user has one",
+             [_execution("conditional-user-configured", "REQUIRED", 10),
+              _execution("auth-otp-form", "REQUIRED", 20)], False),
+        _flow(FIRST_BROKER_FLOW, "Krate: create the brokered user; never link to a local account",
+             [_execution("idp-create-user-if-unique", "REQUIRED", 10)], True),
+    ]
+
+
+def planned_authenticator_config():
+    """The redirector's configuration: SSO users go to PingFederate without a Keycloak password page."""
+    return [{"alias": REDIRECT_CONFIG, "config": {"defaultProvider": BROKER_ALIAS}}]
+
+
+def _same(a, b):
+    """JSON equality that does not equate True with 1 or 10 with 10.0."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    return type(a) is type(b) and a == b
+
+
+def _describe(execution):
+    return execution.get('flowAlias') if execution.get('authenticatorFlow') else execution.get('authenticator')
+
+
+def _check_flows(path, flows):
+    """Every flow must equal planned_flows() (matched by alias); an execution list is compared in priority order."""
+    expected = {flow['alias']: flow for flow in planned_flows()}
+    actual = {flow.get('alias'): flow for flow in flows}
+    for alias, want in expected.items():
+        have = actual[alias]
+        for key in sorted(set(want) | set(have)):
+            if key == 'authenticationExecutions':
+                continue
+            if not _same(have.get(key), want.get(key)):
+                raise ValueError(f'{path}: flow {alias!r} field {key} differs from the Krate plan')
+        for item in have['authenticationExecutions']:
+            if type(item.get('priority')) is not int:
+                raise ValueError(f'{path}: flow {alias!r} execution {_describe(item)!r} priority must be an integer')
+        have_x = sorted(have['authenticationExecutions'], key=lambda x: x['priority'])
+        want_x = want['authenticationExecutions']
+        if len(have_x) != len(want_x):
+            names = [_describe(x) for x in have_x]
+            raise ValueError(f'{path}: flow {alias!r} must have exactly {len(want_x)} executions ({[_describe(x) for x in want_x]}); found {names}')
+        for have_item, want_item in zip(have_x, want_x):
+            for key in sorted(set(want_item) | set(have_item)):
+                if not _same(have_item.get(key), want_item.get(key)):
+                    raise ValueError(f'{path}: flow {alias!r} execution {_describe(want_item)!r} field {key} differs from the Krate plan')
+
+
 def broker_plan(path):
     """The validated broker plan at `path`; a ValueError names what is wrong (never a value)."""
     try:
@@ -744,9 +828,12 @@ def broker_plan(path):
                     raise ValueError(f'{path}: sub-flow {execution.get("flowAlias")!r} of {flow.get("alias")!r} is not planned')
             elif not execution.get('authenticator'):
                 raise ValueError(f'{path}: an execution of {flow.get("alias")!r} names no authenticator')
+    _check_flows(path, flows)
     configs = plan.get('authenticatorConfig')
     if not isinstance(configs, list) or any(not isinstance(c, dict) or not c.get('alias') or not isinstance(c.get('config'), dict) for c in configs):
         raise ValueError(f'{path}: authenticatorConfig must list named configurations')
+    if not _same(configs, planned_authenticator_config()):
+        raise ValueError(f'{path}: authenticatorConfig must be exactly the {REDIRECT_CONFIG!r} redirector configuration of the Krate plan')
     if plan.get('browserFlow') != BROWSER_FLOW:
         raise ValueError(f'{path}: browserFlow must be {BROWSER_FLOW!r}')
     if plan.get('truststore', 'local') not in TRUSTSTORE_MODES:

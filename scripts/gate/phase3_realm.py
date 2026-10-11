@@ -249,9 +249,9 @@ SHAPE = {  # flow alias → (topLevel, [(authenticator | ('flow', alias), requir
                              (('flow', 'krate forms'), 'ALTERNATIVE', 30, None)]),
     'krate forms': (False, [('auth-username-password-form', 'REQUIRED', 10, None),
                             (('flow', 'krate otp'), 'CONDITIONAL', 20, None)]),
-    'krate otp': (False, [('conditional-user-configured', 'REQUIRED', None, None),
-                          ('auth-otp-form', 'REQUIRED', None, None)]),
-    'krate first broker login': (True, [('idp-create-user-if-unique', 'REQUIRED', None, None)]),
+    'krate otp': (False, [('conditional-user-configured', 'REQUIRED', 10, None),
+                          ('auth-otp-form', 'REQUIRED', 20, None)]),
+    'krate first broker login': (True, [('idp-create-user-if-unique', 'REQUIRED', 10, None)]),
 }
 
 
@@ -299,8 +299,9 @@ def compare_shape(plan):
                 diffs.append('%s: expected authenticator %r, got %r' % (where, what, planned.get('authenticator')))
             if planned.get('requirement') != requirement:
                 diffs.append('%s: requirement %r, expected %s' % (where, planned.get('requirement'), requirement))
-            if priority is not None and planned.get('priority') != priority:
-                diffs.append('%s: priority %r, expected %s' % (where, planned.get('priority'), priority))
+            if planned.get('priority') != priority:
+                diffs.append('%s (%s): priority %r, expected %s' % (where, what[1] if isinstance(what, tuple) else what,
+                                                                  planned.get('priority'), priority))
             if config and planned.get('authenticatorConfig') != config:
                 diffs.append('%s: authenticatorConfig %r, expected %r' % (where, planned.get('authenticatorConfig'), config))
     return diffs

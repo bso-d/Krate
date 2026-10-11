@@ -13,7 +13,7 @@
 # harness/phase3/stub-up.sh (rule 11).
 #
 #   stub_idp.sh up   --project NAME --edition-dir DIR --base URL --out DIR [--port N] [--cluster NAME]
-#   stub_idp.sh down --project NAME
+#   stub_idp.sh down --project NAME [--container NAME]
 #   stub_idp.sh status --project NAME [--port N]
 #   stub_idp.sh add-user --project NAME --out DIR USERNAME [GROUP...]
 #   stub_idp.sh remove-group --project NAME --out DIR USERNAME GROUP
@@ -189,7 +189,21 @@ PY
     ;;
   down)
     removed=""
-    for c in $(docker ps -aq --filter "name=^${PROJECT}-gate3-"); do docker rm -f "$c" >/dev/null 2>&1 && removed="$removed $c"; done
+    # The resolved stand-in (the --container name, else the default) plus the project's other gate3 stand-ins;
+    # both queries carry the krate.gate=phase3 label filter, so neither --container nor the default name can
+    # remove a container this script did not start. A container matched by both queries is removed once.
+    for c in $({ docker ps -aq --filter "label=krate.gate=phase3" --filter "name=^${CONTAINER}$";
+                 docker ps -aq --filter "label=krate.gate=phase3" --filter "name=^${PROJECT}-gate3-"; } | sort -u); do
+      docker rm -f "$c" >/dev/null 2>&1 && removed="$removed $c"
+    done
+    # A container of that exact name that survived the loop above does not carry the label: it was not started
+    # by stub_idp.sh (for example the development fixture of harness/phase3/stub-up.sh from before it labelled
+    # its stand-in). Never remove it silently or report success; name it and fail. An absent name is a no-op.
+    if [[ -n "$(docker ps -aq --filter "name=^${CONTAINER}$")" ]]; then
+      [[ -z "$removed" ]] || say "removed containers:$removed"
+      printf 'stub: container %s exists but was not started by stub_idp.sh (it lacks the label krate.gate=phase3), so it was left in place; if you intend to remove it, run: docker rm -f %s\n' "$CONTAINER" "$CONTAINER" >&2
+      exit 1
+    fi
     say "removed containers:${removed:- none}"
     ;;
   status)

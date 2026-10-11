@@ -995,12 +995,231 @@ def check_configure_dual(checks):
     e(placeholders == {'${PING_KEYCLOAK_CLIENT_SECRET}'},
       f'configure-dual: the identity-provider plan may only reference the PingFederate secret placeholder; got {sorted(placeholders)}')
     check_broker_plan_shape(checks, idp)
+    check_gate_shape_helper(checks, idp)
+    check_stub_idp_down(checks)
+    check_check_flows_priority(checks)
     for key in MOVED_SITE_KEYS:
         try:
             module.configs(dict(example, **{key: 5 if key == 'session_idle_minutes' else True}), SYNTHETIC)
             e(False, f'configure-dual: a site file with {key} must be refused (the value lives in .env)')
         except ValueError as exc:
             e('.env' in str(exc), f'configure-dual: the refusal of {key} must point at .env; got {exc}')
+
+
+# R2-S2: the gate's offline plan check (scripts/gate/phase3_realm.py --shape) must accept the configure-dual plan and refuse a
+# changed priority, naming the flow and execution.  (label, mutation, text stderr must name)
+GATE_SHAPE_MUTATIONS = (
+    ('krate otp auth-otp-form priority 30', lambda p: _execution_of(p, 'krate otp', 1).__setitem__('priority', 30), 'krate otp[1] (auth-otp-form)'),
+    ('krate otp conditional-user-configured priority 15', lambda p: _execution_of(p, 'krate otp', 0).__setitem__('priority', 15),
+     'krate otp[0] (conditional-user-configured)'),
+    ('krate first broker login idp-create-user-if-unique priority 20', lambda p: _execution_of(p, 'krate first broker login', 0).__setitem__('priority', 20),
+     'krate first broker login[0] (idp-create-user-if-unique)'),
+)
+
+
+def check_gate_shape_helper(checks, idp):
+    """phase3_realm.py --shape needs no Keycloak: exit 0 on the generated plan, exit 1 naming the execution on a changed priority."""
+    e = checks.expect
+    helper = ROOT / 'scripts/gate/phase3_realm.py'
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'plan.json'
+
+        def run(plan):
+            path.write_text(json.dumps(plan))
+            return subprocess.run([sys.executable, '-I', str(helper), '--shape', str(path)], text=True, capture_output=True, timeout=60)
+        result = run(idp)
+        e(result.returncode == 0, f'phase3_realm.py --shape must accept the configure-dual plan; got exit {result.returncode}: {result.stderr.strip()}')
+        for label, mutate, needle in GATE_SHAPE_MUTATIONS:
+            mutated = json.loads(json.dumps(idp))
+            mutate(mutated)
+            result = run(mutated)
+            e(result.returncode == 1 and needle in result.stderr,
+              f'phase3_realm.py --shape must refuse {label} (exit 1) naming {needle!r}; got exit {result.returncode}: {result.stderr.strip()}')
+
+
+# R2-B1: scripts/gate/stub_idp.sh `down` has no automated regression test (review round 2, "Should fix" item 1).
+# STUB_IDP_SH is a module-level override point: a mutation driver can set ci.STUB_IDP_SH to a copy of the
+# script before calling check_stub_idp_down, without changing this file's call signature.
+STUB_IDP_SH = ROOT / 'scripts/gate/stub_idp.sh'
+
+_FAKE_DOCKER_SH = r'''#!/usr/bin/env bash
+set -u
+LOG="${DOCKER_LOG:?DOCKER_LOG not set}"
+printf '%s\n' "$*" >> "$LOG"
+REMOVED="$LOG.removed"
+touch "$REMOVED"
+case "${1:-}" in
+  ps)
+    shift
+    filters=()
+    while [[ $# -gt 0 ]]; do
+      case "${1:-}" in
+        --filter) filters+=("$2"); shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    while IFS=$'\t' read -r name label; do
+      [[ -z "$name" ]] && continue
+      grep -qxF "id-$name" "$REMOVED" 2>/dev/null && continue
+      ok=1
+      for f in "${filters[@]}"; do
+        key="${f%%=*}"; val="${f#*=}"
+        case "$key" in
+          label) [[ "$label" == "$val" ]] || ok=0 ;;
+          name)
+            if [[ "$val" == *'$' ]]; then
+              exact="${val#^}"; exact="${exact%\$}"
+              [[ "$name" == "$exact" ]] || ok=0
+            else
+              prefix="${val#^}"
+              [[ "$name" == "$prefix"* ]] || ok=0
+            fi
+            ;;
+        esac
+      done
+      [[ "$ok" == 1 ]] && echo "id-$name"
+    done <<< "${FAKE_CONTAINERS:-}"
+    ;;
+  rm)
+    shift
+    for a in "$@"; do
+      case "$a" in
+        -*) continue ;;
+      esac
+      echo "$a" >> "$REMOVED"
+    done
+    ;;
+  inspect) echo absent ;;
+esac
+exit 0
+'''
+
+
+def _stub_idp_down(tmp, project, fake_containers, container=None):
+    """Run `stub_idp.sh down` for real, with a fake docker on PATH. Returns (returncode, stdout, stderr, docker_log).
+
+    Each call gets its own scratch subdirectory so the fake docker's removed-id bookkeeping (which lives next
+    to its log file) never leaks state between independent scenarios sharing the same `tmp`.
+    """
+    scratch = Path(tempfile.mkdtemp(dir=tmp))
+    bindir = scratch / 'bin'
+    bindir.mkdir()
+    docker = bindir / 'docker'
+    docker.write_text(_FAKE_DOCKER_SH)
+    docker.chmod(0o755)
+    log = scratch / 'docker.log'
+    args = ['bash', str(STUB_IDP_SH), 'down', '--project', project]
+    if container is not None:
+        args += ['--container', container]
+    env = dict(os.environ, PATH=f'{bindir}:{os.environ.get("PATH", "")}', DOCKER_LOG=str(log),
+               FAKE_CONTAINERS=fake_containers)
+    result = subprocess.run(args, text=True, capture_output=True, env=env, timeout=30)
+    docker_log = log.read_text() if log.exists() else ''
+    return result.returncode, result.stdout, result.stderr, docker_log
+
+
+def check_stub_idp_down(checks):
+    """stub_idp.sh down against a fake docker (review round 2 should-fix: no automated test of `down --container`).
+
+    Confirmed by hand first (harness/phase3/pr41-r2/T5/manual): `down` sweeps containers from two `docker ps -aq`
+    queries (the resolved --container name, and the project's `${PROJECT}-gate3-` prefix). The second query had
+    no label filter, so an unlabelled container under the default name (`${PROJECT}-gate3-pingstub`, which matches
+    the prefix) was removed before the ownership check could refuse it. Both queries now carry the
+    krate.gate=phase3 label filter; the assertions below hold the documented behaviour: only labelled containers
+    are removed, an unlabelled one of the resolved name is named on stderr with exit 1, another project's
+    stand-in is never touched.
+    """
+    e = lambda cond, msg: checks.expect(cond, 'stub_idp.sh down: ' + msg)  # noqa: E731
+    with tempfile.TemporaryDirectory() as tmp:
+        # 1) an unlabelled container under the default name (${PROJECT}-gate3-pingstub): protected like any other
+        #    unlabelled container (both sweeps carry the label filter), named on stderr, exit 1, no rm.
+        rc, out, err, log = _stub_idp_down(tmp, 'P', 'P-gate3-pingstub\t')
+        e(rc == 1, f'default unlabelled container: expected exit 1, got {rc}: {out!r}')
+        e('container P-gate3-pingstub exists but was not started by stub_idp.sh' in err, f'default unlabelled container: expected the ownership refusal; got {err!r}')
+        e('rm -f' not in log, f'default unlabelled container: must not be removed; docker log was {log!r}')
+
+        # 2) --container NAME carrying the label: removed, reported by its docker id.
+        rc, out, err, log = _stub_idp_down(tmp, 'P', 'custom-name\tkrate.gate=phase3', container='custom-name')
+        e(rc == 0, f'--container labelled: expected exit 0, got {rc}: {err.strip()}')
+        e('removed containers: id-custom-name' in out, f'--container labelled: expected removal message; got {out!r}')
+        e('rm -f id-custom-name' in log, f'--container labelled: expected the fake docker log to show the rm; got {log!r}')
+
+        # 3) --container NAME without the label, NAME not matching the project's gate3- prefix: protected.
+        rc, out, err, log = _stub_idp_down(tmp, 'P', 'custom-name\t', container='custom-name')
+        e(rc == 1, f'--container unlabelled: expected exit 1, got {rc}: {out!r}')
+        e('exists but was not started by stub_idp.sh' in err, f'--container unlabelled: expected the ownership refusal; got {err!r}')
+        e('docker rm -f custom-name' in err, f'--container unlabelled: expected the manual-removal hint; got {err!r}')
+        e('rm -f' not in log, f'--container unlabelled: must not be removed; docker log was {log!r}')
+
+        # 4) nothing exists: a clean no-op.
+        rc, out, err, log = _stub_idp_down(tmp, 'P', '')
+        e(rc == 0, f'nothing exists: expected exit 0, got {rc}: {err.strip()}')
+        e('removed containers: none' in out, f'nothing exists: expected "removed containers: none"; got {out!r}')
+
+        # 5) the default stand-in (labelled) plus an unrelated labelled container of ANOTHER project: only the
+        #    project's own container is swept; the other project's container never matches the prefix filter.
+        rc, out, err, log = _stub_idp_down(tmp, 'P', 'P-gate3-pingstub\tkrate.gate=phase3\nother-gate3-x\tkrate.gate=phase3')
+        e(rc == 0, f'cross-project: expected exit 0, got {rc}: {err.strip()}')
+        e('id-P-gate3-pingstub' in out, f'cross-project: expected the project container removed; got {out!r}')
+        other_untouched = 'other-gate3-x' not in out and 'rm -f id-other-gate3-x' not in log
+        e(other_untouched, f"cross-project: the other project's container must never be touched; stdout {out!r} log {log!r}")
+
+
+def check_check_flows_priority(checks):
+    """R2-N3: a non-integer priority is refused by naming its execution, before any sorting."""
+    e = checks.expect
+    flows = json.loads(json.dumps(identity.planned_flows()))
+    next(f for f in flows if f['alias'] == 'krate otp')['authenticationExecutions'][1]['priority'] = '20'
+    try:
+        identity._check_flows('plan.json', flows)
+        e(False, 'identity._check_flows must refuse a non-integer priority')
+    except ValueError as exc:
+        e('krate otp' in str(exc) and 'auth-otp-form' in str(exc) and 'integer' in str(exc),
+          f'identity._check_flows must name the flow and execution of a non-integer priority; got {exc}')
+
+
+def _execution_of(plan, flow_alias, index):
+    flow = next(f for f in plan['authenticationFlows'] if f['alias'] == flow_alias)
+    return flow['authenticationExecutions'][index]
+
+
+def _replace_first_broker_execution(plan):
+    _execution_of(plan, 'krate first broker login', 0)['authenticator'] = 'idp-auto-link'
+
+
+def _add_auto_link(plan):
+    flow = next(f for f in plan['authenticationFlows'] if f['alias'] == 'krate first broker login')
+    flow['authenticationExecutions'].append({'authenticator': 'idp-auto-link', 'requirement': 'ALTERNATIVE', 'priority': 20,
+                                             'authenticatorFlow': False, 'userSetupAllowed': False})
+
+
+def _set_config_default(plan):
+    plan['authenticatorConfig'][0]['config']['defaultProvider'] = 'other'
+
+
+# PR #41 review (Copilot, sso/identity.py): broker_plan must validate the exact generated execution shapes, not generic types.
+# (label, mutation, text the refusal must name)
+PLAN_SHAPE_MUTATIONS = (
+    ('the first-broker execution replaced by idp-auto-link', _replace_first_broker_execution, 'idp-create-user-if-unique'),
+    ('an idp-auto-link execution added to krate first broker login', _add_auto_link, 'krate first broker login'),
+    ('the redirector requirement changed', lambda p: _execution_of(p, 'krate browser', 1).__setitem__('requirement', 'REQUIRED'), 'requirement'),
+    ('a priority changed', lambda p: _execution_of(p, 'krate otp', 1).__setitem__('priority', 30), 'priority'),
+    ('the redirector authenticatorConfig reference changed', lambda p: _execution_of(p, 'krate browser', 1).__setitem__('authenticatorConfig', 'other'), 'authenticatorConfig'),
+    ('the redirector authenticatorConfig reference removed', lambda p: _execution_of(p, 'krate browser', 1).pop('authenticatorConfig'), 'authenticatorConfig'),
+    ('the redirector defaultProvider changed', _set_config_default, 'authenticatorConfig'),
+    ('the authenticatorConfig list emptied', lambda p: p.__setitem__('authenticatorConfig', []), 'authenticatorConfig'),
+    ('an authenticatorFlow flag flipped', lambda p: _execution_of(p, 'krate first broker login', 0).__setitem__('authenticatorFlow', True), 'not planned'),
+    ('a sub-flow reference turned into an authenticator', lambda p: _execution_of(p, 'krate browser', 2).__setitem__('authenticatorFlow', False), 'names no authenticator'),
+    ('a sub-flow alias swapped', lambda p: _execution_of(p, 'krate browser', 2).__setitem__('flowAlias', 'krate otp'), 'flowAlias'),
+    ('userSetupAllowed enabled', lambda p: _execution_of(p, 'krate forms', 0).__setitem__('userSetupAllowed', True), 'userSetupAllowed'),
+    ('a flow made not top-level', lambda p: p['authenticationFlows'][3].__setitem__('topLevel', False), 'topLevel'),
+    ('a flow providerId changed', lambda p: p['authenticationFlows'][3].__setitem__('providerId', 'client-flow'), 'providerId'),
+    # R2-S1: refused only by identity._same (type strictness): 0 == False and 0 == False pass every earlier generic check.
+    ('userSetupAllowed 0 instead of False on the first-broker execution', lambda p: _execution_of(p, 'krate first broker login', 0).__setitem__('userSetupAllowed', 0), 'userSetupAllowed'),
+    ('authenticatorFlow 0 instead of False on an authenticator execution', lambda p: _execution_of(p, 'krate otp', 1).__setitem__('authenticatorFlow', 0), 'authenticatorFlow'),
+    ('builtIn 0 instead of False on a flow', lambda p: p['authenticationFlows'][2].__setitem__('builtIn', 0), 'builtIn'),
+    ('an authenticator swapped in krate forms', lambda p: _execution_of(p, 'krate forms', 0).__setitem__('authenticator', 'auth-spnego'), 'auth-username-password-form'),
+)
 
 
 def check_broker_plan_shape(checks, idp):
@@ -1064,7 +1283,8 @@ def check_broker_plan_shape(checks, idp):
                 ('an unknown sub-flow', lambda p: p['authenticationFlows'][0]['authenticationExecutions'][2].__setitem__('flowAlias', 'other'), 'not planned'),
                 ('a non-integer priority', lambda p: p['authenticationFlows'][0]['authenticationExecutions'][0].__setitem__('priority', '10'), 'priority'),
                 ('another browser flow', lambda p: p.__setitem__('browserFlow', 'browser'), 'browserFlow'),
-                ('an unknown truststore mode', lambda p: p.__setitem__('truststore', 'none'), 'truststore')):
+                ('an unknown truststore mode', lambda p: p.__setitem__('truststore', 'none'), 'truststore')) + tuple(
+                (label, mutate, needle) for label, mutate, needle in PLAN_SHAPE_MUTATIONS):
             mutated = json.loads(json.dumps(idp))
             mutate(mutated)
             path.write_text(json.dumps(mutated))
@@ -1228,6 +1448,12 @@ def check_broker_refusals(checks, edition, site, env, rendered):
             ('browserFlow bound to browser', lambda p: p.__setitem__('browserFlow', 'browser'), 'browserFlow')):
         mutated_plan(mutation)
         expect_refusal(label, needle)
+    for label, mutation, needle in PLAN_SHAPE_MUTATIONS:
+        mutated_plan(mutation)
+        expect_refusal(label, needle)
+        outcome = preflight(site, 'identity', rendered)
+        checks.expect(outcome.returncode == 1 and needle in outcome.stderr,
+                      f'{edition}: identity-mode preflight must refuse: {label} (naming {needle!r}); got exit {outcome.returncode}: {outcome.stderr.strip()}')
     identity.write_file(plan_file, plan_original, 0o644)
     expect_pass('the planned ping site')
     pem = trust / 'enterprise-ca.pem'
@@ -2301,7 +2527,10 @@ elif path.startswith('authentication/flows/') and parts[-1] in ('execution', 'fl
     parent['executions'].append(execution); save()
     print("Created new execution with id '%s'" % execution['id'], file=sys.stderr)
 elif path.startswith('authentication/flows/') and command == 'delete':
-    remove_flow(next(f for f in state['flows'] if f['id'] == parts[-1])); save()
+    doomed = next(f for f in state['flows'] if f['id'] == parts[-1])
+    if doomed['alias'] == state['browserFlow']:  # Keycloak refuses to delete a bound flow (B-live.md section 1)
+        fail('Cannot delete a flow bound to the realm')
+    remove_flow(doomed); save()
 elif path.startswith('authentication/executions/') and parts[-1] == 'config' and command == 'create':
     c = body(); c['id'] = str(uuid.uuid4()); state['configs'][c['id']] = c
     for flow in state['flows']:
@@ -2328,7 +2557,7 @@ else:
 '''
 
 APPLY_FUNCTIONS = ('env_value', 'url_path_encode', 'json_field', 'identity_apply_idp', 'identity_apply_idp_plan', 'identity_apply_flow',
-                   'identity_put_idp_provider', 'identity_find_execution', 'identity_remove_idp')
+                   'identity_put_idp_provider', 'identity_find_execution', 'identity_remove_idp', 'identity_owned_alias', 'identity_owned_flows_present')
 
 
 def flow_shape(state, alias):
@@ -2366,7 +2595,10 @@ def check_broker_apply(checks):
         e('/opt/keycloak/bin/kcadm.sh "$@" --config "$KCADM_CONFIG" </dev/null' in kcadm_helper and kcadm_helper.count('docker exec -i') == 1
           and kcadm_helper.index('docker exec -i') < kcadm_helper.index('</dev/null'),
           f'{edition}/krate: kcadm must read stdin only with KCADM_STDIN=1 and otherwise exec with </dev/null')
-        for name in ('identity_apply_idp', 'identity_apply_idp_plan', 'identity_apply_flow', 'identity_remove_idp', 'identity_put_idp_provider', 'identity_rotate_ping_secret'):
+        # R2-S4: the four Krate aliases are defined once (identity_owned_alias); the detection, the rebind and the flow deletion use it.
+        e(cli.count('"krate browser"|"krate first broker login"|"krate forms"|"krate otp"') == 1 and 'identity_owned_alias "$current"' in function_body(cli, 'identity_remove_idp'),
+          f'{edition}/krate: the owned flow aliases must be defined once and the rebind must test the current binding against them')
+        for name in ('identity_apply_idp', 'identity_apply_idp_plan', 'identity_apply_flow', 'identity_remove_idp', 'identity_owned_alias', 'identity_owned_flows_present', 'identity_put_idp_provider', 'identity_rotate_ping_secret'):
             e('docker ' not in function_body(cli, name), f'{edition}/krate: {name} must go through the kcadm helper, never docker exec directly')
         e('--with-secret \\\n      | KCADM_STDIN=1 kcadm -- create identity-provider/instances' in cli
           and '--with-secret \\\n      | KCADM_STDIN=1 kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS"' in cli,
@@ -2386,7 +2618,7 @@ def check_broker_apply(checks):
     plan = load_configure_dual().configs(json.loads((ROOT / 'sso/dual-example.json').read_text()), SYNTHETIC)['keycloak/pingfederate-idp.json']
     secret = RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']
     script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', *APPLY_FUNCTIONS) + r'''
-SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; IDENTITY_REALM=krate; IDENTITY_CHANGED=false
+SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; IDENTITY_REALM=krate; IDENTITY_CHANGED=false; IDENTITY_BROWSER_KEPT=""
 IDENTITY_IDP_PLAN=auth/keycloak/pingfederate-idp.json; IDENTITY_IDP_ALIAS=pingfederate; IDENTITY_IDP_CHANGES=()
 sso_dir() { echo "$SSO_DIR"; }
 kcadm_login() { echo "login $*" >> "$KC_CALLS"; }
@@ -2512,6 +2744,119 @@ echo "changed=$IDENTITY_CHANGED"
         e('removed identity provider pingfederate' in journal.read_text().splitlines()[-1], f'{label}: the journal records the removal')
         result, calls, state_again = run()
         e(result.returncode == 0 and mutating(calls) == [] and state_again == state_removed, f'{label} (second run): nothing left to do; got {mutating(calls)}')
+        # PR41 r2 (Copilot, medium): the removal does not hinge on the provider. An apply that stopped before the provider was
+        # created, or a provider deleted out of band, leaves the Krate flows and perhaps the browser binding behind.
+        def owned_flows():
+            return [{'id': 'kb-id', 'alias': 'krate browser', 'topLevel': True, 'executions': [{'id': 'x1', 'requirement': 'ALTERNATIVE', 'priority': 30,
+                                                                                               'index': 0, 'flowAlias': 'krate forms'}]},
+                    {'id': 'kf-id', 'alias': 'krate forms', 'topLevel': False, 'executions': [{'id': 'x2', 'requirement': 'REQUIRED', 'priority': 20,
+                                                                                              'index': 0, 'flowAlias': 'krate otp'}]},
+                    {'id': 'ko-id', 'alias': 'krate otp', 'topLevel': False, 'executions': []},
+                    {'id': 'kfbl-id', 'alias': 'krate first broker login', 'topLevel': True, 'executions': []}]
+
+        def seed(browser_flow, flows, provider_present=False):
+            fresh = {'provider': ({'alias': 'pingfederate', 'config': {}} if provider_present else None), 'mappers': [],
+                     'flows': realm['flows'][:2] + flows, 'configs': {}, 'browserFlow': browser_flow}
+            state_file.write_text(json.dumps(fresh))
+            return fresh
+
+        def provider_calls(made):
+            return [c for c in made if 'identity-provider' in c[1] and c[0] != 'get' or 'mappers' in c[1]]
+
+        base_aliases = ['browser', 'first broker login']
+        seed('krate browser', owned_flows())
+        result, calls, st = run()
+        label = 'apply without the plan file, provider already absent, krate browser still bound'
+        rebind = next((i for i, c in enumerate(calls) if c[0] == 'update' and c[1] == 'realms/krate'), None)
+        flow_deletes = [i for i, c in enumerate(calls) if c[0] == 'delete' and c[1].startswith('authentication/flows/')]
+        e(result.returncode == 0 and st['browserFlow'] == 'browser' and sorted(f['alias'] for f in st['flows']) == sorted(base_aliases),
+          f'{label}: browserFlow back to browser and the four flows gone; got exit {result.returncode} {st["browserFlow"]} {[f["alias"] for f in st["flows"]]} {result.stderr.strip()[:200]}')
+        e(rebind is not None and len(flow_deletes) == 2 and rebind < min(flow_deletes), f'{label}: rebind first, then the two top-level flows; got {calls}')
+        e(provider_calls(calls) == [] and not any(c[0] == 'delete' and 'identity-provider' in c[1] for c in calls)
+          and not any(c[0] == 'get' and c[1].endswith('/mappers') for c in calls), f'{label}: no mapper or provider call for an absent provider; got {calls}')
+        last = journal.read_text().splitlines()[-1]
+        e('removed identity flows only (provider pingfederate already absent)' in last and 'rebound to browser' in last, f'{label}: the journal says flows only; got {last!r}')
+        e('Identity flows removed' in result.stdout and 'changed=true' in result.stdout, f'{label}: the output says what was removed and the realm changed; got {result.stdout.strip()[-200:]!r}')
+        result, calls, st2 = run()
+        e(result.returncode == 0 and mutating(calls) == [] and st2 == st and 'removed' not in result.stdout, f'{label} (second run): nothing left, nothing printed; got {mutating(calls)} {result.stdout!r}')
+        seed('browser', owned_flows())
+        result, calls, st = run()
+        label = 'apply without the plan file, provider absent, browser flow already browser, flows present'
+        e(result.returncode == 0 and sorted(f['alias'] for f in st['flows']) == sorted(base_aliases) and st['browserFlow'] == 'browser'
+          and not any(c[0] == 'update' for c in calls) and not any('identity-provider' in c[1] and c[0] != 'get' for c in calls),
+          f'{label}: the flows are deleted without a rebind or provider call; got {calls}')
+        seed('krate browser', [])
+        result, calls, st = run()
+        label = 'apply without the plan file, provider absent, krate browser bound but no flow left'
+        e(result.returncode == 0 and st['browserFlow'] == 'browser', f'{label}: the dangling binding is released; got {st["browserFlow"]} {result.stderr.strip()[:200]}')
+        # R2-S4: an operator's own browser binding is never replaced; only a Krate-owned binding is released (Keycloak refuses to delete a bound flow).
+        corp = {'id': 'corp-id', 'alias': 'corp browser', 'topLevel': True, 'executions': []}
+        leftover = [f for f in owned_flows() if f['alias'] == 'krate first broker login']
+        seed('corp browser', [corp] + leftover)
+        result, calls, st = run()
+        label = 'apply without the plan file, provider absent, browserFlow bound to the operator flow "corp browser", a leftover krate flow'
+        e(result.returncode == 0 and st['browserFlow'] == 'corp browser' and not any(c[0] == 'update' for c in calls)
+          and [c[1] for c in calls if c[0] == 'delete'] == ['authentication/flows/kfbl-id'] and sorted(f['alias'] for f in st['flows']) == sorted(base_aliases + ['corp browser']),
+          f'{label}: no rebind call, the owned flow deleted, the operator flow and binding kept; got exit {result.returncode} {mutating(calls)} {st["browserFlow"]} {result.stderr.strip()[:200]}')
+        e("corp browser" in result.stdout and 'stays bound' in result.stdout and 'Keycloak\'s browser again' not in result.stdout,
+          f'{label}: the output names the kept binding; got {result.stdout.strip()!r}')
+        last = journal.read_text().splitlines()[-1]
+        e('removed identity flows only (provider pingfederate already absent)' in last and last.endswith("browser flow bound to 'corp browser' left as it is"),
+          f'{label}: the journal names the kept binding; got {last!r}')
+        result, calls, st2 = run()
+        e(result.returncode == 0 and mutating(calls) == [] and st2 == st, f'{label} (second run): nothing left to do; got {mutating(calls)}')
+        # the same with the provider present: mappers, provider and owned flows go, the binding stays
+        seed('corp browser', [corp] + owned_flows(), provider_present=True)
+        with_provider = json.loads(state_file.read_text()); with_provider['mappers'] = [{'id': 'm1', 'name': 'a'}]
+        state_file.write_text(json.dumps(with_provider))
+        result, calls, st = run()
+        label = 'apply without the plan file, provider present, browserFlow bound to the operator flow "corp browser"'
+        e(result.returncode == 0 and not any(c[0] == 'update' for c in calls) and st['browserFlow'] == 'corp browser' and st['provider'] is None
+          and [c[1] for c in calls if c[0] == 'delete'] == ['identity-provider/instances/pingfederate/mappers/m1', 'identity-provider/instances/pingfederate',
+                                                            'authentication/flows/kb-id', 'authentication/flows/kfbl-id']
+          and any(f['alias'] == 'corp browser' for f in st['flows']),
+          f'{label}: no rebind, mappers, provider and owned flows deleted, operator flow kept; got exit {result.returncode} {mutating(calls)} {result.stderr.strip()[:200]}')
+        last = journal.read_text().splitlines()[-1]
+        e(' removed identity provider pingfederate, its mappers and flows; browser flow bound to' in last and "'corp browser' left as it is" in last
+          and "stays bound to 'corp browser'" in result.stdout, f'{label}: journal and output name the kept binding; got {last!r} {result.stdout.strip()!r}')
+        # bound to a Krate flow other than krate browser, with an operator flow beside: rebind first, then delete
+        seed('krate first broker login', [corp] + owned_flows())
+        result, calls, st = run()
+        label = 'apply without the plan file, provider absent, browserFlow bound to "krate first broker login"'
+        rebind = next((i for i, c in enumerate(calls) if c[0] == 'update' and c[1] == 'realms/krate'), None)
+        flow_deletes = [i for i, c in enumerate(calls) if c[0] == 'delete' and c[1].startswith('authentication/flows/')]
+        e(result.returncode == 0 and st['browserFlow'] == 'browser' and rebind is not None and len(flow_deletes) == 2 and rebind < min(flow_deletes)
+          and sorted(f['alias'] for f in st['flows']) == sorted(base_aliases + ['corp browser']) and journal.read_text().splitlines()[-1].endswith('rebound to browser'),
+          f'{label}: rebind to browser, then the owned flows; operator flow kept; got exit {result.returncode} {mutating(calls)} {result.stderr.strip()[:200]}')
+        seeded = seed('browser', [])
+        result, calls, st = run()
+        label = 'apply without the plan file, nothing Krate-owned present'
+        e(result.returncode == 0 and mutating(calls) == [] and st == seeded and result.stdout.strip() == 'changed=false',
+          f'{label}: no mutating call and no output; got {mutating(calls)} {result.stdout!r}')
+        seeded = seed('krate browser', owned_flows())
+        result, calls, st = run(KC_FAIL_GET='identity-provider/instances/pingfederate')
+        label = 'apply without the plan file, provider GET fails with a real error'
+        e(result.returncode != 0 and mutating(calls) == [] and st == seeded and 'identity provider' in result.stderr,
+          f'{label}: must die with no mutation; got exit {result.returncode} {mutating(calls)} {result.stderr.strip()[-160:]!r}')
+        for failing in ('realms/krate', 'authentication/flows'):
+            seeded = seed('browser', owned_flows())
+            result, calls, st = run(KC_FAIL_GET=failing)
+            e(result.returncode != 0 and mutating(calls) == [] and st == seeded,
+              f'apply without the plan file, GET {failing} fails: the detection must die, not read as absence; got exit {result.returncode} {mutating(calls)}')
+        # the normal case is unchanged: provider present, mappers, flows (order rebind, mappers, provider, flows; the old journal wording)
+        seed('krate browser', owned_flows(), provider_present=True)
+        state_with = json.loads(state_file.read_text()); state_with['mappers'] = [{'id': 'm1', 'name': 'a'}, {'id': 'm2', 'name': 'b'}]
+        state_file.write_text(json.dumps(state_with))
+        result, calls, st = run()
+        label = 'apply without the plan file, provider present (normal removal)'
+        deleted = [c[1] for c in calls if c[0] == 'delete']
+        e(result.returncode == 0 and deleted == ['identity-provider/instances/pingfederate/mappers/m1', 'identity-provider/instances/pingfederate/mappers/m2',
+                                                 'identity-provider/instances/pingfederate', 'authentication/flows/kb-id', 'authentication/flows/kfbl-id']
+          and [c[0] for c in mutating(calls)][0] == 'update' and st['provider'] is None and st['browserFlow'] == 'browser',
+          f'{label}: rebind, mappers, provider, flows; got {mutating(calls)}')
+        e(journal.read_text().splitlines()[-1].endswith('removed identity provider pingfederate, its mappers and flows; browser flow rebound to browser'),
+          f'{label}: the journal keeps the wording the gate row P14 greps; got {journal.read_text().splitlines()[-1]!r}')
+        state_file.write_text(json.dumps(state_removed))  # the rotate cases below start from the state after the normal removal
         # B3/Q9: identity rotate PING_KEYCLOAK_CLIENT_SECRET re-PUTs the provider with the new .env value, never removes it.
         rotate_script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'identity_put_idp_provider', 'identity_rotate_ping_secret') + r'''
 SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; IDENTITY_REALM=krate
@@ -2776,7 +3121,7 @@ def main():
         return 1
     print('Identity foundation verified: templates, realm plan, Kafbat runtime plan, names, Compose services and identity network, '
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
-          'runtime.yml incl. refusals), configure-dual, proxy environment and edge rules, release permissions, RPM dependency '
+          'runtime.yml incl. refusals), configure-dual, stub_idp.sh down, proxy environment and edge rules, release permissions, RPM dependency '
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
           'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs.')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence

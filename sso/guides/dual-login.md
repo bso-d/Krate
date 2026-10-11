@@ -644,7 +644,15 @@ provider still in the realm, `auth apply` (and `identity up`) rebinds the
 realm's browser flow to Keycloak's `browser`, removes the provider's mappers,
 the provider and the four flows (journal line `apply removed identity
 provider pingfederate, its mappers and flows; browser flow rebound to
-browser`). Deleting the provider deletes every user's federated-identity
+browser`). When the provider is already gone (deleted in Keycloak, or an
+earlier apply stopped before creating it) but a Krate flow is left, `auth
+apply` removes the flows only and releases the browser binding if it points at
+a Krate flow (journal line `removed identity flows only (provider
+pingfederate already absent); browser flow rebound to browser`). A browser flow
+bound to a flow that is not one of the four Krate flows (for example your own
+`corp browser`) is left as it is, on either path: the output names the kept
+binding and the journal line ends `browser flow bound to '<name>' left as it
+is`. Deleting the provider deletes every user's federated-identity
 link to it (Keycloak removes the links with the provider): the users
 PingFederate created stay in the realm without a credential or link, cannot
 sign in, and after a later re-apply their brokered login ends in the D2

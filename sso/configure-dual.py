@@ -99,50 +99,12 @@ def configs(settings, env=None):
                                        (settings["admin_group"], admin_group))],
         # The redirector sends SSO users to PingFederate without a second
         # Keycloak username/password page.
-        "authenticatorConfig": [{"alias": identity.REDIRECT_CONFIG,
-                                 "config": {"defaultProvider": identity.BROKER_ALIAS}}],
-        "authenticationFlows": flows(),
+        "authenticatorConfig": identity.planned_authenticator_config(),
+        "authenticationFlows": identity.planned_flows(),
         "browserFlow": identity.BROWSER_FLOW,
         "truststore": truststore,
     }
     return {"ui/runtime.yml": app, "keycloak/pingfederate-idp.json": identity_provider}
-
-
-def execution(authenticator, requirement, priority, config=None):
-    item = {"authenticator": authenticator, "requirement": requirement, "priority": priority,
-            "authenticatorFlow": False, "userSetupAllowed": False}
-    if config:
-        item["authenticatorConfig"] = config
-    return item
-
-
-def subflow(alias, requirement, priority):
-    return {"authenticatorFlow": True, "flowAlias": alias, "requirement": requirement,
-            "priority": priority, "userSetupAllowed": False}
-
-
-def flow(alias, description, executions, top_level):
-    return {"alias": alias, "description": description, "providerId": "basic-flow",
-            "topLevel": top_level, "builtIn": False, "authenticationExecutions": executions}
-
-
-def flows():
-    """The realm's browser flow (D3) and first-broker-login flow (D2); parents before their sub-flows."""
-    return [
-        flow(identity.BROWSER_FLOW, "Krate: cookie, then PingFederate; local users with ?kc_idp_hint= (empty)",
-             [execution("auth-cookie", "ALTERNATIVE", 10),
-              execution("identity-provider-redirector", "ALTERNATIVE", 20, identity.REDIRECT_CONFIG),
-              subflow(identity.FORMS_FLOW, "ALTERNATIVE", 30)], True),
-        flow(identity.FORMS_FLOW, "local users: password, then OTP when enrolled",
-             [execution("auth-username-password-form", "REQUIRED", 10),
-              subflow(identity.OTP_FLOW, "CONDITIONAL", 20)], False),
-        flow(identity.OTP_FLOW, "OTP when the user has one",
-             [execution("conditional-user-configured", "REQUIRED", 10),
-              execution("auth-otp-form", "REQUIRED", 20)], False),
-        flow(identity.FIRST_BROKER_FLOW, "Krate: create the brokered user; never link to a local account",
-             [execution("idp-create-user-if-unique", "REQUIRED", 10)], True),
-    ]
-
 
 
 def main():

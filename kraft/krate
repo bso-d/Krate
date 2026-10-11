@@ -1417,10 +1417,27 @@ identity_apply_idp() {
       ok "Identity provider $IDENTITY_IDP_ALIAS: No changes"
     fi
   elif [[ -n "$provider" ]]; then
-    identity_remove_idp
-    identity_journal "$command" removed "identity provider $IDENTITY_IDP_ALIAS, its mappers and flows; browser flow rebound to browser"
+    identity_remove_idp "$provider"
+    if [[ -n "$IDENTITY_BROWSER_KEPT" ]]; then
+      identity_journal "$command" removed "identity provider $IDENTITY_IDP_ALIAS, its mappers and flows; browser flow bound to '$IDENTITY_BROWSER_KEPT' left as it is"
+      ok "Identity provider $IDENTITY_IDP_ALIAS removed from realm $IDENTITY_REALM (no plan file); the browser flow stays bound to '$IDENTITY_BROWSER_KEPT'"
+    else
+      identity_journal "$command" removed "identity provider $IDENTITY_IDP_ALIAS, its mappers and flows; browser flow rebound to browser"
+      ok "Identity provider $IDENTITY_IDP_ALIAS removed from realm $IDENTITY_REALM (no plan file); the browser flow is Keycloak's browser again"
+    fi
     IDENTITY_CHANGED=true
-    ok "Identity provider $IDENTITY_IDP_ALIAS removed from realm $IDENTITY_REALM (no plan file); the browser flow is Keycloak's browser again"
+  elif identity_owned_flows_present; then
+    # An earlier apply that stopped before creating the provider, or a provider deleted out
+    # of band, leaves the Krate flows (and perhaps the browser binding) behind.
+    identity_remove_idp ""
+    if [[ -n "$IDENTITY_BROWSER_KEPT" ]]; then
+      identity_journal "$command" removed "identity flows only (provider $IDENTITY_IDP_ALIAS already absent); browser flow bound to '$IDENTITY_BROWSER_KEPT' left as it is"
+      ok "Identity flows removed from realm $IDENTITY_REALM (no plan file; provider $IDENTITY_IDP_ALIAS was already absent); the browser flow stays bound to '$IDENTITY_BROWSER_KEPT'"
+    else
+      identity_journal "$command" removed "identity flows only (provider $IDENTITY_IDP_ALIAS already absent); browser flow rebound to browser"
+      ok "Identity flows removed from realm $IDENTITY_REALM (no plan file; provider $IDENTITY_IDP_ALIAS was already absent); the browser flow is Keycloak's browser again"
+    fi
+    IDENTITY_CHANGED=true
   fi
   kcadm_logout
 }
@@ -1630,24 +1647,59 @@ for e in json.load(sys.stdin):
         break' "$1" "$2"
 }
 
-# The plan file is gone: unbind the browser flow, remove the provider with its
-# mappers, then the top-level flows the plan owns (their sub-flows go with them).
-identity_remove_idp() {
-  local current id alias
+# Set by identity_remove_idp: the browser flow the realm stays bound to because it is not
+# a Krate flow (empty when the binding was Keycloak's or Krate's and is now `browser`).
+IDENTITY_BROWSER_KEPT=""
+
+# Succeeds when $1 is the alias of a flow the plan owns (the four it creates).
+identity_owned_alias() {
+  case "$1" in
+    "krate browser"|"krate first broker login"|"krate forms"|"krate otp") return 0 ;;
+  esac
+  return 1
+}
+
+# Succeeds when the realm still carries a Krate flow: browserFlow bound to one of the
+# plan's flows, or one of them present. The flows listing returns top-level flows only,
+# so "krate forms" and "krate otp" (sub-flows) never match there; matching them is
+# harmless. A failing query is fatal, never read as absence.
+identity_owned_flows_present() {
+  local current flows id alias
   current="$(kcadm -- get "realms/$IDENTITY_REALM" --fields browserFlow --format csv --noquotes)" || die "Keycloak query failed (realm)"
-  if [[ "$current" != browser ]]; then
-    kcadm -- update "realms/$IDENTITY_REALM" -s browserFlow=browser >/dev/null || die "Keycloak refused to rebind the browser flow"
-  fi
-  while IFS= read -r id; do
-    [[ -n "$id" ]] || continue
-    kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete a mapper of $IDENTITY_IDP_ALIAS"
-  done < <(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers" -r "$IDENTITY_REALM" --fields id --format csv --noquotes)
-  kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" || die "Keycloak refused to delete identity provider $IDENTITY_IDP_ALIAS"
+  ! identity_owned_alias "$current" || return 0
+  flows="$(kcadm -- get authentication/flows -r "$IDENTITY_REALM" --fields id,alias --format csv --noquotes)" || die "Keycloak query failed (flows)"
   while IFS=, read -r id alias; do
-    case "$alias" in
-      "krate browser"|"krate first broker login"|"krate forms"|"krate otp")
-        kcadm -- delete "authentication/flows/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete flow '$alias'" ;;
-    esac
+    ! identity_owned_alias "$alias" || return 0
+  done <<< "$flows"
+  return 1
+}
+
+# The plan file is gone: release the browser binding when it is a Krate flow (Keycloak
+# refuses to delete a bound flow; an operator's own binding is left and named in
+# IDENTITY_BROWSER_KEPT), remove the provider with its mappers
+# (when $1, the provider's representation, is not empty; an absent provider has none),
+# then the top-level flows the plan owns (their sub-flows go with them).
+identity_remove_idp() {
+  local present="${1:-}" current id alias
+  IDENTITY_BROWSER_KEPT=""
+  current="$(kcadm -- get "realms/$IDENTITY_REALM" --fields browserFlow --format csv --noquotes)" || die "Keycloak query failed (realm)"
+  if identity_owned_alias "$current"; then
+    kcadm -- update "realms/$IDENTITY_REALM" -s browserFlow=browser >/dev/null || die "Keycloak refused to rebind the browser flow"
+  elif [[ "$current" != browser ]]; then
+    IDENTITY_BROWSER_KEPT="$current"
+    warn "Browser flow '$current' is not a Krate flow; it stays bound"
+  fi
+  if [[ -n "$present" ]]; then
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete a mapper of $IDENTITY_IDP_ALIAS"
+    done < <(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers" -r "$IDENTITY_REALM" --fields id --format csv --noquotes)
+    kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" || die "Keycloak refused to delete identity provider $IDENTITY_IDP_ALIAS"
+  fi
+  while IFS=, read -r id alias; do
+    if identity_owned_alias "$alias"; then
+      kcadm -- delete "authentication/flows/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete flow '$alias'"
+    fi
   done < <(kcadm -- get authentication/flows -r "$IDENTITY_REALM" --fields id,alias --format csv --noquotes)
 }
 
