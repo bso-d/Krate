@@ -608,6 +608,63 @@ def check_gate_scripts(checks):
     e(isinstance(module.Gate.__dict__['follow'], staticmethod), 'Gate.follow is static (no self)')
     e(set(module.CASES) == {f'K{i}' for i in range(1, 27)} | {'K31', 'K32'}, f'CASES are K1-K26, K31, K32; got {module.CASES}')
 
+    # phase3_broker.Gate.create_topic must check the cleanup DELETE's status, not just fire it (PR41 review 3,
+    # scripts/gate/phase3_broker.py:288): a 200 create with a failed DELETE has to FAIL naming the status, a
+    # successful DELETE must pass, and a refused (non-200) create must not attempt a DELETE at all.
+    p3_spec = importlib.util.spec_from_file_location('phase3_broker', ROOT / 'scripts/gate/phase3_broker.py')
+    assert p3_spec is not None and p3_spec.loader is not None
+    p3_module = importlib.util.module_from_spec(p3_spec)
+    sys.modules.setdefault('phase2_kafbat', module)
+    p3_spec.loader.exec_module(p3_module)
+
+    class _FakeTopicResponse:
+        def __init__(self, status):
+            self.status = status
+
+    class _FakeTopicBrowser:
+        def __init__(self, post_status, delete_status):
+            self.post_status = post_status
+            self.delete_status = delete_status
+            self.calls = []
+
+        def api(self, method, _path, _payload=None):  # the real browser.api signature; path and body are not inspected here
+            self.calls.append(method)
+            return _FakeTopicResponse(self.post_status if method == 'POST' else self.delete_status)
+
+    def _create_topic_case(post_status, delete_status):
+        fake_gate = types.SimpleNamespace(cluster='cluster-x', cleanup_topics=set())
+        browser = _FakeTopicBrowser(post_status, delete_status)
+        try:
+            return 'return', p3_module.Gate.create_topic(fake_gate, browser, 'gate3-check'), browser.calls
+        except p3_module.Outcome as blocked:
+            return 'fail', (blocked.status, blocked.text), browser.calls
+
+    kind, got, calls = _create_topic_case(200, 500)
+    e(kind == 'fail' and got[0] == 'FAIL' and '500' in got[1],
+      f'create_topic must FAIL naming the DELETE status when cleanup fails (200/500); got {kind} {got}')
+    kind, got, calls = _create_topic_case(200, 200)
+    e(kind == 'return' and got == (200, 200), f'create_topic must pass through (create, delete) on a clean removal; got {kind} {got}')
+    kind, got, calls = _create_topic_case(403, 500)
+    e(kind == 'return' and got == (403, None) and calls == ['POST'],
+      f'create_topic must not attempt a DELETE when the create itself was refused; got {kind} {got} calls={calls}')
+    # Gate.cleanup (teardown backstop): every recorded topic is deleted in the broker with --if-exists; no container → no call.
+    docker_calls = []
+    saved = module.service_container, module.docker
+    try:
+        module.service_container = lambda project, service: 'cid-1' if (project, service) == ('p-x', 'kafka-92') else None
+        module.docker = lambda *args, **kwargs: (docker_calls.append(args), (0, '', ''))[1]
+        p3_module.Gate.cleanup(types.SimpleNamespace(project='p-x', cleanup_topics={'gate3-p6', 'gate3-p5'}))
+        e(len(docker_calls) == 2 and all(a[0] == 'exec' and a[1] == 'cid-1' and '--delete' in a and '--if-exists' in a for a in docker_calls)
+          and [a[-1] for a in docker_calls] == ['gate3-p5', 'gate3-p6'],
+          f'Gate.cleanup must delete every recorded topic in the broker with --if-exists; got {docker_calls}')
+        docker_calls.clear()
+        p3_module.Gate.cleanup(types.SimpleNamespace(project='other', cleanup_topics={'gate3-p6'}))
+        e(docker_calls == [], f'Gate.cleanup must make no docker call without a kafka-92 container; got {docker_calls}')
+    finally:
+        module.service_container, module.docker = saved
+    e('self.cleanup()' in (ROOT / 'scripts/gate/phase3_broker.py').read_text().split('def main(self):', 1)[1].split('def finish', 1)[0],
+      'phase3_broker.Gate.main must call self.cleanup() in its finally block')
+
 
 def check_parity(checks):
     result = subprocess.run(['diff', '-U0', str(ROOT / 'kraft/krate'), str(ROOT / 'epc/krate')], text=True, capture_output=True)
@@ -2693,6 +2750,48 @@ echo "changed=$IDENTITY_CHANGED"
         e(result.returncode == 0 and 'No changes' in result.stdout and mutating(calls) == [] and state_after == state and 'changed=false' in result.stdout,
           f'{label}: must report No changes, make no create/update/delete call and leave the realm as it was; got exit {result.returncode}'
           f' {result.stdout.strip()[-200:]} {mutating(calls)}')
+        duplicate_state = json.loads(json.dumps(state))
+        forms = next(f for f in duplicate_state['flows'] if f['alias'] == 'krate forms')
+        first_password = next(e for e in forms['executions'] if e.get('providerId') == 'auth-username-password-form')['id']
+        first_otp = next(e for e in forms['executions'] if e.get('flowAlias') == 'krate otp')['id']
+        forms['executions'].append({'id': 'dup-password-later', 'requirement': 'DISABLED', 'priority': 11, 'index': 2,
+                                    'providerId': 'auth-username-password-form'})
+        forms['executions'].append({'id': 'dup-otp-later', 'requirement': 'DISABLED', 'priority': 21, 'index': 3, 'flowAlias': 'krate otp'})
+        state_file.write_text(json.dumps(duplicate_state))
+        result, calls, state_cleaned = run()
+        label = 'apply with duplicate planned executions'
+        deleted = [c[1] for c in calls if c[0] == 'delete']
+        cleaned_forms = next(f for f in state_cleaned['flows'] if f['alias'] == 'krate forms')
+        remaining_ids = [e['id'] for e in cleaned_forms['executions']]
+        e(result.returncode == 0 and state_cleaned == state, f'{label}: duplicates removed and planned state restored; got exit {result.returncode} diff {_dict_diff(state, state_cleaned)}')
+        e(deleted == ['authentication/executions/dup-password-later', 'authentication/executions/dup-otp-later'],
+          f'{label}: only the later duplicate execution ids are deleted; got {deleted}')
+        e(first_password in remaining_ids and first_otp in remaining_ids and 'dup-password-later' not in remaining_ids and 'dup-otp-later' not in remaining_ids,
+          f'{label}: first matching password/otp executions stay and later duplicates go; got {remaining_ids}')
+        e('removed' in result.stdout and 'auth-username-password-form' in result.stdout and 'krate otp' in result.stdout,
+          f'{label}: change list says the duplicates were removed; got {result.stdout.strip()[-240:]!r}')
+        result, calls, state_after_duplicate = run()
+        e(result.returncode == 0 and 'No changes' in result.stdout and mutating(calls) == [] and state_after_duplicate == state,
+          f'{label} (second run): duplicate cleanup must be idempotent; got exit {result.returncode} {mutating(calls)} {result.stdout.strip()[-200:]!r}')
+        # The duplicate sorts BEFORE the original (lower priority, drifted requirement): the first occurrence in Keycloak's order
+        # is the one reconciled and kept (its requirement and priority corrected), the original — now the later one — is deleted.
+        duplicate_state = json.loads(json.dumps(state))
+        forms = next(f for f in duplicate_state['flows'] if f['alias'] == 'krate forms')
+        forms['executions'].insert(0, {'id': 'dup-password-first', 'requirement': 'DISABLED', 'priority': 5, 'index': 0,
+                                       'providerId': 'auth-username-password-form'})
+        state_file.write_text(json.dumps(duplicate_state))
+        result, calls, state_cleaned = run()
+        label = 'apply with a duplicate planned execution sorting before the original'
+        deleted = [c[1] for c in calls if c[0] == 'delete']
+        cleaned_forms = next(f for f in state_cleaned['flows'] if f['alias'] == 'krate forms')
+        password_steps = [x for x in cleaned_forms['executions'] if x.get('providerId') == 'auth-username-password-form']
+        e(result.returncode == 0 and deleted == ['authentication/executions/' + first_password] and len(password_steps) == 1
+          and password_steps[0]['id'] == 'dup-password-first' and password_steps[0]['requirement'] == 'REQUIRED' and password_steps[0]['priority'] == 10,
+          f'{label}: the first occurrence is reconciled (REQUIRED 10) and kept, the later original deleted; got exit {result.returncode} deleted {deleted} steps {password_steps}')
+        result, calls, state_after_duplicate = run()
+        e(result.returncode == 0 and 'No changes' in result.stdout and mutating(calls) == [],
+          f'{label} (second run): idempotent; got exit {result.returncode} {mutating(calls)} {result.stdout.strip()[-200:]!r}')
+        state_file.write_text(json.dumps(state))  # the drift case below starts from the planned state with the original ids
         # Drift as the hand-applied fixture had it: zeroed priorities, the built-in first-broker-login flow, a stale redirector config,
         # an extra mapper and a third execution in krate otp.
         drift = json.loads(state_file.read_text())
@@ -2843,6 +2942,13 @@ echo "changed=$IDENTITY_CHANGED"
             result, calls, st = run(KC_FAIL_GET=failing)
             e(result.returncode != 0 and mutating(calls) == [] and st == seeded,
               f'apply without the plan file, GET {failing} fails: the detection must die, not read as absence; got exit {result.returncode} {mutating(calls)}')
+        for failing, needle in (('identity-provider/instances/pingfederate/mappers', 'mappers'), ('authentication/flows', 'flows')):
+            seeded = seed('krate browser', owned_flows(), provider_present=True)
+            seeded['mappers'] = [{'id': 'm1', 'name': 'a'}]
+            state_file.write_text(json.dumps(seeded))
+            result, calls, st = run(KC_FAIL_GET=failing)
+            e(result.returncode != 0 and mutating(calls) == [] and st == seeded and needle in result.stderr,
+              f'apply without the plan file, provider present, GET {failing} fails: removal must stop before destructive calls; got exit {result.returncode} {mutating(calls)} {result.stderr.strip()[-160:]!r}')
         # the normal case is unchanged: provider present, mappers, flows (order rebind, mappers, provider, flows; the old journal wording)
         seed('krate browser', owned_flows(), provider_present=True)
         state_with = json.loads(state_file.read_text()); state_with['mappers'] = [{'id': 'm1', 'name': 'a'}, {'id': 'm2', 'name': 'b'}]

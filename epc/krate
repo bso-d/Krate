@@ -1324,7 +1324,7 @@ print(json.dumps({"redirectUris": sorted(client.get("redirectUris", [])), "webOr
 # replaces the representation and wipes alias and name). $1 names the command
 # for the journal.
 identity_reconcile_realm_policy() {
-  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" wanted current line alias
+  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" wanted current line alias actions
   wanted="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["otpPolicyLookAheadWindow"])' "$plan")" \
     || die "Cannot read otpPolicyLookAheadWindow from $plan"
   [[ "$wanted" =~ ^[0-9]+$ ]] || die "$plan: otpPolicyLookAheadWindow must be a whole number"
@@ -1339,6 +1339,10 @@ identity_reconcile_realm_policy() {
     ok "Realm $IDENTITY_REALM: OTP look-ahead window set to $wanted step(s) from the realm plan"
   fi
   # Each planned required action: `alias enabled defaultAction` as the plan states it.
+  actions="$(python3 -c '
+import json, sys
+for action in json.load(open(sys.argv[1]))["requiredActions"]:
+    print(action["alias"], str(action["enabled"]).lower(), str(action["defaultAction"]).lower())' "$plan")" || die "Cannot read required actions from the realm plan"
   while IFS=' ' read -r alias line; do
     [[ -n "$alias" ]] || continue
     current="$(kcadm -- get "authentication/required-actions/$alias" -r "$IDENTITY_REALM")" || die "Keycloak query failed (required action $alias)"
@@ -1353,10 +1357,7 @@ json.dump(action, sys.stdout)' "$line" | KCADM_STDIN=1 kcadm -- update "authenti
       IDENTITY_CHANGED=true
       ok "Realm $IDENTITY_REALM: required action $alias set to enabled/default ${line// //} from the realm plan"
     fi
-  done < <(python3 -c '
-import json, sys
-for action in json.load(open(sys.argv[1]))["requiredActions"]:
-    print(action["alias"], str(action["enabled"]).lower(), str(action["defaultAction"]).lower())' "$plan")
+  done <<< "$actions"
   kcadm_logout
 }
 
@@ -1446,9 +1447,11 @@ identity_apply_idp() {
 # representation ("" when absent). Order: flows first (the provider names its
 # first-broker-login flow), then the provider, its mappers, the realm binding.
 identity_apply_idp_plan() {
-  local plan="$1" sso="$2" provider="$3" line alias existing current id name wanted verdict
+  local plan="$1" sso="$2" provider="$3" line alias existing current id name wanted verdict flow_lines mapper_lines stale_mappers
   existing="$(kcadm -- get authentication/flows -r "$IDENTITY_REALM" --fields alias --format csv --noquotes)" || die "Keycloak query failed (flows)"
+  flow_lines="$(python3 "$sso/identity.py" broker --plan "$plan" flows)" || die "Cannot render flows from $IDENTITY_IDP_PLAN"
   while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
     alias="$(printf '%s' "$line" | json_field alias)"
     [[ "$(printf '%s' "$line" | json_field topLevel)" == true ]] || continue  # sub-flows are made from their parent
     if ! grep -qxF -- "$alias" <<< "$existing"; then
@@ -1457,7 +1460,7 @@ identity_apply_idp_plan() {
       IDENTITY_IDP_CHANGES+=("flow '$alias' created")
     fi
     identity_apply_flow "$plan" "$sso" "$alias"
-  done < <(python3 "$sso/identity.py" broker --plan "$plan" flows)
+  done <<< "$flow_lines"
   if [[ -z "$provider" ]]; then
     identity_put_idp_provider "$plan" "$sso" create
     IDENTITY_IDP_CHANGES+=("provider created")
@@ -1473,7 +1476,9 @@ identity_apply_idp_plan() {
   fi
   current="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers" -r "$IDENTITY_REALM")" || die "Keycloak query failed (mappers)"
   local -a planned=()
+  mapper_lines="$(python3 "$sso/identity.py" broker --plan "$plan" mappers)" || die "Cannot render mappers from $IDENTITY_IDP_PLAN"
   while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
     name="$(printf '%s' "$line" | json_field name)"
     planned+=("$name")
     id="$(printf '%s' "$current" | python3 -c 'import json, sys; print(next((m["id"] for m in json.load(sys.stdin) if m.get("name") == sys.argv[1]), ""))' "$name")"
@@ -1494,17 +1499,18 @@ identity_apply_idp_plan() {
         *) die "Unexpected comparison result for mapper '$name'" ;;
       esac
     fi
-  done < <(python3 "$sso/identity.py" broker --plan "$plan" mappers)
+  done <<< "$mapper_lines"
   # Mappers of this provider the plan does not name widen or change the group mapping: removed.
+  stale_mappers="$(printf '%s' "$current" | python3 -c '
+import json, sys
+for mapper in json.load(sys.stdin):
+    if mapper.get("name") not in sys.argv[1:]:
+        print(mapper["id"] + "," + mapper.get("name", ""))' "${planned[@]}")" || die "Cannot compare mappers with $IDENTITY_IDP_PLAN"
   while IFS=, read -r id name; do
     [[ -n "$id" ]] || continue
     kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete mapper '$name'"
     IDENTITY_IDP_CHANGES+=("mapper '$name' removed")
-  done < <(printf '%s' "$current" | python3 -c '
-import json, sys
-for mapper in json.load(sys.stdin):
-    if mapper.get("name") not in sys.argv[1:]:
-        print(mapper["id"] + "," + mapper.get("name", ""))' "${planned[@]}")
+  done <<< "$stale_mappers"
   wanted="$(python3 "$sso/identity.py" broker --plan "$plan" browser-flow)"
   current="$(kcadm -- get "realms/$IDENTITY_REALM" --fields browserFlow --format csv --noquotes)" || die "Keycloak query failed (realm)"
   if [[ "$current" != "$wanted" ]]; then
@@ -1519,11 +1525,13 @@ for mapper in json.load(sys.stdin):
 # redirector's configuration created or updated, and a level-0 execution the plan
 # does not name removed. Planned sub-flows are reconciled the same way, recursively.
 identity_apply_flow() {
-  local plan="$1" sso="$2" flow="$3" executions line current kind name req prio cfg id cur_req cur_prio cfg_id verdict description
+  local plan="$1" sso="$2" flow="$3" executions line current kind name req prio cfg id cur_req cur_prio cfg_id verdict description execution_lines stale_executions
   local -a planned=()
   executions="authentication/flows/$(url_path_encode "$flow")/executions"
   current="$(kcadm -- get "$executions" -r "$IDENTITY_REALM")" || die "Keycloak query failed (flow '$flow')"
+  execution_lines="$(python3 "$sso/identity.py" broker --plan "$plan" executions "$flow")" || die "Cannot render executions of flow '$flow' from $IDENTITY_IDP_PLAN"
   while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
     if [[ "$(printf '%s' "$line" | json_field authenticatorFlow)" == true ]]; then
       kind=flow; name="$(printf '%s' "$line" | json_field flowAlias)"
     else
@@ -1577,19 +1585,24 @@ identity_apply_flow() {
       fi
     fi
     if [[ "$kind" == flow ]]; then identity_apply_flow "$plan" "$sso" "$name"; fi
-  done < <(python3 "$sso/identity.py" broker --plan "$plan" executions "$flow")
-  while IFS=, read -r id name; do
-    [[ -n "$id" ]] || continue
-    kcadm -- delete "authentication/executions/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to remove $name from flow '$flow'"
-    IDENTITY_IDP_CHANGES+=("'$flow': $name removed")
-  done < <(printf '%s' "$current" | python3 -c '
+  done <<< "$execution_lines"
+  stale_executions="$(printf '%s' "$current" | python3 -c '
 import json, sys
+planned = set(sys.argv[1:])
+kept = set()
 for e in json.load(sys.stdin):
     if e.get("level") != 0:
         continue
     key = ("flow:" + e.get("displayName", "")) if e.get("authenticationFlow") else ("authenticator:" + e.get("providerId", ""))
-    if key not in sys.argv[1:]:
-        print(e["id"] + "," + key.split(":", 1)[1])' "${planned[@]}")
+    if key in planned and key not in kept:
+        kept.add(key)
+        continue
+    print(e["id"] + "," + key.split(":", 1)[1])' "${planned[@]}")" || die "Cannot compare executions in flow '$flow' with $IDENTITY_IDP_PLAN"
+  while IFS=, read -r id name; do
+    [[ -n "$id" ]] || continue
+    kcadm -- delete "authentication/executions/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to remove $name from flow '$flow'"
+    IDENTITY_IDP_CHANGES+=("'$flow': $name removed")
+  done <<< "$stale_executions"
 }
 
 # Create ($3 create) or replace ($3 update) the provider from the plan $1 (helpers in $2)
@@ -1680,9 +1693,15 @@ identity_owned_flows_present() {
 # (when $1, the provider's representation, is not empty; an absent provider has none),
 # then the top-level flows the plan owns (their sub-flows go with them).
 identity_remove_idp() {
-  local present="${1:-}" current id alias
+  local present="${1:-}" current mappers flows id alias
   IDENTITY_BROWSER_KEPT=""
   current="$(kcadm -- get "realms/$IDENTITY_REALM" --fields browserFlow --format csv --noquotes)" || die "Keycloak query failed (realm)"
+  if [[ -n "$present" ]]; then
+    mappers="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers" -r "$IDENTITY_REALM" --fields id --format csv --noquotes)" || die "Keycloak query failed (mappers)"
+  else
+    mappers=""
+  fi
+  flows="$(kcadm -- get authentication/flows -r "$IDENTITY_REALM" --fields id,alias --format csv --noquotes)" || die "Keycloak query failed (flows)"
   if identity_owned_alias "$current"; then
     kcadm -- update "realms/$IDENTITY_REALM" -s browserFlow=browser >/dev/null || die "Keycloak refused to rebind the browser flow"
   elif [[ "$current" != browser ]]; then
@@ -1693,14 +1712,14 @@ identity_remove_idp() {
     while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete a mapper of $IDENTITY_IDP_ALIAS"
-    done < <(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS/mappers" -r "$IDENTITY_REALM" --fields id --format csv --noquotes)
+    done <<< "$mappers"
     kcadm -- delete "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" || die "Keycloak refused to delete identity provider $IDENTITY_IDP_ALIAS"
   fi
   while IFS=, read -r id alias; do
     if identity_owned_alias "$alias"; then
       kcadm -- delete "authentication/flows/$id" -r "$IDENTITY_REALM" || die "Keycloak refused to delete flow '$alias'"
     fi
-  done < <(kcadm -- get authentication/flows -r "$IDENTITY_REALM" --fields id,alias --format csv --noquotes)
+  done <<< "$flows"
 }
 
 # Keycloak's Compose environment carries KRATE_TRUSTSTORE_SHA, a digest of the PEM

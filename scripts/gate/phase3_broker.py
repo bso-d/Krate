@@ -283,9 +283,12 @@ class Gate:
         self.cleanup_topics.add(name)
         response = browser.api('POST', '/api/clusters/%s/topics' % self.cluster,
                                {'name': name, 'partitions': 1, 'replicationFactor': 1})
+        deleted = None
         if response.status == 200:
-            browser.api('DELETE', '/api/clusters/%s/topics/%s' % (self.cluster, name))
-        return response.status
+            deleted = browser.api('DELETE', '/api/clusters/%s/topics/%s' % (self.cluster, name)).status
+            if not 200 <= deleted < 300:  # Kafbat answers 200 on a successful topic delete (phase2_kafbat K5)
+                fail('topic %s created (200) but the cleanup DELETE failed: %s' % (name, deleted))
+        return response.status, deleted
 
     def list_topics(self, browser):
         return browser.api('GET', '/api/clusters/%s/topics' % self.cluster).status
@@ -296,7 +299,7 @@ class Gate:
         perms = self.permissions_of(browser)
         self.permissions['ping-viewer'] = perms
         topic = [p for p in perms if p.startswith('TOPIC:')]
-        create = self.create_topic(browser, 'gate3-p5')
+        create, _deleted = self.create_topic(browser, 'gate3-p5')
         listed = self.list_topics(browser)
         text = 'ping-viewer signed in through the stand-in; Kafbat permissions %s; topic create %s; topic list %s; hops: %s' % (
             topic or perms, create, listed, self.hops_text(self.hops['ping-viewer']))
@@ -308,9 +311,9 @@ class Gate:
         browser = self.signed_in('ping-admin', 'ping-admin')
         perms = self.permissions_of(browser)
         self.permissions['ping-admin'] = perms
-        create = self.create_topic(browser, 'gate3-p6')
-        text = 'ping-admin signed in; topic create %s (removed again); %d permission entries; hops: %s' % (
-            create, len(perms), self.hops_text(self.hops['ping-admin']))
+        create, deleted = self.create_topic(browser, 'gate3-p6')
+        text = 'ping-admin signed in; topic create %s, cleanup DELETE %s (removed again); %d permission entries; hops: %s' % (
+            create, deleted, len(perms), self.hops_text(self.hops['ping-admin']))
         if create != 200:
             fail(text)
         return 'PASS', text
@@ -319,10 +322,11 @@ class Gate:
         browser = self.signed_in('ping-both', 'ping-both')
         perms = self.permissions_of(browser)
         admin = self.permissions.get('ping-admin')
-        create = self.create_topic(browser, 'gate3-p7')
+        create, deleted = self.create_topic(browser, 'gate3-p7')
         missing = sorted(set(admin or []) - set(perms))
-        text = ('ping-both (both AD groups) signed in; topic create %s; %d permission entries (viewer and administrator '
-                'roles together), administrator entries of P6 missing: %s') % (create, len(perms), missing or 'none')
+        text = ('ping-both (both AD groups) signed in; topic create %s, cleanup DELETE %s (removed again); %d permission '
+                'entries (viewer and administrator roles together), administrator entries of P6 missing: %s') % (
+            create, deleted, len(perms), missing or 'none')
         if create != 200 or admin is None or missing:
             fail(text)
         return 'PASS', text
@@ -452,7 +456,7 @@ class Gate:
         self.stub('remove-group', 'ping-both', ADMINS)
         self.stub('remove-group', 'ping-admin', ADMINS)
         both = self.brokered_login('ping-both', 'ping-both-revoked')
-        create = self.create_topic(both['browser'], 'gate3-p9') if both['kind'] == 'ok' else None
+        create, _deleted = self.create_topic(both['browser'], 'gate3-p9') if both['kind'] == 'ok' else (None, None)
         listed = self.list_topics(both['browser']) if both['kind'] == 'ok' else None
         groups = []
         uid = self.keycloak().user_id('ping-both')
@@ -505,9 +509,31 @@ class Gate:
                                ('P13', self.p13_logout), ('P9', self.p9_revocation)):
                 self.case(name, func)
         finally:
+            self.cleanup()
             if self.kc:
                 self.kc.close()
         return self.finish()
+
+    def cleanup(self):
+        """Teardown backstop like the Phase 2 helper's: every topic a row tried to create is deleted in the broker
+        (`--if-exists`, so a topic the row already removed is a no-op); a rerun with the same fixed names never meets
+        a leftover. The rows themselves still fail when their own cleanup DELETE did not succeed (create_topic)."""
+        if not self.cleanup_topics:
+            return
+        cid = p2.service_container(self.project, 'kafka-92')
+        if not cid:
+            log('cleanup: no kafka-92 container; topics %s not removed' % ','.join(sorted(self.cleanup_topics)))
+            return
+        failed = []
+        for topic in sorted(self.cleanup_topics):
+            rc, _, err = p2.docker('exec', cid, '/opt/kafka/bin/kafka-topics.sh', '--bootstrap-server', 'kafka-92:9092',
+                                   '--delete', '--if-exists', '--topic', topic, timeout=60)
+            if rc != 0:
+                failed.append(topic)
+                log('cleanup: kafka-topics.sh --delete %s exit %s: %s' % (topic, rc, err.strip()[-200:]))
+        removed = sorted(self.cleanup_topics - set(failed))
+        log('cleanup: topics %s removed (--if-exists)%s' % (','.join(removed) or 'none',
+                                                             ('; NOT removed: ' + ','.join(failed)) if failed else ''))
 
     def finish(self):
         for case in CASES:
