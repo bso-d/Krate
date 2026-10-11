@@ -291,18 +291,273 @@ Phase 2 (the Kafbat runtime fixture is KRaft on this runner).
 
 ## Last run
 
-Phase 3 (runner v6, rows P1–P16 and Z3) has no receipt yet: the rows were
-exercised by hand and through `phase3_broker.py --only …` against the Phase 3
-development fixture (`harness/phase3/`), and the first full receipt is pasted
-here when the owner's Phase 3 candidate is final.
+The first two receipts below belong to the Phase 3 candidate dfa5d05
+(2026-10-11, gate runner v6, each run alone on its host, the VM run first): the
+Mac run of phases 1–3 with the screenshot story and the full Phase 1 inventory
+inside the air-gapped Rocky Linux 9 VM. Both verdicts read PASS. Earlier runs of
+the same candidate line stay under `harness/gate-receipts/` as evidence only:
+Mac runs 12 (9ed280c) and 13 (ad3232e) were stopped and voided when findings
+arrived during the run (folders suffixed `-VOID`); Mac run 14 (8d5275f) passed
+119/0/2 but its candidate was superseded; VM run 5 (8d5275f) failed S1/S4 on a
+Python 3.9 syntax error in check-identity (fixed in 6f14ea1, with a parse sweep
+in `make syntax` and Python 3.9 in CI); VM run 6 (6f14ea1) failed F6 on a
+one-second readiness flap after the database returned (F5 and C4 now wait for
+stable readiness, dfa5d05).
 
-The receipt tables below are pasted verbatim from the two receipts of candidate
-cda07a0 (2026-10-10, gate runner v4, each run alone on its host). Both verdicts
-read PASS. The owner's acceptance is recorded in the Serena tracker and in PR
-#39, not here. Earlier receipts of the day (c88de6a with runner v1; the void
+The receipt tables after them are pasted verbatim from the two receipts of
+candidate cda07a0 (2026-10-10, gate runner v4, each run alone on its host). Both
+verdicts read PASS. The owner's acceptance is recorded in the Serena tracker and in PR
+#39, not here. Earlier receipts of 2026-10-10 (c88de6a with runner v1; the void
 runs 7–10 and the two failed EPC runs at 5b803c6, which found the umask-077
 directory defect fixed in d119da4) stay under `harness/gate-receipts/` as
 evidence only.
+
+### KRaft, full gate on the development Mac (Phases 1–3 + screenshots), candidate dfa5d05
+
+Receipt folder: `harness/gate-receipts/kraft-dfa5d05-20261011T003753Z/` (receipt.md, receipt.tsv,
+run.log, screenshots/01–11 + manifest.json; console `run15-console.log`). The stand-in identity
+provider ran as `krate-gate1-gate3-pingstub` on 127.0.0.1:18443; the fixture left 0 containers,
+0 volumes and 0 networks. NOT_RUN rows: J7 (needs root and a logrotate binary; decided by the VM
+receipt below) and K17 (owned by the runner) are outside the inventory on this host.
+
+| field | value |
+|---|---|
+| verdict | **PASS** (PASS 119, FAIL 0, NOT_RUN 2, required missing 0: none; required not run: 0; bound: true) |
+| candidate commit | dfa5d051065055728412ad79d2251c568e71c046 |
+| dirty tracked files at run time | none |
+| edition file digests (sha256, 16 hex) | kraft/krate=011cadd2af65f659 kraft/docker-compose.yml=138c63bd004b94be kraft/.env.template=0c5596d34e961541 kraft/nginx.conf=5476aee8ca36324b sso/identity.py=1644bfe756c855a7 sso/preflight.py=53392d57fb09c3cb sso/activate.sh=4d46914763446862 sso/configure-dual.py=9a9ad74d59fd23e2 |
+| edition / fixture | kraft in /Users/shamirkhannabil/Development/Krate/harness/worktrees/gate/kraft, Compose project krate-gate1, https://localhost, identity 172.29.250.0/24 (pool 172.29.250.128/25, proxy 172.29.250.10) |
+| phases | all; screenshots: true; static: true |
+| host | Darwin 27.0.0 arm64; Docker 29.8.0; Compose 5.5.1; Python 3.14.8; OpenSSL 3.6.5 29 Sep 2026 (Library: OpenSSL 3.6.5 29 Sep 2026) |
+| images | apache/kafka:3.9.1@sha256:4ceccc577f03f51f6af8dbfda55194d0d892f4fa7913ffbded567ce3895622ed krate/kafka-ui:1.5.0-sso.7@sha256:3aa5e5919571b74c0b83ffa68287f06481ea7318c4a001c58d418534f50da28b nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94  |
+| runner | gate-identity.sh v6 sha256 ac9ea7dc0b0b3f4e; gate/ 3f9712a6bd895d86; runner repository commit dfa5d051065055728412ad79d2251c568e71c046 |
+| started / finished (UTC) | 20261011T003753Z / 20261011T012309Z |
+
+| id | phase | criterion | result | evidence |
+|---|---|---|---|---|
+| S1 | static | S | PASS | gmake check (syntax, lint, compose-check, offline-check, identity-check): Identity foundation verified: templates, realm plan, Kafbat runtime plan, names, Compose services and identity network,  |
+| S2 | static | S | PASS | git diff --check clean |
+| S3 | static | S | PASS | shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner and scripts/gate/stub_idp.sh |
+| S4 | static | S | PASS | check-identity: Identity foundation verified: templates, realm plan, Kafbat runtime plan, names, Compose services and identity network, monitoring binds, logrotate drop-in, CLI |
+| H1 | 1 | H | PASS | gen-cert:   ✓ Certificate written to certs/server.crt (replace with an org-CA cert anytime) |
+| J1 | 1 | J | PASS | identity up exit=1; overlaps the identity subnet 172; both keys named; no container created |
+| J2 | 1 | J | PASS | start exit=1 with the clash named; no container created |
+| F1 | 1 | F | PASS | identity up exit=0 in pristine state; running services: [keycloak keycloak-db ] (no broker) |
+| F2 | 1 | F | PASS | identity status exit=0: keycloak started yes, ready yes, live yes |
+| H2 | 1 | H | PASS | master realm users after bootstrap: [admin ] (temp-admin removed) |
+| J3 | 1 | J | PASS | journal: 2026-10-11T00:42:12Z up bootstrapped database initialised; permanent admin admin created; temp-admin removed |
+| J4 | 1 | J | PASS | krate-realm.json holds placeholders, none of the 4 secret values |
+| C1 | 1 | C | PASS | second identity up: 'No changes', .env sha 20d55cc9c1773bcf unchanged |
+| F3 | 1 | F | PASS | management port 9000 probes: started=200 ready=200 live=200 realm=200 |
+| G1 | 1 | G | PASS | no host ports published: keycloak:[] keycloak-db:[] |
+| F4 | 1 | F | PASS | authentication probe (krate-cli client_credentials via proxy) HTTP 200; health probes are separate (F3) |
+| G2 | 1 | G | PASS | proxy paths sent as-is (realm discovery and account 200; admin, master realm, metrics, health, bare /identity 404; a dot segment onto the master realm 404; a dot segment onto an allowed path 400; a path parameter 400): /identity/realms/krate/.well-known/openid-configuration=200 /identity/realms/krate/account=200 /identity/admin/=404 /identity/admin/master/console/=404 /identity/realms/master=404 /identity/realms/master/account=404 /identity/metrics=404 /identity/health=404 /identity/health/ready=404 /identity=404 /identity/realms/krate/../master=404 /identity/realms/krate/../krate/account=400 /identity/realms/krate;x=1/account=400 |
+| G3 | 1 | G | PASS | db=[krate-gate1_identity ] kc=[krate-gate1_identity krate-gate1_identity-egress ] identity.internal=true subnet=172.29.250.0/24 range=172.29.250.128/25 proxy=172.29.250.10 trusted=172.29.250.10 |
+| G4 | 1 | G | PASS | probe container address 172.29.250.131 is inside 172.29.250.128/25 and not 172.29.250.10 |
+| G5 | 1 | G | PASS | no route: keycloak is not a name on kafka-network |
+| G6 | 1 | G | PASS | forged X-Forwarded-For 9.9.9.9 from peer 172.29.250.131: Keycloak event ipAddress=[172.29.250.131,CLIENT_LOGIN_ERROR ] (peer address recorded, header ignored) |
+| G7 | 1 | G | PASS | same request through the proxy with a client-supplied X-Forwarded-For: event ipAddress=192.168.65.1 (nginx replaces the header with the real client address) |
+| G8 | 1 | G | PASS | plain:[psql: error: connection to server at "keycloak-db" (172.29.250.129), port 5432 failed: FATAL:  pg_hba.conf rejects connection for host "172.29.250.131", user "keycloak", database "keycloak", no encryption] tls:[t\|TLSv1.3] wrongpw:[psql: error: connection to server at "keycloak-db" (172.29.250.129), port 5432 failed: FATAL:  password authentication failed for user "keycloak"] |
+| A1 | 1 | A | PASS | users add (viewer, admin+email, no group, viewer) then list: [gatea:true gated:true gaten:true gatev:true ] |
+| A2 | 1 | A | PASS | gatea groups=[KRATE_ADMINS]; 'bad name' refused (exit 1); duplicate gatev refused (exit 1) |
+| A3 | 1 | A | PASS | first login: TOTP enrolment + forced password change, OTP required on the 2nd login, wrong OTP refused, old password refused: ENROLLED ['CONFIGURE_TOTP', 'UPDATE_PASSWORD'] aud=krate-ui groups=['KRATE_VIEWERS'] exp=300 iss=https://localhost/identity/realms/krate |
+| B1 | 1 | B | PASS | claims contract: gatea → ENROLLED groups=['KRATE_ADMINS']; gaten (no group) → ENROLLED groups=None (no groups claim: nothing to map a role from) |
+| B2 | 1 | B | PASS | gatev: correct password+OTP accepted; wrong password refused on the login form with: REFUSED Invalid username or password. |
+| B3 | 1 | B | PASS | users disable (exit 0); login refused with: REFUSED Account is disabled, contact your administrator.; users enable (exit 0) |
+| B4 | 1 | B | PASS | direct password grant on krate-ui refused: HTTP 400 (standard flow only) |
+| B5 | 1 | B | PASS | after 5 rapid wrong passwords the account is temporarily locked (Keycloak's quick-login check locks after two rapid failures, later attempts are not counted): {"failedLoginNotBefore":1791679575,"numFailures":2,"numTemporaryLockouts":0,"disabled":true,"numSecondaryAuthFailures":0,"lastIPFailure":"192.168.65.1","lastFailure":1791679515553} |
+| B7 | 1 | B | PASS | a one-time code from the previous 30-second step is accepted (realm look-ahead window 1): {"result": "OK", "claims": {"iss": "https://localhost/identi |
+| B6 | 1 | B | PASS | reset-password sets a new temporary password (exit 0; shown once) |
+| A4 | 1 | A | PASS | old password refused after reset-password (REFUSED Invalid username or password.) |
+| J5 | 1 | J | PASS | journal lines of users add/reset-password carry no secret value: 2026-10-11T00:43:00Z users add ok gatev group=KRATE_VIEWERS |
+| C2 | 1 | C | PASS | after 'compose restart keycloak': 5 gate users still listed; identity up → No changes |
+| C3 | 1 | C | PASS | identity down + up: 5 users kept; gatea logs in with password+OTP (credentials preserved) |
+| H3 | 1 | H | PASS | fresh .env over an existing database: identity up exit=1 (identity database exists but .env lacks KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_CLI_CLIENT_SECRET); the stored DB password still works (nothing rotated) |
+| I1 | 1 | I | PASS | rotate KEYCLOAK_DB_PASSWORD: old rejected (psql: error: connection to server at "keycloak-db" (172.29.250.129), port 5432 failed: FATAL:  password authentication failed for user "keycloak"), new accepted, Keycloak ready again |
+| I2 | 1 | I | PASS | rotate KEYCLOAK_ADMIN_PASSWORD: old password refused by kcadm (exit 1), new one lists master users [admin ] |
+| I3 | 1 | I | PASS | rotate KEYCLOAK_CLI_CLIENT_SECRET: users list works, new secret authenticates (HTTP 200), identity up → No changes |
+| I5 | 1 | I | PASS | rotate --value with the database password's value: refused (exit 1) naming KEYCLOAK_DB_PASSWORD; .env and Keycloak unchanged (admin login still works) |
+| I4 | 1 | I | PASS | config set of a live identity secret refused with the rotate hint (exit 1) |
+| D7 | 1 | D | PASS | KRATE_BACKUP_PASSPHRASE of 5 characters refused (exit 1), no archive written |
+| D1 | 1 | D | PASS | identity backup: exit 0; mode=600 magic=krate-identity-backup/1; 276568 bytes |
+| D2 | 1 | D | PASS | restore while Keycloak runs refused (exit 1):   ✗ Keycloak is running; stop it first: krate identity down |
+| D3 | 1 | D | PASS | tampered archive (one bit flipped) refused before decryption: 'integrity check failed: the backup was modified or the passphrase is wrong' (exit 1); wrong passphrase refused the same way (exit 1) |
+| D4 | 1 | D | PASS | restore: exit 0; marker user gatem gone; the 5 users of the backup present (now 5); Keycloak verified |
+| D5 | 1 | D | PASS | restore reconciled .env: KEYCLOAK_CLI_CLIENT_SECRET back to the backup's value, KEYCLOAK_DB_PASSWORD (a database role) untouched; journal:  restore reconciled .env: KEYCLOAK_CLI_CLIENT_SECRET |
+| E1 | 1 | E | PASS | wrong DB password in .env: identity up exit=1; .env not regenerated (still the wrong value); the value appears in neither output nor journal; journal:  start failed keycloak not healthy within 180s |
+| E2 | 1 | E | PASS | server.key removed: identity up exit=1 (db-tls is incomplete; missing server); no new key generated |
+| E3 | 1 | E | PASS | wrong admin password: up exit=1 with recover-admin hint; recover-admin refused while running (exit 1); after down it recreates the admin (exit 0); master users [admin ] |
+| E4 | 1 | E | PASS | admin deleted in Keycloak (lost admin): up exit=1; recover-admin after down recreates it (exit 0); master users [admin ] |
+| E5 | 1 | E | PASS | volume exists but no master realm (failed first run): identity up detects it, bootstraps (temp-admin created and removed); master users [admin ] |
+| E6 | 1 | E | PASS | lock held by a live process: 'Another krate identity command is running (pid 67217)' (exit 1); after that process died: 'Removing the stale identity lock left by process 67217' and the command proceeds (exit 0) |
+| E8 | 1 | E | PASS | 'krate stop' while an identity command holds the lock and KEYCLOAK_ENABLED is still false: 'Another krate identity command is running (pid 67765)' (exit 1); identity services untouched [keycloak keycloak-db proxy ] |
+| E7 | 1 | E | PASS | two simultaneous mutating commands: refusals=1 created=1 (one refused and one created, or both serialised; never two half-made users) |
+| F5 | 1 | F | PASS | database stopped: ready=503 live=200 (readiness down, liveness up); identity status exit=1; after 60 s restarts=0 state=running health=healthy (no restart loop); database back → ready again and staying ready (3 consecutive status probes at least 3 s apart, first success after 9 s; exit 0) |
+| F6 | 1 | F | PASS | identity status after recovery exit=0: keycloak started yes, ready yes, live yes realm krate present KEYCLOAK_ENABLED true 2026-10-11T00:53:36Z down ok keycloak and keycloak-db stopped; volume kept |
+| C4 | 1 | C | PASS | renew-db-tls: notAfter=Nov 13 00:40:52 2027 GMT → notAfter=Nov 13 00:56:05 2027 GMT, chains to the CA, .prev discarded, journal ok, Keycloak ready |
+| C5 | 1 | C | PASS | injected restart failure: renew-db-tls exit=1, server.crt byte-identical to before (5fb9755999811079), .prev consumed, journal 'rolled back'; database healthy on the old certificate (healthy) |
+| C6 | 1 | C | PASS | otpPolicyLookAheadWindow set to 0 in Keycloak; identity up (exit 0) reconciled it to 1; journal 'up reconciled realm policy' |
+| J6 | 1 | J | PASS | logrotate render names this journal: /Users/shamirkhannabil/Development/Krate/harness/worktrees/gate/kraft/auth/identity-journal.log { rotate 12 maxage 400 copytruncate |
+| J7 | 1 | J | NOT_RUN | needs root (or sudo) and a logrotate binary: outside the inventory on this host; decided by the Linux VM receipt |
+| A5 | 1 | A | PASS | users list after the whole ladder: 2 gate users |
+| D6 | 1 | D | PASS | restore with KEYCLOAK_PUBLIC_URL=https://recovery.example.test/identity: exit 0; krate-ui redirect now [https://recovery.example.test/login/oauth2/code/keycloak]; journal 'restore reconciled krate-ui urls'; set back and identity up (exit 0) reconciles again |
+| X1 | 1 | X | PASS | 11 screenshots in /Users/shamirkhannabil/Development/Krate/harness/gate-receipts/kraft-dfa5d05-20261011T003753Z/screenshots (manifest.json has the captions and the asserted outcomes): STORY OK: 7 assertions over 11 screenshots |
+| Z1 | 1 | Z | PASS | 27 distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, 17 temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: 0 hits |
+| K1 | 2 | K | PASS | auth configure --local (exit 0; Kafbat plan: Keycloak login only (no shared form login), roles from the groups claim /Users/shamirkhannabil/Development/); start (exit 0); auth apply (exit 0, preflight inside); broker container untouched by apply; runtime.yml has no shared login |
+| K30 | 2 | K | PASS | second auth apply: exit 0, kafka-ui container unchanged (066034f0cf88 == 066034f0cf88), prints 'unchanged ... sessions kept' |
+| K27 | 2 | K | PASS | public proxy, paths as-is: /metrics=404 /actuator=404 /actuator/=404 /actuator/health=404 /actuator/prometheus=404 /actuator;x/prometheus=400 /logout/connect=404 /logout/connect/back-channel/keycloak=404 /api/clusters;x=400 /api/clusters=302 (metrics/actuator/back-channel 404; path parameters 400; API redirects anonymous callers to login) |
+| K33 | 2 | K | PASS | Host: evil.example.test → HTTP 000, curl exit 52 (444: empty reply); Host: localhost → 302; plain HTTP with Host: localhost → 301 https://localhost/api/clusters (redirect to the public authority); KRATE_PROXY_PUBLIC_HOST=localhost |
+| K34 | 2 | K | PASS | gen-cert changed KRATE_PROXY_CONF_SHA (3c79eb6693fe38db728b1cb3e754b771 → e5bd252fb89bcdffa01cf67df5db8673); auth apply recreated the proxy (53de8c31dde9 → 322f667674bd, exit 0); second apply kept it (exit 0); proxy serves |
+| K28 | 2 | K | PASS | anonymous API call redirects to https://localhost/oauth2/authorization/keycloak |
+| M1 | 2 | M | PASS | monitor up exit=0; Prometheus and Loki bound to 127.0.0.1 only, Grafana on all interfaces: prom=[9090/tcp -> 127.0.0.1:19090 ] loki=[3100/tcp -> 127.0.0.1:13100 ] grafana=[3000/tcp -> 0.0.0.0:13000 3000/tcp -> [::]:13000 ] |
+| M2 | 2 | M | PASS | kafka-exporter networks: [krate-gate1_kafka-network krate-kraft-monitoring_monitoring ] (brokers' network, not identity) |
+| K2 | 2 | K | PASS | 12/12 core reads 200; cluster listed=True lag field=True; other: broker-metrics=200 acls=500 activeproducers=200 config=403 |
+| K3 | 2 | K | PASS | 26/26 RBAC-checked mutations 403 (valid CSRF token, body Access Denied); feature absent, refused before RBAC: connector*=500 x4 schema*=400 x2; new topic GET=404, fixture topic 200 |
+| K4 | 2 | K | PASS | messages/v2=403 smartfilter-register=403; runtime.yml viewer messages_read=False (KAFKA_UI_VIEWER_MESSAGES=unset) |
+| K5 | 2 | K | PASS | admin1 core 11/11 2xx (create,config,partitions,produce,read,msg-delete,offsets-reset,offsets-delete,group-delete,broker-config,delete); not 403: acl-create=500 ksql=200 connector=500 schema=400; d... |
+| K6 | 2 | K | PASS | Keycloak login completed (TOTP enrolled); Kafbat callback 302 Location=/login?error; /api/clusters with jar=302 |
+| K7 | 2 | K | PASS | after krate identity users disable: new login refused at Keycloak (Account is disabled, contact your administrator.), no code issued; credentials: same password and TOTP signed in twice just before... |
+| K8 | 2 | K | PASS | GET /login=200; POST /login=405 ; POST /api/config/authentication=405; then /api/clusters=302; authType=OAUTH2 |
+| K9 | 2 | K | PASS | deployed image 3aa5e5919571 vs stub IdP: control=accepted wrong-iss=refused wrong-aud=refused expired=refused bad-signature=refused; no session after each refusal=True |
+| K10 | 2 | K | PASS | Kafbat username = Keycloak sub before; after e-mail/first/last name change (username read-only in the user profile): username = same sub True, same permissions True |
+| K11 | 2 | K | PASS | admin group removed: open session kept admin (create topic 200); kcadm logout (3 KC sessions) 0.80s, old SESSION 302 after 0.02s; re-login without group: kafbat-refused /login?error |
+| K12 | 2 | K | PASS | cross-site POST create-topic with SESSION, no token: 403 (Access Denied); topic GET=404; cross-site POST /logout=403; session still 200 |
+| K13 | 2 | K | PASS | GET /logout=200 , session then 200; POST /logout without token=403, session then 200 |
+| K14 | 2 | K | PASS | SESSION before login present=True, after login changed=True; old id -> 302, new id -> 200 |
+| K15 | 2 | K | PASS | authz redirect_uri=callback; KC auth evil redirect_uri=400; KC logout evil target=400; GET //evil.example/ 302->/oauth2/authorization/keycloak; post-login Location /evil.example/ |
+| K16 | 2 | K | PASS | via proxy: Location /oauth2/authorization/keyclo (unspoofed /oauth2/authorization/keyclo); non-proxy peer on kafka-network -> kafka-ui:8080: 302 /gate-spoof/oauth2/authoriza; honoured from non-prox... |
+| K17 | 2 | K | NOT_RUN | owned by runner |
+| K18 | 2 | K | PASS | ID token aud/azp=krate-cli: callback /login?error, /api/clusters=302; wrong iss: callback /login?error, /api/clusters=302 |
+| K19 | 2 | K | PASS | krate-ui user token: /api/clusters=302 userInfo=False; krate-ui ID token: /api/clusters=302 userInfo=False; krate-cli token: /api/clusters=302 userInfo=False |
+| K20 | 2 | K | PASS | viewer PUT /api/smartfilters/testexecutions=200 ({"result":true,"error":null}); POST /api/clusters/cluster-1-kraft/cache=200; guide: reachable by every signed-in user |
+| K21 | 2 | K | PASS | kcadm users/{id}/logout (2 KC sessions) returned in 0.99s; old SESSION -> 302 /oauth2/authorization/keycloak after 0.01s |
+| K22 | 2 | K | PASS | sessions survived the disable (200/200, new login refused: K7); idle limit 900s: after 840s idle 200, after 960s idle 302 /oauth2/authorization/keycloak |
+| K23 | 2 | K | PASS | admin no header=403 (Access Denied); wrong token=403; valid token=200; viewer valid token=403 (Access Denied) |
+| K24 | 2 | K | PASS | POST /logout+token 302 -> KC end_session; old SESSION 302; id_token_hint yes, post_logout_redirect_uri=https://localhost; KC end-session 302 https://localhost; Keycloak SSO session ended=True |
+| K25 | 2 | K | PASS | both1 groups KRATE_ADMINS,KRATE_VIEWERS; permissions include administrator-only ksql=True (20 entries); topic create=200 delete=200 |
+| K26 | 2 | K | PASS | identity up rc 0: realm krate present; realm groups before KRATE_ADMINS,KRATE_VIEWERS after KRATE_ADMINS,KRATE_VIEWERS; .env restored rc 0, identity up rc 0; guide documents admin-side rename=True |
+| K31 | 2 | K | PASS | Secure=True HttpOnly=False; token before login set, cleared at login=True, new token after=True; session=200 |
+| K32 | 2 | K | PASS | missing topic=404 invalid body=400 viewer denied=403; bodies without stackTrace=True |
+| Z2 | 2 | Z | PASS | 28 distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, 17 temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: 0 hits |
+| P1 | 3 | P | PASS | auth configure site.json exit 0; plan auth/keycloak/pingfederate-idp.json shape (provider → krate first broker login; krate browser = cookie ALT 10, redirector ALT 20 → pingfederate, krate forms ALT 30 = password REQ 10 + krate otp CONDITIONAL 20; create-user-if-unique REQUIRED; browserFlow; 2 FORCE mappers): as planned; placeholder only, none of the 31 secret values |
+| P2 | 3 | P | PASS | secret missing: exit 1 (PING_KEYCLOAK_CLIENT_SECRET is not set in .env); PEM 600: exit 1 (must be world-readable and writable by its owner only (chmod 644)); http tokenUrl: exit 1 (tokenUrl must be an https URL); restored: exit 0 (positive control) |
+| P3 | 3 | P | PASS | auth apply exit 0: realm vs plan (provider, 2 mappers, flows with requirement/priority, redirector config, browserFlow): identical; journal 'apply reconciled identity provider'; second apply exit 0 prints the line 'Identity provider pingfederate: No changes' and journals nothing more |
+| P4 | 3 | P | PASS | PEM added: apply recreated Keycloak (82281ebca0a0 → d5f3904fcf5e), KRATE_TRUSTSTORE_SHA unset → 798c236223df874245b91b62c0633a57 in .env and the container; unchanged PEMs: second apply kept d5f3904fcf5e; a second PEM: recreated again (→ 2e50f9f64b33, sha 274216c322ce31c5f47d21dc7d9a79e3, exit 0); journal 'apply recreated keycloak: truststores changed'; Keycloak log: truststore files in the truststore paths [/opt/keycloak/conf/truststores/gate3-stand-in.crt, /opt/keycloak/conf/truststo |
+| P5 | 3 | P | PASS | TLS pinned; ping-viewer signed in through the stand-in; Kafbat permissions ['TOPIC:ANALYSIS_VIEW,VIEW']; topic create 403; topic list 200; hops: 302 /oauth2/authorization/keycloak > 303 realm:proto... |
+| P6 | 3 | P | PASS | TLS pinned; ping-admin signed in; topic create 200 (removed again); 11 permission entries; hops: 302 /oauth2/authorization/keycloak > 303 realm:protocol/openid-connect/auth > 303 realm:broker/pingf... |
+| P7 | 3 | P | PASS | TLS pinned; ping-both (both AD groups) signed in; topic create 200; 19 permission entries (viewer and administrator roles together), administrator entries of P6 missing: none |
+| P8 | 3 | P | PASS | TLS pinned; ping-none (no AD group): kafbat-refused at /login; hops: 302 /oauth2/authorization/keycloak > 303 realm:protocol/openid-connect/auth > 303 realm:broker/pingfederate/login > 200 stand-in... |
+| P9 | 3 | P | PASS | TLS pinned; ping-both without APP-KAFKA-ADMINS in the stand-in: next sign-in ok, topic create 403, list 200, realm groups ['KRATE_VIEWERS']; ping-admin without it: kafbat-refused at /login |
+| P10 | 3 | P | PASS | TLS pinned; no Keycloak page between the stand-in and Kafbat: ping-viewer: 10 hops, realm pages none, action hops none, requiredActions []; ping-admin: 10 hops, realm pages none, action hops none, ... |
+| P11 | 3 | P | PASS | TLS pinned; default path 303 -> /identity/realms/krate/broker/pingfederate/login; kc_idp_hint= 200 login form; local user gate3local: 302 -> /identity/realms/krate/login-actions/required-action (CO... |
+| P12 | 3 | P | PASS | TLS pinned; stand-in user gate3clash (same username as the local user): error 409 at /identity/realms/krate/login-actions/first-broker-login (User with username gate3clash already exists. Please lo... |
+| P13 | 3 | P | PASS | TLS pinned; POST /logout 302 -> KC end_session; end-session 302 -> /; realm sessions of ping-viewer 2 -> 1 (1 ended); next sign-in hops: 302 /oauth2/authorization/keycloak > 303 realm:protocol/open... |
+| P16 | 3 | P | PASS | stand-in secret rotated (exit 0); before identity rotate the brokered sign-in fails at the realm: error ping-viewer: error 502 at /identity/realms/krate/broker/pingfederate/endpoint (Unexpected error when authenticating with identity provider); federated identities 1; identity rotate PING_KEYCLOAK_CLIENT_SECRET --value (stdin) exit 0, line 'Identity provider pingfederate: secret updated', journal 'rotate … applied to identity provider pingfederate', .env carries the new value; afterwards ping-viewer signs in again with its link kept: ok ping-viewer: ok 200 at / (Kafbat UI); federated identities 1 |
+| P14 | 3 | P | PASS | plan file removed; auth apply exit 0; realm: provider gone, no krate flow, browserFlow browser; journal 'apply removed identity provider'; Kafbat's default path → realm auth answers HTTP 200 with the login form (1 form) instead of the broker redirect |
+| P15 | 3 | P | PASS | CONFIGURE_TOTP defaultAction set to true behind the CLI's back (drift confirmed: 0); identity up exit 0; afterwards defaultAction false and the realm matches the plan again (provider re-applied after P14's removal): identical; journal 'up reconciled required action CONFIGURE_TOTP' and 'up reconciled identity provider' |
+| Z3 | 3 | Z | PASS | 34 distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, 19 temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: 0 hits |
+
+### EPC, full Phase 1 inventory inside the air-gapped Rocky Linux 9 VM (bundle v103 = product files of dfa5d05, runner dfa5d05)
+
+Receipt folder: `harness/gate-receipts/epc-vm-dfa5d05-full/` (receipt.md, receipt.tsv, run.log, the
+redacted console log, .exit = 0, screenshots/01–11 + manifest.json; run notes
+`harness/linux-vm/run5/NOTES.md`). The Lima VM was created fresh for run 5 (Rocky Linux 9.8 aarch64, SELinux
+enforcing, Python 3.9.25) and reused unchanged for runs 6 and 7;
+`make`/`git` installed before the gap; the air gap was turned on once and proven before and after every
+step (`dnf makecache` rc 1, `curl 1.1.1.1` rc 28). Offline `./krate docker-install` and `./krate install`
+from the v103 package (sha256 9a96a794…, from the bundle's `.sha256` file, checked with `sha256sum -c` in
+the VM and recorded in the run notes; built from `git archive 8d5275f`, whose `epc/` is byte-identical to
+dfa5d05's) under the default umask; the static block ran on a clone of the
+branch at dfa5d05 (`--repo`) with the loaded shellcheck image and the bundle's nginx image for the render
+check; X1 from the loaded Playwright image; J7 as root. The same VM and package had recorded the two
+earlier verdicts of this candidate line: run 5 at 8d5275f FAIL 66/2/0 (S1/S4: a Python 3.9 syntax error in
+check-identity, fixed in 6f14ea1) and run 6 at 6f14ea1 FAIL 67/1/0 (F6: a one-second readiness flap after
+the database returned, answered by the stable-readiness wait in dfa5d05); their receipts stay under
+`harness/gate-receipts/epc-vm-{8d5275f,6f14ea1}-full/`.
+
+| field | value |
+|---|---|
+| verdict | **PASS** (PASS 68, FAIL 0, NOT_RUN 0, required missing 0: none; required not run: 0; bound: true) |
+| candidate commit | dfa5d051065055728412ad79d2251c568e71c046 (stated as dfa5d051065055728412ad79d2251c568e71c046 and resolved in --repo; edition files bound by digest; static block on that checkout) |
+| dirty tracked files at run time | edition: unknown (no git); --repo:  |
+| edition file digests (sha256, 16 hex) | epc/krate=21489fd796813f63 epc/docker-compose.yml=21d665d69cbf8468 epc/.env.template=5fe81d22fc59960f epc/nginx.conf=5476aee8ca36324b epc/sso/identity.py=1644bfe756c855a7 epc/sso/preflight.py=53392d57fb09c3cb epc/sso/activate.sh=4d46914763446862 epc/sso/configure-dual.py=9a9ad74d59fd23e2 |
+| edition / fixture | epc in /opt/krate/epc, Compose project krate-epc, https://localhost, identity 172.29.250.0/24 (pool 172.29.250.128/25, proxy 172.29.250.10) |
+| phases | 1; screenshots: true; static: true |
+| host | Linux 5.14.0-687.10.1.el9_8.0.1.aarch64 aarch64; Docker 29.9.0; Compose 5.6.0; Python 3.9.25; OpenSSL 3.5.5 27 Jan 2026 (Library: OpenSSL 3.5.5 27 Jan 2026) |
+| images | krate-offline/image:sha256-39bc3b30084ad6ab33ad2c9a525f15c942bf097b18cb2a1825afa6df3411f8b5 krate-offline/image:sha256-e701673a1643cc8a4f196ea98b40b43c629e38f1dc0d57ffb7207dd2c7d9e3fb krate-offline/image:sha256-63ffc0d1f14e4082b832c6a42e606e9a0384a526f16ddd720af7c1f018f2f7c4 krate-offline/image:sha256-6741e706bd2cc2fcc2c97a74f227589c7283e44cdb210e47ea99258f243f6f74 krate-offline/image:sha256-9b9fb55f7e3b2149854def33c728b781dc44d1c5e86492ad62912a527ae234b3  |
+| runner | gate-identity.sh v6 sha256 ac9ea7dc0b0b3f4e; gate/ 3f9712a6bd895d86; runner repository commit no git |
+| started / finished (UTC) | 20261011T001937Z / 20261011T003615Z |
+
+| id | phase | criterion | result | evidence |
+|---|---|---|---|---|
+| S1 | static | S | PASS | gmake check (syntax, lint, compose-check, offline-check, identity-check): [nginx render image: krate-offline/image:sha256-63ffc0d1f14e4082b832c6a42e606e9a0384a526f16ddd720af7c1f018f2f7c4 (KRATE_ |
+| S2 | static | S | PASS | git diff --check clean |
+| S3 | static | S | PASS | shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner and scripts/gate/stub_idp.sh |
+| S4 | static | S | PASS | check-identity: [nginx render image: krate-offline/image:sha256-63ffc0d1f14e4082b832c6a42e606e9a0384a526f16ddd720af7c1f018f2f7c4 (KRATE_CHECK_NGINX_IMAGE, in place of the pinne |
+| H1 | 1 | H | PASS | gen-cert:   ✓ Certificate written to certs/server.crt (replace with an org-CA cert anytime) |
+| J1 | 1 | J | PASS | identity up exit=1; overlaps the identity subnet 172; both keys named; no container created |
+| J2 | 1 | J | PASS | start exit=1 with the clash named; no container created |
+| F1 | 1 | F | PASS | identity up exit=0 in pristine state; running services: [keycloak keycloak-db ] (no broker) |
+| F2 | 1 | F | PASS | identity status exit=0: keycloak started yes, ready yes, live yes |
+| H2 | 1 | H | PASS | master realm users after bootstrap: [admin ] (temp-admin removed) |
+| J3 | 1 | J | PASS | journal: 2026-10-11T00:21:33Z up bootstrapped database initialised; permanent admin admin created; temp-admin removed |
+| J4 | 1 | J | PASS | krate-realm.json holds placeholders, none of the 4 secret values |
+| C1 | 1 | C | PASS | second identity up: 'No changes', .env sha c7b796a56e126893 unchanged |
+| F3 | 1 | F | PASS | management port 9000 probes: started=200 ready=200 live=200 realm=200 |
+| G1 | 1 | G | PASS | no host ports published: keycloak:[] keycloak-db:[] |
+| F4 | 1 | F | PASS | authentication probe (krate-cli client_credentials via proxy) HTTP 200; health probes are separate (F3) |
+| G2 | 1 | G | PASS | proxy paths sent as-is (realm discovery and account 200; admin, master realm, metrics, health, bare /identity 404; a dot segment onto the master realm 404; a dot segment onto an allowed path 400; a path parameter 400): /identity/realms/krate/.well-known/openid-configuration=200 /identity/realms/krate/account=200 /identity/admin/=404 /identity/admin/master/console/=404 /identity/realms/master=404 /identity/realms/master/account=404 /identity/metrics=404 /identity/health=404 /identity/health/ready=404 /identity=404 /identity/realms/krate/../master=404 /identity/realms/krate/../krate/account=400 /identity/realms/krate;x=1/account=400 |
+| G3 | 1 | G | PASS | db=[krate-epc_identity ] kc=[krate-epc_identity krate-epc_identity-egress ] identity.internal=true subnet=172.29.250.0/24 range=172.29.250.128/25 proxy=172.29.250.10 trusted=172.29.250.10 |
+| G4 | 1 | G | PASS | probe container address 172.29.250.131 is inside 172.29.250.128/25 and not 172.29.250.10 |
+| G5 | 1 | G | PASS | no route: keycloak is not a name on kafka-network |
+| G6 | 1 | G | PASS | forged X-Forwarded-For 9.9.9.9 from peer 172.29.250.131: Keycloak event ipAddress=[172.29.250.131,CLIENT_LOGIN_ERROR ] (peer address recorded, header ignored) |
+| G7 | 1 | G | PASS | same request through the proxy with a client-supplied X-Forwarded-For: event ipAddress=172.19.0.1 (nginx replaces the header with the real client address) |
+| G8 | 1 | G | PASS | plain:[psql: error: connection to server at "keycloak-db" (172.29.250.129), port 5432 failed: FATAL:  pg_hba.conf rejects connection for host "172.29.250.131", user "keycloak", database "keycloak", no encryption] tls:[t\|TLSv1.3] wrongpw:[psql: error: connection to server at "keycloak-db" (172.29.250.129), port 5432 failed: FATAL:  password authentication failed for user "keycloak"] |
+| A1 | 1 | A | PASS | users add (viewer, admin+email, no group, viewer) then list: [gatea:true gated:true gaten:true gatev:true ] |
+| A2 | 1 | A | PASS | gatea groups=[KRATE_ADMINS]; 'bad name' refused (exit 1); duplicate gatev refused (exit 1) |
+| A3 | 1 | A | PASS | first login: TOTP enrolment + forced password change, OTP required on the 2nd login, wrong OTP refused, old password refused: ENROLLED ['CONFIGURE_TOTP', 'UPDATE_PASSWORD'] aud=krate-ui groups=['KRATE_VIEWERS'] exp=300 iss=https://localhost/identity/realms/krate |
+| B1 | 1 | B | PASS | claims contract: gatea → ENROLLED groups=['KRATE_ADMINS']; gaten (no group) → ENROLLED groups=None (no groups claim: nothing to map a role from) |
+| B2 | 1 | B | PASS | gatev: correct password+OTP accepted; wrong password refused on the login form with: REFUSED Invalid username or password. |
+| B3 | 1 | B | PASS | users disable (exit 0); login refused with: REFUSED Account is disabled, contact your administrator.; users enable (exit 0) |
+| B4 | 1 | B | PASS | direct password grant on krate-ui refused: HTTP 400 (standard flow only) |
+| B5 | 1 | B | PASS | after 5 rapid wrong passwords the account is temporarily locked (Keycloak's quick-login check locks after two rapid failures, later attempts are not counted): {"failedLoginNotBefore":1791678277,"numFailures":2,"numTemporaryLockouts":0,"disabled":true,"numSecondaryAuthFailures":0,"lastIPFailure":"172.19.0.1","lastFailure":1791678217333} |
+| B7 | 1 | B | PASS | a one-time code from the previous 30-second step is accepted (realm look-ahead window 1): {"result": "OK", "claims": {"iss": "https://localhost/identi |
+| B6 | 1 | B | PASS | reset-password sets a new temporary password (exit 0; shown once) |
+| A4 | 1 | A | PASS | old password refused after reset-password (REFUSED Invalid username or password.) |
+| J5 | 1 | J | PASS | journal lines of users add/reset-password carry no secret value: 2026-10-11T00:22:09Z users add ok gatev group=KRATE_VIEWERS |
+| C2 | 1 | C | PASS | after 'compose restart keycloak': 5 gate users still listed; identity up → No changes |
+| C3 | 1 | C | PASS | identity down + up: 5 users kept; gatea logs in with password+OTP (credentials preserved) |
+| H3 | 1 | H | PASS | fresh .env over an existing database: identity up exit=1 (identity database exists but .env lacks KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_CLI_CLIENT_SECRET); the stored DB password still works (nothing rotated) |
+| I1 | 1 | I | PASS | rotate KEYCLOAK_DB_PASSWORD: old rejected (psql: error: connection to server at "keycloak-db" (172.29.250.129), port 5432 failed: FATAL:  password authentication failed for user "keycloak"), new accepted, Keycloak ready again |
+| I2 | 1 | I | PASS | rotate KEYCLOAK_ADMIN_PASSWORD: old password refused by kcadm (exit 1), new one lists master users [admin ] |
+| I3 | 1 | I | PASS | rotate KEYCLOAK_CLI_CLIENT_SECRET: users list works, new secret authenticates (HTTP 200), identity up → No changes |
+| I5 | 1 | I | PASS | rotate --value with the database password's value: refused (exit 1) naming KEYCLOAK_DB_PASSWORD; .env and Keycloak unchanged (admin login still works) |
+| I4 | 1 | I | PASS | config set of a live identity secret refused with the rotate hint (exit 1) |
+| D7 | 1 | D | PASS | KRATE_BACKUP_PASSPHRASE of 5 characters refused (exit 1), no archive written |
+| D1 | 1 | D | PASS | identity backup: exit 0; mode=600 magic=krate-identity-backup/1; 276568 bytes |
+| D2 | 1 | D | PASS | restore while Keycloak runs refused (exit 1):   ✗ Keycloak is running; stop it first: krate identity down |
+| D3 | 1 | D | PASS | tampered archive (one bit flipped) refused before decryption: 'integrity check failed: the backup was modified or the passphrase is wrong' (exit 1); wrong passphrase refused the same way (exit 1) |
+| D4 | 1 | D | PASS | restore: exit 0; marker user gatem gone; the 5 users of the backup present (now 5); Keycloak verified |
+| D5 | 1 | D | PASS | restore reconciled .env: KEYCLOAK_CLI_CLIENT_SECRET back to the backup's value, KEYCLOAK_DB_PASSWORD (a database role) untouched; journal:  restore reconciled .env: KEYCLOAK_CLI_CLIENT_SECRET |
+| E1 | 1 | E | PASS | wrong DB password in .env: identity up exit=1; .env not regenerated (still the wrong value); the value appears in neither output nor journal; journal:  start failed keycloak not healthy within 180s |
+| E2 | 1 | E | PASS | server.key removed: identity up exit=1 (db-tls is incomplete; missing server); no new key generated |
+| E3 | 1 | E | PASS | wrong admin password: up exit=1 with recover-admin hint; recover-admin refused while running (exit 1); after down it recreates the admin (exit 0); master users [admin ] |
+| E4 | 1 | E | PASS | admin deleted in Keycloak (lost admin): up exit=1; recover-admin after down recreates it (exit 0); master users [admin ] |
+| E5 | 1 | E | PASS | volume exists but no master realm (failed first run): identity up detects it, bootstraps (temp-admin created and removed); master users [admin ] |
+| E6 | 1 | E | PASS | lock held by a live process: 'Another krate identity command is running (pid 258406)' (exit 1); after that process died: 'Removing the stale identity lock left by process 258406' and the command proceeds (exit 0) |
+| E8 | 1 | E | PASS | 'krate stop' while an identity command holds the lock and KEYCLOAK_ENABLED is still false: 'Another krate identity command is running (pid 259164)' (exit 1); identity services untouched [keycloak keycloak-db proxy ] |
+| E7 | 1 | E | PASS | two simultaneous mutating commands: refusals=1 created=1 (one refused and one created, or both serialised; never two half-made users) |
+| F5 | 1 | F | PASS | database stopped: ready=503 live=200 (readiness down, liveness up); identity status exit=1; after 60 s restarts=0 state=running health=healthy (no restart loop); database back → ready again and staying ready (3 consecutive status probes at least 3 s apart, first success after 12 s; exit 0) |
+| F6 | 1 | F | PASS | identity status after recovery exit=0: keycloak started yes, ready yes, live yes realm krate present KEYCLOAK_ENABLED true 2026-10-11T00:30:12Z down ok keycloak and keycloak-db stopped; volume kept |
+| C4 | 1 | C | PASS | renew-db-tls: notAfter=Nov 13 00:20:52 2027 GMT → notAfter=Nov 13 00:33:06 2027 GMT, chains to the CA, .prev discarded, journal ok, Keycloak ready |
+| C5 | 1 | C | PASS | injected restart failure: renew-db-tls exit=1, server.crt byte-identical to before (b069b2aa914fedf7), .prev consumed, journal 'rolled back'; database healthy on the old certificate (healthy) |
+| C6 | 1 | C | PASS | otpPolicyLookAheadWindow set to 0 in Keycloak; identity up (exit 0) reconciled it to 1; journal 'up reconciled realm policy' |
+| J6 | 1 | J | PASS | logrotate render names this journal: /opt/krate/epc/auth/identity-journal.log { rotate 12 maxage 400 copytruncate |
+| J7 | 1 | J | PASS | logrotate --install (exit 0) and 'logrotate -d' dry run accepted; the installed drop-in is removed again by the gate |
+| A5 | 1 | A | PASS | users list after the whole ladder: 2 gate users |
+| D6 | 1 | D | PASS | restore with KEYCLOAK_PUBLIC_URL=https://recovery.example.test/identity: exit 0; krate-ui redirect now [https://recovery.example.test/login/oauth2/code/keycloak]; journal 'restore reconciled krate-ui urls'; set back and identity up (exit 0) reconciles again |
+| X1 | 1 | X | PASS | 11 screenshots in /home/shamirkhannabil.guest/gate/receipt-epc-dfa5d051065055728412ad79d2251c568e71c046/screenshots (manifest.json has the captions and the asserted outcomes): STORY OK: 7 assertions over 11 screenshots |
+| Z1 | 1 | Z | PASS | 27 distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, 17 temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: 0 hits |
 
 ### KRaft, full gate on the development Mac (Phase 1 + screenshots + Phase 2)
 
