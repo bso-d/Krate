@@ -270,6 +270,24 @@ wait_status() { # wait until `identity status` exits 0 (max $1 s)
   local waited=0
   until "$KRATE" identity status >/dev/null 2>&1; do (( waited >= ${1:-180} )) && return 1; sleep 5; waited=$((waited+5)); done
 }
+# Ready and staying ready: Keycloak's readiness is its database connection pool, which recovers
+# connection by connection after the database returns (an UP probe can be followed by a DOWN
+# one a second later; seen once on the EPC VM). Recovery means $2 (default 3) consecutive
+# `identity status` successes at least 3 s apart within $1 s; STABLE_AFTER = seconds until the first of them.
+wait_status_stable() {
+  local need="${2:-3}" ok=0 waited=0 first=""
+  while :; do
+    if "$KRATE" identity status >/dev/null 2>&1; then
+      (( ok == 0 )) && first=$waited
+      ok=$((ok+1))
+    else
+      ok=0; first=""
+    fi
+    (( ok >= need )) && { STABLE_AFTER="${first:-0}"; return 0; }
+    (( waited >= ${1:-180} )) && return 1
+    sleep 3; waited=$((waited+3))
+  done
+}
 temp_password() { printf '%s\n' "$1" | awk '/Temporary password for/{getline; print $1; exit}'; }
 add_user() { # name [--viewer|--admin] → temp password in TEMP_PW
   cap "$KRATE" identity users add "$@" || return 1
@@ -569,12 +587,12 @@ EOF
   dbid="$(cid keycloak-db)"; kcid="$(cid keycloak)"; docker stop "$dbid" >/dev/null 2>&1; sleep 15
   codes="ready=$(kc_http 9000 /health/ready) live=$(kc_http 9000 /health/live)"; "$KRATE" identity status >/dev/null 2>&1; rc=$?
   sleep 45; ev="restarts=$(docker inspect -f '{{.RestartCount}}' "$kcid") state=$(docker inspect -f '{{.State.Status}}' "$kcid") health=$(docker inspect -f '{{.State.Health.Status}}' "$kcid")"
-  docker start "$dbid" >/dev/null 2>&1; wait_status 240; after=$?
-  [[ "$codes" == "ready=503 live=200" && $rc -ne 0 && "$ev" == restarts=0\ state=running* && $after -eq 0 ]]; st=$?; ok_if F5 1 F "$st" "database stopped: $codes (readiness down, liveness up); identity status exit=$rc; after 60 s $ev (no restart loop); database back → ready again (status exit $after)"
+  docker start "$dbid" >/dev/null 2>&1; STABLE_AFTER=""; wait_status_stable 240; after=$?
+  [[ "$codes" == "ready=503 live=200" && $rc -ne 0 && "$ev" == restarts=0\ state=running* && $after -eq 0 ]]; st=$?; ok_if F5 1 F "$st" "database stopped: $codes (readiness down, liveness up); identity status exit=$rc; after 60 s $ev (no restart loop); database back → ready again and staying ready (3 consecutive status probes at least 3 s apart, first success after ${STABLE_AFTER:-?} s; exit $after)"
   cap "$KRATE" identity status; st=$?; ev="$(printf '%s' "$CAP" | grep -E 'keycloak |realm|KEYCLOAK_ENABLED' | xargs)"; ok_if F6 1 F "$st" "identity status after recovery exit=$st: $ev"
   # renew-db-tls, with CA renewal path and rollback by fault injection
   before="$(openssl x509 -in "$TLS/server.crt" -noout -enddate)"; cap "$KRATE" identity renew-db-tls; rc=$?; after="$(openssl x509 -in "$TLS/server.crt" -noout -enddate)"
-  openssl verify -CAfile "$TLS/ca.crt" "$TLS/server.crt" >/dev/null 2>&1; ev=$?; wait_status 180
+  openssl verify -CAfile "$TLS/ca.crt" "$TLS/server.crt" >/dev/null 2>&1; ev=$?; wait_status_stable 180  # the database restarted: ready and staying ready (see F5)
   [[ $rc -eq 0 && "$before" != "$after" && $ev -eq 0 && ! -f "$TLS/server.key.prev" ]] && journal_has ' renew-db-tls ok '; st=$?; ok_if C4 1 C "$st" "renew-db-tls: $before → $after, chains to the CA, .prev discarded, journal ok, Keycloak ready"
   mkdir -p "$STATE/fakebin"; real_docker="$(command -v docker)"
   # shellcheck disable=SC2016  # the $1/$@ below are the fake binary's own, written literally

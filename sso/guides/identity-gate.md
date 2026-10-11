@@ -122,7 +122,7 @@ Every id is one row of the receipt.
 | F2 | `identity status` | exit 0 and one line per probe |
 | F3 | `/health/started`, `/health/ready`, `/health/live` on management port 9000 and the realm on 8080, each queried separately from inside the identity network | four distinct 200s |
 | F4 | authentication probe: `client_credentials` of `krate-cli` through the proxy | 200 (health and authentication are different probes) |
-| F5 | `docker stop keycloak-db`: readiness vs liveness, `identity status`, Keycloak's restart count after 60 s, recovery when the database returns | `ready=503 live=200`; status exit 1; `RestartCount` 0 and state `running`; ready again afterwards |
+| F5 | `docker stop keycloak-db`: readiness vs liveness, `identity status`, Keycloak's restart count after 60 s, recovery when the database returns | `ready=503 live=200`; status exit 1; `RestartCount` 0 and state `running`; ready again and staying ready afterwards: three consecutive `identity status` successes at least 3 s apart within 240 s (Keycloak's readiness is its connection pool, which recovers connection by connection; a single UP probe followed by a DOWN one was seen once on the EPC VM), the seconds until the first success in the evidence |
 | F6 | `identity status` after recovery | exit 0 (the command's own status, with its lines as evidence) |
 
 ### G: "Protect every relevant link: trusted browser-facing HTTPS and issuer URLs; explicitly trusted proxy headers; private management endpoints; database TLS with certificate and hostname verification. … audit and close reachable unauthenticated backing-service paths, including published monitoring endpoints."
