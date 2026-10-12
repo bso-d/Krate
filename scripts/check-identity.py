@@ -3344,12 +3344,22 @@ def check_prometheus_reload(checks):
     e(bodies[EDITIONS[0]] == bodies[EDITIONS[1]], 'kraft/epc parity: monitor_reload_prometheus must have the same body in both editions')
     if bash_binary() is None:
         return
-    # Behavioural proof with a stubbed monitor_compose: the four outcomes an operator can hit.
+    # Behavioural proof with a stubbed monitor_compose: the four outcomes an operator can hit,
+    # plus the two S2 edges that start from an already-rejected previous state. The `stale`
+    # file is the first poll's answer AFTER the SIGHUP: Prometheus can process the signal
+    # after that poll ran, so the poll still sees the BEFORE state — the race that made the
+    # pre-fix decision order report a good file as rejected.
     script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'monitor_prometheus_reload_state', 'monitor_reload_prometheus') + r'''
 monitor_compose() {
   case "$1" in
-    exec) [[ -f "$STATE/metrics" ]] || return 1; cat "$STATE/metrics" ;;
-    kill) if [[ -f "$STATE/after" ]]; then cp "$STATE/after" "$STATE/metrics"; else rm -f "$STATE/metrics"; fi ;;
+    exec)
+      if [[ -f "$STATE/killed" && -f "$STATE/stale" ]]; then
+        mv "$STATE/stale" "$STATE/stale.used"; cat "$STATE/stale.used"; return 0
+      fi
+      [[ -f "$STATE/metrics" ]] || return 1; cat "$STATE/metrics" ;;
+    kill)
+      touch "$STATE/killed"
+      if [[ -f "$STATE/after" ]]; then cp "$STATE/after" "$STATE/metrics"; else rm -f "$STATE/metrics"; fi ;;
   esac
 }
 sleep() { :; }
@@ -3357,22 +3367,35 @@ STATE="$1"
 monitor_reload_prometheus
 '''
     cases = (
-        ('a valid change', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(1, '1.7918145217e+09'),
+        ('a valid change', prometheus_metrics(1, '1.7918145079e+09'), None, prometheus_metrics(1, '1.7918145217e+09'),
          0, 'Prometheus reloaded its configuration and alert rules.'),
-        ('a rejected file', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(0, '1.7918145079e+09'),
+        ('a rejected file', prometheus_metrics(1, '1.7918145079e+09'), None, prometheus_metrics(0, '1.7918145079e+09'),
          1, 'rejected the configuration and keeps running with the previous one'),
-        ('no reload reported', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(1, '1.7918145079e+09'),
+        ('no reload reported', prometheus_metrics(1, '1.7918145079e+09'), None, prometheus_metrics(1, '1.7918145079e+09'),
          1, 'reported no reload after 20 polls'),
         # S2: the flag was already 0 from an earlier rejection, so a lingering 0 must not be
         # reported as a new rejection — the good reload moves the timestamp and sets it to 1.
-        ('a good reload after an earlier rejection', prometheus_metrics(0, '1.7918145079e+09'),
+        ('a good reload after an earlier rejection', prometheus_metrics(0, '1.7918145079e+09'), None,
          prometheus_metrics(1, '1.7918145217e+09'), 0, 'Prometheus reloaded its configuration and alert rules.'),
+        # The S2 race itself: the first poll after the SIGHUP still reads the stale rejected
+        # state; the pre-fix order (flag before the timestamp comparison) died with
+        # "rejected" here, on a good file.
+        ('a good reload whose first poll still sees the stale rejected state', prometheus_metrics(0, '1.7918145079e+09'),
+         prometheus_metrics(0, '1.7918145079e+09'), prometheus_metrics(1, '1.7918145217e+09'),
+         0, 'Prometheus reloaded its configuration and alert rules.'),
+        # A file rejected twice in a row never moves the success timestamp, so the rejected
+        # verdict comes at the end of the polling budget, from the last observed flag.
+        ('a file rejected again after an earlier rejection', prometheus_metrics(0, '1.7918145079e+09'), None,
+         prometheus_metrics(0, '1.7918145079e+09'),
+         1, 'rejected the configuration and keeps running with the previous one'),
     )
-    for label, before, after, code, needle in cases:
+    for label, before, stale, after, code, needle in cases:
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)
             (state / 'metrics').write_text(before)
             (state / 'after').write_text(after)
+            if stale is not None:
+                (state / 'stale').write_text(stale)
             result = run_bash(script, state)
             e(result.returncode == code, f'monitor reload with {label} must exit {code}; got {result.returncode} ({result.stderr.strip()[:120]})')
             e(needle in result.stdout + result.stderr, f'monitor reload with {label} must report {needle!r}; got {(result.stdout + result.stderr).strip()[:160]!r}')
@@ -3546,8 +3569,9 @@ def check_grafana_front(checks):
         e('set $grafana http://krate-grafana:3000;' in nginx,
           f'{edition}/nginx.conf: must resolve Grafana at request time through its kafka-network alias krate-grafana')
         redirect = blocks.get('= /grafana')
-        e(redirect is not None and 'return 301 /grafana/;' in redirect,
-          f'{edition}/nginx.conf: /grafana must redirect to /grafana/ (Grafana serves from the sub-path)')
+        e(redirect is not None and 'return 301 https://$http_host/grafana/;' in redirect,
+          f'{edition}/nginx.conf: /grafana must redirect to an absolute https://$http_host/grafana/ (a relative 301 '
+          f'would be absolutized with the listen port and drop a non-443 public port)')
         login, app = blocks.get('^~ /grafana/login'), blocks.get('^~ /grafana/')
         for name, body in (('/grafana/login', login), ('/grafana/', app)):
             if body is None:  # an explicit test: checks.expect does not narrow the type
@@ -3555,8 +3579,10 @@ def check_grafana_front(checks):
                 continue
             e('proxy_pass $grafana;' in body and 'access_log /var/log/nginx/access.log krate_identity;' in body,
               f'{edition}/nginx.conf: {name} must proxy to Grafana and log without query strings (the OAuth callback carries a one-time code)')
-            e("worker-src 'self' blob:" in body,
-              f'{edition}/nginx.conf: {name} must extend the CSP with worker-src (Grafana\'s Monaco editor starts blob: workers)')
+            csp = [line for line in body.splitlines() if 'add_header Content-Security-Policy' in line]
+            e(len(csp) == 1 and "worker-src 'self' blob:" in csp[0],
+              f'{edition}/nginx.conf: {name} must extend its Content-Security-Policy header with worker-src '
+              f'(Grafana\'s Monaco editor starts blob: workers); asserting on the block text alone is satisfied by a comment')
             for header in ('X-Frame-Options SAMEORIGIN', 'X-Content-Type-Options nosniff', 'Referrer-Policy no-referrer',
                            'Permissions-Policy', 'Content-Security-Policy'):
                 e(f'add_header {header}' in body,

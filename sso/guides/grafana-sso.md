@@ -27,8 +27,9 @@ Two things keep working unchanged: the provisioned dashboards and their uid bind
 
 ## Prerequisites
 
-1. The cluster and the identity stack run: `./krate identity up`, `./krate auth apply`,
-   `./krate start`, `./krate monitor up` (Grafana still local).
+1. The cluster and the identity stack run, in this order: `./krate identity up`,
+   `./krate start`, `./krate auth apply`, `./krate monitor up` (Grafana still local).
+   `auth apply` needs the running cluster, so it comes after `start`.
 2. `KEYCLOAK_PUBLIC_URL` names a host that resolves to this installation for browsers
    **and** from inside containers — not `localhost`, `127.0.0.1` or `[::1]`: inside a
    container, `localhost` is the container. `krate monitor realm` and `krate monitor up`
