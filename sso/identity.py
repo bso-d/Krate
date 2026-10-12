@@ -1370,10 +1370,10 @@ def cmd_grafana_client(args):
         # (ClientResource.java:210-217 at 26.8.0), and a masked readback is treated as equal.
         client_verdict(grafana_client(origin, args.with_secret), json.load(sys.stdin))
     else:
-        # codeql[py/clear-text-logging-sensitive-data] This stdout is a pipe into kcadm's standard
         # input (KCADM_STDIN=1 kcadm … -f -), never a terminal, log or command line: it is the
         # mechanism that keeps the secret off argv, which the gate proves by sampling ps.
         # Same pattern as `broker provider --with-secret` on main.
+        # codeql[py/clear-text-logging-sensitive-data]
         sys.stdout.write(render(grafana_client(origin, args.with_secret)))
     return 0
 
@@ -1388,9 +1388,9 @@ def cmd_grafana_ini(args):
         write_if_changed(args.output, text, 0o644)
         print(args.output)
     else:
-        # codeql[py/clear-text-logging-sensitive-data] realm.ini carries no secret value: the
         # client secret is a $__file{} reference to the rendered file, and assert_redacted above
         # has already refused to emit any .env secret. The CLI redirects this into the file.
+        # codeql[py/clear-text-logging-sensitive-data]
         sys.stdout.write(text)
     return 0
 
@@ -1408,16 +1408,16 @@ def cmd_perses_clients(args):
         client_verdict(perses_rep(args.name, origin, port), json.load(sys.stdin))
         return 0
     if args.client:
-        # codeql[py/clear-text-logging-sensitive-data] This stdout is a pipe into kcadm's standard
         # input (KCADM_STDIN=1 kcadm … -f -), never a terminal, log or command line: it is the
         # mechanism that keeps the secret off argv, which the gate proves by sampling ps.
         # Same pattern as `broker provider --with-secret` on main.
+        # codeql[py/clear-text-logging-sensitive-data]
         sys.stdout.write(render(perses_rep(args.client, origin, port, args.with_secret)))
     else:
-        # codeql[py/clear-text-logging-sensitive-data] This stdout is a pipe into kcadm's standard
         # input (KCADM_STDIN=1 kcadm … -f -), never a terminal, log or command line: it is the
         # mechanism that keeps the secret off argv, which the gate proves by sampling ps.
         # Same pattern as `broker provider --with-secret` on main.
+        # codeql[py/clear-text-logging-sensitive-data]
         sys.stdout.write(render(perses_clients(origin, port, args.with_secret)))
     return 0
 
