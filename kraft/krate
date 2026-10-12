@@ -3133,6 +3133,46 @@ monitor_logins() {
   fi
 }
 
+# Prometheus's own verdict on its last configuration reload, as "<timestamp> <successful>"
+# read over one metrics request inside the container (the host port is loopback-only).
+# Exits non-zero when either metric is missing, which is how a stopped or unreachable
+# Prometheus is told from a rejected configuration.
+monitor_prometheus_reload_state() {
+  monitor_compose exec -T prometheus wget -q -O - http://127.0.0.1:9090/metrics 2>/dev/null | awk '
+    $1 == "prometheus_config_last_reload_success_timestamp_seconds" { timestamp = $2 }
+    $1 == "prometheus_config_last_reload_successful" { successful = $2 }
+    END { if (timestamp == "" || successful == "") exit 1; printf "%s %s\n", timestamp, successful }'
+}
+
+# Reload Prometheus and prove the result. The lifecycle API is off, so the reload is a
+# SIGHUP; a signal always "succeeds", so the answer comes from the reload metrics: a
+# rejected file leaves prometheus_config_last_reload_successful at 0 with the previous
+# configuration still in use (harness/phase4/lab4 Q4).
+monitor_reload_prometheus() {
+  local before state timestamp successful waited=0
+  before="$(monitor_prometheus_reload_state)" \
+    || die "Prometheus did not answer on http://127.0.0.1:9090/metrics — is the stack up? (krate monitor status)"
+  monitor_compose kill -s SIGHUP prometheus
+  while :; do
+    if state="$(monitor_prometheus_reload_state)"; then
+      timestamp="${state%% *}"
+      successful="${state##* }"
+      if [[ "${successful%%.*}" == 0 ]]; then
+        die "Prometheus rejected the configuration and keeps running with the previous one. Fix monitoring/prometheus/prometheus.yml (or alerts.yml), then: krate monitor reload. The error: krate monitor logs prometheus"
+      fi
+      if [[ "$timestamp" != "${before%% *}" ]]; then
+        ok "Prometheus reloaded its configuration and alert rules."
+        return 0
+      fi
+    fi
+    sleep 0.5
+    waited=$((waited + 1))
+    if [[ "$waited" -ge 20 ]]; then
+      die "Prometheus reported no reload within 10 s — is it running and healthy? (krate monitor status, krate monitor logs prometheus)"
+    fi
+  done
+}
+
 cmd_monitor() {
   local sub="${1:-}"; shift || true
   case "$sub" in
@@ -3175,13 +3215,10 @@ cmd_monitor() {
     status)  require_compose; monitor_compose ps ;;
     logs)    require_compose; monitor_compose logs --tail 100 "$@" ;;
     reload)
-      # Re-read alert rules without restarting Prometheus.
+      # Re-read the configuration and alert rules without restarting Prometheus
+      # (SIGHUP, then Prometheus's own reload metrics: the lifecycle API is off).
       require_compose
-      if monitor_compose exec -T prometheus wget -q -O /dev/null --post-data='' http://127.0.0.1:9090/-/reload; then
-        ok "Prometheus reloaded its rules."
-      else
-        die "Reload failed — is the stack up?"
-      fi
+      monitor_reload_prometheus
       ;;
     ui) monitor_logins ;;
     *)

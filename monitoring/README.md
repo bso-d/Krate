@@ -23,6 +23,14 @@ their own, so they are published on the host's loopback interface only
 `0.0.0.0` to publish them on every interface. Grafana and Perses reach them
 inside the Docker network either way.
 
+`prometheus/prometheus.yml` and `prometheus/alerts.yml` are bind-mounted as
+single files, so edit them in place and run `./krate monitor reload`. It sends
+Prometheus `SIGHUP` — its lifecycle API is off, so nothing on the network can
+reload or stop it — and then reads Prometheus's own reload metrics: the command
+fails when Prometheus rejected the file, and Prometheus keeps running with the
+previous configuration in that case (`./krate monitor logs prometheus` shows
+why).
+
 ## Perses
 
 Perses v0.54.0 is reachable only through the `perses-gateway` nginx service on

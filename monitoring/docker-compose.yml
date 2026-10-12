@@ -108,7 +108,10 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=${PROM_RETENTION:-15d}
-      - --web.enable-lifecycle
+      # No --web.enable-lifecycle: with it any peer on the monitoring network — and a
+      # Grafana Viewer through a Prometheus datasource's resources route — could reload
+      # and stop Prometheus (POST /-/reload, POST /-/quit). `krate monitor reload` sends
+      # SIGHUP instead; the entrypoint execs Prometheus, so the signal reaches PID 1.
     networks: [monitoring, perses]
     depends_on: [kafka-exporter]
     healthcheck:

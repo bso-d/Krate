@@ -3294,9 +3294,81 @@ if address="$(identity_email_address "$1")"; then echo "ok $address"; else echo 
             e(result.stdout.strip() == expected, f'identity_email_address {address!r} must give {expected}; got {result.stdout.strip()!r}')
 
 
+def prometheus_metrics(successful, timestamp):
+    """A Prometheus exposition body with the two configuration-reload metrics."""
+    return ('# TYPE prometheus_config_last_reload_successful gauge\n'
+            f'prometheus_config_last_reload_successful {successful}\n'
+            '# TYPE prometheus_config_last_reload_success_timestamp_seconds gauge\n'
+            f'prometheus_config_last_reload_success_timestamp_seconds {timestamp}\n')
+
+
+def check_prometheus_reload(checks):
+    """Phase 4 commit 2: the lifecycle API is off and `monitor reload` proves its result from Prometheus's own metrics."""
+    e = checks.expect
+    # The rendered command, not the file text: the service's comment explains why the flag is gone.
+    result = subprocess.run(['docker', 'compose', '--env-file', str(ROOT / 'monitoring/.env.template'),
+                             '-f', str(ROOT / 'monitoring/docker-compose.yml'), 'config', '--format', 'json'],
+                            cwd=ROOT, text=True, capture_output=True)
+    if e(result.returncode == 0, 'monitoring: Compose rendering from the template failed'):
+        command = [str(part) for part in (json.loads(result.stdout)['services']['prometheus'].get('command') or [])]
+        e(not any(flag in part for part in command for flag in ('enable-lifecycle', 'enable-admin-api', 'enable-remote-write-receiver')),
+          f'monitoring/prometheus: the lifecycle API, the admin API and the remote-write receiver must stay off (a Grafana Viewer reached '
+          f'reload and quit through a datasource); got {command}')
+    bodies = {}
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        body = function_body(cli, 'monitor_reload_prometheus')
+        bodies[edition] = body
+        e('--post-data' not in cli, f'{edition}/krate: no HTTP reload may be left (the lifecycle API is off)')
+        e('monitor_compose kill -s SIGHUP prometheus' in body, f'{edition}/krate: the reload must send SIGHUP to the prometheus service')
+        state = function_body(cli, 'monitor_prometheus_reload_state')
+        e('prometheus_config_last_reload_success_timestamp_seconds' in state and 'prometheus_config_last_reload_successful' in state
+          and 'http://127.0.0.1:9090/metrics' in state,
+          f'{edition}/krate: the reload must read both reload metrics from Prometheus itself')
+        e('rejected the configuration and keeps running with the previous one' in body,
+          f'{edition}/krate: a rejected configuration must be reported as such, not as a timeout')
+        e('monitor_reload_prometheus' in function_body(cli, 'cmd_monitor'), f'{edition}/krate: cmd_monitor reload must call monitor_reload_prometheus')
+    e(bodies[EDITIONS[0]] == bodies[EDITIONS[1]], 'kraft/epc parity: monitor_reload_prometheus must have the same body in both editions')
+    if bash_binary() is None:
+        return
+    # Behavioural proof with a stubbed monitor_compose: the four outcomes an operator can hit.
+    script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'monitor_prometheus_reload_state', 'monitor_reload_prometheus') + r'''
+monitor_compose() {
+  case "$1" in
+    exec) [[ -f "$STATE/metrics" ]] || return 1; cat "$STATE/metrics" ;;
+    kill) if [[ -f "$STATE/after" ]]; then cp "$STATE/after" "$STATE/metrics"; else rm -f "$STATE/metrics"; fi ;;
+  esac
+}
+sleep() { :; }
+STATE="$1"
+monitor_reload_prometheus
+'''
+    cases = (
+        ('a valid change', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(1, '1.7918145217e+09'),
+         0, 'Prometheus reloaded its configuration and alert rules.'),
+        ('a rejected file', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(0, '1.7918145079e+09'),
+         1, 'rejected the configuration and keeps running with the previous one'),
+        ('no reload reported', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(1, '1.7918145079e+09'),
+         1, 'reported no reload within 10 s'),
+    )
+    for label, before, after, code, needle in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / 'metrics').write_text(before)
+            (state / 'after').write_text(after)
+            result = run_bash(script, state)
+            e(result.returncode == code, f'monitor reload with {label} must exit {code}; got {result.returncode} ({result.stderr.strip()[:120]})')
+            e(needle in result.stdout + result.stderr, f'monitor reload with {label} must report {needle!r}; got {(result.stdout + result.stderr).strip()[:160]!r}')
+    with tempfile.TemporaryDirectory() as tmp:  # Prometheus not answering at all
+        result = run_bash(script, Path(tmp))
+        e(result.returncode == 1 and 'did not answer' in result.stderr,
+          f'monitor reload without Prometheus must say it did not answer; got {result.returncode} {result.stderr.strip()[:120]!r}')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
+                  check_prometheus_reload,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
@@ -3314,7 +3386,8 @@ def main():
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
           'runtime.yml incl. refusals), configure-dual, stub_idp.sh down, proxy environment and edge rules, release permissions, RPM dependency '
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
-          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule.')
+          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
+          'Prometheus lifecycle off and the SIGHUP reload result.')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
         print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0
