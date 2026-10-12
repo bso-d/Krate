@@ -503,7 +503,9 @@ file `auth/keycloak/krate-realm.json` still must not define
 `identityProviders`: the realm plan is local-only in both modes.
 
 A plan file an earlier Krate wrote is refused by the field that differs (the
-message names the field and the remedy): remove the plan file, rerun
+message names the field and the remedy): remove both generated files
+(`auth/ui/runtime.yml` and `auth/keycloak/pingfederate-idp.json` —
+`auth configure` refuses to replace either one), rerun
 `./krate auth configure /path/to/site.json`, then `./krate auth apply`.
 
 `auth apply` then takes the identity lock, records the truststore digest
@@ -591,17 +593,18 @@ The realm flows the plan states:
 - Keycloak trusts the e-mail PingFederate asserts (`trustEmail` `true` in the
   plan): at every brokered sign-in the realm user's e-mail verification is set
   from the `email_verified` claim PingFederate asserts — Keycloak reads it from
-  the ID token and re-reads it from the userinfo response when it fetches one,
-  where a claim PingFederate did not send parses as **false**
-  (`OIDCIdentityProvider.extractIdentity`, 26.8.0:599-606). **PingFederate must
-  therefore assert `email_verified: true`**, or brokered users stay unverified
-  and the Phase 4 UIs refuse them; only when neither response carries the claim
-  does the fallback apply, which marks a new user or a changed address verified
-  and leaves an existing user's flag as it was
+  the ID token and re-reads it from the userinfo response whenever that
+  response returns an `email`, where a claim PingFederate did not send parses
+  as **false** (`OIDCIdentityProvider.extractIdentity`, 26.8.0:599-606).
+  **PingFederate must therefore assert `email_verified: true`**, or brokered
+  users stay unverified and the Phase 4 UIs refuse them; only when the claim
+  reaches neither response — the ID token lacks it and the userinfo response
+  returns no e-mail — does the fallback apply, which marks a new user or a
+  changed address verified and leaves an existing user's flag as it was
   (`AbstractIdentityProvider.setEmailVerified`, 26.8.0:214-230). With the flag
-  false every brokered user is unverified and the
-  Phase 4 UIs refuse the sign-in (Perses' oauth2-proxy answers `500` "email in
-  id_token (…) isn't verified"). Trusting the address is not account linking:
+  false every brokered user is unverified and the Phase 4 UIs refuse the
+  sign-in (Perses' oauth2-proxy answers `500` "email in id_token (…) isn't
+  verified"). Trusting the address is not account linking:
   the first-login flow stays Create User If Unique (D2), so a clash with a
   local user is still an error page. A user brokered before this change keeps
   its unverified flag until a sign-in in which PingFederate asserts a verified
