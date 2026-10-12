@@ -157,6 +157,6 @@ above.
 | "IdP did not return a role attribute" | the user is in neither realm group: `./krate identity users groups <name>`, then add them (`role_attribute_strict = true` refuses a sign-in with no role) |
 | `loginError: InternalError` and `/userinfo/emails` 404 in Grafana's log | the realm user has no e-mail address: `./krate identity users set-email <name> <address>` |
 | "User sync failed" | a disabled local Grafana user still holds that e-mail: `./krate monitor grafana-user retire <login>` |
-| `krate monitor up` exits non-zero naming `idp-wait` | the realm did not answer within 120 s: start Keycloak (`./krate identity up`), then `./krate monitor up` again — the consumers were created, not started, and are not restart-looping |
+| `krate monitor up` exits non-zero naming `idp-wait` | the realm did not answer within 120 s: start Keycloak (`./krate identity up`), then `./krate monitor up` again — the consumers were created, not started, and are not restart-looping. During such an outage `monitor up` also warns that it skipped the client reconcile (and a due seed-token renewal) and does both on a later run |
 | `krate monitor up` refuses with "run krate monitor realm first" | `GRAFANA_AUTH_CONFIG=realm.ini` was set by hand on an installation that never ran the switch: run `./krate monitor realm` (or roll back) |
 | Alerts stopped provisioning | the seed token expired or its file is missing: `./krate monitor up` renews it; `ls -l monitoring/auth/secrets/` and `./krate monitor logs` show the rest |

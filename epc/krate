@@ -3327,11 +3327,30 @@ grafana_admin() {
 # The secret reaches Keycloak through identity.py's environment and kcadm's standard
 # input, never as an argument. Scopes are compared and reported, not converged: a
 # PUT of the representation never changes a client's scopes.
+identity_keycloak_running() {
+  local cid
+  cid="$(identity_container keycloak)" || return 1
+  [[ -n "$cid" && "$(container_status "$cid")" == running ]]
+}
+
 identity_reconcile_grafana_client() {
-  local origin="$1" sso id verdict
+  local origin="$1" optional="${2:-}" sso id verdict
   sso="$(sso_dir)"
-  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" \
-    || die "Keycloak refused the master admin login. Check: krate identity status"
+  if [[ "$optional" == optional ]]; then
+    # Called from `monitor up`, which must reach Compose even during a Keycloak outage:
+    # idp-wait is what names that failure (row U13), not this login. kcadm_login itself
+    # dies when the container is stopped, so reachability is checked first and a refused
+    # login is a warning; the next `monitor up` reconciles the client.
+    if ! identity_keycloak_running; then
+      warn "Keycloak is not running: the krate-grafana client is not reconciled now (a later krate monitor up does it)"
+      return 0
+    fi
+    kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" \
+      || { warn "Keycloak did not accept the master admin login: the krate-grafana client is not reconciled now (a later krate monitor up does it)"; return 0; }
+  else
+    kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" \
+      || die "Keycloak refused the master admin login. Check: krate identity status"
+  fi
   id="$(kcadm_client_id "$IDENTITY_REALM" krate-grafana)" || die "Keycloak query failed"
   if [[ -z "$id" ]]; then
     GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
@@ -3426,9 +3445,13 @@ monitor_grafana_seed_renew() {
   [[ "$expires" =~ ^[0-9]+$ && "$old_id" =~ ^[0-9]+$ ]] || return 0
   [[ $((expires - now)) -lt 2592000 ]] || return 0
   info "Renewing the Grafana seed token (it expires in $(( (expires - now) / 86400 )) days)"
-  account="$(grafana_admin_token service-account --name krate-seed --role Admin \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')" \
-    || die "Grafana refused the krate-seed service account while renewing its token"
+  # Grafana may be created but not started (idp-wait holds it during an outage), so a
+  # renewal that cannot run is a warning: the current token still has up to 30 days.
+  if ! account="$(grafana_admin_token service-account --name krate-seed --role Admin \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')"; then
+    warn "Grafana did not answer while renewing the seed token, which still has $(( (expires - now) / 86400 )) days; a later krate monitor up renews it"
+    return 0
+  fi
   name="$(grafana_admin_token token-create --account-id "$account" --days 90 | monitor_write_seed_token)" \
     || die "Grafana refused the successor seed token; the previous one is still in place"
   grafana_admin_token token-delete --account-id "$account" --token-id "$old_id" >/dev/null \
@@ -3452,7 +3475,7 @@ monitor_realm_refresh() {
     chmod 644 "$ini"
     ok "Updated monitoring/auth/realm.ini"
   fi
-  identity_reconcile_grafana_client "$origin"
+  identity_reconcile_grafana_client "$origin" optional
   monitor_grafana_seed_renew
 }
 

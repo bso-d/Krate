@@ -3625,7 +3625,20 @@ def check_grafana_realm_cli(checks):
         renew = function_body(cli, 'monitor_grafana_seed_renew')
         e('2592000' in renew and 'token-delete' in renew and renew.index('token-create') < renew.index('token-delete'),
           f'{edition}/krate: the renewal must create the successor before deleting the old token id, within 30 days of expiry')
+        e('did not answer while renewing the seed token' in renew
+          and renew.index('did not answer while renewing') < renew.index('token-create'),
+          f'{edition}/krate: a renewal that cannot reach Grafana must warn and continue, not die (Grafana may be held by idp-wait)')
+        # Row U13: during a Keycloak outage `monitor up` must still reach Compose, so idp-wait
+        # names the failure. kcadm_login dies when the container is stopped, so the optional
+        # reconcile tests reachability first and downgrades a refused login to a warning.
+        e('identity_reconcile_grafana_client "$origin" optional' in function_body(cli, 'monitor_realm_refresh'),
+          f'{edition}/krate: monitor_realm_refresh must reconcile optionally, so an outage still reaches Compose')
+        reconcile = function_body(cli, 'identity_reconcile_grafana_client')
+        e('if ! identity_keycloak_running; then' in reconcile
+          and reconcile.index('if ! identity_keycloak_running; then') < reconcile.index('kcadm_login master user'),
+          f'{edition}/krate: the optional reconcile must test reachability before kcadm_login, which dies when Keycloak is stopped')
     for name in ('refuse_loopback_public_url', 'grafana_admin', 'grafana_admin_token', 'identity_reconcile_grafana_client',
+                 'identity_keycloak_running',
                  'monitor_write_seed_token', 'monitor_grafana_seed_token', 'monitor_grafana_seed_renew',
                  'monitor_realm_refresh', 'grafana_list_collisions', 'monitor_compose', 'monitor_prepare'):
         first, second = (function_body((ROOT / edition / 'krate').read_text(), name) for edition in EDITIONS)
