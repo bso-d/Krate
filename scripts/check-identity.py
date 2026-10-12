@@ -3220,12 +3220,87 @@ def check_install_lock(checks):
 
 
 
+# Phase 4: every function the programme adds to the two CLIs must have the same body in both
+# (the files differ only in the known edition hunks, which check_parity enforces separately).
+P4_PARITY_FUNCTIONS = ('identity_email_address', 'identity_realm_ui', 'cmd_identity_users')
+
+
+def check_identity_users(checks):
+    """Phase 4 commit 1: `identity users logout` and `set-email`, the e-mail a realm UI needs, CLI parity."""
+    e = checks.expect
+    bodies = {}
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        users = function_body(cli, 'cmd_identity_users')
+        bodies[edition] = users
+        e('krate identity users {enable|disable|reset-password|groups|logout} <username>' in cli
+          and 'krate identity users set-email <username> <address>' in cli,
+          f'{edition}/krate: the users usage must list logout and set-email')
+        e('identity users {enable|disable|reset-password|groups|logout} U' in cli and 'identity users set-email U A' in cli,
+          f'{edition}/krate: the help must list the new users actions')
+        e('kcadm -- create "users/$uid/logout" -r "$IDENTITY_REALM"' in users,
+          f'{edition}/krate: users logout must create the user\'s logout resource through the kcadm helper')
+        logout_line = next((line for line in cli.splitlines() if 'users/$uid/logout' in line), '')
+        e(logout_line and re.search(r'\s-n(\s|$)', logout_line) is None,
+          f'{edition}/krate: users logout must not pass -n (kcadm rejects it on the logout resource, rc 2)')
+        e('identity_journal "users logout" ok "$user"' in users and 'identity_journal "users set-email" ok "$user"' in users,
+          f'{edition}/krate: both new actions must write a journal line')
+        e('kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s "email=$email" -s emailVerified=true' in users,
+          f'{edition}/krate: users set-email must set the address and mark it verified')
+        e('-s "email=$email" -s emailVerified=true >/dev/null' in users,
+          f'{edition}/krate: users add --email must create the user with a verified address (a realm UI refuses an unverified one)')
+        e('if [[ "$action" == add ]] && identity_realm_ui && [[ -z "$email" ]]' in users
+          and users.index('identity_realm_ui') < users.index('require_compose'),
+          f'{edition}/krate: users add must refuse a missing --email while a realm UI is on, before it touches anything')
+        realm_ui = function_body(cli, 'identity_realm_ui')
+        e('GRAFANA_AUTH_CONFIG local.ini)" == realm.ini' in realm_ui and 'PERSES_IDP)" == krate' in realm_ui
+          and 'env_value_file "$env_file"' in realm_ui and 'MONITOR_DIR/.env' in realm_ui,
+          f'{edition}/krate: identity_realm_ui must read both realm-mode keys from monitoring/.env')
+    e(bodies[EDITIONS[0]] == bodies[EDITIONS[1]], 'kraft/epc parity: cmd_identity_users must have the same body in both editions')
+    for name in P4_PARITY_FUNCTIONS:
+        first, second = (function_body((ROOT / edition / 'krate').read_text(), name) for edition in EDITIONS)
+        e(first == second, f'kraft/epc parity: {name} must have the same body in both editions')
+    if bash_binary() is None:
+        return
+    # Behavioural proof of the two new helpers (extracted, run against a temporary monitoring/.env).
+    realm_script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value_file', 'identity_realm_ui') + r'''
+MONITOR_DIR="$1"
+if identity_realm_ui; then echo realm; else echo local; fi
+'''
+    mail_script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'identity_email_address') + r'''
+if address="$(identity_email_address "$1")"; then echo "ok $address"; else echo refused; fi
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        monitor = Path(tmp)
+        for label, content, expected in (
+                ('no monitoring/.env', None, 'local'),
+                ('Grafana local', 'GRAFANA_AUTH_CONFIG=local.ini\n', 'local'),
+                ('Grafana on the realm', 'GRAFANA_AUTH_CONFIG=realm.ini\n', 'realm'),
+                ('Grafana realm.ini quoted', 'GRAFANA_AUTH_CONFIG="realm.ini"\n', 'realm'),
+                ('Perses on the realm', 'PERSES_IDP=krate\nPERSES_AUTH_MODE=native\n', 'realm'),
+                ('Perses rolled back', 'PERSES_IDP=\nPERSES_AUTH_MODE=local\n', 'local'),
+                ('Perses native with a company IdP', 'PERSES_AUTH_MODE=native\nPERSES_IDP=\n', 'local'),
+                ('both UIs local', 'GRAFANA_AUTH_CONFIG=local.ini\nPERSES_IDP=\n', 'local')):
+            if content is None:
+                (monitor / '.env').unlink(missing_ok=True)
+            else:
+                (monitor / '.env').write_text(content)
+            result = run_bash(realm_script, monitor)
+            e(result.stdout.strip() == expected,
+              f'identity_realm_ui with {label} must report {expected}; got {result.stdout.strip()!r} {result.stderr.strip()[:120]}')
+        for address, expected in (('jane@example.test', 'ok jane@example.test'), ('jane', 'refused'),
+                                  ('a b@example.test', 'refused'), ('', 'refused'), ('a@b c', 'refused')):
+            result = run_bash(mail_script, address)
+            e(result.stdout.strip() == expected, f'identity_email_address {address!r} must give {expected}; got {result.stdout.strip()!r}')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
-                  check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_deploy_release, check_rpm_install, check_gen_cert_ip,
+                  check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
+                  check_deploy_release, check_rpm_install, check_gen_cert_ip,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
                   check_broker_apply, check_truststore_env, check_broker_docs):
         try:
@@ -3239,7 +3314,7 @@ def main():
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
           'runtime.yml incl. refusals), configure-dual, stub_idp.sh down, proxy environment and edge rules, release permissions, RPM dependency '
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
-          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs.')
+          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule.')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
         print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0

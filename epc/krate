@@ -1926,7 +1926,28 @@ identity_username() {
 identity_users_usage() {
   die "Usage: krate identity users list
        krate identity users add <username> [--admin|--viewer] [--email <address>]
-       krate identity users {enable|disable|reset-password|groups} <username>"
+       krate identity users {enable|disable|reset-password|groups|logout} <username>
+       krate identity users set-email <username> <address>"
+}
+
+# The e-mail address the CLI accepts: one @ and no whitespace (Keycloak checks the
+# rest). Shared by `users add --email` and `users set-email`.
+identity_email_address() {
+  local address="${1:-}"
+  [[ "$address" == *@* && "$address" != *[[:space:]]* ]] || return 1
+  printf '%s' "$address"
+}
+
+# True while a monitoring UI signs people in through the Krate realm: Grafana with
+# GRAFANA_AUTH_CONFIG=realm.ini, Perses with PERSES_IDP=krate. Such a UI needs the
+# user's address — Grafana reads it from userinfo and refuses a sign-in without it,
+# Perses' oauth2-proxy answers 500 "email in id_token (…) isn't verified" — so
+# `users add` requires --email and marks the address verified.
+identity_realm_ui() {
+  local env_file="$MONITOR_DIR/.env"
+  [[ "$(env_value_file "$env_file" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]] && return 0
+  [[ "$(env_value_file "$env_file" PERSES_IDP)" == krate ]] && return 0
+  return 1
 }
 
 # A user's temporary password: generated, shown once, must be changed at the
@@ -1954,19 +1975,27 @@ cmd_identity_users() {
           --admin)  group="$(env_value KEYCLOAK_ADMIN_GROUP)"; group="${group:-KRATE_ADMINS}"; shift ;;
           --viewer) group="$(env_value KEYCLOAK_VIEWER_GROUP)"; group="${group:-KRATE_VIEWERS}"; shift ;;
           --email)
-            email="${2:-}"
-            [[ "$email" == *@* && "$email" != *[[:space:]]* ]] || die "--email needs an address"
+            email="$(identity_email_address "${2:-}")" || die "--email needs an address"
             shift 2 ;;
           *) identity_users_usage ;;
         esac
       done
       ;;
-    enable|disable|reset-password|groups)
+    enable|disable|reset-password|groups|logout)
       [[ $# -eq 1 ]] || identity_users_usage
       user="$(identity_username "$1")"
       ;;
+    set-email)
+      [[ $# -eq 2 ]] || identity_users_usage
+      user="$(identity_username "$1")"
+      email="$(identity_email_address "$2")" || die "set-email needs an address"
+      ;;
     *) identity_users_usage ;;
   esac
+  # A monitoring UI on the realm needs the user's address, so it is not optional then.
+  if [[ "$action" == add ]] && identity_realm_ui && [[ -z "$email" ]]; then
+    die "--email is required while a monitoring UI signs in through the Krate realm (GRAFANA_AUTH_CONFIG=realm.ini or PERSES_IDP=krate): Grafana reads the address from userinfo and Perses refuses a user without one"
+  fi
   require_compose; require_compose_file; require_env
   [[ "$action" == list || "$action" == groups ]] || identity_lock
   kcadm_login "$IDENTITY_REALM" client krate-cli "$(env_value KEYCLOAK_CLI_CLIENT_SECRET)" \
@@ -1991,7 +2020,9 @@ cmd_identity_users() {
         [[ -n "$gid" ]] || die "Group $group does not exist in realm $IDENTITY_REALM (KEYCLOAK_VIEWER_GROUP/KEYCLOAK_ADMIN_GROUP changed after the realm was created? See the guide: rename it in Keycloak, or set .env back)"
       fi
       if [[ -n "$email" ]]; then
-        kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true -s "email=$email" >/dev/null
+        # Verified because the operator typed the address: a realm UI refuses an
+        # unverified one (oauth2-proxy: 500 "email in id_token (…) isn't verified").
+        kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true -s "email=$email" -s emailVerified=true >/dev/null
       else
         kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true >/dev/null
       fi
@@ -2018,6 +2049,25 @@ cmd_identity_users() {
       ;;
     groups)
       kcadm -- get "users/$uid/groups" -r "$IDENTITY_REALM" --fields name --format csv --noquotes | sed 's/^/  /'
+      ;;
+    logout)
+      # Ends every session of this user in the realm; Keycloak then posts a back-channel
+      # logout token to each client of those sessions that has a reachable URL, so Kafbat
+      # ends at once (harness/phase4/lab1 K-a: 204, tokens within ~25 ms). The realm's
+      # "Sign out all active sessions" sends no logout token, so a live Kafbat session
+      # survives it until its idle limit. kcadm rejects the no-merge flag on this
+      # resource (rc 2); krate-cli's manage-users scope is enough
+      # (harness/phase4/lab6 L5-8).
+      kcadm -- create "users/$uid/logout" -r "$IDENTITY_REALM"
+      identity_journal "users logout" ok "$user"
+      ok "Sessions of $user ended; the next access needs a new sign-in"
+      ;;
+    set-email)
+      # Verified because the operator typed the address. This is also the way to verify
+      # the address of a user brokered in before the provider trusted it.
+      kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s "email=$email" -s emailVerified=true
+      identity_journal "users set-email" ok "$user"
+      ok "E-mail address of $user set and marked verified"
       ;;
   esac
   kcadm_logout
@@ -3989,8 +4039,11 @@ cmd_help() {
   printf "  %-30s %s\n" "identity recover-admin" "Recreate the master admin from .env via a temporary bootstrap admin (Keycloak stopped)"
   printf "  %-30s %s\n" "identity users list"  "Users of the krate realm"
   printf "  %s\n" "identity users add U [--admin|--viewer] [--email A]"
-  printf "  %-30s %s\n" ""                     "Create a user with a one-time temporary password"
-  printf "  %s\n" "identity users {enable|disable|reset-password|groups} U"
+  printf "  %-30s %s\n" ""                     "Create a user with a one-time temporary password (--email required while a realm UI is on)"
+  printf "  %s\n" "identity users {enable|disable|reset-password|groups|logout} U"
+  printf "  %-30s %s\n" ""                     "logout ends every realm session of U (Kafbat ends at once)"
+  printf "  %s\n" "identity users set-email U A"
+  printf "  %-30s %s\n" ""                     "Set U's e-mail address, marked verified (a realm UI needs it)"
   printf "  %-30s %s\n" "identity rotate KEY [--value]" "Rotate a Keycloak password/secret in Keycloak and .env (--value: from stdin; PING_KEYCLOAK_CLIENT_SECRET needs --value)"
   printf "  %-30s %s\n" "identity backup FILE" "Encrypted dump of the identity database (KRATE_BACKUP_PASSPHRASE or prompt)"
   printf "  %-30s %s\n" "identity restore FILE" "Restore that dump with Keycloak stopped, then start and verify it"
