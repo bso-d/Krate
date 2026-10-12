@@ -3362,7 +3362,7 @@ monitor_reload_prometheus
         ('a rejected file', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(0, '1.7918145079e+09'),
          1, 'rejected the configuration and keeps running with the previous one'),
         ('no reload reported', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(1, '1.7918145079e+09'),
-         1, 'reported no reload within 10 s'),
+         1, 'reported no reload after 20 polls'),
         # S2: the flag was already 0 from an earlier rejection, so a lingering 0 must not be
         # reported as a new rejection — the good reload moves the timestamp and sets it to 1.
         ('a good reload after an earlier rejection', prometheus_metrics(0, '1.7918145079e+09'),
@@ -3382,7 +3382,8 @@ monitor_reload_prometheus
           f'monitor reload without Prometheus must say it did not answer; got {result.returncode} {result.stderr.strip()[:120]!r}')
 
 
-# The five Loki read locations the gateway may proxy (S6: pinned so a widened selector fails).
+# The five Loki read locations the gateway may proxy, and the methods each allows (S6: pinned, so
+# neither a widened selector nor a widened method list can pass gmake check).
 LOKI_GATEWAY_READ_LOCATIONS = (
     '~ ^/loki/api/v1/(query|query_range|labels|series|index/stats|index/volume|index/volume_range|detected_fields|detected_labels|patterns)$',
     '~ ^/loki/api/v1/label/[^/]+/values$',
@@ -3390,6 +3391,13 @@ LOKI_GATEWAY_READ_LOCATIONS = (
     '= /loki/api/v1/tail',
     '= /ready',
 )
+LOKI_GATEWAY_METHODS = {
+    '~ ^/loki/api/v1/(query|query_range|labels|series|index/stats|index/volume|index/volume_range|detected_fields|detected_labels|patterns)$': 'GET POST',
+    '~ ^/loki/api/v1/label/[^/]+/values$': 'GET',
+    '~ ^/loki/api/v1/detected_field/[^/]+/values$': 'GET POST',
+    '= /loki/api/v1/tail': 'GET',
+    '= /ready': 'GET',
+}
 
 
 def check_loki_gateway(checks):
@@ -3413,9 +3421,11 @@ def check_loki_gateway(checks):
         e(body.count('proxy_pass http://loki:3100;') == 1,
           f'monitoring/loki/gateway.conf: {selector} must proxy to Loki only')
         # limit_except lists the allowed methods and denies the rest; without deny all it would only
-        # require authentication for the others (nginx limit_except semantics).
-        e(re.search(r'limit_except [A-Z ]+\{ deny all; \}', body) is not None,
-          f'monitoring/loki/gateway.conf: {selector} must restrict its methods with limit_except … deny all')
+        # require authentication for the others (nginx limit_except semantics, Context7
+        # /websites/nginx_en). The list is pinned per location: widening it (PUT, DELETE) must fail.
+        methods = LOKI_GATEWAY_METHODS.get(selector)
+        e(methods is not None and f'limit_except methods {{ deny all; }}'.replace('methods', methods) in body,
+          f'monitoring/loki/gateway.conf: {selector} must allow exactly {methods} and deny every other method; got {body.strip()[:100]!r}')
         e(selector.startswith('~ ^/loki/api/v1/') or selector in ('= /loki/api/v1/tail', '= /ready'),
           f'monitoring/loki/gateway.conf: {selector} is not one of Loki\'s read paths')
     defaults = [body for selector, body in blocks if 'proxy_pass' not in body]

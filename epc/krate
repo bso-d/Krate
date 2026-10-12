@@ -3589,7 +3589,13 @@ monitor_reload_prometheus() {
     sleep 0.5
     waited=$((waited + 1))
     if [[ "$waited" -ge 20 ]]; then
-      die "Prometheus reported no reload within 10 s — is it running and healthy? (krate monitor status, krate monitor logs prometheus)"
+      # A configuration rejected twice in a row never moves the success timestamp, so the
+      # polling budget expires with the flag still 0: report the rejection, not a missing
+      # reload. ${successful:-1} keeps set -u safe when no read ever succeeded.
+      if [[ "${successful:-1}" == 0* ]]; then
+        die "Prometheus rejected the configuration and keeps running with the previous one, and did so before this reload too. Fix monitoring/prometheus/prometheus.yml (or alerts.yml), then: krate monitor reload. The error: krate monitor logs prometheus"
+      fi
+      die "Prometheus reported no reload after 20 polls of its metrics (about 10 s) — is it running and healthy? (krate monitor status, krate monitor logs prometheus)"
     fi
   done
 }
