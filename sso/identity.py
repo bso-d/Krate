@@ -47,6 +47,34 @@ UI_BACKCHANNEL_LOGOUT_URL = 'http://kafka-ui:8080/logout/connect/back-channel/' 
 UI_SESSION_COOKIE = 'SESSION'
 # The site opts viewers into message payloads with this .env key (default: off).
 VIEWER_MESSAGES_KEY = 'KAFKA_UI_VIEWER_MESSAGES'
+# Required actions `krate identity users add` (and reset-password) put on a local user: the
+# authenticator is enrolled and the temporary password replaced at the first login. Neither is
+# a realm default action (Phase 3, owner decision D1): a default action would also apply to
+# users PingFederate brokers in, whose MFA is the enterprise identity provider's.
+USER_REQUIRED_ACTIONS = ['CONFIGURE_TOTP', 'UPDATE_PASSWORD']
+# The PingFederate broker plan `krate auth configure <site.json>` writes (sso/configure-dual.py)
+# and `krate auth apply` / `krate identity up` apply to the running realm. Names shared by the
+# planner, the CLI, the preflight and the checks.
+BROKER_PLAN = 'auth/keycloak/pingfederate-idp.json'
+BROKER_ALIAS = 'pingfederate'
+BROKER_SECRET_KEY = 'PING_KEYCLOAK_CLIENT_SECRET'
+BROKER_SECRET = '${' + BROKER_SECRET_KEY + '}'
+BROKER_ENDPOINTS = ('issuer', 'authorizationUrl', 'tokenUrl', 'userInfoUrl', 'jwksUrl')
+FIRST_BROKER_FLOW = 'krate first broker login'
+BROWSER_FLOW = 'krate browser'
+FORMS_FLOW = 'krate forms'
+OTP_FLOW = 'krate otp'
+BROKER_FLOWS = (BROWSER_FLOW, FORMS_FLOW, OTP_FLOW, FIRST_BROKER_FLOW)
+REDIRECT_CONFIG = 'PingFederate redirect'
+TRUSTSTORES_DIR = 'auth/keycloak/truststores'
+# What Keycloak loads from a truststore-paths directory (scanned recursively): PEM files and PKCS12 files.
+TRUSTSTORE_SUFFIXES = ('.crt', '.pem', '.p12', '.pfx', '.pkcs12')
+# How the identity provider's TLS chain is trusted: `local` = a CA file under TRUSTSTORES_DIR is required when
+# the provider is not on the public host; `system` = the JVM default truststore is relied on (public CA).
+TRUSTSTORE_MODES = ('local', 'system')
+# .env key carrying the truststore digest; part of keycloak's Compose environment, so a changed
+# PEM set recreates Keycloak (it reads KC_TRUSTSTORE_PATHS at start only). Like KRATE_PROXY_CONF_SHA.
+TRUSTSTORE_SHA_KEY = 'KRATE_TRUSTSTORE_SHA'
 RBAC_RESOURCES = ('applicationconfig', 'clusterconfig', 'topic', 'consumer', 'schema', 'connect',
                   'connector', 'acl', 'audit', 'client_quotas')
 PATTERN_RESOURCES = ('topic', 'consumer', 'schema', 'connect', 'connector')
@@ -289,9 +317,13 @@ def realm(values):
         # Keycloak's documented default of one step either side.
         'otpPolicyLookAheadWindow': 1,
         **EVENTS,
+        # Both enabled, neither a default action: `identity users add` assigns them to the local
+        # user it creates (USER_REQUIRED_ACTIONS); a default action would also be demanded of
+        # users PingFederate brokers in (Phase 3, D1). identity_reconcile_realm_policy applies
+        # enabled/defaultAction to an existing realm.
         'requiredActions': [
             {'alias': 'CONFIGURE_TOTP', 'name': 'Configure OTP', 'providerId': 'CONFIGURE_TOTP',
-             'enabled': True, 'defaultAction': True, 'priority': 10},
+             'enabled': True, 'defaultAction': False, 'priority': 10},
             {'alias': 'UPDATE_PASSWORD', 'name': 'Update Password', 'providerId': 'UPDATE_PASSWORD',
              'enabled': True, 'defaultAction': False, 'priority': 30},
         ],
@@ -656,6 +688,255 @@ def db_tls(directory):
     return list(TLS_FILES)
 
 
+# ─── PingFederate broker plan (read by the CLI's identity_apply_idp) ────────────
+# The plan file is Keycloak's own export shape (see sso/configure-dual.py for the schema): a
+# provider, its mappers, one authenticator config and flows whose executions reference a
+# sub-flow by `flowAlias`. These readers hand the CLI one item at a time; the secret enters
+# the provider only through the environment (BROKER_SECRET_KEY), never an argument.
+
+# ─── The planned flows: one source for the writer and the validator ─────────────
+# sso/configure-dual.py writes these into the plan; broker_plan() refuses a plan that differs
+# from them in any field (PR #41 review: a generic "some authenticator" check let `idp-auto-link`
+# replace the sole first-broker execution, which links a brokered identity to a local account).
+
+def _execution(authenticator, requirement, priority, config=None):
+    item = {"authenticator": authenticator, "requirement": requirement, "priority": priority,
+            "authenticatorFlow": False, "userSetupAllowed": False}
+    if config:
+        item["authenticatorConfig"] = config
+    return item
+
+
+def _subflow(alias, requirement, priority):
+    return {"authenticatorFlow": True, "flowAlias": alias, "requirement": requirement,
+            "priority": priority, "userSetupAllowed": False}
+
+
+def _flow(alias, description, executions, top_level):
+    return {"alias": alias, "description": description, "providerId": "basic-flow",
+            "topLevel": top_level, "builtIn": False, "authenticationExecutions": executions}
+
+
+def planned_flows():
+    """The realm's browser flow (D3) and first-broker-login flow (D2); parents before their sub-flows."""
+    return [
+        _flow(BROWSER_FLOW, "Krate: cookie, then PingFederate; local users with ?kc_idp_hint= (empty)",
+             [_execution("auth-cookie", "ALTERNATIVE", 10),
+              _execution("identity-provider-redirector", "ALTERNATIVE", 20, REDIRECT_CONFIG),
+              _subflow(FORMS_FLOW, "ALTERNATIVE", 30)], True),
+        _flow(FORMS_FLOW, "local users: password, then OTP when enrolled",
+             [_execution("auth-username-password-form", "REQUIRED", 10),
+              _subflow(OTP_FLOW, "CONDITIONAL", 20)], False),
+        _flow(OTP_FLOW, "OTP when the user has one",
+             [_execution("conditional-user-configured", "REQUIRED", 10),
+              _execution("auth-otp-form", "REQUIRED", 20)], False),
+        _flow(FIRST_BROKER_FLOW, "Krate: create the brokered user; never link to a local account",
+             [_execution("idp-create-user-if-unique", "REQUIRED", 10)], True),
+    ]
+
+
+def planned_authenticator_config():
+    """The redirector's configuration: SSO users go to PingFederate without a Keycloak password page."""
+    return [{"alias": REDIRECT_CONFIG, "config": {"defaultProvider": BROKER_ALIAS}}]
+
+
+def _same(a, b):
+    """JSON equality that does not equate True with 1 or 10 with 10.0."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    return type(a) is type(b) and a == b
+
+
+def _describe(execution):
+    return execution.get('flowAlias') if execution.get('authenticatorFlow') else execution.get('authenticator')
+
+
+def _check_flows(path, flows):
+    """Every flow must equal planned_flows() (matched by alias); an execution list is compared in priority order."""
+    expected = {flow['alias']: flow for flow in planned_flows()}
+    actual = {flow.get('alias'): flow for flow in flows}
+    for alias, want in expected.items():
+        have = actual[alias]
+        for key in sorted(set(want) | set(have)):
+            if key == 'authenticationExecutions':
+                continue
+            if not _same(have.get(key), want.get(key)):
+                raise ValueError(f'{path}: flow {alias!r} field {key} differs from the Krate plan')
+        for item in have['authenticationExecutions']:
+            if type(item.get('priority')) is not int:
+                raise ValueError(f'{path}: flow {alias!r} execution {_describe(item)!r} priority must be an integer')
+        have_x = sorted(have['authenticationExecutions'], key=lambda x: x['priority'])
+        want_x = want['authenticationExecutions']
+        if len(have_x) != len(want_x):
+            names = [_describe(x) for x in have_x]
+            raise ValueError(f'{path}: flow {alias!r} must have exactly {len(want_x)} executions ({[_describe(x) for x in want_x]}); found {names}')
+        for have_item, want_item in zip(have_x, want_x):
+            for key in sorted(set(want_item) | set(have_item)):
+                if not _same(have_item.get(key), want_item.get(key)):
+                    raise ValueError(f'{path}: flow {alias!r} execution {_describe(want_item)!r} field {key} differs from the Krate plan')
+
+
+def broker_plan(path):
+    """The validated broker plan at `path`; a ValueError names what is wrong (never a value)."""
+    try:
+        plan = json.loads(Path(path).read_text())
+    except ValueError:
+        raise ValueError(f'{path} is not valid JSON') from None
+    if not isinstance(plan, dict):
+        raise ValueError(f'{path} must be a JSON object')
+    providers = plan.get('identityProviders')
+    if not isinstance(providers, list) or len(providers) != 1 or not isinstance(providers[0], dict):
+        raise ValueError(f'{path} must define exactly one identity provider')
+    provider = providers[0]
+    config = provider.get('config')
+    if provider.get('alias') != BROKER_ALIAS or provider.get('providerId') != 'oidc' or not isinstance(config, dict):
+        raise ValueError(f'{path}: the identity provider must be the oidc provider {BROKER_ALIAS}')
+    if config.get('clientSecret') != BROKER_SECRET:
+        raise ValueError(f'{path}: clientSecret must be the {BROKER_SECRET} placeholder')
+    for key in BROKER_ENDPOINTS:
+        parts = urlsplit(str(config.get(key) or ''))
+        if parts.scheme != 'https' or not parts.hostname:
+            raise ValueError(f'{path}: {key} must be an https URL')
+    if provider.get('firstBrokerLoginFlowAlias') != FIRST_BROKER_FLOW:
+        raise ValueError(f'{path}: firstBrokerLoginFlowAlias must be {FIRST_BROKER_FLOW!r}')
+    mappers = plan.get('identityProviderMappers')
+    if not isinstance(mappers, list) or len(mappers) != 2 or any(not isinstance(m, dict) for m in mappers):
+        raise ValueError(f'{path} must define exactly two identity-provider mappers')
+    names = [m.get('name') for m in mappers]
+    if len(set(names)) != 2 or any(not name for name in names):
+        raise ValueError(f'{path}: mapper names must be distinct')
+    for mapper in mappers:
+        if mapper.get('identityProviderAlias') != BROKER_ALIAS or not isinstance(mapper.get('config'), dict):
+            raise ValueError(f'{path}: every mapper must belong to {BROKER_ALIAS}')
+    flows = plan.get('authenticationFlows')
+    if not isinstance(flows, list) or any(not isinstance(flow, dict) for flow in flows):
+        raise ValueError(f'{path}: authenticationFlows must be a list of flows')
+    aliases = [flow.get('alias') for flow in flows]
+    if sorted(aliases) != sorted(BROKER_FLOWS):
+        raise ValueError(f'{path}: authenticationFlows must be exactly {sorted(BROKER_FLOWS)}')
+    for flow in flows:
+        if not isinstance(flow.get('authenticationExecutions'), list):
+            raise ValueError(f'{path}: flow {flow.get("alias")!r} must list authenticationExecutions')
+        for execution in flow['authenticationExecutions']:
+            if not isinstance(execution, dict) or execution.get('requirement') not in ('REQUIRED', 'ALTERNATIVE', 'CONDITIONAL', 'DISABLED') \
+                    or not isinstance(execution.get('priority'), int):
+                raise ValueError(f'{path}: every execution of {flow.get("alias")!r} needs a requirement and an integer priority')
+            if execution.get('authenticatorFlow'):
+                if execution.get('flowAlias') not in aliases:
+                    raise ValueError(f'{path}: sub-flow {execution.get("flowAlias")!r} of {flow.get("alias")!r} is not planned')
+            elif not execution.get('authenticator'):
+                raise ValueError(f'{path}: an execution of {flow.get("alias")!r} names no authenticator')
+    _check_flows(path, flows)
+    configs = plan.get('authenticatorConfig')
+    if not isinstance(configs, list) or any(not isinstance(c, dict) or not c.get('alias') or not isinstance(c.get('config'), dict) for c in configs):
+        raise ValueError(f'{path}: authenticatorConfig must list named configurations')
+    if not _same(configs, planned_authenticator_config()):
+        raise ValueError(f'{path}: authenticatorConfig must be exactly the {REDIRECT_CONFIG!r} redirector configuration of the Krate plan')
+    if plan.get('browserFlow') != BROWSER_FLOW:
+        raise ValueError(f'{path}: browserFlow must be {BROWSER_FLOW!r}')
+    if plan.get('truststore', 'local') not in TRUSTSTORE_MODES:
+        raise ValueError(f'{path}: truststore must be one of {list(TRUSTSTORE_MODES)}')
+    return plan
+
+
+def broker_flow(plan, alias):
+    flow = next((flow for flow in plan['authenticationFlows'] if flow.get('alias') == alias), None)
+    if flow is None:
+        raise ValueError(f'flow {alias!r} is not in the plan')
+    return flow
+
+
+def broker_config(plan, alias):
+    config = next((c for c in plan['authenticatorConfig'] if c.get('alias') == alias), None)
+    if config is None:
+        raise ValueError(f'authenticator config {alias!r} is not in the plan')
+    return {'alias': config['alias'], 'config': dict(config['config'])}
+
+
+def broker_provider(plan, with_secret=False):
+    """The provider representation; with `with_secret` the placeholder becomes the environment's value."""
+    provider = json.loads(json.dumps(plan['identityProviders'][0]))
+    if with_secret:
+        value = os.environ.get(BROKER_SECRET_KEY, '')
+        if value in PLACEHOLDERS:
+            raise ValueError(f'{BROKER_SECRET_KEY} is not set in the environment')
+        provider['config']['clientSecret'] = value
+    else:
+        del provider['config']['clientSecret']
+    return provider
+
+
+def differs(wanted, current):
+    """True when `current` (a representation Keycloak returned) lacks or differs in any key of `wanted`."""
+    if isinstance(wanted, dict):
+        return not isinstance(current, dict) or any(differs(value, current.get(key)) for key, value in wanted.items())
+    return wanted != current
+
+
+def truststore_files(directory):
+    """Every regular file under the truststores directory, recursively, sorted by relative path (Keycloak scans it that way)."""
+    directory = Path(directory)
+    if not directory.is_dir():
+        return []
+    return sorted((path for path in directory.rglob('*') if path.is_file()), key=lambda path: str(path.relative_to(directory)))
+
+
+def truststore_digest(directory):
+    """Digest of the file set Keycloak loads at start: sorted relative names, each with its content.
+
+    An empty set digests to the empty string, the value a .env without the key renders: a
+    Phase 1/2 installation (empty directory, no KRATE_TRUSTSTORE_SHA) is not recreated on its
+    first upgrade, only when a file appears.
+    """
+    directory = Path(directory)
+    files = truststore_files(directory)
+    if not files:
+        return ''
+    digest = hashlib.sha256()
+    for path in files:
+        data = path.read_bytes()
+        digest.update(str(path.relative_to(directory)).encode() + b'\n' + b'%d\n' % len(data) + data)
+    return digest.hexdigest()[:32]
+
+
+def cmd_broker(args):
+    """Plan items for the CLI, one JSON document per line (flows and executions in plan order)."""
+    plan = broker_plan(args.plan)
+    out = sys.stdout
+    if args.item == 'provider':
+        # The secret travels stdin -> kcadm only; this output is piped, never logged or captured.
+        out.write(json.dumps(broker_provider(plan, args.with_secret)) + '\n')
+    elif args.item == 'provider-differs':
+        out.write(('differs' if differs(broker_provider(plan), json.load(sys.stdin)) else 'same') + '\n')
+    elif args.item == 'mappers':
+        for mapper in plan['identityProviderMappers']:
+            out.write(json.dumps(mapper) + '\n')
+    elif args.item == 'mapper-differs':
+        wanted = next(m for m in plan['identityProviderMappers'] if m['name'] == args.name)
+        out.write(('differs' if differs(wanted, json.load(sys.stdin)) else 'same') + '\n')
+    elif args.item == 'flows':
+        for flow in plan['authenticationFlows']:
+            out.write(json.dumps({'alias': flow['alias'], 'topLevel': bool(flow.get('topLevel')),
+                                  'description': flow.get('description', ''), 'providerId': flow.get('providerId', 'basic-flow')}) + '\n')
+    elif args.item == 'executions':
+        for execution in broker_flow(plan, args.name)['authenticationExecutions']:
+            out.write(json.dumps(execution) + '\n')
+    elif args.item == 'config':
+        out.write(json.dumps(broker_config(plan, args.name)) + '\n')
+    elif args.item == 'config-differs':
+        out.write(('differs' if differs(broker_config(plan, args.name), json.load(sys.stdin)) else 'same') + '\n')
+    elif args.item == 'browser-flow':
+        out.write(plan['browserFlow'] + '\n')
+    return 0
+
+
+def cmd_truststore_digest(args):
+    print(truststore_digest(args.directory))
+    return 0
+
+
 # ─── CLI ───────────────────────────────────────────────────────────────────────
 
 def cmd_plan(args):
@@ -840,6 +1121,17 @@ def main():
     opener.add_argument('--input', type=Path, required=True)
     opener.add_argument('--output', type=Path, required=True)
     opener.set_defaults(func=cmd_backup_open)
+    broker = commands.add_parser('broker', help='read one item of the PingFederate broker plan for krate auth apply')
+    broker.add_argument('--plan', type=Path, required=True)
+    broker.add_argument('item', choices=['provider', 'provider-differs', 'mappers', 'mapper-differs', 'flows', 'executions',
+                                         'config', 'config-differs', 'browser-flow'])
+    broker.add_argument('name', nargs='?', default='', help='flow alias, mapper name or config alias the item refers to')
+    broker.add_argument('--with-secret', action='store_true',
+                        help=f'substitute {BROKER_SECRET_KEY} from the environment into the provider (output is piped to kcadm)')
+    broker.set_defaults(func=cmd_broker)
+    digest = commands.add_parser('truststore-digest', help='digest of the PEM files Keycloak loads from a truststores directory')
+    digest.add_argument('--directory', type=Path, required=True)
+    digest.set_defaults(func=cmd_truststore_digest)
     args = parser.parse_args()
     try:
         return args.func(args)

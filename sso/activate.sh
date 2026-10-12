@@ -5,7 +5,11 @@
 # Applies the Kafbat UI authentication mode in .env: validates the rendered
 # configuration, then reconciles only kafka-ui and the proxy (each is recreated
 # when its inputs changed). Keycloak is managed by `krate identity`; in
-# runtime.yml mode it must already be ready.
+# runtime.yml mode it must already be ready. In that mode the PingFederate
+# plan (auth/keycloak/pingfederate-idp.json), when it exists, is applied to
+# the realm, and Keycloak is recreated first when the trust material in
+# auth/keycloak/truststores changed since it started (it reads PEMs at start
+# only); without the plan a leftover provider is removed.
 apply_auth() {
   require_compose; require_compose_file
   require_sso_compose
@@ -18,6 +22,28 @@ apply_auth() {
   fi
   # Render into the validator's stdin: credentials never reach terminal output.
   compose_cmd config --format json | python3 "$sso_dir/preflight.py" --directory "$SCRIPT_DIR" --mode "$mode"
+  if [[ "$mode" == runtime.yml ]]; then
+    # Keycloak and its realm change below: the same lock the identity commands hold.
+    identity_lock
+    local kc_before kc_after trust_changed=false
+    kc_before="$(compose_cmd ps -q keycloak)"
+    if sync_truststore_env; then
+      trust_changed=true
+      info "Trust material in auth/keycloak/truststores changed; recreating Keycloak..."
+    fi
+    compose_cmd up -d --pull never --no-build --no-deps --wait --wait-timeout "$timeout" keycloak
+    kc_after="$(compose_cmd ps -q keycloak)"
+    if [[ "$kc_before" == "$kc_after" && -n "$kc_before" ]]; then
+      ok "Keycloak unchanged (same trust material and image)"
+    elif $trust_changed; then
+      ok "Keycloak recreated with the trust material in auth/keycloak/truststores"
+      identity_journal apply recreated "keycloak: truststores changed"
+    else
+      ok "Keycloak recreated (its service definition, image or container changed)"
+      identity_journal apply recreated "keycloak: service definition changed"
+    fi
+    identity_apply_idp apply
+  fi
   # Only kafka-ui is recreated below, and it depends on healthy brokers.
   while IFS= read -r service; do
     [[ "$service" == kafka-* && "$service" != kafka-ui ]] || continue
@@ -53,7 +79,10 @@ apply_auth() {
   fi
   ok "Authentication applied ($mode). Broker services and stored data were unchanged."
   # The login model now in force, so nobody looks for a form that is not there.
-  if [[ "$mode" == runtime.yml ]]; then
+  if [[ "$mode" == runtime.yml && -f "$SCRIPT_DIR/$IDENTITY_IDP_PLAN" ]]; then
+    echo "  Sign-in: Keycloak (realm krate) sends users to PingFederate; local users (krate identity users) sign in through the"
+    echo "           break-glass URL with ?kc_idp_hint= (empty), see docs/dual-login.md; there is no shared form login"
+  elif [[ "$mode" == runtime.yml ]]; then
     echo "  Sign-in: Keycloak (realm krate) — manage users with krate identity users; there is no shared form login"
   else
     echo "  Sign-in: shared Admin login (KAFKA_UI_USER / KAFKA_UI_PASSWORD in .env)"

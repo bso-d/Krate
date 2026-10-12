@@ -128,6 +128,9 @@ test validate: check
 
 syntax:
 >for file in $(CLI_FILES); do bash -n "$$file"; done
+># Every Python helper must parse with the interpreter at hand: the bundle hosts (RHEL 9 class) run them with
+># Python 3.9, so this is run there too (gate row S1) and under Python 3.9 in CI. Parse only: no __pycache__.
+>python3 -c 'import ast, sys; [ast.parse(open(f, "rb").read(), f) for f in sys.argv[1:]]' $$(git ls-files '*.py' 2>/dev/null || find . -path ./.git -prune -o -path ./harness -prune -o -path ./dist -prune -o -path ./tests -prune -o -name '*.py' -print)
 
 lint:
 >shellcheck $(CLI_FILES)
