@@ -66,6 +66,18 @@ FORMS_FLOW = 'krate forms'
 OTP_FLOW = 'krate otp'
 BROKER_FLOWS = (BROWSER_FLOW, FORMS_FLOW, OTP_FLOW, FIRST_BROKER_FLOW)
 REDIRECT_CONFIG = 'PingFederate redirect'
+# The provider flags the Krate plan fixes: one source for the writer (sso/configure-dual.py) and for
+# broker_plan() below, as planned_flows() is for the flows. `trustEmail` true makes PingFederate the
+# authority for the address it asserts: Keycloak sets the realm user's e-mail verification from the
+# `email_verified` claim when PingFederate sends one and marks it verified when it sends none, so only
+# an asserted `email_verified: false` leaves a brokered user unverified
+# (OIDCIdentityProvider.setEmailVerified, 26.8.0:1114-1128, reached from
+# AbstractIdentityProvider.updateEmail:202-207 for a new user or syncMode FORCE). With the flag false
+# every brokered user is unverified, which the Phase 4 UIs refuse (oauth2-proxy answers 500 "email in
+# id_token (…) isn't verified"). This is not account linking: the first-broker-login flow stays Create
+# User If Unique only (D2) and no linking path reads the flag (IdentityBrokerService.java at 26.8.0:
+# no reference to it). `storeToken` stays false: the realm keeps no PingFederate token.
+BROKER_PROVIDER_FLAGS = {'enabled': True, 'trustEmail': True, 'storeToken': False}
 TRUSTSTORES_DIR = 'auth/keycloak/truststores'
 # What Keycloak loads from a truststore-paths directory (scanned recursively): PEM files and PKCS12 files.
 TRUSTSTORE_SUFFIXES = ('.crt', '.pem', '.p12', '.pfx', '.pkcs12')
@@ -793,6 +805,10 @@ def broker_plan(path):
     config = provider.get('config')
     if provider.get('alias') != BROKER_ALIAS or provider.get('providerId') != 'oidc' or not isinstance(config, dict):
         raise ValueError(f'{path}: the identity provider must be the oidc provider {BROKER_ALIAS}')
+    for key, value in BROKER_PROVIDER_FLAGS.items():
+        if not _same(provider.get(key), value):
+            raise ValueError(f'{path}: the identity provider field {key} differs from the Krate plan;'
+                             ' regenerate the plan with krate auth configure <site.json>')
     if config.get('clientSecret') != BROKER_SECRET:
         raise ValueError(f'{path}: clientSecret must be the {BROKER_SECRET} placeholder')
     for key in BROKER_ENDPOINTS:

@@ -12,7 +12,10 @@ by `krate auth apply` and `krate identity up` (identity_apply_idp) and read thro
   identityProviders        one IdentityProviderRepresentation, alias `pingfederate`;
                            config.clientSecret is the ${PING_KEYCLOAK_CLIENT_SECRET}
                            placeholder, replaced from the environment at apply time;
-                           firstBrokerLoginFlowAlias names the flow below.
+                           firstBrokerLoginFlowAlias names the flow below; `enabled`,
+                           `trustEmail` and `storeToken` are identity.BROKER_PROVIDER_FLAGS
+                           (trustEmail true: Keycloak carries the e-mail verification
+                           PingFederate asserts, which the Phase 4 UIs require).
   identityProviderMappers  two oidc-advanced-group-idp-mapper entries, matched by `name`.
   authenticatorConfig      [{alias, config}] for the identity-provider-redirector.
   authenticationFlows      AuthenticationFlowRepresentation list; `topLevel` true for the
@@ -72,11 +75,12 @@ def configs(settings, env=None):
     # Applied to the realm in the SSO phase; the realm plan (local users, clients,
     # groups, sessions) is owned by sso/identity.py and never written here. The
     # mappers put a PingFederate user whose claim names the site's AD group into
-    # the realm group of the same role, which is what Kafbat's roles read.
+    # the realm group of the same role, which is what Kafbat's roles read. The
+    # provider's fixed flags come from identity.BROKER_PROVIDER_FLAGS, which
+    # broker_plan() validates, so a plan can only carry the Krate values.
     identity_provider = {
         "identityProviders": [{"alias": identity.BROKER_ALIAS, "displayName": "Company sign-in",
-                               "providerId": "oidc", "enabled": True,
-                               "trustEmail": False, "storeToken": False,
+                               "providerId": "oidc", **identity.BROKER_PROVIDER_FLAGS,
                                "firstBrokerLoginFlowAlias": identity.FIRST_BROKER_FLOW,
                                "config": {"clientId": settings["client_id"],
                                           "clientSecret": identity.BROKER_SECRET,

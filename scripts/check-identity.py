@@ -1286,6 +1286,10 @@ def check_broker_plan_shape(checks, idp):
     e(provider.get('firstBrokerLoginFlowAlias') == 'krate first broker login',
       f'the provider must use the flow "krate first broker login" (D2); got {provider.get("firstBrokerLoginFlowAlias")!r}')
     e(provider.get('config', {}).get('syncMode') == 'FORCE', 'the provider syncs on every login (syncMode FORCE: group removal takes effect at the next sign-in)')
+    e(all(provider.get(key) is value for key, value in identity.BROKER_PROVIDER_FLAGS.items()),
+      f'the provider carries the Krate flags {sorted(identity.BROKER_PROVIDER_FLAGS)} exactly (trustEmail true: Keycloak sets the realm user\'s e-mail '
+      f'verification from the email_verified claim PingFederate asserts, which the Phase 4 UIs require); got '
+      f'{{{", ".join(f"{key}={provider.get(key)!r}" for key in sorted(identity.BROKER_PROVIDER_FLAGS))}}}')
     e(all(m.get('config', {}).get('syncMode') == 'FORCE' and m.get('identityProviderMapper') == 'oidc-advanced-group-idp-mapper'
           for m in idp['identityProviderMappers']), 'both mappers are oidc-advanced-group-idp-mapper with syncMode FORCE')
     e(idp.get('authenticatorConfig') == [{'alias': 'PingFederate redirect', 'config': {'defaultProvider': 'pingfederate'}}],
@@ -1340,6 +1344,9 @@ def check_broker_plan_shape(checks, idp):
                 ('an unknown sub-flow', lambda p: p['authenticationFlows'][0]['authenticationExecutions'][2].__setitem__('flowAlias', 'other'), 'not planned'),
                 ('a non-integer priority', lambda p: p['authenticationFlows'][0]['authenticationExecutions'][0].__setitem__('priority', '10'), 'priority'),
                 ('another browser flow', lambda p: p.__setitem__('browserFlow', 'browser'), 'browserFlow'),
+                ('a provider that does not trust the asserted e-mail', lambda p: p['identityProviders'][0].__setitem__('trustEmail', False), 'trustEmail'),
+                ('a provider that keeps the IdP token', lambda p: p['identityProviders'][0].__setitem__('storeToken', True), 'storeToken'),
+                ('a disabled provider', lambda p: p['identityProviders'][0].__setitem__('enabled', False), 'enabled'),
                 ('an unknown truststore mode', lambda p: p.__setitem__('truststore', 'none'), 'truststore')) + tuple(
                 (label, mutate, needle) for label, mutate, needle in PLAN_SHAPE_MUTATIONS):
             mutated = json.loads(json.dumps(idp))
@@ -1375,7 +1382,7 @@ def check_broker_plan_shape(checks, idp):
         os.environ.pop('PING_KEYCLOAK_CLIENT_SECRET', None)
         if env_backup is not None:
             os.environ['PING_KEYCLOAK_CLIENT_SECRET'] = env_backup
-    current = {'alias': 'pingfederate', 'internalId': 'x', 'providerId': 'oidc', 'enabled': True, 'trustEmail': False, 'storeToken': False,
+    current = {'alias': 'pingfederate', 'internalId': 'x', 'providerId': 'oidc', 'enabled': True, 'trustEmail': True, 'storeToken': False,
                'displayName': 'Company sign-in', 'firstBrokerLoginFlowAlias': 'krate first broker login', 'types': ['USER_AUTHENTICATION'],
                'config': dict(idp['identityProviders'][0]['config'], clientSecret='**********', extra='ignored')}
     e(identity.differs(identity.broker_provider(idp), current) is False, 'differs(): Keycloak extras (internalId, types, masked secret, extra config) are not a difference')
@@ -1383,6 +1390,8 @@ def check_broker_plan_shape(checks, idp):
       'differs(): a changed first-broker-login alias is a difference')
     e(identity.differs(identity.broker_provider(idp), dict(current, config=dict(current['config'], tokenUrl='https://x'))) is True,
       'differs(): a changed endpoint is a difference')
+    e(identity.differs(identity.broker_provider(idp), dict(current, trustEmail=False)) is True,
+      'differs(): a provider that does not trust the asserted e-mail is a difference, so auth apply converges a console-only change back')
 
 
 def truststore_pem(site, name='enterprise-ca.pem', mode=0o644):
@@ -3145,6 +3154,7 @@ def check_broker_docs(checks):
                         ('krate browser', 'the browser flow (D3)'), ('krate forms', 'the forms sub-flow'), ('krate otp', 'the OTP sub-flow'),
                         ('owner to confirm', 'the decisions are marked owner to confirm'),
                         ('syncMode', 'revocation through syncMode FORCE at the next sign-in'),
+                        ('trustEmail', 'the e-mail trust the plan states (a brokered user without it is unverified, which the Phase 4 UIs refuse)'),
                         ('KRATE_TRUSTSTORE_SHA', 'the truststore digest and Keycloak recreation'),
                         ('idp-create-user-if-unique', 'the no-linking authenticator'), ('No changes', 'the idempotent second apply'),
                         ('identity provider pingfederate', 'the journal line'), ('auth configure --local', 'the way back to local sign-in')):

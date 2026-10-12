@@ -270,6 +270,13 @@ def compare_shape(plan):
             diffs.append('provider.config.clientSecret is not the ${PING_KEYCLOAK_CLIENT_SECRET} placeholder')
         if config.get('syncMode') != 'FORCE':
             diffs.append('provider.config.syncMode is %r, not FORCE' % config.get('syncMode'))
+        # trustEmail true: PingFederate is the authority for the address it asserts, so Keycloak sets
+        # the realm user's e-mail verification from the email_verified claim, and marks it verified
+        # when the claim is absent (OIDCIdentityProvider.setEmailVerified, 26.8.0:1114-1128). With it
+        # false a brokered user stays unverified and the Phase 4 UIs refuse the sign-in.
+        for key, value in (('enabled', True), ('trustEmail', True), ('storeToken', False)):
+            if provider.get(key) is not value:
+                diffs.append('provider.%s is %r, not %r' % (key, provider.get(key), value))
     mappers = plan.get('identityProviderMappers') or []
     if len(mappers) != 2 or any(m.get('identityProviderMapper') != 'oidc-advanced-group-idp-mapper'
                                 or (m.get('config') or {}).get('syncMode') != 'FORCE' for m in mappers):

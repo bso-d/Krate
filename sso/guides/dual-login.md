@@ -494,6 +494,10 @@ truststore is relied on. `runtime.yml` must equal the Krate plan for this
 file `auth/keycloak/krate-realm.json` still must not define
 `identityProviders`: the realm plan is local-only in both modes.
 
+A plan file an earlier Krate wrote is refused by the field that differs (the
+message names the field and the remedy): remove the plan file, rerun
+`./krate auth configure /path/to/site.json`, then `./krate auth apply`.
+
 `auth apply` then takes the identity lock, records the truststore digest
 (below), reconciles Keycloak, and applies the plan to realm `krate` with
 `kcadm` inside the Keycloak container (logged in as `KEYCLOAK_ADMIN_USER`;
@@ -576,6 +580,17 @@ The realm flows the plan states:
   viewer group only = `viewer`, admin group = `administrator`, both =
   `administrator`, neither = refused at Kafbat's login (`/login?error`), no
   session.
+- Keycloak trusts the e-mail PingFederate asserts (`trustEmail` `true` in the
+  plan): at every brokered sign-in the realm user's e-mail verification is set
+  from the `email_verified` claim PingFederate sends, and marked verified when
+  it sends none, so only an asserted `email_verified: false` leaves the user
+  unverified. With the flag false every brokered user is unverified and the
+  Phase 4 UIs refuse the sign-in (Perses' oauth2-proxy answers `500` "email in
+  id_token (…) isn't verified"). Trusting the address is not account linking:
+  the first-login flow stays Create User If Unique (D2), so a clash with a
+  local user is still an error page. A user brokered before this change keeps
+  its unverified flag until a sign-in in which PingFederate asserts a verified
+  address, or until an administrator sets it in Keycloak.
 - SSO users get no Keycloak TOTP and no profile page: MFA is the enterprise
   identity provider's (D1).
 - Revocation: the mappers and the provider sync with `syncMode` `FORCE`, so
