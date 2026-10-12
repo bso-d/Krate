@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Static checks for the Krate identity foundation (templates, realm plan, Compose, CLI parity)."""
+import configparser
 import contextlib
 import importlib.util
 from typing import Callable
@@ -453,8 +454,10 @@ def check_monitoring_binds(checks):
                       f'monitoring/{name}: must publish only 127.0.0.1:{port}:{port} by default; got {ports}')
     for name, port in (('grafana', 3000), ('perses-gateway', 3443)):
         ports = services.get(name, {}).get('ports', [])
-        checks.expect(len(ports) == 1 and not ports[0].get('host_ip') and ports[0].get('published') == str(port),
-                      f'monitoring/{name}: must still publish {port} on every interface; got {ports}')
+        # Grafana's default keeps main's behaviour (every interface, gate row M1); realm mode
+        # sets GRAFANA_BIND=127.0.0.1, which check_grafana_realm_compose renders separately.
+        checks.expect(len(ports) == 1 and ports[0].get('host_ip') in (None, '0.0.0.0') and ports[0].get('published') == str(port),
+                      f'monitoring/{name}: must still publish {port} on every interface by default; got {ports}')
 
 
 def check_logrotate(checks):
@@ -535,9 +538,15 @@ def check_exposure(checks):
                 continue  # no own headers: the server-level set applies
             e(server_level <= own, f'{edition}/nginx.conf: a location that sets proxy_set_header must restate the server-level set;'
                                    f' missing {sorted(server_level - own)} in {block.strip()[:60]!r}')
+        # Derived, not hard-coded: the server level plus every location that restates the header set
+        # must also clear the client-supplied ones. A location that proxies without restating
+        # (/login, /oauth2/, /login/oauth2/) inherits the server-level set and is not counted.
+        restating = 1 + len([body for body in re.findall(r'location [^{]+\{(.*?)\n    \}', nginx, re.S)
+                             if 'proxy_set_header X-Forwarded-Host' in body])
+        e(restating == 6, f'{edition}/nginx.conf: expected the server level and five restating locations (identity realms, identity resources, /, /grafana/login, /grafana/); got {restating}')
         for header in ('Forwarded', 'X-Forwarded-Prefix', 'X-Forwarded-Ssl', 'X-Forwarded-Port'):
-            e(nginx.count(f'proxy_set_header {header} "";') == nginx.count('proxy_set_header X-Forwarded-Host $http_host;') == 4,
-              f'{edition}/nginx.conf: every proxied location must clear the client-supplied {header} header')
+            e(nginx.count(f'proxy_set_header {header} "";') == nginx.count('proxy_set_header X-Forwarded-Host $http_host;') == restating,
+              f'{edition}/nginx.conf: every proxied location must clear the client-supplied {header} header ({restating} of them)')
         cli = (ROOT / edition / 'krate').read_text()
         prepare = cli[cli.index('\nprepare() {'):cli.index('\n}', cli.index('\nprepare() {'))]
         e('identity_network_clash' in prepare and prepare.index('identity_network_clash') < prepare.index('generate_secrets'),
@@ -2675,8 +2684,10 @@ def check_broker_apply(checks):
               f'{edition}/krate: the {verdict} verdict must be captured with || die')
             e(f'identity.py" broker --plan "$plan" {verdict}' in cli and f'== differs' not in cli.split(verdict)[1].split('\n')[0],
               f'{edition}/krate: {verdict} must not be compared inside [[ ]]')
+        # Four verdict consumers: the broker provider, its mappers, its redirector config
+        # and (Phase 4) the krate-grafana client.
         unexpected = cli.count('*) die "Unexpected comparison result')  # hoisted: Python 3.9 (RHEL 9) rejects a backslash inside an f-string expression
-        e(unexpected == 3, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
+        e(unexpected == 4, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
         e('PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3' in cli,
           f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
     if bash_binary() is None:
@@ -3419,10 +3430,370 @@ def check_loki_gateway(checks):
       f'monitoring/loki-gateway must mount loki/gateway.conf read-only as its nginx config; got {volumes}')
 
 
+def monitoring_services(env=None):
+    """The rendered monitoring Compose services, with optional interpolation overrides."""
+    environment = dict(os.environ) if env is None else dict(os.environ, **env)
+    result = subprocess.run(['docker', 'compose', '--env-file', str(ROOT / 'monitoring/.env.template'),
+                             '-f', str(ROOT / 'monitoring/docker-compose.yml'), '--profile', '*', 'config', '--format', 'json'],
+                            cwd=ROOT, text=True, capture_output=True, env=environment)
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip()[:400])
+    return json.loads(result.stdout)['services']
+
+
+def check_grafana_realm_compose(checks):
+    """Phase 4 commit 5: Grafana's realm-mode shape, the idp-wait one-shot and monitoring-init's new inputs."""
+    e = checks.expect
+    try:
+        services = monitoring_services()
+        loopback = monitoring_services({'GRAFANA_BIND': '127.0.0.1'})
+    except ValueError as exc:
+        e(False, f'monitoring: Compose rendering failed: {exc}')
+        return
+    grafana = services['grafana']
+    ports = grafana.get('ports') or []
+    e(len(ports) == 1 and ports[0].get('host_ip') == '0.0.0.0' and ports[0].get('published') == '3000',
+      f'monitoring/grafana: local mode keeps publishing 3000 on every interface; got {ports}')
+    loop_ports = loopback['grafana'].get('ports') or []
+    e(len(loop_ports) == 1 and loop_ports[0].get('host_ip') == '127.0.0.1',
+      f'monitoring/grafana: GRAFANA_BIND=127.0.0.1 (realm mode) must bind the port to the loopback interface; got {loop_ports}')
+    networks = grafana.get('networks') or {}
+    e(sorted(networks) == ['kafka-network', 'monitoring']
+      and (networks.get('kafka-network') or {}).get('aliases') == ['krate-grafana'],
+      f'monitoring/grafana: must be on monitoring and kafka-network with the alias krate-grafana (the cluster proxy\'s route); got {networks}')
+    depends = grafana.get('depends_on') or {}
+    e((depends.get('monitoring-init') or {}).get('condition') == 'service_completed_successfully'
+      and (depends.get('idp-wait') or {}).get('condition') == 'service_completed_successfully'
+      and (depends.get('prometheus') or {}).get('condition') == 'service_started',
+      f'monitoring/grafana: must wait for the rendered secret and for the realm; got {depends}')
+    mounts = {(volume.get('target'), volume.get('read_only')): volume.get('source', '') for volume in grafana.get('volumes') or []}
+    e(('/etc/krate/grafana', True) in mounts and mounts[('/etc/krate/grafana', True)] == 'grafana_rendered',
+      f'monitoring/grafana: must mount the rendered secret volume read-only at /etc/krate/grafana; got {mounts}')
+    e(any(target == '/etc/krate/ca/server.crt' and read_only and source.endswith('certs/server.crt')
+          for (target, read_only), source in mounts.items()),
+      f'monitoring/grafana: must mount the cluster CA read-only at /etc/krate/ca/server.crt; got {mounts}')
+    e('KRATE_GRAFANA_AUTH_SHA' in (grafana.get('environment') or {}),
+      'monitoring/grafana: KRATE_GRAFANA_AUTH_SHA must be part of its environment, so a sign-in input change recreates it')
+    e((grafana.get('extra_hosts') or [''])[0].endswith(':host-gateway') or 'host-gateway' in str(grafana.get('extra_hosts')),
+      f'monitoring/grafana: must resolve the realm\'s public host to the host gateway; got {grafana.get("extra_hosts")}')
+    waiter = services.get('idp-wait')
+    if not e(waiter is not None, 'monitoring/docker-compose.yml: the idp-wait one-shot is missing'):
+        return
+    e(not waiter.get('ports'), f'monitoring/idp-wait must not publish a port; got {waiter.get("ports")}')
+    e(list(waiter.get('networks') or {}) == ['monitoring'], f'monitoring/idp-wait must be on the monitoring network only; got {waiter.get("networks")}')
+    e(waiter.get('read_only') is True and waiter.get('user') == '65534:65534' and waiter.get('cap_drop') == ['ALL']
+      and waiter.get('restart') == 'no',
+      f'monitoring/idp-wait must be read-only, unprivileged and run once; got user={waiter.get("user")} read_only={waiter.get("read_only")} '
+      f'cap_drop={waiter.get("cap_drop")} restart={waiter.get("restart")}')
+    e(waiter.get('command') == ['python3', '/etc/krate/idp/idp_wait.py'], f'monitoring/idp-wait command; got {waiter.get("command")}')
+    e('IDP_DISCOVERY_URL' in (waiter.get('environment') or {}), 'monitoring/idp-wait: IDP_DISCOVERY_URL must reach it (empty means no realm UI)')
+    waiter_mounts = {volume.get('target'): volume.get('source', '') for volume in waiter.get('volumes') or []}
+    e('/etc/krate/idp' in waiter_mounts and waiter_mounts['/etc/krate/idp'].endswith('monitoring/idp'),
+      f'monitoring/idp-wait must mount monitoring/idp read-only; got {waiter_mounts}')
+    e(any(target == '/etc/krate/ca/server.crt' for target in waiter_mounts), f'monitoring/idp-wait must mount the cluster CA; got {waiter_mounts}')
+    e(waiter.get('image') == services['monitoring-init'].get('image'),
+      'monitoring/idp-wait must use the same pinned Python image as monitoring-init (no new image)')
+    init = services['monitoring-init']
+    init_env = init.get('environment') or {}
+    e('GRAFANA_AUTH_CONFIG' in init_env and 'GRAFANA_OAUTH_CLIENT_SECRET' in init_env,
+      f'monitoring-init: render.py renders only what its environment lists, so both Grafana keys must be there; got {sorted(init_env)}')
+    e('/rendered/grafana' in [volume.get('target') for volume in init.get('volumes') or []],
+      'monitoring-init must mount the grafana_rendered volume it writes the client secret into')
+    for name, service in services.items():
+        listed = list(service.get('networks') or {})
+        e(not any(network.startswith('identity') for network in listed),
+          f'monitoring/{name}: no monitoring service may join an identity network; got {listed}')
+
+
+def check_grafana_front(checks):
+    """Phase 4 commit 5: the cluster proxy serves Grafana at /grafana/, rate limiting the sign-in path only."""
+    e = checks.expect
+    for edition in EDITIONS:
+        nginx = (ROOT / edition / 'nginx.conf').read_text()
+        blocks = {selector.strip(): body for selector, body in re.findall(r'location ([^{]+)\{(.*?)\n    \}', nginx, re.S)}
+        e('set $grafana http://krate-grafana:3000;' in nginx,
+          f'{edition}/nginx.conf: must resolve Grafana at request time through its kafka-network alias krate-grafana')
+        redirect = blocks.get('= /grafana')
+        e(redirect is not None and 'return 301 /grafana/;' in redirect,
+          f'{edition}/nginx.conf: /grafana must redirect to /grafana/ (Grafana serves from the sub-path)')
+        login, app = blocks.get('^~ /grafana/login'), blocks.get('^~ /grafana/')
+        for name, body in (('/grafana/login', login), ('/grafana/', app)):
+            if not e(body is not None, f'{edition}/nginx.conf: the {name} location is missing'):
+                continue
+            e('proxy_pass $grafana;' in body and 'access_log /var/log/nginx/access.log krate_identity;' in body,
+              f'{edition}/nginx.conf: {name} must proxy to Grafana and log without query strings (the OAuth callback carries a one-time code)')
+            e("worker-src 'self' blob:" in body,
+              f'{edition}/nginx.conf: {name} must extend the CSP with worker-src (Grafana\'s Monaco editor starts blob: workers)')
+            for header in ('X-Frame-Options SAMEORIGIN', 'X-Content-Type-Options nosniff', 'Referrer-Policy no-referrer',
+                           'Permissions-Policy', 'Content-Security-Policy'):
+                e(f'add_header {header}' in body,
+                  f'{edition}/nginx.conf: {name} must restate {header} (a location with its own add_header loses the server-level set)')
+        if login is None or app is None:
+            continue
+        e('limit_req zone=krate_login burst=20 nodelay;' in login, f'{edition}/nginx.conf: /grafana/login must be rate limited')
+        e('limit_req' not in app,
+          f'{edition}/nginx.conf: /grafana/ must not be rate limited (the SPA loads ~100 assets at once; a limit_req with burst=40 answered 503 to 51 of them)')
+        e('proxy_read_timeout 3600s;' in app and 'proxy_set_header Upgrade $http_upgrade;' in app
+          and 'proxy_set_header Connection "upgrade";' in app,
+          f'{edition}/nginx.conf: /grafana/ must carry the WebSocket upgrade Grafana Live tail needs')
+        e('proxy_read_timeout' not in login and 'Upgrade' not in login,
+          f'{edition}/nginx.conf: the WebSocket upgrade belongs to /grafana/ only')
+        e(nginx.index('    location ^~ /grafana/') < nginx.index('    location ^~ /metrics {') < nginx.index('    location / {'),
+          f'{edition}/nginx.conf: the Grafana locations must precede the 404 blocks and the catch-all location /')
+
+
+# render.py reads these two for its Grafana output only. They reach it through
+# monitoring-init's own environment, so a change recreates monitoring-init and Grafana
+# (KRATE_GRAFANA_AUTH_SHA) and must NOT recreate Perses, Alertmanager or the gateway:
+# they are deliberately absent from the CLI's KRATE_RENDER_ENV_KEYS.
+GRAFANA_ONLY_RENDER_KEYS = {'GRAFANA_AUTH_CONFIG', 'GRAFANA_OAUTH_CLIENT_SECRET'}
+# The edition .env keys render.py may read (they come from the cluster's .env, not from
+# monitoring/.env, so monitor_compose passes them and hashes them separately).
+RENDER_EDITION_KEYS = {'KEYCLOAK_PUBLIC_URL', 'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
+                       'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS', 'PERSES_IDP',
+                       'PERSES_GROUP_PROOF_MINUTES', 'PERSES_ISSUER_APPLIED'}
+RENDER_ENV_ACCESSOR = re.compile(r"(?:env\.get\(|env\[|(?:flag|require)\(env,\s*)'([A-Z][A-Z_0-9]+)'")
+
+
+def render_env_keys():
+    """Every monitoring/.env key render.py reads, whatever accessor it uses, plus a closure guard.
+
+    Keys that are not in monitoring/.env.template are edition values (the KEYCLOAK_* keys
+    `monitor_compose` passes in); they are hashed separately, not through KRATE_RENDER_ENV_KEYS.
+    """
+    text = (ROOT / 'monitoring/render.py').read_text()
+    derived = set(RENDER_ENV_ACCESSOR.findall(text))
+    # A new accessor style would silently shrink the derived set: any all-caps literal that is
+    # also a monitoring/.env.template key must be explained by the pattern above.
+    template_keys = set(identity.read_env(ROOT / 'monitoring/.env.template'))
+    literals = set(re.findall(r"'([A-Z][A-Z_0-9]{3,})'", text))
+    unexplained = (literals & template_keys) - derived
+    if unexplained:
+        raise ValueError(f'monitoring/render.py reads {sorted(unexplained)} through an accessor RENDER_ENV_ACCESSOR does not match')
+    return derived & template_keys, derived - template_keys
+
+
+def check_grafana_realm_cli(checks):
+    """Phase 4 commits 4-5: the CLI side of the Grafana realm switch."""
+    e = checks.expect
+    try:
+        monitor_keys, edition_keys = render_env_keys()
+    except ValueError as exc:
+        e(False, str(exc))
+        monitor_keys, edition_keys = set(), set()
+    e(edition_keys <= RENDER_EDITION_KEYS,
+      f'monitoring/render.py reads edition .env keys outside the realm set {sorted(RENDER_EDITION_KEYS)}: {sorted(edition_keys - RENDER_EDITION_KEYS)}')
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        e('Usage: krate monitor {up|down|status|logs|reload|ui|realm|grafana-user retire <login>}' in cli,
+          f'{edition}/krate: the monitor usage must list realm and grafana-user retire')
+        monitor = function_body(cli, 'cmd_monitor')
+        for branch in ('\n    realm)\n', '\n    grafana-user)\n'):
+            e(branch in monitor, f'{edition}/krate: cmd_monitor must have a {branch.strip()} branch')
+        e('refuse_loopback_public_url' in monitor and 'grafana-seed.meta' not in monitor,
+          f'{edition}/krate: cmd_monitor realm must refuse a loopback public host (the seed-meta refusal belongs to monitor_prepare)')
+        prepare = function_body(cli, 'monitor_prepare')
+        e('refuse_loopback_public_url' in prepare and 'auth/secrets/grafana-seed.meta' in prepare
+          and prepare.index('refuse_loopback_public_url') < prepare.index('preflight.py'),
+          f'{edition}/krate: monitor_prepare must refuse a loopback host and a missing seed meta in realm mode, before Compose runs')
+        e('preflight.py" --directory "$SCRIPT_DIR" --mode monitoring' in prepare,
+          f'{edition}/krate: monitor_prepare must run the monitoring preflight')
+        compose = function_body(cli, 'monitor_compose')
+        for export in ('GRAFANA_BIND="$grafana_bind"', 'KRATE_IDP_HOST="$idp_host"', 'IDP_DISCOVERY_URL="$idp_url"',
+                       'KRATE_GRAFANA_AUTH_SHA="$grafana_sha"'):
+            e(export in compose, f'{edition}/krate: monitor_compose must export {export}')
+        e('find "$env_file"' not in compose,
+          f'{edition}/krate: the render revision must not hash the whole monitoring/.env (an unrelated key would recreate every consumer)')
+        declared = re.search(r'KRATE_RENDER_ENV_KEYS=\(\n(.*?)\n\)\n', cli, re.S)
+        if e(declared is not None, f'{edition}/krate: KRATE_RENDER_ENV_KEYS is missing'):
+            listed = set(declared.group(1).split())
+            e(listed == monitor_keys - GRAFANA_ONLY_RENDER_KEYS,
+              f'{edition}/krate: KRATE_RENDER_ENV_KEYS must equal the monitoring/.env keys render.py reads minus the Grafana-only ones; '
+              f'missing {sorted(monitor_keys - GRAFANA_ONLY_RENDER_KEYS - listed)}, unexpected {sorted(listed - monitor_keys)}')
+            e(not (listed & GRAFANA_ONLY_RENDER_KEYS),
+              f'{edition}/krate: no GRAFANA_* key may enter the render revision (it would recreate Perses, Alertmanager and the gateway)')
+        # No Grafana credential ever reaches a command line: the helpers pass them in the
+        # environment of the call, and the CLI builds no Authorization header of its own.
+        e('Authorization' not in cli and 'curl ' not in cli,
+          f'{edition}/krate: the CLI must build no HTTP credential and call no curl (grafana-admin.py authenticates in-process)')
+        e('GRAFANA_ADMIN_PASSWORD="$(env_value_file "$env_file" GRAFANA_PASSWORD)" \\' in cli
+          and 'GRAFANA_SERVICE_ACCOUNT_TOKEN="$(cat "$token_file")" \\' in cli,
+          f'{edition}/krate: the Grafana credentials must reach grafana-admin.py as environment assignments')
+        realm_refresh = function_body(cli, 'monitor_realm_refresh')
+        e('cmp -s "$ini" "$ini.new"' in realm_refresh,
+          f'{edition}/krate: monitor_realm_refresh must write realm.ini only when it changed, so an unchanged file does not recreate Grafana')
+        renew = function_body(cli, 'monitor_grafana_seed_renew')
+        e('2592000' in renew and 'token-delete' in renew and renew.index('token-create') < renew.index('token-delete'),
+          f'{edition}/krate: the renewal must create the successor before deleting the old token id, within 30 days of expiry')
+    for name in ('refuse_loopback_public_url', 'grafana_admin', 'grafana_admin_token', 'identity_reconcile_grafana_client',
+                 'monitor_write_seed_token', 'monitor_grafana_seed_token', 'monitor_grafana_seed_renew',
+                 'monitor_realm_refresh', 'grafana_list_collisions', 'monitor_compose', 'monitor_prepare'):
+        first, second = (function_body((ROOT / edition / 'krate').read_text(), name) for edition in EDITIONS)
+        e(first == second, f'kraft/epc parity: {name} must have the same body in both editions')
+    if bash_binary() is None:
+        return
+    script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'public_url_host', 'refuse_loopback_public_url') + r'''
+ENV_FILE="$1"
+refuse_loopback_public_url
+echo accepted
+'''
+    for url, expected in (('https://localhost/identity', 1), ('https://127.0.0.1/identity', 1), ('https://[::1]/identity', 1),
+                          ('http://[::1]:8080/identity', 1), ('https://krate.example.test/identity', 0)):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / '.env'
+            env.write_text(f'KEYCLOAK_PUBLIC_URL={url}\n')
+            result = run_bash(script, env)
+            e(result.returncode == expected,
+              f'refuse_loopback_public_url with {url} must exit {expected}; got {result.returncode} ({result.stderr.strip()[:100]})')
+            if expected == 1:
+                e('KEYCLOAK_PUBLIC_URL' in result.stderr, f'the refusal of {url} must name KEYCLOAK_PUBLIC_URL; got {result.stderr.strip()[:120]!r}')
+
+
+def check_grafana_realm_plan(checks):
+    """Phase 4 commits 4/8: Grafana's realm.ini, the krate-grafana client and the two Perses clients."""
+    e = checks.expect
+    values = identity.settings(SYNTHETIC)
+    origin = values['public_origin']
+    ini = identity.grafana_ini(values)
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.read_string(ini)
+    wanted_ini = {
+        ('server', 'root_url'): origin + '/grafana/',
+        ('server', 'serve_from_sub_path'): 'true',
+        ('security', 'cookie_secure'): 'true',
+        ('security', 'cookie_samesite'): 'lax',
+        ('auth', 'disable_login_form'): 'true',
+        ('auth', 'disable_login'): 'true',
+        ('auth', 'login_maximum_inactive_lifetime_duration'): '%dm' % values['session_idle_minutes'],
+        ('auth', 'login_maximum_lifetime_duration'): '%dh' % values['session_max_hours'],
+        ('auth.basic', 'enabled'): 'false',
+        ('auth.generic_oauth', 'enabled'): 'true',
+        ('auth.generic_oauth', 'name'): 'Krate sign-in',
+        ('auth.generic_oauth', 'allow_sign_up'): 'true',
+        ('auth.generic_oauth', 'client_id'): 'krate-grafana',
+        ('auth.generic_oauth', 'scopes'): 'openid profile email',
+        ('auth.generic_oauth', 'login_attribute_path'): 'sub',
+        ('auth.generic_oauth', 'groups_attribute_path'): 'groups',
+        ('auth.generic_oauth', 'role_attribute_strict'): 'true',
+        ('auth.generic_oauth', 'skip_org_role_sync'): 'false',
+        ('auth.generic_oauth', 'allow_assign_grafana_admin'): 'false',
+        ('auth.generic_oauth', 'use_pkce'): 'true',
+        ('auth.generic_oauth', 'use_refresh_token'): 'true',
+        ('auth.generic_oauth', 'tls_skip_verify_insecure'): 'false',
+        ('auth.generic_oauth', 'tls_client_ca'): '/etc/krate/ca/server.crt',
+        ('auth.generic_oauth', 'client_secret'): '$__file{/etc/krate/grafana/client-secret}',
+        ('sso_settings', 'configurable_providers'): 'none',
+        ('metrics', 'enabled'): 'false',
+        ('auth.anonymous', 'hide_version'): 'true',
+        ('public_dashboards', 'enabled'): 'false',
+        ('snapshots', 'enabled'): 'false',
+        ('news', 'news_feed_enabled'): 'false',
+        ('dashboards', 'default_home_dashboard_path'): '/var/lib/grafana/dashboards/kafka-overview.json',
+    }
+    for (section, key), expected in wanted_ini.items():
+        e(parser.has_option(section, key) and parser.get(section, key) == expected,
+          f'realm.ini [{section}] {key} must be {expected!r} (row U26 and the plan\'s commit 4); got '
+          f'{parser.get(section, key, fallback=None)!r}')
+    for name, expected in (('auth_url', 'auth'), ('token_url', 'token'), ('api_url', 'userinfo')):
+        e(parser.get('auth.generic_oauth', name, fallback='') == f'{origin}/identity/realms/krate/protocol/openid-connect/{expected}',
+          f'realm.ini auth.generic_oauth {name} must be the realm\'s explicit {expected} endpoint')
+    signout = parser.get('auth', 'signout_redirect_url', fallback='')
+    e(signout.startswith(f'{origin}/identity/realms/krate/protocol/openid-connect/logout?')
+      and 'post_logout_redirect_uri=' in signout and 'client_id=krate-grafana' in signout,
+      f'realm.ini signout_redirect_url must end the realm session and return to the Grafana login; got {signout[:120]!r}')
+    role = parser.get('auth.generic_oauth', 'role_attribute_path', fallback='')
+    for group, wanted_role in ((values['admin_group'], 'Admin'), (values['viewer_group'], 'Viewer')):
+        e(group in role and wanted_role in role, f'realm.ini role_attribute_path must map {group} to {wanted_role}; got {role!r}')
+    e("''" in role and role.index(values['admin_group']) < role.index(values['viewer_group']),
+      f'realm.ini role_attribute_path must prefer Admin and fall back to the empty role (role_attribute_strict refuses it); got {role!r}')
+    for secret in ALL_SECRETS:
+        e(secret not in ini, 'realm.ini must carry no secret value (the client secret is a $__file reference)')
+    e((ROOT / 'monitoring/grafana/dashboards/kafka-overview.json').is_file(),
+      'monitoring/grafana/dashboards/kafka-overview.json must exist: realm.ini makes it the home dashboard')
+
+    client = identity.grafana_client(origin)
+    e(client['clientId'] == 'krate-grafana' and client['publicClient'] is False and client['standardFlowEnabled'] is True
+      and client['implicitFlowEnabled'] is False and client['directAccessGrantsEnabled'] is False
+      and client['serviceAccountsEnabled'] is False and client['frontchannelLogout'] is False,
+      f'krate-grafana must be a confidential standard-flow client with no front-channel logout; got {client}')
+    e(client['redirectUris'] == [origin + '/grafana/login/generic_oauth'] and client['webOrigins'] == [origin],
+      f'krate-grafana redirectUris/webOrigins; got {client["redirectUris"]} {client["webOrigins"]}')
+    e(client['attributes'].get('pkce.code.challenge.method') == 'S256'
+      and client['attributes'].get('post.logout.redirect.uris') == origin + '/grafana/login',
+      f'krate-grafana attributes; got {client["attributes"]}')
+    e(not any('backchannel' in key for key in client['attributes']),
+      'krate-grafana must register no back-channel logout URL: Grafana has no such endpoint')
+    e(sorted(client['defaultClientScopes']) == ['basic', 'email', 'profile', 'roles', 'web-origins']
+      and client['optionalClientScopes'] == [],
+      f'krate-grafana scopes must be the krate-ui default set and nothing optional; got {client["defaultClientScopes"]} {client["optionalClientScopes"]}')
+    e(client['protocolMappers'] == [identity.groups_mapper()],
+      'krate-grafana must carry the same groups mapper as krate-ui (one source: identity.groups_mapper)')
+    e('secret' not in client, 'krate-grafana without --with-secret must carry no secret key')
+    e('GRAFANA_OAUTH_CLIENT_SECRET' in identity.GRAFANA_SECRET_KEY, 'the Grafana secret key name')
+    environment = dict(os.environ, GRAFANA_OAUTH_CLIENT_SECRET='synthetic-grafana-secret-7c1d2e')
+    saved = {key: os.environ.pop(key, None) for key in ('GRAFANA_OAUTH_CLIENT_SECRET',)}
+    try:
+        try:
+            identity.grafana_client(origin, with_secret=True)
+            e(False, 'grafana_client --with-secret must refuse an unset GRAFANA_OAUTH_CLIENT_SECRET')
+        except ValueError as exc:
+            e('GRAFANA_OAUTH_CLIENT_SECRET' in str(exc) and 'synthetic' not in str(exc),
+              f'the refusal must name the key and no value; got {exc}')
+        os.environ['GRAFANA_OAUTH_CLIENT_SECRET'] = environment['GRAFANA_OAUTH_CLIENT_SECRET']
+        with_secret = identity.grafana_client(origin, with_secret=True)
+        e(with_secret['secret'] == environment['GRAFANA_OAUTH_CLIENT_SECRET'], 'grafana_client --with-secret substitutes the environment value')
+    finally:
+        for key, value in saved.items():
+            os.environ.pop(key, None)
+            if value is not None:
+                os.environ[key] = value
+    # The refusal is tested through the shipped subcommand (the CLI's entry point), not the
+    # library function, plus a positive control so the refusal cannot be unconditional.
+    for url, expected_rc in (('https://localhost/identity', 1), ('https://127.0.0.1/identity', 1),
+                             ('https://[::1]/identity', 1), (SYNTHETIC['KEYCLOAK_PUBLIC_URL'], 0)):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / '.env'
+            env_file.write_text(''.join(f'{key}={value}\n' for key, value in dict(SYNTHETIC, KEYCLOAK_PUBLIC_URL=url).items()))
+            result = subprocess.run([sys.executable, str(ROOT / 'sso/identity.py'), 'grafana-ini', '--env-file', str(env_file)],
+                                    text=True, capture_output=True)
+            e((result.returncode != 0) == (expected_rc != 0),
+              f'identity.py grafana-ini with KEYCLOAK_PUBLIC_URL={url} must exit {expected_rc}; got {result.returncode} {result.stderr.strip()[:120]!r}')
+            if expected_rc != 0:
+                e('KEYCLOAK_PUBLIC_URL' in result.stderr,
+                  f'the refusal of {url} must name KEYCLOAK_PUBLIC_URL and no value; got {result.stderr.strip()[:160]!r}')
+            else:
+                e('[auth.generic_oauth]' in result.stdout, 'identity.py grafana-ini prints the ini on stdout')
+    same = dict(client, id='generated-id', internalId='x', secret='**********',
+                redirectUris=list(reversed(client['redirectUris'])), extra='ignored')
+    e(identity.client_differs(client, same) is False,
+      'client_differs: Keycloak additions, a masked secret and a reordered set are not a difference')
+    e(identity.client_differs(client, dict(same, redirectUris=[origin + '/other'])) is True,
+      'client_differs: a changed redirect URI is a difference')
+    e(identity.client_differs(client, dict(same, attributes=dict(client['attributes'], **{'pkce.code.challenge.method': ''}))) is True,
+      'client_differs: a dropped PKCE method is a difference')
+
+def check_perses_clients(checks):
+    """Phase 4 commit 8's generators, landed with the Grafana ones because they share groups_mapper,
+    checked_origin and env_secret: the two Perses realm clients."""
+    e = checks.expect
+    perses = identity.perses_clients('https://krate.example.test', '3443')
+    ids = sorted(item['clientId'] for item in perses)
+    e(ids == ['krate-perses', 'krate-perses-sync'], f'the Perses clients; got {ids}')
+    main_client = next(item for item in perses if item['clientId'] == 'krate-perses')
+    e(sorted(main_client['redirectUris']) == sorted(['https://krate.example.test:3443/oauth2/callback',
+                                                    'https://krate.example.test:3443/api/auth/providers/oidc/krate/callback']),
+      f'krate-perses must carry both callbacks (oauth2-proxy and Perses native); got {main_client["redirectUris"]}')
+    e(main_client['attributes'].get('pkce.code.challenge.method') == 'S256', 'krate-perses must require PKCE S256')
+    guard = next(item for item in perses if item['clientId'] == 'krate-perses-sync')
+    e(guard['serviceAccountsEnabled'] is True and guard['standardFlowEnabled'] is False,
+      f'krate-perses-sync must be a service-account client with no browser flow; got {guard}')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
-                  check_prometheus_reload, check_loki_gateway,
+                  check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
+                  check_grafana_realm_cli, check_grafana_realm_plan, check_perses_clients,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
@@ -3441,7 +3812,8 @@ def main():
           'runtime.yml incl. refusals), configure-dual, stub_idp.sh down, proxy environment and edge rules, release permissions, RPM dependency '
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
           'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
-          'Prometheus lifecycle off and the SIGHUP reload result, the read-only Loki gateway.')
+          'Prometheus lifecycle off and the SIGHUP reload result, the read-only Loki gateway, '
+          'the Grafana realm switch (compose, proxy front, CLI, realm.ini and clients).')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
         print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan the local Keycloak realm, Kafbat's Keycloak login and the database TLS material for Krate identity.
+"""Plan the local Keycloak realm, Kafbat's Keycloak login, the Grafana and Perses realm clients and the database TLS material for Krate identity.
 
 Secrets never enter this program's output: the realm plan and Kafbat's
 runtime.yml carry ``${VAR}`` placeholders that Keycloak and Kafbat resolve from
@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 REALM = 'krate'
@@ -116,6 +116,48 @@ EVENTS = {
     'adminEventsEnabled': True,
     'adminEventsDetailsEnabled': False,
 }
+
+# ─── Phase 4 realm-plan clients (Grafana, Perses) ─────────────────────────────
+# Names shared by the generators below, the CLI's reconciles and scripts/check-identity.py.
+GRAFANA_CLIENT = 'krate-grafana'
+GRAFANA_CLIENT_NAME = 'Grafana'
+# The generic_oauth login-button label (realm.ini `name`) and the paths the ini and the client
+# representation share: the browser is served at /grafana/, signs in at /grafana/login and comes
+# back on /grafana/login/generic_oauth (lab6 L5-3 walk).
+GRAFANA_SIGNIN_NAME = 'Krate sign-in'
+GRAFANA_ROOT_PATH = '/grafana/'
+GRAFANA_LOGIN_PATH = '/grafana/login'
+GRAFANA_REDIRECT_PATH = '/grafana/login/generic_oauth'
+# monitoring/.env key the CLI substitutes into the client with --with-secret; Grafana itself reads
+# the rendered secret file ($__file{...}), never this program's output.
+GRAFANA_SECRET_KEY = 'GRAFANA_OAUTH_CLIENT_SECRET'
+# Container paths of the Phase 4 compose mounts: monitoring-init renders the client secret into
+# grafana_rendered (plan commit 5) and the cluster CA is mounted read-only (plan commits 5 and 7).
+GRAFANA_SECRET_FILE = '/etc/krate/grafana/client-secret'
+GRAFANA_TLS_CA_FILE = '/etc/krate/ca/server.crt'
+# The Krate home dashboard: the provisioning provider's path (dashboards.yml `path`) + file name;
+# the stock Home panel fetches grafana.com news, so the realm ini points somewhere else (lab6 L5-3).
+GRAFANA_HOME_DASHBOARD = '/var/lib/grafana/dashboards/kafka-overview.json'
+PERSES_CLIENT = 'krate-perses'
+PERSES_CLIENT_NAME = 'Perses'
+PERSES_SYNC_CLIENT = 'krate-perses-sync'
+PERSES_SYNC_CLIENT_NAME = 'Perses guard'
+# The OIDC provider slug render.py configures in Perses (monitoring/render.py:110,215).
+PERSES_OIDC_SLUG = 'krate'
+PERSES_SECRET_KEY = 'OAUTH2_PROXY_CLIENT_SECRET'
+PERSES_SYNC_SECRET_KEY = 'PERSES_SYNC_CLIENT_SECRET'
+PERSES_PORT_KEY = 'PERSES_PORT'
+PERSES_PORT_DEFAULT = '3443'
+# The client-differs verdict: the fields the CLI's reconcile converges, the ones Keycloak stores
+# as sets (its readback reorders them: lab2/logs/020-realm-setup.log), the scope fields the caller
+# only reports (a PUT never changes scopes), and the mask the admin API returns for a secret.
+CLIENT_VERDICT_FIELDS = ('redirectUris', 'webOrigins', 'frontchannelLogout', 'attributes', 'protocolMappers')
+CLIENT_SET_FIELDS = ('redirectUris', 'webOrigins')
+CLIENT_SCOPE_FIELDS = ('defaultClientScopes', 'optionalClientScopes')
+KEYCLOAK_SECRET_MASK = '**********'
+# Hosts grafana-ini refuses for KEYCLOAK_PUBLIC_URL; the CLI's refuse_loopback_public_url
+# (monitor_prepare, plan commit 5) refuses the same hosts, so no path can write the file.
+LOOPBACK_HOSTS = ('localhost', '127.0.0.1', '::1')
 
 DB_HOST = 'keycloak-db'
 CA_NAME = 'Krate identity CA'
@@ -278,6 +320,19 @@ def ui_client_attributes(origin):
     }
 
 
+def groups_mapper():
+    """The `groups` claim mapper every Krate browser client carries: group names, never realm
+    paths (full.path false), in the ID token, the access token and userinfo. One source for
+    krate-ui, krate-grafana and krate-perses."""
+    return {
+        'name': 'groups', 'protocol': 'openid-connect',
+        'protocolMapper': 'oidc-group-membership-mapper', 'consentRequired': False,
+        'config': {'claim.name': GROUPS_CLAIM, 'full.path': 'false', 'multivalued': 'true',
+                   'id.token.claim': 'true', 'access.token.claim': 'true',
+                   'userinfo.token.claim': 'true'},
+    }
+
+
 def realm(values):
     """Local-mode realm from settings(): local users, two groups, two clients, no identity providers."""
     origin = values['public_origin']
@@ -294,13 +349,7 @@ def realm(values):
         'attributes': ui_client_attributes(origin),
         'defaultClientScopes': list(DEFAULT_SCOPES),
         'optionalClientScopes': [],
-        'protocolMappers': [{
-            'name': 'groups', 'protocol': 'openid-connect',
-            'protocolMapper': 'oidc-group-membership-mapper', 'consentRequired': False,
-            'config': {'claim.name': GROUPS_CLAIM, 'full.path': 'false', 'multivalued': 'true',
-                       'id.token.claim': 'true', 'access.token.claim': 'true',
-                       'userinfo.token.claim': 'true'},
-        }],
+        'protocolMappers': [groups_mapper()],
     }
     cli_client = {
         'clientId': CLI_CLIENT, 'name': 'Krate CLI user management', 'enabled': True,
@@ -503,11 +552,11 @@ def write_if_changed(path, content, mode):
     return True
 
 
-def assert_redacted(text, env):
-    """Refuse output that embeds any configured secret value."""
+def assert_redacted(text, env, what='the realm plan'):
+    """Refuse output that embeds any configured secret value; the refusal names the key only."""
     for key, value in secret_values(env).items():
         if value in text:
-            raise ValueError('refusing to emit ' + key + ': its value would appear in the realm plan')
+            raise ValueError('refusing to emit ' + key + f': its value would appear in {what}')
 
 
 def plan(env_file, output, show=False):
@@ -871,14 +920,19 @@ def broker_config(plan, alias):
     return {'alias': config['alias'], 'config': dict(config['config'])}
 
 
+def env_secret(key):
+    """The environment's secret for `key`; the refusal names the key, never a value."""
+    value = os.environ.get(key, '')
+    if value in PLACEHOLDERS:
+        raise ValueError(f'{key} is not set in the environment')
+    return value
+
+
 def broker_provider(plan, with_secret=False):
     """The provider representation; with `with_secret` the placeholder becomes the environment's value."""
     provider = json.loads(json.dumps(plan['identityProviders'][0]))
     if with_secret:
-        value = os.environ.get(BROKER_SECRET_KEY, '')
-        if value in PLACEHOLDERS:
-            raise ValueError(f'{BROKER_SECRET_KEY} is not set in the environment')
-        provider['config']['clientSecret'] = value
+        provider['config']['clientSecret'] = env_secret(BROKER_SECRET_KEY)
     else:
         del provider['config']['clientSecret']
     return provider
@@ -953,6 +1007,335 @@ def cmd_truststore_digest(args):
     return 0
 
 
+# ─── Phase 4 realm plans: Grafana and Perses (pure) ───────────────────────────
+# The client representations and the Grafana ini that `krate monitor realm` / `krate monitor up`
+# reconcile against the running realm. Every field was verified live on the lab fixtures:
+# harness/phase4/lab6/logs/061-krate-grafana-client-request.json (create request) and
+# 063-krate-grafana-readback.json, harness/phase4/lab2/logs/020-realm-setup.log (perses readback),
+# harness/phase4/lab2/kcadmin.py:64-101 and harness/phase4/lab7/kcadmin.py:80-115 (the kcadm JSON
+# that worked) and harness/phase4/lab7/results.md:30,117 (realm clients, logout chain). Client
+# secrets are never part of a stored plan: --with-secret substitutes them from the environment
+# exactly like broker_provider(), and the CLI pipes that output to kcadm (stdin only, never argv).
+
+def checked_origin(origin):
+    """A bare public https origin (the CLI's --origin: KEYCLOAK_PUBLIC_URL minus /identity)."""
+    parts = urlsplit(origin or '')
+    if (parts.scheme != 'https' or not parts.hostname or parts.username or parts.password
+            or parts.query or parts.fragment or parts.path not in ('', '/')):
+        raise ValueError('--origin must be an https origin with no path (KEYCLOAK_PUBLIC_URL minus /identity)')
+    return 'https://' + parts.netloc
+
+
+def refuse_loopback_public_url(url):
+    """Refuse a loopback KEYCLOAK_PUBLIC_URL host for the realm-derived Grafana configuration: its
+    URLs are for browsers on other machines. The CLI's monitor_prepare refuses the same hosts
+    (plan commit 5, U14); the generator repeats the refusal so no path can write the file. The
+    message names the key, never the value."""
+    if urlsplit(url or '').hostname in LOOPBACK_HOSTS:
+        raise ValueError('KEYCLOAK_PUBLIC_URL must name the public host: refusing a loopback host'
+                         ' (localhost, 127.0.0.1, [::1])')
+
+
+def grafana_client(origin, with_secret=False):
+    """The krate-grafana client representation (verified live: lab6/logs/061 create request,
+    063 readback).
+
+    Confidential, standard flow only, PKCE S256 (OIDCConfigAttributes.PKCE_CODE_CHALLENGE_METHOD,
+    Keycloak 26.8.0 server-spi-private/src/main/java/org/keycloak/protocol/oidc/OIDCConfigAttributes.java:64),
+    one exact post-logout target (POST_LOGOUT_REDIRECT_URIS, same file :93 — the logout endpoint
+    accepts no wildcard) and krate-ui's groups mapper. No backchannel.logout.url: Grafana has no
+    back-channel logout endpoint; its logout is the browser redirect realm.ini's
+    signout_redirect_url performs. The secret is never part of the plan: `with_secret` substitutes
+    GRAFANA_OAUTH_CLIENT_SECRET from the environment like broker_provider() does.
+    """
+    client = {
+        'clientId': GRAFANA_CLIENT, 'name': GRAFANA_CLIENT_NAME, 'enabled': True,
+        'protocol': 'openid-connect', 'publicClient': False,
+        'clientAuthenticatorType': 'client-secret',
+        'standardFlowEnabled': True, 'implicitFlowEnabled': False,
+        'directAccessGrantsEnabled': False, 'serviceAccountsEnabled': False,
+        # No Keycloak-initiated logout at all; stated so a changed Keycloak default cannot switch it on.
+        'frontchannelLogout': False,
+        'redirectUris': [origin + GRAFANA_REDIRECT_PATH],
+        'webOrigins': [origin],
+        'attributes': {
+            'pkce.code.challenge.method': 'S256',
+            'post.logout.redirect.uris': origin + GRAFANA_LOGIN_PATH,
+        },
+        'defaultClientScopes': list(DEFAULT_SCOPES),
+        'optionalClientScopes': [],
+        'protocolMappers': [groups_mapper()],
+    }
+    if with_secret:
+        client['secret'] = env_secret(GRAFANA_SECRET_KEY)
+    return client
+
+
+def grafana_role_expression(values):
+    """realm.ini's role_attribute_path: the JMESPath expression sso/configure.py:131-136 builds
+    (back-quoted JSON literals are string literals), with the realm's group names; equal to the
+    value verified live on the fixture (lab6/evidence/realm.ini:28)."""
+    def contains(group):
+        return f'contains({GROUPS_CLAIM}[*], `{json.dumps(group)}`)'
+    return (f"{contains(values['admin_group'])} && 'Admin' || "
+            f"{contains(values['viewer_group'])} && 'Viewer' || ''")
+
+
+def grafana_ini(values):
+    """The text of monitoring/auth/realm.ini from settings(): Grafana signs in through the Krate
+    realm, served at /grafana/ by the cluster proxy. Content verified live on the lab6 fixture
+    (harness/phase4/lab6/evidence/realm.ini) with the two planned deviations: the client secret is
+    read from the rendered file ($__file{/etc/krate/grafana/client-secret}; monitoring-init renders
+    GRAFANA_OAUTH_CLIENT_SECRET there, plan commit 5 — the value never enters this file) and the
+    cluster CA is the compose-mounted /etc/krate/ca/server.crt (plan commits 5 and 7).
+
+    Key anchors, Grafana v12.2.0 conf/defaults.ini (harness/phase4/grafana-src/grafana-v12.2.0):
+    [server] root_url:60 serve_from_sub_path:63; [security] cookie_secure:384 cookie_samesite:387;
+    [auth] disable_login:605 login_maximum_inactive_lifetime_duration:608
+    login_maximum_lifetime_duration:611 disable_login_form:617 signout_redirect_url:623;
+    [auth.basic] enabled:920; [auth.generic_oauth] 878-916 (name:879 enabled:881 allow_sign_up:882
+    client_id:884 client_secret:885 scopes:886 login_attribute_path:890 role_attribute_path:892
+    role_attribute_strict:893 groups_attribute_path:896 auth_url:899 token_url:900 api_url:901
+    tls_skip_verify_insecure:908 tls_client_ca:911 use_pkce:912 allow_assign_grafana_admin:914
+    skip_org_role_sync:915 use_refresh_token:916); [sso_settings] configurable_providers:686;
+    [auth.anonymous] hide_version:700; [metrics] enabled:1729; [snapshots] enabled:457;
+    [public_dashboards] enabled:2161; [news] news_feed_enabled:1708; [dashboards]
+    default_home_dashboard_path:479.
+
+    Why the non-default values: the session lifetimes are the realm's (one source:
+    KEYCLOAK_SESSION_IDLE_MINUTES / KEYCLOAK_SESSION_MAX_HOURS; Grafana's own defaults are 7d/30d,
+    research-grafana.md 4.1). disable_login closes every Grafana-password path even against a
+    GF_* override, and [auth.basic] enabled=false because Basic does not depend on
+    disable_login_form (research-grafana.md, section 4 rows). role_attribute_strict=true refuses a
+    login whose groups map to no role instead of falling back to Viewer (research-grafana.md 2.2).
+    use_pkce=true: generic_oauth sends no nonce, PKCE is the flow's protection
+    (research-grafana.md 1.4). tls_client_ca + tls_skip_verify_insecure=false: generic_oauth in
+    12.2.0 has no ID-token signature validation, so the IdP trust is the TLS-protected back
+    channel to token_url/api_url (research-grafana.md 1.2). configurable_providers=none keeps a
+    DB-stored SSO setting from overriding this file (research-grafana.md 1.12). metrics off and
+    hide_version/public_dashboards/snapshots/news off: no unauthenticated surface, no external
+    fetch, and U17 refuses the realm switch while public dashboards or snapshots hold content.
+    default_home_dashboard_path: the stock Home's news panel fetches grafana.com even with
+    news_feed_enabled=false (lab6 L5-3, finding 3).
+    """
+    origin = values['public_origin']
+    endpoints = origin + '/identity/realms/' + REALM + '/protocol/openid-connect/'
+    signout = (endpoints + 'logout?post_logout_redirect_uri='
+               + quote(origin + GRAFANA_LOGIN_PATH, safe='') + '&client_id=' + GRAFANA_CLIENT)
+    secret_ref = '$__file{' + GRAFANA_SECRET_FILE + '}'
+    return f"""; Generated by Krate: Grafana signs in through the Krate realm (KEYCLOAK_PUBLIC_URL), served at /grafana/ by the cluster proxy.
+[server]
+root_url = {origin}{GRAFANA_ROOT_PATH}
+serve_from_sub_path = true
+[security]
+cookie_secure = true
+cookie_samesite = lax
+[auth]
+disable_login_form = true
+disable_login = true
+login_maximum_inactive_lifetime_duration = {values['session_idle_minutes']}m
+login_maximum_lifetime_duration = {values['session_max_hours']}h
+signout_redirect_url = {signout}
+[auth.basic]
+enabled = false
+[auth.generic_oauth]
+enabled = true
+name = {GRAFANA_SIGNIN_NAME}
+allow_sign_up = true
+client_id = {GRAFANA_CLIENT}
+client_secret = {secret_ref}
+scopes = {' '.join(UI_OIDC_SCOPES)}
+auth_url = {endpoints}auth
+token_url = {endpoints}token
+api_url = {endpoints}userinfo
+login_attribute_path = sub
+groups_attribute_path = {GROUPS_CLAIM}
+role_attribute_path = {grafana_role_expression(values)}
+role_attribute_strict = true
+skip_org_role_sync = false
+allow_assign_grafana_admin = false
+use_pkce = true
+use_refresh_token = true
+tls_skip_verify_insecure = false
+tls_client_ca = {GRAFANA_TLS_CA_FILE}
+[sso_settings]
+configurable_providers = none
+[metrics]
+enabled = false
+[auth.anonymous]
+hide_version = true
+[public_dashboards]
+enabled = false
+[snapshots]
+enabled = false
+[news]
+news_feed_enabled = false
+[dashboards]
+default_home_dashboard_path = {GRAFANA_HOME_DASHBOARD}
+"""
+
+
+def perses_port(env):
+    """PERSES_PORT from the parsed monitoring .env: the port the Perses origin is published on.
+    Same default and same validation as render.py:387-389, so the client's redirect URIs and the
+    rendered gateway config can never disagree."""
+    value = env.get(PERSES_PORT_KEY, PERSES_PORT_DEFAULT)
+    if not value.isdigit() or not 1 <= int(value) <= 65535:
+        raise ValueError(PERSES_PORT_KEY + ' must be a port number from 1 to 65535')
+    return int(value)
+
+
+def perses_origin(origin, port):
+    """The Perses public origin: the KEYCLOAK_PUBLIC_URL host on PERSES_PORT (plan commit 7:
+    realm_site public_url = https://<host of KEYCLOAK_PUBLIC_URL>:<PERSES_PORT>); an IPv6 host
+    keeps its brackets."""
+    host = urlsplit(origin).hostname or ''
+    return 'https://' + ('[' + host + ']' if ':' in host else host) + ':' + str(port)
+
+
+def perses_client(origin, port, with_secret=False):
+    """The krate-perses client representation: krate-ui's shape with the two callbacks of the
+    Perses origin (verified live: lab2/kcadmin.py:64-87, readback lab2/logs/020-realm-setup.log,
+    lab7/results.md:30).
+
+    The redirect URIs are oauth2-proxy's callback (proxy-prefix default /oauth2, oauth2-proxy
+    v7.15.5 oauthproxy.go:177 with pkg/apis/options/options.go:146) and Perses' native-OIDC
+    callback /api/auth/providers/oidc/<slug>/callback (perses v0.54.0
+    internal/api/impl/auth/auth.go:80 with internal/api/utils/utils.go:26,28,30; the slug is
+    render.py's `krate`). post.logout.redirect.uris carries the origin with and without the
+    trailing slash, joined with `##` like ui_client_attributes: the verified one-logout chain
+    ends on <origin>/ (lab7/results.md:117). No backchannel.logout.url: the single logout is the
+    gateway's redirect chain (plan commit 9). The secret comes from the environment only
+    (OAUTH2_PROXY_CLIENT_SECRET — the same key render.py:496 renders for oauth2-proxy).
+    """
+    base = perses_origin(origin, port)
+    client = {
+        'clientId': PERSES_CLIENT, 'name': PERSES_CLIENT_NAME, 'enabled': True,
+        'protocol': 'openid-connect', 'publicClient': False,
+        'clientAuthenticatorType': 'client-secret',
+        'standardFlowEnabled': True, 'implicitFlowEnabled': False,
+        'directAccessGrantsEnabled': False, 'serviceAccountsEnabled': False,
+        'frontchannelLogout': False,
+        'redirectUris': [base + '/oauth2/callback',
+                         base + '/api/auth/providers/oidc/' + PERSES_OIDC_SLUG + '/callback'],
+        'webOrigins': [base],
+        'attributes': {'pkce.code.challenge.method': 'S256',
+                       'post.logout.redirect.uris': base + '##' + base + '/'},
+        'defaultClientScopes': list(DEFAULT_SCOPES),
+        'optionalClientScopes': [],
+        'protocolMappers': [groups_mapper()],
+    }
+    if with_secret:
+        client['secret'] = env_secret(PERSES_SECRET_KEY)
+    return client
+
+
+def perses_sync_client(with_secret=False):
+    """The krate-perses-sync client representation: krate-cli's shape without the realm-management
+    roles — the guard authenticates with its service account only and manages no users (verified
+    live: lab2/kcadmin.py:90-101, lab2/results.md:34). The secret comes from the environment only
+    (PERSES_SYNC_CLIENT_SECRET, the key render.py reads for the perses-sync output)."""
+    client = {
+        'clientId': PERSES_SYNC_CLIENT, 'name': PERSES_SYNC_CLIENT_NAME, 'enabled': True,
+        'protocol': 'openid-connect', 'publicClient': False,
+        'clientAuthenticatorType': 'client-secret',
+        'standardFlowEnabled': False, 'implicitFlowEnabled': False,
+        'directAccessGrantsEnabled': False, 'serviceAccountsEnabled': True,
+        'redirectUris': [], 'webOrigins': [],
+        'defaultClientScopes': list(DEFAULT_SCOPES),
+        'optionalClientScopes': [],
+    }
+    if with_secret:
+        client['secret'] = env_secret(PERSES_SYNC_SECRET_KEY)
+    return client
+
+
+def perses_clients(origin, port, with_secret=False):
+    """Both Perses realm clients, in the order the reconcile converges them."""
+    return [perses_client(origin, port, with_secret), perses_sync_client(with_secret)]
+
+
+def perses_rep(name, origin, port, with_secret=False):
+    """The planned representation of the one Perses client `name`."""
+    if name == PERSES_CLIENT:
+        return perses_client(origin, port, with_secret)
+    if name == PERSES_SYNC_CLIENT:
+        return perses_sync_client(with_secret)
+    raise ValueError('client must be ' + PERSES_CLIENT + ' or ' + PERSES_SYNC_CLIENT)
+
+
+def _mappers_differ(wanted, current):
+    """Planned mappers matched by name; Keycloak's own additions (the mapper id) are ignored, and
+    so is a mapper Keycloak carries beyond the plan — differs()'s subset discipline, because the
+    reconcile PUTs the planned set rather than deleting foreign mappers."""
+    if not isinstance(current, list):
+        return True
+    by_name = {mapper.get('name'): mapper for mapper in current if isinstance(mapper, dict)}
+    return any(differs(mapper, by_name.get(mapper.get('name'))) for mapper in wanted)
+
+
+def _set_field_differs(wanted, current):
+    """Order-insensitive list equality for the fields Keycloak stores as sets: its readback
+    reorders redirectUris (created /oauth2/callback first, read back second —
+    lab2/logs/020-realm-setup.log:43-46), so a positional compare would never converge."""
+    if not isinstance(current, list) or not all(isinstance(item, str) for item in current):
+        return True
+    return sorted(wanted) != sorted(current)
+
+
+def client_differs(wanted, current):
+    """True when Keycloak's current client representation lacks or differs in any field the
+    reconcile converges (CLIENT_VERDICT_FIELDS), or in the secret when present in both: a secret
+    Keycloak masked with ********** counts as equal because the admin API never returns the value.
+    Keycloak's own additions (id, internalId, realm_client, its default backchannel.logout.*
+    attributes) are ignored — differs()'s discipline."""
+    if not isinstance(current, dict):
+        return True
+    for field in CLIENT_VERDICT_FIELDS:
+        if field not in wanted:
+            continue
+        have = current.get(field)
+        if field == 'protocolMappers':
+            if _mappers_differ(wanted[field], have):
+                return True
+        elif field in CLIENT_SET_FIELDS:
+            if _set_field_differs(wanted[field], have):
+                return True
+        elif differs(wanted[field], have):
+            return True
+    if 'secret' in wanted and 'secret' in current:
+        if current['secret'] != KEYCLOAK_SECRET_MASK and wanted['secret'] != current['secret']:
+            return True
+    return False
+
+
+def _scopes(rep):
+    """The client's scope lists in a comparable (sorted) form; anything malformed counts as []."""
+    result = []
+    for field in CLIENT_SCOPE_FIELDS:
+        value = rep.get(field)
+        result.append(sorted(value) if isinstance(value, list)
+                      and all(isinstance(item, str) for item in value) else [])
+    return result
+
+
+def scopes_differ(wanted, current):
+    """True when the current client scopes are not the planned ones, compared order-insensitively
+    (Keycloak returns them in its own order). The caller reports this instead of converging it: a
+    client PUT never changes scopes."""
+    if not isinstance(current, dict):
+        return True
+    return _scopes(wanted) != _scopes(current)
+
+
+def client_verdict(wanted, current):
+    """The client-differs contract: one `same`/`differs` line for the converged fields, plus a
+    `scopes-differ` line when the scopes drifted (reported by the caller, never converged)."""
+    sys.stdout.write(('differs' if client_differs(wanted, current) else 'same') + '\n')
+    if scopes_differ(wanted, current):
+        sys.stdout.write('scopes-differ\n')
+
+
 # ─── CLI ───────────────────────────────────────────────────────────────────────
 
 def cmd_plan(args):
@@ -963,6 +1346,51 @@ def cmd_plan(args):
 
 def cmd_runtime(args):
     runtime_plan(args.env_file, args.clusters, args.output, args.force, args.show)
+    return 0
+
+
+def cmd_grafana_client(args):
+    """The krate-grafana representation for the CLI's reconcile, or the client-differs verdict on
+    Keycloak's current representation from stdin. With --with-secret the output is piped to kcadm
+    only (stdin -> kcadm, never argv or a log); the verdict lines carry no value at all."""
+    origin = checked_origin(args.origin)
+    if args.item == 'client-differs':
+        client_verdict(grafana_client(origin), json.load(sys.stdin))
+    else:
+        sys.stdout.write(render(grafana_client(origin, args.with_secret)))
+    return 0
+
+
+def cmd_grafana_ini(args):
+    """Render monitoring/auth/realm.ini from the edition .env; refuses a loopback public host."""
+    env = read_env(args.env_file)
+    refuse_loopback_public_url(env.get('KEYCLOAK_PUBLIC_URL'))
+    text = grafana_ini(settings(env))
+    assert_redacted(text, env, 'realm.ini')
+    if args.output:
+        write_if_changed(args.output, text, 0o644)
+        print(args.output)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def cmd_perses_clients(args):
+    """The Perses client representations for the CLI's reconcile (one with --client, a JSON array
+    of both without), or the client-differs verdict on Keycloak's current representation of one
+    client from stdin. PERSES_PORT comes from monitoring/.env, the public URL from the edition
+    .env; secrets travel --with-secret -> stdin -> kcadm only."""
+    origin = public_origin(read_env(args.env_file).get('KEYCLOAK_PUBLIC_URL'))
+    port = perses_port(read_env(args.monitor_env_file))
+    if args.item == 'client-differs':
+        if not args.name:
+            raise ValueError('client-differs names the client: ' + PERSES_CLIENT + ' or ' + PERSES_SYNC_CLIENT)
+        client_verdict(perses_rep(args.name, origin, port), json.load(sys.stdin))
+        return 0
+    if args.client:
+        sys.stdout.write(render(perses_rep(args.client, origin, port, args.with_secret)))
+    else:
+        sys.stdout.write(render(perses_clients(origin, port, args.with_secret)))
     return 0
 
 
@@ -1145,6 +1573,29 @@ def main():
     broker.add_argument('--with-secret', action='store_true',
                         help=f'substitute {BROKER_SECRET_KEY} from the environment into the provider (output is piped to kcadm)')
     broker.set_defaults(func=cmd_broker)
+    gclient = commands.add_parser('grafana-client', help='the krate-grafana client representation for krate monitor realm')
+    gclient.add_argument('--origin', required=True, help='public origin: KEYCLOAK_PUBLIC_URL without /identity')
+    gclient.add_argument('item', nargs='?', choices=['client-differs'], default=None,
+                         help="client-differs: same/differs verdict on Keycloak's representation from stdin")
+    gclient.add_argument('--with-secret', action='store_true',
+                         help=f'substitute {GRAFANA_SECRET_KEY} from the environment into the client (output is piped to kcadm)')
+    gclient.set_defaults(func=cmd_grafana_client)
+    gini = commands.add_parser('grafana-ini', help="render Grafana's realm.ini (Keycloak sign-in) from .env values")
+    gini.add_argument('--env-file', type=Path, required=True)
+    gini.add_argument('--output', type=Path, help='write the ini here (0644) and print the path instead of the text')
+    gini.set_defaults(func=cmd_grafana_ini)
+    pclients = commands.add_parser('perses-clients', help='the krate-perses client representations for krate monitor up')
+    pclients.add_argument('--env-file', type=Path, required=True, help='edition .env (KEYCLOAK_PUBLIC_URL)')
+    pclients.add_argument('--monitor-env-file', type=Path, required=True, help='monitoring/.env (PERSES_PORT)')
+    pclients.add_argument('--client', choices=[PERSES_CLIENT, PERSES_SYNC_CLIENT], default=None,
+                          help='print one client representation instead of a JSON array of both')
+    pclients.add_argument('item', nargs='?', choices=['client-differs'], default=None,
+                          help="client-differs NAME: verdict on Keycloak's representation of NAME from stdin")
+    pclients.add_argument('name', nargs='?', choices=[PERSES_CLIENT, PERSES_SYNC_CLIENT], default=None,
+                          help='the client name client-differs refers to')
+    pclients.add_argument('--with-secret', action='store_true',
+                          help=f'substitute {PERSES_SECRET_KEY} / {PERSES_SYNC_SECRET_KEY} from the environment (output is piped to kcadm)')
+    pclients.set_defaults(func=cmd_perses_clients)
     digest = commands.add_parser('truststore-digest', help='digest of the PEM files Keycloak loads from a truststores directory')
     digest.add_argument('--directory', type=Path, required=True)
     digest.set_defaults(func=cmd_truststore_digest)

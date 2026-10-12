@@ -96,6 +96,9 @@ def validate(root, mode, config):
     if mode == 'identity':
         validate_identity(root, config)
         return
+    if mode == 'monitoring':
+        validate_monitoring(root, config)
+        return
     services = config['services']
     ui = services['kafka-ui']['environment']
     location = ui.get('SPRING_CONFIG_ADDITIONAL_LOCATION', '')
@@ -530,15 +533,55 @@ def validate_identity(root, config):
         validate_broker(root, env, origin, secrets, require_secret=False)
 
 
+def validate_monitoring(root, config):
+    """Monitoring stack checks: network membership, and Grafana's realm-mode exposure.
+
+    A monitoring service on an identity network would reach Keycloak and its database
+    from a stack that has no business there. Grafana needs exactly two networks: the
+    monitoring one for its datasources and the cluster's kafka-network, which is the
+    only route the cluster proxy has to it (`krate-grafana` alias, /grafana/). In realm
+    mode its own port has no login left (Basic off, login form off), so it must be
+    published on the loopback interface only, and the issuer route, the cluster CA and
+    the rendered client secret must be present.
+    """
+    services = config['services']
+    for name, service in services.items():
+        for network in (service.get('networks') or {}):
+            for forbidden in ('identity', 'identity-egress'):
+                if network == forbidden or network.startswith(forbidden + '_') or network.endswith('_' + forbidden):
+                    raise Preflight(f'monitoring service {name} must not join the {forbidden} network')
+    grafana = services.get('grafana')
+    if grafana is None:
+        raise Preflight('the monitoring stack renders no grafana service')
+    networks = sorted(grafana.get('networks') or {})
+    if networks != ['kafka-network', 'monitoring']:
+        raise Preflight(f'grafana must be on exactly the monitoring and kafka-network networks; got {networks}')
+    if not str((grafana.get('environment') or {}).get('GF_PATHS_CONFIG', '')).endswith('/realm.ini'):
+        return  # local mode: main's exposure is unchanged (every interface, its own login)
+    ports = grafana.get('ports') or []
+    if not ports or ports[0].get('host_ip') != '127.0.0.1':
+        raise Preflight('grafana in realm mode must publish its port on 127.0.0.1 only (GRAFANA_BIND); '
+                        'users reach it through the cluster proxy at /grafana/')
+    # Compose renders extra_hosts as "host=ip" (the file writes "host:ip"), so accept both.
+    if not any(str(entry).replace(':', '=').endswith('=host-gateway') for entry in grafana.get('extra_hosts') or []):
+        raise Preflight('grafana in realm mode must resolve the realm host with an extra_hosts host-gateway entry')
+    mounts = [str(volume.get('target')) for volume in grafana.get('volumes') or []]
+    for needed in ('/etc/krate/grafana', '/etc/krate/ca/server.crt'):
+        if needed not in mounts:
+            raise Preflight(f'grafana in realm mode must mount {needed} (the rendered client secret and the cluster CA)')
+    if not (root / 'monitoring/auth/realm.ini').is_file():
+        raise Preflight('monitoring/auth/realm.ini is missing: run krate monitor realm')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory', type=Path, required=True)
-    parser.add_argument('--mode', choices=['local.yml', 'runtime.yml', 'identity'], required=True)
+    parser.add_argument('--mode', choices=['local.yml', 'runtime.yml', 'identity', 'monitoring'], required=True)
     args = parser.parse_args()
+    label = {'identity': 'Identity', 'monitoring': 'Monitoring'}.get(args.mode, 'Authentication')
     try:
         validate(args.directory, args.mode, json.load(sys.stdin))
     except Preflight as exc:
-        label = 'Identity' if args.mode == 'identity' else 'Authentication'
         print(f'{label} preflight failed: {exc}', file=sys.stderr)
         return 1
     except (OSError, ValueError, KeyError, IndexError, TypeError, subprocess.SubprocessError):
@@ -547,14 +590,15 @@ def main():
             print('Identity preflight failed: check protected .env, the rendered keycloak/keycloak-db/proxy services '
                   'and identity network, auth/keycloak/db-tls and auth/keycloak/krate-realm.json.', file=sys.stderr)
             return 1
+        if args.mode == 'monitoring':
+            print('Monitoring preflight failed: check the rendered monitoring services (their networks, grafana\'s published '
+                  'port, extra_hosts and mounts) and monitoring/auth/realm.ini.', file=sys.stderr)
+            return 1
         print('Authentication preflight failed: check protected .env, unique secrets (16+ characters), generated auth files '
               '(auth/ui/runtime.yml, auth/keycloak/krate-realm.json), the rendered kafka-ui/keycloak services, HTTPS URL and '
               'matching unexpired TLS certificate.', file=sys.stderr)
         return 1
-    if args.mode == 'identity':
-        print('Identity preflight passed; no services changed.')
-        return 0
-    print('Authentication preflight passed; no services changed.')
+    print(f'{label} preflight passed; no services changed.')
     return 0
 
 

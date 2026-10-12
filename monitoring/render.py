@@ -17,6 +17,7 @@ import sys
 from urllib.parse import urlsplit
 
 PERSES_UID = 65532       # persesdev/perses and oauth2-proxy run as nonroot
+GRAFANA_UID = 472        # grafana/grafana image config User=472
 ALERTMANAGER_UID = 65534  # prom/alertmanager runs as nobody
 SYNC_UID = 65534
 GROUP = re.compile(r'[^,\s"\'\\]{1,256}')
@@ -500,6 +501,12 @@ def render(env, out, site_path):
         if mode == 'native':
             sync['service-client-secret'] = require(env, 'PERSES_SYNC_CLIENT_SECRET')
         outputs['perses-sync'] = (SYNC_UID, sync)
+    # Grafana's realm client secret, rendered independent of PERSES_AUTH_MODE:
+    # Grafana on the realm with Perses local must work. It reaches Grafana as
+    # /etc/krate/grafana/client-secret (uid 472, mode 0400), read by realm.ini's
+    # client_secret = $__file{...}, so it is never in the environment or an argument.
+    if env.get('GRAFANA_AUTH_CONFIG') == 'realm.ini':
+        outputs['grafana'] = (GRAFANA_UID, {'client-secret': require(env, 'GRAFANA_OAUTH_CLIENT_SECRET')})
     # Validate everything before touching any output volume.
     for name, (uid, files) in outputs.items():
         target = out / name
@@ -507,7 +514,7 @@ def render(env, out, site_path):
         for relative, content in files.items():
             write(target / relative, content, uid)
         seal(target, uid)
-    for name in ('oauth2-proxy', 'perses-sync'):
+    for name in ('oauth2-proxy', 'perses-sync', 'grafana'):
         if name not in outputs and (out / name).exists():
             clear(out / name)
             seal(out / name, 0)

@@ -151,6 +151,31 @@ the previous files and image references.
 Verify the site's Docker `json-file` log path, permissions and SELinux access on
 the target host; no automatic relabelling is performed.
 
+## Table 2 — Accepted residual reachability
+
+Networks and each service's own authorization separate the UIs from the backing
+services, but a Docker network is a trust boundary, not a firewall: a container reaches
+every other container on a network it shares, on any port that container listens on. This
+table is the complete list of what stays reachable, and it is the list the executable gate
+enforces: the census (row W4, `scripts/gate-identity.sh --phase 4c`) probes every container
+port from five sources and fails on any reachable pair that is not here, and row U28
+measures a Grafana administrator's datasource reach against the same table. A new row needs
+the owner's approval.
+
+`source` is where the probe runs, `target` is a Compose service name and `port` a port that
+target listens on; `*` in either column means "any". Table 1 lists, per service, what it
+publishes and who authenticates it.
+
+| source | target | port | why accepted |
+| --- | --- | --- | --- |
+| `grafana-admin-datasource` | `loki` | 3100 | A Grafana **Admin** can create a datasource and reach any HTTP service on Grafana's networks through it: Grafana applies `data_source_proxy_whitelist` only in the legacy proxy (`pkg/api/pluginproxy/ds_proxy.go:392` at v12.2.0), not on the datasource proxy and `resources` paths. A Viewer cannot (`POST /api/datasources` answers 403, row U6). Grafana's own Loki datasource points at the read-only `loki-gateway`, so the ordinary path cannot write to Loki (row U7); reaching `loki` directly needs a datasource an Admin created. |
+| `grafana-admin-datasource` | `kafka-ui` | 8080 | The same Admin-only reach, to Kafbat's unauthenticated `/metrics` and `/actuator/` (`kafbat-ui/README.md`): the cluster proxy answers 404 for both publicly (row K27), but on `kafka-network` they are open. |
+| `kafka-network` | `grafana` | 3000 | Grafana joins the cluster's `kafka-network` so the cluster proxy can serve it at `/grafana/` over TLS. Any peer of that network can reach the port; in realm mode the port has no login left (Basic authentication and the login form are off) and answers only through the realm, and on the host it is published on 127.0.0.1 only. |
+| `grafana` | `kafka-*` | `*` | Grafana is a `kafka-network` peer, so the brokers' listeners are open to it exactly as they are to every other peer of that network (the cluster's own trust model, unchanged). |
+| `grafana` | `kafka-ui` | 8080 | As above: Kafbat's unauthenticated `/metrics` and `/actuator/` on the shared network. |
+| `grafana` | `kafka-exporter` | 9308 | A metrics endpoint with no login, on the two networks Grafana needs for its datasources. |
+| `grafana` | `proxy` | `*` | The cluster proxy, reachable from `kafka-network`; it answers only the hosts and paths it serves. |
+
 ## Licenses
 
 Krate is AGPL-3.0. The bundled images keep their own licenses; their notices
