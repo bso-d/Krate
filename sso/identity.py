@@ -69,8 +69,10 @@ REDIRECT_CONFIG = 'PingFederate redirect'
 # The provider flags the Krate plan fixes: one source for the writer (sso/configure-dual.py) and for
 # broker_plan() below, as planned_flows() is for the flows. `trustEmail` true makes PingFederate the
 # authority for the address it asserts: Keycloak sets the realm user's e-mail verification from the
-# `email_verified` claim when PingFederate sends one and marks it verified when it sends none, so only
-# an asserted `email_verified: false` leaves a brokered user unverified
+# `email_verified` claim PingFederate sends, re-reading it from the userinfo response when it fetches
+# one, where a claim PingFederate did not send parses as false (OIDCIdentityProvider.extractIdentity,
+# 26.8.0:599-606) — so the provider must assert email_verified: true. Only when neither response
+# carries the claim does the fallback mark a new user or a changed address verified
 # (OIDCIdentityProvider.setEmailVerified, 26.8.0:1114-1128, reached from
 # AbstractIdentityProvider.updateEmail:202-207 for a new user or syncMode FORCE). With the flag false
 # every brokered user is unverified, which the Phase 4 UIs refuse (oauth2-proxy answers 500 "email in

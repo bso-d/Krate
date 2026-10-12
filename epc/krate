@@ -3569,17 +3569,21 @@ monitor_reload_prometheus() {
   local before state timestamp successful waited=0
   before="$(monitor_prometheus_reload_state)" \
     || die "Prometheus did not answer on http://127.0.0.1:9090/metrics — is the stack up? (krate monitor status)"
+  local before_ts="${before%% *}" before_ok="${before##* }"
   monitor_compose kill -s SIGHUP prometheus
   while :; do
     if state="$(monitor_prometheus_reload_state)"; then
       timestamp="${state%% *}"
       successful="${state##* }"
-      if [[ "${successful%%.*}" == 0 ]]; then
-        die "Prometheus rejected the configuration and keeps running with the previous one. Fix monitoring/prometheus/prometheus.yml (or alerts.yml), then: krate monitor reload. The error: krate monitor logs prometheus"
-      fi
-      if [[ "$timestamp" != "${before%% *}" ]]; then
+      # The flag describes THIS reload only once the timestamp moved, and a rejection is a
+      # flip of the flag to 0: reading the flag first reported a good file as rejected when
+      # an earlier reload had already left it at 0.
+      if [[ "$timestamp" != "$before_ts" && "${successful%%.*}" == 1 ]]; then
         ok "Prometheus reloaded its configuration and alert rules."
         return 0
+      fi
+      if [[ "${successful%%.*}" == 0 && "${before_ok%%.*}" == 1 ]]; then
+        die "Prometheus rejected the configuration and keeps running with the previous one. Fix monitoring/prometheus/prometheus.yml (or alerts.yml), then: krate monitor reload. The error: krate monitor logs prometheus"
       fi
     fi
     sleep 0.5

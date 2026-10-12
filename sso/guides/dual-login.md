@@ -590,9 +590,16 @@ The realm flows the plan states:
   session.
 - Keycloak trusts the e-mail PingFederate asserts (`trustEmail` `true` in the
   plan): at every brokered sign-in the realm user's e-mail verification is set
-  from the `email_verified` claim PingFederate sends, and marked verified when
-  it sends none, so only an asserted `email_verified: false` leaves the user
-  unverified. With the flag false every brokered user is unverified and the
+  from the `email_verified` claim PingFederate asserts — Keycloak reads it from
+  the ID token and re-reads it from the userinfo response when it fetches one,
+  where a claim PingFederate did not send parses as **false**
+  (`OIDCIdentityProvider.extractIdentity`, 26.8.0:599-606). **PingFederate must
+  therefore assert `email_verified: true`**, or brokered users stay unverified
+  and the Phase 4 UIs refuse them; only when neither response carries the claim
+  does the fallback apply, which marks a new user or a changed address verified
+  and leaves an existing user's flag as it was
+  (`AbstractIdentityProvider.setEmailVerified`, 26.8.0:214-230). With the flag
+  false every brokered user is unverified and the
   Phase 4 UIs refuse the sign-in (Perses' oauth2-proxy answers `500` "email in
   id_token (…) isn't verified"). Trusting the address is not account linking:
   the first-login flow stays Create User If Unique (D2), so a clash with a

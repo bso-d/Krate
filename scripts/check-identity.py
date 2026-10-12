@@ -3256,6 +3256,8 @@ def check_identity_users(checks):
           f'{edition}/krate: users logout must not pass -n (kcadm rejects it on the logout resource, rc 2)')
         e('identity_journal "users logout" ok "$user"' in users and 'identity_journal "users set-email" ok "$user"' in users,
           f'{edition}/krate: both new actions must write a journal line')
+        e('[[ "$action" == list || "$action" == groups ]] || identity_lock' in users,
+          f'{edition}/krate: every mutating users action (logout and set-email included) must take the identity lock; only list and groups may skip it')
         e('kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s "email=$email" -s emailVerified=true' in users,
           f'{edition}/krate: users set-email must set the address and mark it verified')
         e('-s "email=$email" -s emailVerified=true >/dev/null' in users,
@@ -3361,6 +3363,10 @@ monitor_reload_prometheus
          1, 'rejected the configuration and keeps running with the previous one'),
         ('no reload reported', prometheus_metrics(1, '1.7918145079e+09'), prometheus_metrics(1, '1.7918145079e+09'),
          1, 'reported no reload within 10 s'),
+        # S2: the flag was already 0 from an earlier rejection, so a lingering 0 must not be
+        # reported as a new rejection — the good reload moves the timestamp and sets it to 1.
+        ('a good reload after an earlier rejection', prometheus_metrics(0, '1.7918145079e+09'),
+         prometheus_metrics(1, '1.7918145217e+09'), 0, 'Prometheus reloaded its configuration and alert rules.'),
     )
     for label, before, after, code, needle in cases:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3376,6 +3382,16 @@ monitor_reload_prometheus
           f'monitor reload without Prometheus must say it did not answer; got {result.returncode} {result.stderr.strip()[:120]!r}')
 
 
+# The five Loki read locations the gateway may proxy (S6: pinned so a widened selector fails).
+LOKI_GATEWAY_READ_LOCATIONS = (
+    '~ ^/loki/api/v1/(query|query_range|labels|series|index/stats|index/volume|index/volume_range|detected_fields|detected_labels|patterns)$',
+    '~ ^/loki/api/v1/label/[^/]+/values$',
+    '~ ^/loki/api/v1/detected_field/[^/]+/values$',
+    '= /loki/api/v1/tail',
+    '= /ready',
+)
+
+
 def check_loki_gateway(checks):
     """Phase 4 commit 3: Grafana reaches Loki only through the read-only gateway; the log write path stays direct."""
     e = checks.expect
@@ -3384,9 +3400,15 @@ def check_loki_gateway(checks):
         return
     text = path.read_text()
     blocks = re.findall(r'location ([^{]+)\{(.*?)\n    \}', text, re.S)
-    e(len(blocks) == 5, f'monitoring/loki/gateway.conf: expected the four verified read locations and the default; got {len(blocks)}')
+    e(len(blocks) == 6, f'monitoring/loki/gateway.conf: expected the five read locations and the default; got {len(blocks)}')
     proxied = [(selector.strip(), body) for selector, body in blocks if 'proxy_pass' in body]
-    e(len(proxied) == 4, f'monitoring/loki/gateway.conf: exactly four locations may proxy; got {len(proxied)}')
+    # Pinned, not counted: a regression that widened a selector (or added one for a write path)
+    # must fail here, because Loki has no authentication of its own to fall back on.
+    e(sorted(selector for selector, _ in proxied) == sorted(LOKI_GATEWAY_READ_LOCATIONS),
+      f'monitoring/loki/gateway.conf: the proxied locations must be exactly the read paths '
+      f'{sorted(LOKI_GATEWAY_READ_LOCATIONS)}; got {sorted(selector for selector, _ in proxied)}')
+    e(not any('push' in selector or 'delete' in selector or 'rules' in selector for selector, _ in proxied),
+      'monitoring/loki/gateway.conf: no write or lifecycle path may be proxied')
     for selector, body in proxied:
         e(body.count('proxy_pass http://loki:3100;') == 1,
           f'monitoring/loki/gateway.conf: {selector} must proxy to Loki only')
