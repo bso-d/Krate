@@ -565,12 +565,18 @@ def validate_monitoring(root, config):
     # Compose renders extra_hosts as "host=ip" (the file writes "host:ip"), so accept both.
     if not any(str(entry).replace(':', '=').endswith('=host-gateway') for entry in grafana.get('extra_hosts') or []):
         raise Preflight('grafana in realm mode must resolve the realm host with an extra_hosts host-gateway entry')
-    mounts = [str(volume.get('target')) for volume in grafana.get('volumes') or []]
-    for needed in ('/etc/krate/grafana', '/etc/krate/ca/server.crt'):
+    mounts = {str(volume.get('target')): str(volume.get('source')) for volume in grafana.get('volumes') or []}
+    for needed in ('/etc/krate/grafana', '/etc/krate/ca/server.crt', '/etc/krate/auth'):
         if needed not in mounts:
-            raise Preflight(f'grafana in realm mode must mount {needed} (the rendered client secret and the cluster CA)')
-    if not (root / 'monitoring/auth/realm.ini').is_file():
+            raise Preflight(f'grafana in realm mode must mount {needed} (the rendered client secret, the cluster CA and its configuration)')
+    # The files are looked up through the rendered mount sources, not built from --directory:
+    # in the repo layout monitoring/ is shared at the root while --directory is the edition
+    # directory, and in a bundle it sits beside the CLI. The rendered source is absolute in
+    # both, so this is layout-independent (live4a defect D2).
+    if not (Path(mounts['/etc/krate/auth']) / 'realm.ini').is_file():
         raise Preflight('monitoring/auth/realm.ini is missing: run krate monitor realm')
+    if not Path(mounts['/etc/krate/ca/server.crt']).is_file():
+        raise Preflight('the cluster certificate Grafana verifies the realm with is not a file: run krate gen-cert')
 
 
 def main():

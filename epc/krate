@@ -3364,11 +3364,16 @@ identity_reconcile_grafana_client() {
       || die "Keycloak refused the master admin login. Check: krate identity status"
   fi
   id="$(kcadm_client_id "$IDENTITY_REALM" krate-grafana)" || die "Keycloak query failed"
+  local err
   if [[ -z "$id" ]]; then
+    # kcadm announces a creation on stderr; only a real failure reaches the operator.
+    err="$(mktemp)" || die "Cannot create a temporary file"
     GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
       python3 "$sso/identity.py" grafana-client --origin "$origin" --with-secret \
-      | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null \
-      || die "Cannot create the krate-grafana client: either its representation did not render or Keycloak refused it (see the message above)"
+      | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null 2>"$err" \
+      || { sed 's/^/  /' "$err" >&2; rm -f "$err"
+           die "Cannot create the krate-grafana client: either its representation did not render or Keycloak refused it"; }
+    rm -f "$err"
     identity_journal "monitor realm" created "krate-grafana client"
     ok "Created the krate-grafana client in realm $IDENTITY_REALM"
     kcadm_logout
@@ -3383,10 +3388,13 @@ identity_reconcile_grafana_client() {
   case "$verdict" in
     same*) ok "krate-grafana client unchanged" ;;
     differs*)
+      err="$(mktemp)" || die "Cannot create a temporary file"
       GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
         python3 "$sso/identity.py" grafana-client --origin "$origin" --with-secret \
-        | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m \
-        || die "Cannot update the krate-grafana client: either its representation did not render or Keycloak refused it (see the message above)"
+        | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m >/dev/null 2>"$err" \
+        || { sed 's/^/  /' "$err" >&2; rm -f "$err"
+             die "Cannot update the krate-grafana client: either its representation did not render or Keycloak refused it"; }
+      rm -f "$err"
       identity_journal "monitor realm" reconciled "krate-grafana client"
       ok "krate-grafana client updated from the plan" ;;
     *) die "Unexpected comparison result for the krate-grafana client: $verdict" ;;
@@ -3490,7 +3498,7 @@ monitor_grafana_seed_renew() {
 monitor_realm_refresh() {
   local ini="$MONITOR_DIR/auth/realm.ini" origin
   origin="$(public_url_origin)"
-  python3 "$(sso_dir)/identity.py" grafana-ini --env-file "$ENV_FILE" --output "$ini.new" \
+  python3 "$(sso_dir)/identity.py" grafana-ini --env-file "$ENV_FILE" --output "$ini.new" >/dev/null \
     || die "Cannot render monitoring/auth/realm.ini"
   if [[ -f "$ini" ]] && cmp -s "$ini" "$ini.new"; then
     rm -f "$ini.new"
@@ -3686,7 +3694,7 @@ Remove it first — a public dashboard under Dashboards → Share → Public das
       monitor_grafana_seed_token 90
       grafana_list_collisions
       identity_reconcile_grafana_client "$origin"
-      python3 "$(sso_dir)/identity.py" grafana-ini --env-file "$ENV_FILE" --output "$MONITOR_DIR/auth/realm.ini" \
+      python3 "$(sso_dir)/identity.py" grafana-ini --env-file "$ENV_FILE" --output "$MONITOR_DIR/auth/realm.ini" >/dev/null \
         || die "Cannot write monitoring/auth/realm.ini"
       ok "Wrote monitoring/auth/realm.ini"
       echo ""
