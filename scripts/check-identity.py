@@ -3637,8 +3637,15 @@ def check_grafana_realm_cli(checks):
         e('if ! identity_keycloak_running; then' in reconcile
           and reconcile.index('if ! identity_keycloak_running; then') < reconcile.index('kcadm_login master user'),
           f'{edition}/krate: the optional reconcile must test reachability before kcadm_login, which dies when Keycloak is stopped')
+        # The client representation takes the bare origin: identity.py's checked_origin refuses a
+        # path, and KEYCLOAK_PUBLIC_URL always ends in /identity (live4a defect D1).
+        e(cli.count('origin="$(public_url_origin)"') == 2 and 'origin="$(env_value KEYCLOAK_PUBLIC_URL)"' not in cli,
+          f'{edition}/krate: both client call sites must derive the bare public origin, not pass KEYCLOAK_PUBLIC_URL')
+        seed = function_body(cli, 'monitor_grafana_seed_token')
+        e('grafana-seed.meta' in seed and seed.index('grafana-seed.meta') < seed.index('service-account'),
+          f'{edition}/krate: a re-run of the switch must not pile up seed tokens (skip while one has 30+ days left)')
     for name in ('refuse_loopback_public_url', 'grafana_admin', 'grafana_admin_token', 'identity_reconcile_grafana_client',
-                 'identity_keycloak_running',
+                 'identity_keycloak_running', 'public_url_origin',
                  'monitor_write_seed_token', 'monitor_grafana_seed_token', 'monitor_grafana_seed_renew',
                  'monitor_realm_refresh', 'grafana_list_collisions', 'monitor_compose', 'monitor_prepare'):
         first, second = (function_body((ROOT / edition / 'krate').read_text(), name) for edition in EDITIONS)
@@ -3660,6 +3667,20 @@ echo accepted
               f'refuse_loopback_public_url with {url} must exit {expected}; got {result.returncode} ({result.stderr.strip()[:100]})')
             if expected == 1:
                 e('KEYCLOAK_PUBLIC_URL' in result.stderr, f'the refusal of {url} must name KEYCLOAK_PUBLIC_URL; got {result.stderr.strip()[:120]!r}')
+    origin_script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'public_url_origin') + r'''
+ENV_FILE="$1"
+public_url_origin
+'''
+    for url, expected in (('https://krate.example.test/identity', 'https://krate.example.test'),
+                          ('https://krate.example.test:8443/identity', 'https://krate.example.test:8443'),
+                          ('https://[fd00::1]:8443/identity', 'https://[fd00::1]:8443'),
+                          ('https://krate.example.test/identity/', 'https://krate.example.test')):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / '.env'
+            env.write_text(f'KEYCLOAK_PUBLIC_URL={url}\n')
+            result = run_bash(origin_script, env)
+            e(result.stdout.strip() == expected,
+              f'public_url_origin of {url} must be {expected} (identity.py checked_origin refuses a path); got {result.stdout.strip()!r}')
 
 
 def check_grafana_realm_plan(checks):

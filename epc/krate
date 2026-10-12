@@ -2605,6 +2605,18 @@ public_url_authority() {
   if [[ -n "$port" && "$port" != 443 ]]; then printf '%s:%s\n' "$(public_url_host)" "$port"; else public_url_host; fi
 }
 
+# The bare public origin: KEYCLOAK_PUBLIC_URL without its /identity path. The realm
+# clients' redirect URIs and web origins are built from it (sso/identity.py
+# public_origin/checked_origin refuse a path), while the ini's endpoints keep the
+# /identity path and are rendered from the .env by identity.py itself.
+public_url_origin() {
+  local url scheme authority
+  url="$(env_value KEYCLOAK_PUBLIC_URL)"
+  scheme="${url%%://*}"
+  authority="${url#*://}"; authority="${authority%%/*}"
+  printf '%s://%s\n' "$scheme" "$authority"
+}
+
 # The proxy's Compose environment follows its inputs, so `up` recreates it exactly when
 # one changed. KRATE_PROXY_CONF_SHA digests nginx.conf and certs/server.{crt,key}: a new
 # release replaces nginx.conf (a new inode the running proxy, bound to the old one, never
@@ -3356,7 +3368,7 @@ identity_reconcile_grafana_client() {
     GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
       python3 "$sso/identity.py" grafana-client --origin "$origin" --with-secret \
       | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null \
-      || die "Keycloak refused to create the krate-grafana client"
+      || die "Cannot create the krate-grafana client: either its representation did not render or Keycloak refused it (see the message above)"
     identity_journal "monitor realm" created "krate-grafana client"
     ok "Created the krate-grafana client in realm $IDENTITY_REALM"
     kcadm_logout
@@ -3374,7 +3386,7 @@ identity_reconcile_grafana_client() {
       GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
         python3 "$sso/identity.py" grafana-client --origin "$origin" --with-secret \
         | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m \
-        || die "Keycloak refused the krate-grafana client update"
+        || die "Cannot update the krate-grafana client: either its representation did not render or Keycloak refused it (see the message above)"
       identity_journal "monitor realm" reconciled "krate-grafana client"
       ok "krate-grafana client updated from the plan" ;;
     *) die "Unexpected comparison result for the krate-grafana client: $verdict" ;;
@@ -3410,8 +3422,20 @@ print(data["name"])' "$MONITOR_DIR/auth/secrets/grafana-seed.token" "$MONITOR_DI
 # under monitoring/auth/secrets/, which import_site_files carries across an upgrade
 # and no release file contains.
 monitor_grafana_seed_token() {
-  local days="${1:-90}" dir="$MONITOR_DIR/auth/secrets" account name
+  local days="${1:-90}" dir="$MONITOR_DIR/auth/secrets" meta="$MONITOR_DIR/auth/secrets/grafana-seed.meta"
+  local account name expires now
   install -d -m 700 "$dir" || die "Cannot create $dir"
+  # Re-running the switch must not pile up tokens: one with more than 30 days left stays
+  # in use (the same threshold monitor_grafana_seed_renew uses).
+  if [[ -f "$meta" ]]; then
+    expires="$(sed -n 's/^expires=//p' "$meta")"
+    now="$(date -u +%s)"
+    if [[ "$expires" =~ ^[0-9]+$ && $((expires - now)) -ge 2592000 ]]; then
+      set_env_file_value "$MONITOR_DIR/.env" GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE auth/secrets/grafana-seed.token
+      ok "Grafana seed token still valid for $(( (expires - now) / 86400 )) days; not creating another"
+      return 0
+    fi
+  fi
   account="$(grafana_admin service-account --name krate-seed --role Admin \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')" \
     || die "Grafana refused the krate-seed service account — is it running? (krate monitor status)"
@@ -3465,7 +3489,7 @@ monitor_grafana_seed_renew() {
 # and the seed token is renewed while it is still valid.
 monitor_realm_refresh() {
   local ini="$MONITOR_DIR/auth/realm.ini" origin
-  origin="$(env_value KEYCLOAK_PUBLIC_URL)"; origin="${origin%/}"
+  origin="$(public_url_origin)"
   python3 "$(sso_dir)/identity.py" grafana-ini --env-file "$ENV_FILE" --output "$ini.new" \
     || die "Cannot render monitoring/auth/realm.ini"
   if [[ -f "$ini" ]] && cmp -s "$ini" "$ini.new"; then
@@ -3632,7 +3656,7 @@ To go back to the local login: krate config set GRAFANA_AUTH_CONFIG=local.ini &&
       local state origin blocked
       state="$(identity_state)" || exit 1
       [[ "${state%% *}" == existing ]] || die "No identity database (state: $state). Run: krate identity up, then krate auth apply"
-      origin="$(env_value KEYCLOAK_PUBLIC_URL)"; origin="${origin%/}"
+      origin="$(public_url_origin)"
       # Refuse a Grafana whose state realm mode would hide from the API: after the
       # switch a database SSO setting, a public dashboard and a snapshot answer
       # 404/403, so an operator would lose sight of them (harness/phase4/lab6 L5-4).
