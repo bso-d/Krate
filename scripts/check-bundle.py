@@ -59,6 +59,9 @@ def main():
                 raise SystemExit('Missing monitoring package file: fluent-bit/' + name)
         if not (root / 'monitoring/README.md').is_file():
             raise SystemExit('Missing monitoring package file: README.md')
+        # Grafana's Loki datasource queries through this gateway, which serves nothing without its config.
+        if not (root / 'monitoring/loki/gateway.conf').is_file():
+            raise SystemExit('Missing monitoring package file: loki/gateway.conf')
     if monitor_template.is_file() and 'PERSES_IMAGE=' in monitor_template.read_text():
         for name in ('render.py', 'perses/seed.py', 'perses/sync/perses_sync.py', 'perses/provisioning/krate.json',
                      'perses/provisioning/roles.json', 'perses/dashboards/kafka-overview.json',

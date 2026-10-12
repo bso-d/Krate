@@ -3365,10 +3365,64 @@ monitor_reload_prometheus
           f'monitor reload without Prometheus must say it did not answer; got {result.returncode} {result.stderr.strip()[:120]!r}')
 
 
+def check_loki_gateway(checks):
+    """Phase 4 commit 3: Grafana reaches Loki only through the read-only gateway; the log write path stays direct."""
+    e = checks.expect
+    path = ROOT / 'monitoring/loki/gateway.conf'
+    if not e(path.is_file(), 'monitoring/loki/gateway.conf is missing'):
+        return
+    text = path.read_text()
+    blocks = re.findall(r'location ([^{]+)\{(.*?)\n    \}', text, re.S)
+    e(len(blocks) == 5, f'monitoring/loki/gateway.conf: expected the four verified read locations and the default; got {len(blocks)}')
+    proxied = [(selector.strip(), body) for selector, body in blocks if 'proxy_pass' in body]
+    e(len(proxied) == 4, f'monitoring/loki/gateway.conf: exactly four locations may proxy; got {len(proxied)}')
+    for selector, body in proxied:
+        e(body.count('proxy_pass http://loki:3100;') == 1,
+          f'monitoring/loki/gateway.conf: {selector} must proxy to Loki only')
+        # limit_except lists the allowed methods and denies the rest; without deny all it would only
+        # require authentication for the others (nginx limit_except semantics).
+        e(re.search(r'limit_except [A-Z ]+\{ deny all; \}', body) is not None,
+          f'monitoring/loki/gateway.conf: {selector} must restrict its methods with limit_except … deny all')
+        e(selector.startswith('~ ^/loki/api/v1/') or selector in ('= /loki/api/v1/tail', '= /ready'),
+          f'monitoring/loki/gateway.conf: {selector} is not one of Loki\'s read paths')
+    defaults = [body for selector, body in blocks if 'proxy_pass' not in body]
+    e(len(defaults) == 1 and 'return 403;' in defaults[0],
+      'monitoring/loki/gateway.conf: the default location must refuse everything else with 403')
+    e('listen 3100;' in text and 'client_max_body_size' in text,
+      'monitoring/loki/gateway.conf: must listen on 3100 (the datasource URL) and bound the request body')
+    datasources = (ROOT / 'monitoring/grafana/provisioning/datasources/datasources.yml').read_text()
+    e('url: http://loki-gateway:3100' in datasources and 'url: http://loki:3100' not in datasources,
+      'Grafana\'s Loki datasource must point at loki-gateway, not at loki (a Viewer could otherwise write to Loki)')
+    e(re.search(r'^\s+uid:\s*loki\s*$', datasources, re.M) is not None,
+      'Grafana\'s Loki datasource keeps uid `loki`: provisioned dashboards bind to it')
+    e('url: http://prometheus:9090' in datasources, 'Grafana\'s Prometheus datasource is unchanged')
+    fluent = (ROOT / 'monitoring/fluent-bit/fluent-bit.conf').read_text()
+    e(re.search(r'^\s+Host\s+loki$', fluent, re.M) is not None,
+      'Fluent Bit must keep shipping logs to loki directly: the gateway is read-only')
+    makefile = (ROOT / 'Makefile').read_text()
+    e('monitoring/loki' in makefile, 'Makefile: the bundle must copy monitoring/loki (gateway.conf ships with it)')
+    result = subprocess.run(['docker', 'compose', '--env-file', str(ROOT / 'monitoring/.env.template'),
+                             '-f', str(ROOT / 'monitoring/docker-compose.yml'), '--profile', '*', 'config', '--format', 'json'],
+                            cwd=ROOT, text=True, capture_output=True)
+    if not e(result.returncode == 0, 'monitoring: Compose rendering from the template failed'):
+        return
+    service = json.loads(result.stdout)['services'].get('loki-gateway')
+    if not e(service is not None, 'monitoring/docker-compose.yml: the loki-gateway service is missing'):
+        return
+    e(not service.get('ports'), f'monitoring/loki-gateway must not publish a host port; got {service.get("ports")}')
+    e(list(service.get('networks') or {}) == ['monitoring'],
+      f'monitoring/loki-gateway must be on the monitoring network only; got {list(service.get("networks") or {})}')
+    e(list(service.get('depends_on') or {}) == ['loki'], f'monitoring/loki-gateway must depend on loki; got {service.get("depends_on")}')
+    volumes = [(volume.get('source', ''), volume.get('target'), volume.get('read_only')) for volume in service.get('volumes') or []]
+    e(any(source.endswith('monitoring/loki/gateway.conf') and target == '/etc/nginx/conf.d/default.conf' and read_only
+          for source, target, read_only in volumes),
+      f'monitoring/loki-gateway must mount loki/gateway.conf read-only as its nginx config; got {volumes}')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
-                  check_prometheus_reload,
+                  check_prometheus_reload, check_loki_gateway,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
@@ -3387,7 +3441,7 @@ def main():
           'runtime.yml incl. refusals), configure-dual, stub_idp.sh down, proxy environment and edge rules, release permissions, RPM dependency '
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
           'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
-          'Prometheus lifecycle off and the SIGHUP reload result.')
+          'Prometheus lifecycle off and the SIGHUP reload result, the read-only Loki gateway.')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
         print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0

@@ -15,5 +15,7 @@ datasources:
     type: loki
     uid: loki
     access: proxy
-    url: http://loki:3100
+    # Through the read-only gateway: Loki has no authentication, and a direct URL
+    # would let any Grafana user who can reach a datasource write to it.
+    url: http://loki-gateway:3100
     editable: false
