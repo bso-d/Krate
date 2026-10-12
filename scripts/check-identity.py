@@ -3540,7 +3540,8 @@ def check_grafana_front(checks):
           f'{edition}/nginx.conf: /grafana must redirect to /grafana/ (Grafana serves from the sub-path)')
         login, app = blocks.get('^~ /grafana/login'), blocks.get('^~ /grafana/')
         for name, body in (('/grafana/login', login), ('/grafana/', app)):
-            if not e(body is not None, f'{edition}/nginx.conf: the {name} location is missing'):
+            if body is None:  # an explicit test: checks.expect does not narrow the type
+                e(False, f'{edition}/nginx.conf: the {name} location is missing')
                 continue
             e('proxy_pass $grafana;' in body and 'access_log /var/log/nginx/access.log krate_identity;' in body,
               f'{edition}/nginx.conf: {name} must proxy to Grafana and log without query strings (the OAuth callback carries a one-time code)')
@@ -3627,7 +3628,8 @@ def check_grafana_realm_cli(checks):
         e('find "$env_file"' not in compose,
           f'{edition}/krate: the render revision must not hash the whole monitoring/.env (an unrelated key would recreate every consumer)')
         declared = re.search(r'KRATE_RENDER_ENV_KEYS=\(\n(.*?)\n\)\n', cli, re.S)
-        if e(declared is not None, f'{edition}/krate: KRATE_RENDER_ENV_KEYS is missing'):
+        e(declared is not None, f'{edition}/krate: KRATE_RENDER_ENV_KEYS is missing')
+        if declared is not None:  # an explicit test: checks.expect does not narrow the type
             listed = set(declared.group(1).split())
             e(listed == monitor_keys - GRAFANA_ONLY_RENDER_KEYS,
               f'{edition}/krate: KRATE_RENDER_ENV_KEYS must equal the monitoring/.env keys render.py reads minus the Grafana-only ones; '
