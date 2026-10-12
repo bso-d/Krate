@@ -3246,8 +3246,11 @@ identity_reconcile_grafana_client() {
     kcadm_logout
     return 0
   fi
+  # With the secret, so a rotated GRAFANA_OAUTH_CLIENT_SECRET is detected and converged
+  # instead of leaving Keycloak on the old value while Grafana reads the new one.
   verdict="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" \
-    | python3 "$sso/identity.py" grafana-client --origin "$origin" client-differs)" \
+    | GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
+      python3 "$sso/identity.py" grafana-client --origin "$origin" --with-secret client-differs)" \
     || die "Cannot compare the krate-grafana client with the plan"
   case "$verdict" in
     *scopes-differ*) warn "krate-grafana: its scopes differ from the plan, and a client update never changes scopes — set them in Keycloak" ;;
@@ -3583,6 +3586,18 @@ Remove it first — a public dashboard under Dashboards → Share → Public das
         retire)
           [[ $# -eq 1 ]] || die "Usage: krate monitor grafana-user retire <login>"
           require_compose; require_env
+          # This command speaks to Grafana as the Basic admin. Realm mode turns Basic off
+          # ([auth.basic] enabled = false, and row U2 asserts a Basic call answers 401), and
+          # the seed service account may not administer users either: disabling a user needs
+          # the global-org ActionUsersDisable permission, i.e. a Grafana server admin, while
+          # krate-seed is an org Admin (grafana-v12.2.0 api.go:561-568). Say so and give the
+          # sequence that works, instead of failing with a misleading credential hint.
+          if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
+            die "Grafana is in realm mode, where the Basic admin this command needs is disabled and the seed service account may not administer users. Roll back, retire, and switch again:
+  krate config set GRAFANA_AUTH_CONFIG=local.ini && krate monitor up
+  krate monitor grafana-user retire $1
+  krate config set GRAFANA_AUTH_CONFIG=realm.ini && krate monitor up"
+          fi
           # Retiring moves the e-mail aside AND disables the account: disabling
           # alone still fails the realm sign-in with "User sync failed"
           # (harness/phase4/lab6 L5-5). Folders and dashboards the user owns stay.
@@ -3602,10 +3617,12 @@ Remove it first — a public dashboard under Dashboards → Share → Public das
   esac
 }
 
-# Read a key from an arbitrary env file, with a default.
+# Read a key from an arbitrary env file, with a default. Quotes and CR are stripped: a
+# CRLF-edited monitoring/.env must not make identity_realm_ui compare realm.ini\r and
+# report local (Compose itself tolerates CRLF).
 env_value_file() {
   local file="$1" key="$2" default="${3:-}" v=""
-  [[ -f "$file" ]] && v="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"'"')"
+  [[ -f "$file" ]] && v="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
   echo "${v:-$default}"
 }
 

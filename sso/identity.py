@@ -69,16 +69,22 @@ REDIRECT_CONFIG = 'PingFederate redirect'
 # The provider flags the Krate plan fixes: one source for the writer (sso/configure-dual.py) and for
 # broker_plan() below, as planned_flows() is for the flows. `trustEmail` true makes PingFederate the
 # authority for the address it asserts: Keycloak sets the realm user's e-mail verification from the
-# `email_verified` claim PingFederate sends, re-reading it from the userinfo response when it fetches
-# one, where a claim PingFederate did not send parses as false (OIDCIdentityProvider.extractIdentity,
-# 26.8.0:599-606) — so the provider must assert email_verified: true. Only when neither response
-# carries the claim does the fallback mark a new user or a changed address verified
+# `email_verified` claim PingFederate sends, re-reading the claim from the userinfo response whenever
+# that response returns an `email`, where an absent claim parses as false
+# (OIDCIdentityProvider.extractIdentity, 26.8.0:599-606,612-614) — so the provider must assert
+# email_verified: true. Only when the claim reaches neither response (the ID token lacks it and the
+# userinfo response returns no e-mail) does the fallback apply: it marks a new user or a changed
+# address verified and leaves an existing user's flag untouched
 # (OIDCIdentityProvider.setEmailVerified, 26.8.0:1114-1128, reached from
-# AbstractIdentityProvider.updateEmail:202-207 for a new user or syncMode FORCE). With the flag false
-# every brokered user is unverified, which the Phase 4 UIs refuse (oauth2-proxy answers 500 "email in
-# id_token (…) isn't verified"). This is not account linking: the first-broker-login flow stays Create
-# User If Unique only (D2) and no linking path reads the flag (IdentityBrokerService.java at 26.8.0:
-# no reference to it). `storeToken` stays false: the realm keeps no PingFederate token.
+# AbstractIdentityProvider.updateEmail:202-207 for a new user or syncMode FORCE; the fallback itself
+# is AbstractIdentityProvider.setEmailVerified:214-230). With the flag false every brokered user is
+# unverified, which the Phase 4 UIs refuse (oauth2-proxy answers 500 "email in id_token (…) isn't
+# verified"). This is not account linking: the first-broker-login flow stays Create User If Unique
+# only (D2) and no linking path reads the flag: IdentityBrokerService.java,
+# IdpCreateUserIfUniqueAuthenticator.java — a clash with a local user is a FEDERATED_IDENTITY_EXISTS
+# error page unless runIfUserVerified consumed the single-use marker of the e-mail account-link
+# confirmation — and IdpVerifyAccountLinkActionTokenHandler.java carry no reference to it at 26.8.0.
+# `storeToken` stays false: the realm keeps no PingFederate token.
 BROKER_PROVIDER_FLAGS = {'enabled': True, 'trustEmail': True, 'storeToken': False}
 TRUSTSTORES_DIR = 'auth/keycloak/truststores'
 # What Keycloak loads from a truststore-paths directory (scanned recursively): PEM files and PKCS12 files.
@@ -1357,7 +1363,12 @@ def cmd_grafana_client(args):
     only (stdin -> kcadm, never argv or a log); the verdict lines carry no value at all."""
     origin = checked_origin(args.origin)
     if args.item == 'client-differs':
-        client_verdict(grafana_client(origin), json.load(sys.stdin))
+        # The secret takes part in the verdict: without it a rotated
+        # GRAFANA_OAUTH_CLIENT_SECRET is undetectable, so Keycloak would keep the old
+        # value while the rendered file carries the new one and every sign-in failed
+        # invalid_client. Keycloak returns the real secret to a master admin
+        # (ClientResource.java:210-217 at 26.8.0), and a masked readback is treated as equal.
+        client_verdict(grafana_client(origin, args.with_secret), json.load(sys.stdin))
     else:
         sys.stdout.write(render(grafana_client(origin, args.with_secret)))
     return 0

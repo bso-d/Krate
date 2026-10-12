@@ -3685,6 +3685,19 @@ def check_grafana_realm_cli(checks):
         renew = function_body(cli, 'monitor_grafana_seed_renew')
         e('2592000' in renew and 'token-delete' in renew and renew.index('token-create') < renew.index('token-delete'),
           f'{edition}/krate: the renewal must create the successor before deleting the old token id, within 30 days of expiry')
+        reconcile = function_body(cli, 'identity_reconcile_grafana_client')
+        # B5: the verdict must be computed WITH the plan secret, or rotating
+        # GRAFANA_OAUTH_CLIENT_SECRET leaves Keycloak on the old value while Grafana reads the
+        # new one, and the CLI reports "unchanged" (review-phase4-batch-b-COMPLETE.md, B5).
+        e(reconcile.count('GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)"') == 3
+          and reconcile.count('--with-secret') == 3,
+          f'{edition}/krate: the create, the update and the verdict must all carry the client secret '
+          f'(got {reconcile.count("--with-secret")} of 3 --with-secret uses)')
+        e('client_verdict(grafana_client(origin, args.with_secret)' in (ROOT / 'sso/identity.py').read_text(),
+          'sso/identity.py: the client-differs verdict must build the plan with the secret, or client_differs\' secret branch is dead code')
+        # b2/S2: retiring needs the Basic admin, which realm mode disables.
+        e('Grafana is in realm mode, where the Basic admin this command needs is disabled' in cli,
+          f'{edition}/krate: grafana-user retire must refuse in realm mode and give the rollback-first sequence')
         e('did not answer while renewing the seed token' in renew
           and renew.index('did not answer while renewing') < renew.index('token-create'),
           f'{edition}/krate: a renewal that cannot reach Grafana must warn and continue, not die (Grafana may be held by idp-wait)')

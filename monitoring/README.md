@@ -29,7 +29,12 @@ Prometheus `SIGHUP` — its lifecycle API is off, so nothing on the network can
 reload or stop it — and then reads Prometheus's own reload metrics: the command
 fails when Prometheus rejected the file, and Prometheus keeps running with the
 previous configuration in that case (`./krate monitor logs prometheus` shows
-why).
+why). Editors that replace a file instead of writing it in place (vim's
+default, `sed -i`) leave the container reading the old inode: the reload then
+succeeds on the old content while your change is not in effect. After such an
+edit run `./krate monitor up` (it recreates prometheus), or verify with
+`docker exec <prometheus container> cat /etc/prometheus/prometheus.yml` that
+the container sees your change.
 
 ## Perses
 
@@ -175,6 +180,9 @@ publishes and who authenticates it.
 | `grafana` | `kafka-ui` | 8080 | As above: Kafbat's unauthenticated `/metrics` and `/actuator/` on the shared network. |
 | `grafana` | `kafka-exporter` | 9308 | A metrics endpoint with no login, on the two networks Grafana needs for its datasources. |
 | `grafana` | `proxy` | `*` | The cluster proxy, reachable from `kafka-network`; it answers only the hosts and paths it serves. |
+| `anonymous-https` | `proxy:/grafana/healthz` | 443 | Grafana's liveness endpoint, answered without a sign-in through the cluster proxy. It says whether Grafana is up and carries no user, organisation, datasource or metrics data (row U21a fails on any such body). |
+| `anonymous-https` | `proxy:/grafana/public/build/` | 443 | One hashed front-end asset, so the login page can render before anybody signs in. Static content from the image; no Krate data. |
+| `anonymous-https` | `proxy:/grafana/avatar/<hash>` | 443 | Grafana's avatar endpoint, which fetches a gravatar image for an e-mail hash. Offline it answers an error and never returns Krate data; the hash is not a Krate identifier. |
 
 ## Licenses
 
