@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Krate identity acceptance gate: Phase 1 (identity foundation), Phase 2 (Kafbat
-# authorization) and Phase 3 (PingFederate brokering, with a stand-in IdP from the
-# edition's Keycloak image) against a disposable fixture. Each acceptance criterion of the
-# owner's handover has numbered tests; every test ends PASS, FAIL or NOT_RUN with
+# authorization), Phase 3 (PingFederate brokering, with a stand-in IdP from the
+# edition's Keycloak image) and Phase 4 (the realm applied to Grafana, Perses and
+# the backing services; slices 4a/4b/4c, each with a --session-max-hours companion
+# run) against a disposable fixture. Each acceptance criterion of the owner's
+# handover has numbered tests; every test ends PASS, FAIL or NOT_RUN with
 # evidence, and the receipt binds the results to the candidate (commit or file
 # digests), the dirty files, the tool versions and this runner's own digest. The
 # verdict is PASS only when every required test passed and the candidate is bound.
@@ -10,18 +12,28 @@
 #
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe [--phase 1|2|3|all] [--stub-port N]
 #   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>
+#   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test
+#   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1
 #
 # The fixture directory is a disposable checkout or a fixture installation whose
 # .env, auth/keycloak, certs, journal and monitoring state the run creates and
 # destroys. The runner refuses an existing .env unless --wipe is given. Secret
 # values never appear on a command line: they travel through the environment or
 # through 0600 files, and every captured output is redacted before it is published.
+#
+# Phase 4 runs under a non-localhost public host (--public-host, required there
+# and refused for 1-3): the realm-mode monitoring UIs refuse a loopback
+# KEYCLOAK_PUBLIC_URL. The name is mapped without touching /etc/hosts: the curl()
+# wrapper below adds --resolve NAME:PORT:127.0.0.1 for the fixture's HTTPS, HTTP
+# and Perses ports, and scripts/gate/netmap.py does the same for the Python
+# helpers through $GATE_PUBLIC_HOST (TLS keeps the real name). Containers resolve
+# the name through their extra_hosts host-gateway entry.
 # shellcheck disable=SC2319  # `[[ ... ]]; st=$?` reads the condition's status on the very next statement
 set -uo pipefail
 umask 077
 (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || { echo "bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 2; }
 
-GATE_VERSION=6
+GATE_VERSION=7
 RUNNER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 GATE_DIR="$(dirname "$RUNNER")/gate"
 REPO="$(cd "$(dirname "$RUNNER")/.." && pwd)"
@@ -42,13 +54,39 @@ SCREENSHOTS=true
 STATIC=true
 CANDIDATE_ARG=""
 REPO_ARG=""
+PUBLIC_HOST=""          # Phase 4: the non-loopback public name (--public-host)
+SESSION_MAX_HOURS=""    # Phase 4a/4b companion runs: KEYCLOAK_SESSION_MAX_HOURS=N (--session-max-hours)
+# Monitoring ports of the fixture (the defaults may be in use on a developer host);
+# fixture_env sets them and the curl() wrapper resolves the public name for them.
+GRAFANA_GATE_PORT=13000
+PROM_GATE_PORT=19090
+LOKI_GATE_PORT=13100
+PERSES_GATE_PORT=13443
 
 usage() {
   cat <<EOF
 Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
-          [--subnet CIDR --proxy-ip IP --ip-range CIDR] [--phase 1|2|3|all] [--out DIR]
-          [--candidate SHA] [--stub-port N] [--wipe] [--keep] [--no-screenshots] [--no-static]
+          [--subnet CIDR --proxy-ip IP --ip-range CIDR] [--phase 1|2|3|4a|4b|4c|all] [--out DIR]
+          [--candidate SHA] [--stub-port N] [--public-host NAME] [--session-max-hours N]
+          [--wipe] [--keep] [--no-screenshots] [--no-static]
   --edition-dir    kraft or epc checkout or fixture installation (default: $REPO/kraft)
+  --phase          1, 2, 3, all (= 1-3, the default), or the Phase 4 slices 4a (Grafana),
+                   4b (Perses), 4c (backing services); a slice runs REQUIRED_P1 plus its own inventory
+  --public-host NAME
+                   the non-loopback public host of the fixture (required for 4a/4b/4c, refused
+                   for 1-3: the Phase 1-3 inventory and receipts are localhost runs — X1's
+                   browser story maps the name 'localhost' in Chromium, and K33 probes plain
+                   HTTP with 'Host: localhost' against \$BASE). The name is mapped
+                   to 127.0.0.1 for the runner's curl calls (--resolve), for the Python helpers
+                   (scripts/gate/netmap.py, \$GATE_PUBLIC_HOST) and for the containers
+                   (extra_hosts host-gateway); /etc/hosts is never touched and TLS keeps the
+                   real name (the certificate must cover NAME: gen-cert derives its SAN from
+                   KEYCLOAK_PUBLIC_URL)
+  --session-max-hours N
+                   Phase 4a/4b companion run: KEYCLOAK_SESSION_MAX_HOURS=N is set in the
+                   fixture .env before the realm is created (the value applies at realm
+                   creation only), then REQUIRED_P1 plus U27 (4a) or U27 and V23 (4b) run,
+                   and the receipt names N
   --candidate SHA  the commit the edition files come from, when the directory has no git (a bundle install);
                    the receipt also records the sha256 of the edition files and is INCOMPLETE without a binding
   --repo DIR       a checkout of the candidate for the static block (S1-S4) when the edition directory is a bundle
@@ -56,7 +94,7 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
   --stub-port N    Phase 3: the stand-in IdP's port on 127.0.0.1 (default $STUB_PORT; must be free)
   --wipe           remove an existing .env/auth/certs in that directory first (required when present)
   --keep           leave the fixture running at the end (no teardown)
-  --no-screenshots skip the end-user screenshot story (X1 leaves the required inventory)
+  --no-screenshots skip the end-user screenshot story (X1/X3/X4 leave the required inventory)
   --no-static      skip gmake check / git diff --check (S1-S4 leave the required inventory)
 EOF
 }
@@ -72,6 +110,8 @@ while [[ $# -gt 0 ]]; do
     --ip-range) IP_RANGE="$2"; shift 2 ;;
     --phase) PHASE="$2"; shift 2 ;;
     --stub-port) STUB_PORT="$2"; shift 2 ;;
+    --public-host) PUBLIC_HOST="$2"; shift 2 ;;
+    --session-max-hours) SESSION_MAX_HOURS="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --candidate) CANDIDATE_ARG="$2"; shift 2 ;;
     --repo) [[ -d "$2" ]] || { echo "--repo $2 is not a directory" >&2; exit 2; }; REPO_ARG="$(cd "$2" && pwd)"; shift 2 ;;
@@ -83,8 +123,33 @@ while [[ $# -gt 0 ]]; do
     *) usage; exit 2 ;;
   esac
 done
-[[ "$PHASE" == 1 || "$PHASE" == 2 || "$PHASE" == 3 || "$PHASE" == all ]] || { echo "--phase must be 1, 2, 3 or all" >&2; exit 2; }
+# ── argument validation: every refusal below happens before the first Docker call
+# (host_conflicts, near the end of this file, is the first command that talks to
+# the daemon), so a refused run starts nothing and leaves nothing behind. ──
+[[ "$PHASE" == 1 || "$PHASE" == 2 || "$PHASE" == 3 || "$PHASE" == 4a || "$PHASE" == 4b || "$PHASE" == 4c || "$PHASE" == all ]] \
+  || { echo "--phase must be 1, 2, 3, 4a, 4b, 4c or all" >&2; exit 2; }
 [[ "$STUB_PORT" =~ ^[0-9]+$ ]] || { echo "--stub-port must be a number" >&2; exit 2; }
+if [[ -n "$PUBLIC_HOST" ]]; then
+  [[ "$PUBLIC_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
+    || { echo "--public-host must be a DNS name (letters, digits, . and -): $PUBLIC_HOST" >&2; exit 2; }
+  case "${PUBLIC_HOST,,}" in
+    localhost|127.0.0.1|::1) echo "--public-host must not be a loopback name (the realm-mode UIs refuse it): $PUBLIC_HOST" >&2; exit 2 ;;
+  esac
+fi
+case "$PHASE" in
+  4a|4b|4c)
+    [[ -n "$PUBLIC_HOST" ]] \
+      || { echo "--phase $PHASE requires --public-host NAME: the realm-mode monitoring UIs refuse a loopback KEYCLOAK_PUBLIC_URL (refuse_loopback_public_url)" >&2; exit 2; } ;;
+  *)
+    [[ -z "$PUBLIC_HOST" ]] \
+      || { echo "--public-host is refused with --phase $PHASE: the Phase 1-3 inventory and receipts are localhost runs (X1's browser story maps the name 'localhost' in Chromium, and K33 probes plain HTTP with 'Host: localhost' against \$BASE)" >&2; exit 2; } ;;
+esac
+if [[ -n "$SESSION_MAX_HOURS" ]]; then
+  [[ "$SESSION_MAX_HOURS" =~ ^[0-9]+$ && "$SESSION_MAX_HOURS" -ge 1 ]] \
+    || { echo "--session-max-hours must be a whole number of at least 1 (sso/identity.py KEYCLOAK_SESSION_MAX_HOURS)" >&2; exit 2; }
+  [[ "$PHASE" == 4a || "$PHASE" == 4b ]] \
+    || { echo "--session-max-hours runs with --phase 4a or 4b only (the session-maximum rows are U27 and V23)" >&2; exit 2; }
+fi
 
 ED="$EDITION_DIR"
 EDITION="$(basename "$ED")"
@@ -94,7 +159,24 @@ JOURNAL="$ED/auth/identity-journal.log"
 TLS="$ED/auth/keycloak/db-tls"
 MON_PROJECT="krate-${EDITION}-monitoring"
 CLASH_NET="${PROJECT}-gate-clash"
-[[ "$HTTPS_PORT" == 443 ]] && BASE="https://localhost" || BASE="https://localhost:$HTTPS_PORT"
+# The public authority of the fixture: localhost for Phases 1-3, --public-host for
+# Phase 4 (the two are mutually exclusive, see the validation above).
+BASE_HOST="${PUBLIC_HOST:-localhost}"
+[[ "$HTTPS_PORT" == 443 ]] && BASE="https://$BASE_HOST" || BASE="https://$BASE_HOST:$HTTPS_PORT"
+# ── name mapping without /etc/hosts (Phase 4): every curl call of this runner
+# resolves the public name for the fixture's HTTPS, HTTP and Perses ports to
+# loopback (--resolve, so SNI, Host and the certificate check keep the real
+# name); the Python helpers get the same mapping through netmap.py, which reads
+# the exported GATE_PUBLIC_HOST. Empty for Phases 1-3: a pure passthrough.
+CURL_RESOLVE=()
+if [[ -n "$PUBLIC_HOST" ]]; then
+  gate_port=""
+  for gate_port in "$HTTPS_PORT" "$HTTP_PORT" "$PERSES_GATE_PORT"; do
+    CURL_RESOLVE+=("--resolve" "${PUBLIC_HOST}:${gate_port}:127.0.0.1")
+  done
+  export GATE_PUBLIC_HOST="$PUBLIC_HOST"
+fi
+curl() { command curl "${CURL_RESOLVE[@]}" "$@"; }
 [[ -x "$KRATE" && -f "$ED/.env.template" ]] || { echo "not an edition directory: $ED" >&2; exit 2; }
 if [[ -d "$ED/sso" ]]; then SSO="$ED/sso"; elif [[ -d "$ED/../sso" ]]; then SSO="$(cd "$ED/../sso" && pwd)"; else echo "no sso/ beside $ED" >&2; exit 2; fi
 if [[ -e "$ENVF" ]] && ! $WIPE; then
@@ -170,6 +252,28 @@ if { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v logrotat
 REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K31 K32 K33 K34 M1 M2 Z2)
 REQUIRED_P3=(P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 Z3)
 REQUIRED_X=(X1)
+# Phase 4 inventories (PHASE4-INSTRUCTIONS-v3.md section 5): a slice is REQUIRED_P1
+# plus its own rows, and it holds no Phase 2/3 ids (on an EPC edition directory the
+# Phase 2/3 rows would be NOT_RUN and finish() would turn that into INCOMPLETE).
+# The session-maximum rows (U27, V23) run only in the --session-max-hours companion
+# runs and are not part of the default inventories.
+REQUIRED_P4A=(U1 U2 U3 U4 U5 U6 U7 U8 U9 U10 U11 U12 U13 U14 U15 U16 U17 U18 U19 U20 U21a U21b U22 U23 U24 U25 U26 U28 U29 X3 Z4a)
+REQUIRED_P4B=(V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15 V16 V17 V18 V19 V20 V21 V22 V24 X4 Z4b)
+REQUIRED_P4C=(W1 W2 W3 W4)
+SESSION_P4A=(U27)
+SESSION_P4B=(U27 V23)
+phase4_session_ids() { case "$1" in 4a) printf '%s\n' "${SESSION_P4A[@]}" ;; 4b) printf '%s\n' "${SESSION_P4B[@]}" ;; esac; }
+# W3 (the foreign-source probe) follows the J7 pattern: on the Mac it runs (a)+(b)
+# from the Mac's LAN address; on a VM it needs root (or sudo) and iproute2 for the
+# p4probe network namespace, and leaves the inventory when the host cannot do it.
+W3_REQUIRED=false
+if [[ "$PHASE" == 4c ]]; then
+  if [[ "$(uname -s)" == Darwin ]]; then
+    W3_REQUIRED=true
+  elif { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v ip >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+    W3_REQUIRED=true
+  fi
+fi
 required_ids() { # the inventory that decides the verdict, given the flags
   local id
   for id in "${REQUIRED_P1[@]}"; do
@@ -177,9 +281,30 @@ required_ids() { # the inventory that decides the verdict, given the flags
     if [[ "$id" == J7 ]] && ! $J7_REQUIRED; then continue; fi
     echo "$id"
   done
-  if [[ "$PHASE" != 1 ]]; then for id in "${REQUIRED_P2[@]}"; do echo "$id"; done; fi
-  if [[ "$PHASE" == 3 || "$PHASE" == all ]]; then for id in "${REQUIRED_P3[@]}"; do echo "$id"; done; fi
-  if $SCREENSHOTS; then for id in "${REQUIRED_X[@]}"; do echo "$id"; done; fi
+  case "$PHASE" in
+    1) ;;
+    2) for id in "${REQUIRED_P2[@]}"; do echo "$id"; done ;;
+    3|all)
+      for id in "${REQUIRED_P2[@]}"; do echo "$id"; done
+      for id in "${REQUIRED_P3[@]}"; do echo "$id"; done ;;
+    4a|4b|4c)
+      if [[ -n "$SESSION_MAX_HOURS" ]]; then
+        while IFS= read -r id; do echo "$id"; done < <(phase4_session_ids "$PHASE")
+      else
+        local -a inv=()
+        case "$PHASE" in
+          4a) inv=("${REQUIRED_P4A[@]}") ;;
+          4b) inv=("${REQUIRED_P4B[@]}") ;;
+          4c) inv=("${REQUIRED_P4C[@]}") ;;
+        esac
+        for id in "${inv[@]}"; do
+          if ! $SCREENSHOTS && [[ "$id" == X* ]]; then continue; fi
+          if [[ "$id" == W3 ]] && ! $W3_REQUIRED; then continue; fi
+          echo "$id"
+        done
+      fi ;;
+  esac
+  if $SCREENSHOTS && [[ "$PHASE" != 4* ]]; then for id in "${REQUIRED_X[@]}"; do echo "$id"; done; fi
 }
 
 log() { if [[ -n "${RAW_CLOSED:-}" ]]; then printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; else printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$RAW" >&2; fi; }
@@ -318,7 +443,7 @@ hold_lock() { # a live process holds the identity lock until release_lock
 release_lock() { kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; }
 
 fixture_reset() {
-  local n; for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress
+  local n; for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
@@ -333,9 +458,15 @@ fixture_env() {
   "$KRATE" config set "KRATE_IDENTITY_SUBNET=$SUBNET" >/dev/null
   "$KRATE" config set "KRATE_IDENTITY_PROXY_IP=$PROXY_IP" >/dev/null
   "$KRATE" config set "KRATE_IDENTITY_IP_RANGE=$IP_RANGE" >/dev/null
-  # Monitoring ports of the fixture (the defaults may be in use on a developer host).
-  "$KRATE" config set GRAFANA_PORT=13000 >/dev/null; "$KRATE" config set PROM_PORT=19090 >/dev/null
-  "$KRATE" config set LOKI_PORT=13100 >/dev/null; "$KRATE" config set PERSES_PORT=13443 >/dev/null
+  # Monitoring ports of the fixture (the defaults may be in use on a developer host);
+  # the curl() wrapper resolves the public name for PERSES_GATE_PORT.
+  "$KRATE" config set "GRAFANA_PORT=$GRAFANA_GATE_PORT" >/dev/null; "$KRATE" config set "PROM_PORT=$PROM_GATE_PORT" >/dev/null
+  "$KRATE" config set "LOKI_PORT=$LOKI_GATE_PORT" >/dev/null; "$KRATE" config set "PERSES_PORT=$PERSES_GATE_PORT" >/dev/null
+  # --session-max-hours N (Phase 4 companion runs): the value must be in .env before
+  # the realm is created — KEYCLOAK_SESSION_MAX_HOURS is applied at realm creation
+  # only (the realm plan's ssoSessionMaxLifespan, sso/identity.py), and this gate's
+  # realm is new, so the plan applies.
+  [[ -z "$SESSION_MAX_HOURS" ]] || "$KRATE" config set "KEYCLOAK_SESSION_MAX_HOURS=$SESSION_MAX_HOURS" >/dev/null
   PG_IMAGE="$(envv KEYCLOAK_DB_IMAGE)"
 }
 host_conflicts() { # other krate installations on this Docker host block a run (one installation per host by design)
@@ -653,6 +784,69 @@ run_screenshots() {
   ok_if X1 1 X "$st" "$n screenshots in $OUT/screenshots (manifest.json has the captions and the asserted outcomes): $(printf '%s' "$CAP" | grep -E 'STORY|assert' | tail -1 | cut -c1-120)"
 }
 
+# ═══════════════════════════ shared fixture bring-up ═══════════════════════════
+# start_cluster: the one implementation of the fixture bring-up used by the K1
+# prelude and by the Phase 4 slices on both editions (section 5 of
+# harness/phase4/PHASE4-INSTRUCTIONS-v3.md): auth configure (extra arguments such
+# as the K1 prelude's --local are accepted and ignored by the CLI's
+# auth_configure), config set KAFKA_UI_AUTH_CONFIG=runtime.yml, start, auth
+# apply, then monitor up. Sets SC_CONFIGURE/SC_SET/SC_START/SC_APPLY/SC_MONITOR
+# (exit codes), SC_STUB (the 4b stand-in prelude), SC_CONFIGURE_EV (evidence
+# line) and SC_BROKER_BEFORE/AFTER (the kafka-92 container id around auth
+# apply); returns non-zero when any step failed. The monitoring secrets are
+# collected for the leak scans.
+#
+# --broker (slice 4b only, lead decision 2026-10-13): the runner owns the
+# stand-in IdP — stub_idp.sh up (the Phase 3 project/port convention) BEFORE
+# auth configure, which then runs with the stand-in's site.json so the broker
+# plan (commit 0: trustEmail=true) is written and applied by auth apply; V19
+# exercises it. The prelude removes a pre-existing plan and runtime.yml first:
+# since b51fe90 broker_plan REFUSES a stale plan whose trustEmail/storeToken/
+# enabled differ, naming the field. The two preflight prerequisites Phase 3
+# proved (P2) are set the same way: the stand-in's PEM at 644 in the truststore
+# dir, and PING_KEYCLOAK_CLIENT_SECRET through the environment (set_env_raw),
+# never on a command line.
+SC_CONFIGURE=0; SC_SET=0; SC_START=0; SC_APPLY=0; SC_MONITOR=0; SC_STUB=0; SC_CONFIGURE_EV=""; SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
+stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR/site.json
+  local cluster rc f
+  cap "$KRATE" auth configure; rc=$?  # the plain plan: its runtime.yml names the edition's cluster list
+  [[ $rc -eq 0 ]] || { SC_STUB=$rc; log "broker prelude: plain auth configure failed (exit $rc)"; return 1; }
+  cluster="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["rbac"]["roles"][0]["clusters"][0])' "$ED/auth/ui/runtime.yml" 2>/dev/null)"
+  [[ -n "$cluster" ]] || { SC_STUB=1; log "broker prelude: no cluster name in the plain runtime.yml"; return 1; }
+  rm -f "$ED/auth/ui/runtime.yml" "$ED/auth/keycloak/pingfederate-idp.json"  # the stale-plan trap (b51fe90)
+  cap "$STUB" up --project "$PROJECT" --edition-dir "$ED" --base "$BASE" --port "$STUB_PORT" --out "$STUB_DIR" --cluster "$cluster"; SC_STUB=$?
+  [[ $SC_STUB -eq 0 ]] || { log "broker prelude: stub_idp.sh up failed (exit $SC_STUB): $(printf '%s' "$CAP" | grep -E '^stub:' | tail -1 | cut -c1-160)"; return 1; }
+  for f in .admin-pw .client-secret .user-pw; do add_secret "$(tr -d '\n' < "$STUB_DIR/$f")"; done
+  mkdir -p "$ED/auth/keycloak/truststores"
+  cp "$STUB_DIR/stub.crt" "$ED/auth/keycloak/truststores/gate3-stand-in.crt"; chmod 644 "$ED/auth/keycloak/truststores/gate3-stand-in.crt"
+  set_env_raw PING_KEYCLOAK_CLIENT_SECRET "$(tr -d '\n' < "$STUB_DIR/.client-secret")"; collect_secrets
+  log "broker prelude: stand-in up on 127.0.0.1:$STUB_PORT (cluster $cluster); site file $STUB_DIR/site.json"
+}
+start_cluster() { # [--local] [--broker]
+  local arg broker=false
+  local -a cfg_args=()
+  for arg in "$@"; do
+    case "$arg" in
+      --broker) broker=true ;;
+      *) cfg_args+=("$arg") ;;
+    esac
+  done
+  if $broker; then
+    stub_up_for_broker || return 1
+    cfg_args=("$STUB_DIR/site.json")
+  fi
+  cap "$KRATE" auth configure ${cfg_args[@]+"${cfg_args[@]}"}; SC_CONFIGURE=$?
+  SC_CONFIGURE_EV="$(printf '%s' "$CAP" | grep -E 'runtime.yml|Kafbat plan' | head -2 | xargs | cut -c1-120)"
+  "$KRATE" config set KAFKA_UI_AUTH_CONFIG=runtime.yml >/dev/null; SC_SET=$?
+  cap "$KRATE" start; SC_START=$?
+  SC_BROKER_BEFORE="$(cid kafka-92)"
+  cap "$KRATE" auth apply; SC_APPLY=$?
+  SC_BROKER_AFTER="$(cid kafka-92)"
+  cap "$KRATE" monitor up; SC_MONITOR=$?
+  collect_secrets
+  [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 && $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]]
+}
+
 # ═══════════════════════════ phase 2 ═══════════════════════════
 run_phase2() {
   local rc rc2 ev before after names id result evidence p
@@ -661,12 +855,8 @@ run_phase2() {
     for id in "${REQUIRED_P2[@]}"; do [[ "$id" == Z* ]] || record "$id" 2 K NOT_RUN "Phase 2 runtime fixture is KRaft on this runner; EPC runtime is covered by the Phase 1 receipt inside the Linux VM"; done
     return
   fi
-  cap "$KRATE" auth configure --local; rc=$?; ev="$(printf '%s' "$CAP" | grep -E 'runtime.yml|Kafbat plan' | head -2 | xargs | cut -c1-120)"
-  "$KRATE" config set KAFKA_UI_AUTH_CONFIG=runtime.yml >/dev/null
-  cap "$KRATE" start; after=$?
-  before="$(cid kafka-92)"
-  cap "$KRATE" auth apply; rc2=$?
-  names="$(cid kafka-92)"
+  start_cluster --local
+  rc="$SC_CONFIGURE"; after="$SC_START"; rc2="$SC_APPLY"; before="$SC_BROKER_BEFORE"; names="$SC_BROKER_AFTER"; ev="$SC_CONFIGURE_EV"
   grep -q 'allow-shared-login' "$ED/auth/ui/runtime.yml" && ev="$ev; allow-shared-login PRESENT"
   [[ $rc -eq 0 && $after -eq 0 && $rc2 -eq 0 && "$before" == "$names" && -n "$before" ]] && ! grep -q 'allow-shared-login' "$ED/auth/ui/runtime.yml"; st=$?; ok_if K1 2 K "$st" "auth configure --local (exit $rc; $ev); start (exit $after); auth apply (exit $rc2, preflight inside); broker container untouched by apply; runtime.yml has no shared login"
   before="$(cid kafka-ui)"; cap "$KRATE" auth apply; rc=$?; after="$(cid kafka-ui)"
@@ -840,6 +1030,328 @@ EOF
   docker logs "${PROJECT}-gate3-pingstub" > "$STATE/pingstub.log" 2>&1 || true
 }
 
+# ═══════════════════════════ phase 4 ═══════════════════════════
+# The Phase 4 slices (4a Grafana, 4b Perses, 4c backing services) run REQUIRED_P1
+# plus their own inventory on both editions (the EPC VM receipt is part of the
+# slice acceptance), under --public-host NAME: the realm-mode monitoring UIs
+# refuse a loopback KEYCLOAK_PUBLIC_URL. The rows live in the slice helpers
+# (scripts/gate/phase4_grafana.py, phase4_perses.py, section 5 of
+# harness/phase4/PHASE4-INSTRUCTIONS-v3.md); X3/X4 (screenshot stories), Z4a/Z4b
+# (the extended leak scans) and W1-W4 are the runner's. A --session-max-hours N
+# companion run sets N in fixture_env (before the realm is created) and runs
+# REQUIRED_P1 plus U27 (4a) or U27 and V23 (4b) only.
+in_inv() { # id inventory...: membership without a subshell
+  local want="$1"; shift; local have
+  for have in "$@"; do [[ "$have" == "$want" ]] && return 0; done
+  return 1
+}
+phase4_ingest() { # TSV slice regex: record the helper's rows; its `setup` line is logged, not recorded
+  local tsv="$1" slice="$2" regex="$3" id result evidence crit
+  [[ -f "$tsv" ]] || return 0
+  while IFS=$'\t' read -r id result evidence; do
+    if [[ "$id" == setup ]]; then log "[$result] $slice setup: ${evidence:0:220}"; continue; fi
+    [[ "$id" =~ $regex ]] || continue
+    [[ -n "${SEEN[$id]:-}" ]] && continue
+    crit="${id%%[0-9]*}"
+    record "$id" "$slice" "$crit" "$result" "$evidence"
+  done < "$tsv"
+}
+phase4_stub() { # id slice crit evidence: a runner-owned row whose body awaits the live walk (rule 11)
+  record "$1" "$2" "$3" NOT_RUN "$4"
+}
+# X3: the end-user screenshot story for slice 4a, wired exactly as t-live4a verified it
+# (live4a results.md §"X3 report": scripts/gate/screenshots-grafana.mjs ran UNMODIFIED
+# at ee173ac in krate-harness/playwright:1.60.0 with the gate's --resolve-to mapping
+# shape; `STORY OK: 12 assertions over 5 screenshots`; every NEEDS-LIVE-VERIFICATION
+# selector confirmed as written; the manifest sha256 list independently recomputed).
+# Credentials come from the helper's enrolment state files ($STATE/p4/kc-{p4v,p4both}.json)
+# through the environment only, never argv; all four values join the leak set.
+phase4_screenshots_x3() {
+  local slice="$1" viewer_json="$STATE/p4/kc-p4v.json" admin_json="$STATE/p4/kc-p4both.json"
+  local outdir="$OUT/screenshots-grafana" gateway st n sha_ok f s rest pw totp
+  if ! $SCREENSHOTS; then
+    phase4_stub X3 "$slice" X "not run: --no-screenshots (X3 is outside the required inventory)"
+    return
+  fi
+  if [[ ! -f "$viewer_json" || ! -f "$admin_json" ]]; then
+    phase4_stub X3 "$slice" X "the helper's enrolment state files are missing (kc-p4v.json / kc-p4both.json): the slice setup did not run, so the story has no signed-in users"
+    return
+  fi
+  if ! docker image inspect krate-harness/playwright:1.60.0 >/dev/null 2>&1; then
+    printf 'FROM mcr.microsoft.com/playwright:v1.60.0-noble\nRUN npm i -g playwright@1.60.0\nENV NODE_PATH=/usr/lib/node_modules\n' | docker build -q -t krate-harness/playwright:1.60.0 - >/dev/null 2>&1 \
+      || { record X3 "$slice" X FAIL "harness image krate-harness/playwright:1.60.0 could not be built (network needed once)"; return; }
+  fi
+  gateway="$(docker run --rm --add-host host.docker.internal:host-gateway "$PG_IMAGE" sh -c 'getent ahostsv4 host.docker.internal | awk "{print \$1; exit}"' 2>/dev/null | tr -d '[:space:]')"
+  if [[ -z "$gateway" ]]; then
+    record X3 "$slice" X FAIL "cannot resolve the Docker host gateway (host.docker.internal) from a container"
+    return
+  fi
+  mkdir -p "$outdir" && chmod 755 "$outdir"
+  pw="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$viewer_json" 2>/dev/null)"
+  totp="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["totp"])' "$viewer_json" 2>/dev/null)"
+  [[ -n "$pw" && -n "$totp" ]] || { record X3 "$slice" X FAIL "kc-p4v.json carries no password/totp"; return; }
+  add_secret "$pw"; add_secret "$totp"
+  export GATE_VIEWER_PASSWORD="$pw" GATE_VIEWER_TOTP="$totp"; pw=""; totp=""
+  pw="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$admin_json" 2>/dev/null)"
+  totp="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["totp"])' "$admin_json" 2>/dev/null)"
+  [[ -n "$pw" && -n "$totp" ]] || { record X3 "$slice" X FAIL "kc-p4both.json carries no password/totp"; return; }
+  add_secret "$pw"; add_secret "$totp"
+  export GATE_ADMIN_PASSWORD="$pw" GATE_ADMIN_TOTP="$totp"; pw=""; totp=""
+  cap docker run --rm --add-host host.docker.internal:host-gateway -v "$outdir:/out" -v "$GATE_DIR:/gate:ro" \
+    -e GATE_VIEWER_PASSWORD -e GATE_VIEWER_TOTP -e GATE_ADMIN_PASSWORD -e GATE_ADMIN_TOTP -e PW_MODULES=/usr/lib/node_modules \
+    krate-harness/playwright:1.60.0 node /gate/screenshots-grafana.mjs \
+    --base "$BASE" --host "$BASE_HOST" --out /out --viewer-user p4v --admin-user p4both --resolve-to "$gateway"
+  st=$?
+  unset GATE_VIEWER_PASSWORD GATE_VIEWER_TOTP GATE_ADMIN_PASSWORD GATE_ADMIN_TOTP
+  n="$(find "$outdir" -name '*.png' | wc -l | tr -d ' ')"
+  sha_ok=0
+  if [[ -f "$outdir/manifest.tsv" ]]; then
+    sha_ok=1
+    while IFS=$'\t' read -r f s rest; do
+      [[ "$f" == file || -z "$f" || ! -f "$outdir/$f" ]] && continue
+      printf '%s  %s\n' "$s" "$outdir/$f" | { shasum -a 256 -c - >/dev/null 2>&1 || sha256sum -c - >/dev/null 2>&1; } || sha_ok=0
+    done < "$outdir/manifest.tsv"
+  fi
+  [[ $st -eq 0 && "$n" == 5 && "$CAP" == *"STORY OK"* && $sha_ok -eq 1 ]]; s=$?
+  ok_if X3 "$slice" X "$s" "$n screenshots in ${outdir##*/}/, every manifest.tsv sha256 verified=$sha_ok, story exit=$st: $(printf '%s' "$CAP" | grep -E '^STORY' | tail -1 | cut -c1-120)"
+}
+phase4_leak_scan_z4a() {
+  local slice="$1"
+  section "Z4a: extended secret-leak scan over docker logs of every container, raw gate log, receipt, screenshot manifests, and ps dumps"
+  if [[ -f "$STATE/phase4-secrets.txt" ]]; then
+    local v
+    while IFS= read -r v; do
+      add_secret "$v"
+    done < "$STATE/phase4-secrets.txt"
+  fi
+  local -a cnames=() places=("$JOURNAL" "$RECEIPT")
+  if command -v docker >/dev/null 2>&1; then
+    while IFS= read -r cn; do
+      [[ -n "$cn" ]] || continue
+      cnames+=("$cn")
+      docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
+      places+=("$STATE/docker-$cn.log")
+    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-" | sort -u)
+  fi
+  local mf psd
+  for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
+    [[ -f "$mf" ]] && places+=("$mf")
+  done
+  for psd in "$STATE"/*ps*.txt; do
+    [[ -f "$psd" ]] && places+=("$psd")
+  done
+
+  local raw_without_display="$STATE/raw-without-display.log"
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || true
+
+  local secrets_all="$STATE/secrets-all.$$.txt"
+  local secrets_temp="$STATE/secrets-temp.$$.txt"
+  local files_list="$STATE/scan-places.$$.txt"
+  : > "$secrets_all"; chmod 600 "$secrets_all"
+  : > "$secrets_temp"; chmod 600 "$secrets_temp"
+  : > "$files_list"; chmod 600 "$files_list"
+
+  local s t p
+  for s in "${SECRETS[@]}"; do
+    printf '%s\n' "$s" >> "$secrets_all"
+  done
+  for t in "${TEMP_SECRETS[@]}"; do
+    printf '%s\n' "$t" >> "$secrets_temp"
+  done
+  for p in "${places[@]}"; do
+    printf '%s\n' "$p" >> "$files_list"
+  done
+
+  local scan_err="$STATE/leak-scan.$$.err"
+  local hits
+  hits=$(python3 -I -c '
+import sys, os
+
+all_secrets = [line.strip() for line in open(sys.argv[1], encoding="utf-8", errors="replace") if len(line.strip()) >= 6]
+temp_secrets = set(line.strip() for line in open(sys.argv[2], encoding="utf-8", errors="replace") if len(line.strip()) >= 6)
+places = [line.strip() for line in open(sys.argv[3], encoding="utf-8", errors="replace") if line.strip()]
+raw_file = sys.argv[4]
+raw_no_disp = sys.argv[5]
+
+hits = 0
+
+for p in places:
+    if not os.path.isfile(p):
+        continue
+    try:
+        content = open(p, "rb").read().decode("utf-8", "replace")
+    except OSError:
+        continue
+    for s in all_secrets:
+        c = content.count(s)
+        if c > 0:
+            hits += c
+            print(f"LEAK: secret appears in {os.path.basename(p)} x{c}", file=sys.stderr)
+
+if os.path.isfile(raw_file):
+    try:
+        raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
+        for s in all_secrets:
+            if s not in temp_secrets:
+                c = raw_content.count(s)
+                if c > 0:
+                    hits += c
+                    print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
+    except OSError:
+        pass
+
+if os.path.isfile(raw_no_disp):
+    try:
+        raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
+        for s in temp_secrets:
+            c = raw_nd_content.count(s)
+            if c > 0:
+                hits += c
+                print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
+    except OSError:
+        pass
+
+ed_auth = sys.argv[6]
+if os.path.isdir(ed_auth):
+    for root, _dirs, files in os.walk(ed_auth):
+        for fn in files:
+            fp = os.path.join(root, fn)
+            try:
+                content = open(fp, "rb").read().decode("utf-8", "replace")
+                for s in all_secrets:
+                    c = content.count(s)
+                    if c > 0:
+                        hits += c
+                        print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
+            except OSError:
+                pass
+
+print(hits)
+' "$secrets_all" "$secrets_temp" "$files_list" "$RAW" "$raw_without_display" "$ED/auth/keycloak" 2>"$scan_err")
+  if [[ -f "$scan_err" ]]; then
+    cat "$scan_err" >> "$RAW"
+    rm -f "$scan_err"
+  fi
+
+  rm -f "$secrets_all" "$secrets_temp" "$files_list" "$raw_without_display"
+  local st
+  [[ "$hits" == "0" ]]; st=$?
+  ok_if Z4a "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): $hits hits; walk: live4a 901"
+}
+run_phase4() { # slice: 4a|4b|4c
+  local slice="$1" id rc ev crit job helper only tsv regex
+  local -a inv=() run_inv=() helper_jobs=() only_arg=()
+  section "Phase $slice fixture: brokers + Kafbat + proxy + identity + monitoring, public host $BASE_HOST${SESSION_MAX_HOURS:+, session maximum ${SESSION_MAX_HOURS}h}"
+  case "$slice" in
+    4a) inv=("${REQUIRED_P4A[@]}") ;;
+    4b) inv=("${REQUIRED_P4B[@]}") ;;
+    4c) inv=("${REQUIRED_P4C[@]}") ;;
+  esac
+  run_inv=("${inv[@]}")
+  # Which helper produces which rows (section 5): "<script> <only|- for all> <id prefix>".
+  # A companion --session-max-hours run executes U27 (through the Grafana helper) for
+  # both 4a and 4b, and V23 (through the Perses helper) for 4b; U27/V23 are the only
+  # rows of the companion inventory besides REQUIRED_P1.
+  if [[ -n "$SESSION_MAX_HOURS" ]]; then
+    run_inv=()
+    while IFS= read -r id; do run_inv+=("$id"); done < <(phase4_session_ids "$slice")
+    case "$slice" in
+      4a) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U") ;;
+      4b) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U" "$GATE_DIR/phase4_perses.py V23 V") ;;
+    esac
+  else
+    case "$slice" in
+      4a) helper_jobs=("$GATE_DIR/phase4_grafana.py - U") ;;
+      4b) helper_jobs=("$GATE_DIR/phase4_perses.py - V") ;;
+      4c) helper_jobs=() ;;  # W1-W4 are the runner's rows (section 5)
+    esac
+  fi
+  # Slice 4b brings up the stand-in IdP and configures with its site.json (the
+  # broker plan of commit 0, lead decision 2026-10-13); 4a and 4c configure plain
+  # (--local, accepted and ignored by the CLI).
+  local -a bringup=(--local)
+  [[ "$slice" == 4b ]] && bringup=(--broker)
+  if ! start_cluster "${bringup[@]}"; then
+    ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR (output in run.log)"
+    log "$ev"
+    for id in "${run_inv[@]}"; do
+      crit="${id%%[0-9]*}"
+      case "$id" in
+        Z*) phase4_stub "$id" "$slice" Z "$ev; the leak scan did not run" ;;
+        X*) phase4_stub "$id" "$slice" X "$ev; the screenshot story did not run" ;;
+        *) record "$id" "$slice" "$crit" FAIL "$ev" ;;
+      esac
+    done
+    return
+  fi
+  # The slice helpers (background children, so an interrupt reaches them). Scaffold:
+  # until the live walk notes land, their rows answer NOT_RUN naming what they need.
+  for job in ${helper_jobs[@]+"${helper_jobs[@]}"}; do
+    read -r helper only regex <<<"$job"
+    if [[ ! -f "$helper" ]]; then log "$helper missing"; continue; fi
+    only_arg=(); [[ "$only" == - ]] || only_arg=(--only "$only")
+    local -a extra_arg=()
+    if [[ "$slice" == 4b && "$(basename "$helper")" == phase4_perses.py ]]; then
+      extra_arg=(--stub-dir "$STUB_DIR" --stub-port "$STUB_PORT" --stub-script "$STUB")  # V19 reuses phase3_broker.Gate.brokered_login
+    fi
+    tsv="$STATE/$(basename "$helper" .py).tsv"
+    python3 -I "$helper" run --edition-dir "$ED" --base-url "$BASE" --monitor-project "$MON_PROJECT" \
+      --state "$STATE" "${only_arg[@]}" ${extra_arg[@]+"${extra_arg[@]}"} > "$tsv" 2>>"$RAW" & CHILD=$!
+    wait "$CHILD"; rc=$?; CHILD=""
+    phase4_ingest "$tsv" "$slice" "^${regex}[0-9]+[ab]?\$"
+    log "$(basename "$helper") exit=$rc"
+  done
+  # Runner-owned rows: the screenshot stories (scripts/gate/screenshots-{grafana,perses}.mjs
+  # are scaffolds, not run: no browser here — the lead runs them against the fixture),
+  # the extended leak scans and, for 4c, the W rows.
+  if [[ -z "$SESSION_MAX_HOURS" ]]; then
+    case "$slice" in
+      4a)
+        in_inv X3 "${run_inv[@]}" && phase4_screenshots_x3 "$slice"
+        in_inv Z4a "${run_inv[@]}" && phase4_leak_scan_z4a "$slice"
+        ;;
+      4b)
+        in_inv X4 "${run_inv[@]}" && phase4_stub X4 "$slice" X "screenshot story scripts/gate/screenshots-perses.mjs (exactly 6 PNGs, own directory, manifest.tsv with sha256, every shot after its DOM assertion): scaffold written from the lab7 evidence (logs/082-q3-real-browser.log, driver/cdp.mjs), NOT RUN yet; the runner wiring awaits the live4b walk"
+        in_inv Z4b "${run_inv[@]}" && phase4_stub Z4b "$slice" Z "extended leak scan (cluster and monitoring container logs incl. idp-wait/monitoring-init/perses-migrate, the raw gate log, the receipt, the screenshot manifests, ps -eo args samples every 0.2 s during monitor up, the token/cookie line patterns id_token_hint=/jwtPayload=/jwtSignature=/jwtRefreshToken=/_oauth2_proxy=/oauth2/callback?code=, plus \$STATE/phase4-secrets.txt in the searched set): body awaits the live4b walk; the Phase 1 set was scanned as Z1"
+        ;;
+      4c)
+        in_inv W1 "${run_inv[@]}" && phase4_stub W1 "$slice" W "the published-ports census (perses-gateway 0.0.0.0:PERSES_PORT; prometheus/loki 127.0.0.1; grafana per U21a; no host port for the rest of monitoring/docker-compose.yml): body awaits the live4c walk"
+        in_inv W2 "${run_inv[@]}" && phase4_stub W2 "$slice" W "Prometheus POST/PUT /-/reload and POST /-/quit from the monitoring network (403, lifecycle API off) plus the krate monitor reload walk (valid edit: exit 0, timestamp increased, same container; invalid edit: non-zero, prometheus_config_last_reload_successful 0, still answering): body awaits the live4c walk"
+        if in_inv W3 "${run_inv[@]}"; then
+          if $W3_REQUIRED; then
+            phase4_stub W3 "$slice" W "foreign-source probe (VM: the p4probe netns checks (a)-(e) of harness/phase4/lab8/w1x-row.sh as a runner function; Mac: (a)+(b) from the LAN address): body awaits the live4c walk; the row's evidence must state which variant ran and why (lead decision 2026-10-13)"
+          else
+            record W3 "$slice" W NOT_RUN "needs root (or sudo) and iproute2 for the p4probe namespace on Linux (J7 pattern: outside the inventory on this host; decided by the VM receipt)"
+          fi
+        fi
+        in_inv W4 "${run_inv[@]}" && phase4_stub W4 "$slice" W "the five-source reachability census (host process on the VM, probe containers on monitoring/perses/kafka-network, and Grafana itself) over docker inspect of both projects, compared with table 2 of monitoring/README.md: body awaits the live4c walk"
+        ;;
+    esac
+  fi
+  # The inventory fill: a row that produced no result (helper missing, incomplete,
+  # or not reached) is NOT_RUN, never silently absent.
+  for id in "${run_inv[@]}"; do
+    [[ -n "${SEEN[$id]:-}" ]] && continue
+    crit="${id%%[0-9]*}"
+    phase4_stub "$id" "$slice" "$crit" "no result produced: the ${slice} row bodies await the live walk notes (harness/phase4/live${slice}/, rule 11); scaffold only"
+  done
+  # In a companion --session-max-hours run the rest of the slice stays out of the
+  # inventory; name it for the receipt reader.
+  if [[ -n "$SESSION_MAX_HOURS" ]]; then
+    for id in "${inv[@]}"; do
+      [[ -n "${SEEN[$id]:-}" ]] && continue
+      crit="${id%%[0-9]*}"
+      phase4_stub "$id" "$slice" "$crit" "companion --session-max-hours $SESSION_MAX_HOURS run: this row belongs to the slice's default receipt"
+    done
+  fi
+  # The helper's runtime secrets (JWTs, cookies, tokens, enrolled passwords and TOTP
+  # seeds) join the leak set; Z4a/Z4b (and every later scan) search for them.
+  if [[ -f "$STATE/phase4-secrets.txt" ]]; then
+    local v
+    while IFS= read -r v; do add_secret "$v"; done < "$STATE/phase4-secrets.txt"
+  fi
+}
+
 # ═══════════════════════════ leak scan, teardown, verdict ═══════════════════════════
 leak_scan() {
   section "Z: secret-leak scan over every captured output, the journal, plan files, receipt files and container logs"
@@ -876,9 +1388,18 @@ teardown() {
   "$STUB" down --project "$PROJECT" >/dev/null 2>&1 || true  # before compose down: the stand-in is attached to identity-egress
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   local v; for v in $(docker volume ls -q | grep -E "^${MON_PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
-  docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" >/dev/null 2>&1 || true
-  local n; for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-"); do docker network rm "$n" >/dev/null 2>&1; done
-  for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-"); do docker rm -f "$n" >/dev/null 2>&1; done
+  docker volume rm "${MON_PROJECT}_grafana_rendered" >/dev/null 2>&1 || true  # named explicitly (section 5); the prefix loop above is the backstop
+  docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" "${MON_PROJECT}_perses" >/dev/null 2>&1 || true
+  local n; for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-|^${PROJECT}-gate4-"); do docker network rm "$n" >/dev/null 2>&1; done
+  for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done
+  # Phase 4 helper containers carry the krate.gate=phase4 label (the name filter above
+  # is the backstop for helpers that name them differently).
+  for n in $(docker ps -aq --filter "label=krate.gate=phase4"); do docker rm -f "$n" >/dev/null 2>&1; done
+  # The W3 probe namespace (harness/phase4/lab8/w1x-row.sh names: netns p4probe, veth p4v0/p4v1).
+  if [[ "$(uname -s)" == Linux ]] && command -v ip >/dev/null 2>&1 && { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; }; then
+    as_root ip netns list 2>/dev/null | grep -qw p4probe && as_root ip netns del p4probe >/dev/null 2>&1
+    ip link show p4v0 >/dev/null 2>&1 && as_root ip link del p4v0 >/dev/null 2>&1
+  fi
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
   local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
   log "fixture resources left: $left"
@@ -928,6 +1449,9 @@ PYEOF
     echo "| edition file digests (sha256, 16 hex) |$EDITION_DIGESTS |"
     echo "| edition / fixture | $EDITION in $ED, Compose project $PROJECT, $BASE, identity $SUBNET (pool $IP_RANGE, proxy $PROXY_IP) |"
     echo "| phases | $PHASE; screenshots: $SCREENSHOTS; static: $STATIC |"
+    if [[ -n "$SESSION_MAX_HOURS" ]]; then
+      echo "| session maximum | KEYCLOAK_SESSION_MAX_HOURS=$SESSION_MAX_HOURS (--session-max-hours, set in .env before the realm was created); this companion run executes REQUIRED_P1 plus: $(phase4_session_ids "$PHASE" | tr '\n' ' ') |"
+    fi
     echo "| host | $(uname -srm); Docker $(docker version -f '{{.Server.Version}}' 2>/dev/null); Compose $(docker compose version --short 2>/dev/null); $(python3 --version 2>&1); $(openssl version) |"
     echo "| images | $(grep -E '^[A-Z_]+_IMAGE=' "$ED/.env.template" | cut -d= -f2 | tr '\n' ' ') |"
     echo "| runner | $(basename "$RUNNER") v$GATE_VERSION sha256 $(sha256file "$RUNNER"); gate/ $gate_digest; runner repository commit $RUNNER_COMMIT${RUNNER_DIRTY:+ (dirty: $RUNNER_DIRTY)} |"
@@ -954,6 +1478,11 @@ case "$PHASE" in
   1) run_phase1; run_screenshots; leak_scan Z1 1 ;;
   2) run_phase1; run_screenshots; leak_scan Z1 1; run_phase2; leak_scan Z2 2 ;;  # Phase 2 is accepted only with Phase 1
   3|all) run_phase1; run_screenshots; leak_scan Z1 1; run_phase2; leak_scan Z2 2; run_phase3; leak_scan Z3 3 ;;  # Phase 3 reuses the Phase 2 stack
+  # Phase 4: the slice runs REQUIRED_P1 (with its Z1 scan) and then its own rows.
+  # X1 is not part of a Phase 4 inventory (the story's resolver maps `localhost`;
+  # the Phase 4 stories are X3/X4 under --public-host); the slice's own leak rows
+  # are Z4a/Z4b.
+  4a|4b|4c) run_phase1; leak_scan Z1 1; run_phase4 "$PHASE" ;;
 esac
 FINISHED=true
 trap - EXIT HUP INT TERM

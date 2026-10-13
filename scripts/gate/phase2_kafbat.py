@@ -59,6 +59,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)  # python3 -I does not add the script directory
+import netmap  # noqa: E402
+
+# Phase 4 name mapping: resolve $GATE_PUBLIC_HOST (the gate's --public-host) to
+# loopback without touching /etc/hosts; a no-op on the Phase 1-3 localhost runs.
+# TLS keeps the real name (only getaddrinfo is substituted).
+netmap.install()
+
 REALM = 'krate'
 UI_CLIENT = 'krate-ui'
 CLI_CLIENT = 'krate-cli'
