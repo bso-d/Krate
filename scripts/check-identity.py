@@ -3476,7 +3476,7 @@ def check_loki_gateway(checks):
     if not e(service is not None, 'monitoring/docker-compose.yml: the loki-gateway service is missing'):
         return
     e(not service.get('ports'), f'monitoring/loki-gateway must not publish a host port; got {service.get("ports")}')
-    e('any(port.get('host_ip') != '127.0.0.1' for port in ports)' in (ROOT / 'sso/preflight.py').read_text(),
+    e("any(port.get('host_ip') != '127.0.0.1' for port in ports)" in (ROOT / 'sso/preflight.py').read_text(),
       'sso/preflight.py: the realm-mode bind check must cover every published port, not only the first')
     e(list(service.get('networks') or {}) == ['monitoring'],
       f'monitoring/loki-gateway must be on the monitoring network only; got {list(service.get("networks") or {})}')
