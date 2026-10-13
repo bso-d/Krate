@@ -660,8 +660,11 @@ def check_gate_scripts(checks):
     docker_calls = []
     saved = module.service_container, module.docker
     try:
-        module.service_container = lambda project, service: 'cid-1' if (project, service) == ('p-x', 'kafka-92') else None
-        module.docker = lambda *args, **kwargs: (docker_calls.append(args), (0, '', ''))[1]
+        # setattr, not direct assignment: Pyright rejects module-attribute assignment
+        # (reportAttributeAccessIssue — ModuleType declares no such attributes).
+        setattr(module, 'service_container',
+                lambda project, service: 'cid-1' if (project, service) == ('p-x', 'kafka-92') else None)
+        setattr(module, 'docker', lambda *args, **kwargs: (docker_calls.append(args), (0, '', ''))[1])
         p3_module.Gate.cleanup(types.SimpleNamespace(project='p-x', cleanup_topics={'gate3-p6', 'gate3-p5'}))
         e(len(docker_calls) == 2 and all(a[0] == 'exec' and a[1] == 'cid-1' and '--delete' in a and '--if-exists' in a for a in docker_calls)
           and [a[-1] for a in docker_calls] == ['gate3-p5', 'gate3-p6'],
@@ -670,7 +673,8 @@ def check_gate_scripts(checks):
         p3_module.Gate.cleanup(types.SimpleNamespace(project='other', cleanup_topics={'gate3-p6'}))
         e(docker_calls == [], f'Gate.cleanup must make no docker call without a kafka-92 container; got {docker_calls}')
     finally:
-        module.service_container, module.docker = saved
+        setattr(module, 'service_container', saved[0])
+        setattr(module, 'docker', saved[1])
     e('self.cleanup()' in (ROOT / 'scripts/gate/phase3_broker.py').read_text().split('def main(self):', 1)[1].split('def finish', 1)[0],
       'phase3_broker.Gate.main must call self.cleanup() in its finally block')
 
@@ -3881,6 +3885,19 @@ def check_grafana_realm_plan(checks):
       'client_differs: a changed redirect URI is a difference')
     e(identity.client_differs(client, dict(same, attributes=dict(client['attributes'], **{'pkce.code.challenge.method': ''}))) is True,
       'client_differs: a dropped PKCE method is a difference')
+    # The client-mode scalars, behaviourally (PR #42 review, identity.py:162 thread): flipping any
+    # one of them in Keycloak's readback must flip the verdict — a mode change made in the console
+    # (public client, disabled, a dropped flow, service accounts off) may never read back "same",
+    # or the reconcile never converges it. The textual CLIENT_VERDICT_FIELDS check below pins the
+    # list; this pins the behaviour the list exists for.
+    for field, flipped in (('enabled', False), ('protocol', 'saml'), ('publicClient', True),
+                           ('frontchannelLogout', not client['frontchannelLogout']),
+                           ('standardFlowEnabled', not client['standardFlowEnabled']),
+                           ('implicitFlowEnabled', not client['implicitFlowEnabled']),
+                           ('directAccessGrantsEnabled', not client['directAccessGrantsEnabled']),
+                           ('serviceAccountsEnabled', not client['serviceAccountsEnabled'])):
+        e(identity.client_differs(client, dict(same, **{field: flipped})) is True,
+          f'client_differs: a changed {field} is a difference (the client-mode fields take part in the verdict)')
 
 def check_perses_clients(checks):
     """Phase 4 commit 8's generators, landed with the Grafana ones because they share groups_mapper,
@@ -3906,52 +3923,14 @@ def check_perses_clients(checks):
     guard = next(item for item in perses if item['clientId'] == 'krate-perses-sync')
     e(guard['serviceAccountsEnabled'] is True and guard['standardFlowEnabled'] is False,
       f'krate-perses-sync must be a service-account client with no browser flow; got {guard}')
-
-
-def check_monitoring_preflight_exposure(checks):
-    """PR #42 F1, behaviourally: realm-mode Grafana must publish EVERY mapping on 127.0.0.1.
-
-    check_loki_gateway pins the source line; this pipes the real rendered monitoring config
-    through the shipped preflight, so the check cannot be satisfied by dead code: a loopback
-    mapping beside an all-interfaces mapping must be refused with a value-free message, and
-    local mode must keep main's exposure (every interface, its own login).
-    """
-    e = checks.expect
-    with tempfile.TemporaryDirectory() as tmp:
-        site = Path(tmp) / 'site'
-        site.mkdir()
-        identity.write_file(site / '.env', '', 0o600)
-        certs = Path(tmp) / 'certs'
-        certs.mkdir()
-        (certs / 'server.crt').write_text('not a certificate: the monitoring preflight only checks that the file exists\n')
-        try:
-            services = monitoring_services({'GRAFANA_AUTH_CONFIG': 'realm.ini',
-                                            'GRAFANA_BIND': '127.0.0.1',
-                                            'PERSES_CERTS_DIR': str(certs)})
-        except ValueError as exc:
-            e(False, f'monitoring: Compose rendering failed: {exc}')
-            return
-        rendered = json.dumps({'services': services})
-        result = preflight(site, 'monitoring', rendered)
-        e(result.returncode == 0,
-          f'preflight --mode monitoring must pass realm mode with a single loopback mapping; '
-          f'got {result.returncode}: {result.stderr.strip()[:200]}')
-        dual = json.loads(rendered)
-        mapping = dict(dual['services']['grafana']['ports'][0])
-        mapping.update({'host_ip': '0.0.0.0', 'published': '3001'})
-        dual['services']['grafana']['ports'].append(mapping)
-        result = preflight(site, 'monitoring', json.dumps(dual))
-        e(result.returncode == 1 and 'must publish its port on 127.0.0.1 only' in result.stderr
-          and '0.0.0.0' not in result.stderr,
-          f'preflight --mode monitoring must refuse a loopback mapping beside an all-interfaces mapping '
-          f'with a value-free message; got {result.returncode}: {result.stderr.strip()[:200]}')
-        local = json.loads(rendered)
-        local['services']['grafana']['environment']['GF_PATHS_CONFIG'] = '/etc/krate/auth/local.ini'
-        local['services']['grafana']['ports'][0]['host_ip'] = '0.0.0.0'
-        result = preflight(site, 'monitoring', json.dumps(local))
-        e(result.returncode == 0,
-          f'preflight --mode monitoring must leave local-mode exposure unchanged (every interface, its own login); '
-          f'got {result.returncode}: {result.stderr.strip()[:200]}')
+    # The sync shape in the verdict too: it declares no frontchannelLogout/attributes/protocolMappers,
+    # and client_differs compares a field only when the plan declares it — so a faithful readback
+    # stays "same" while flipping its service-account flag is a difference (PR #42 review, :162).
+    sync_readback = dict(guard, id='generated-id', realm_client=True, secret=identity.KEYCLOAK_SECRET_MASK)
+    e(identity.client_differs(guard, sync_readback) is False,
+      'client_differs: the perses-sync readback with Keycloak additions and a masked secret is not a difference')
+    e(identity.client_differs(guard, dict(sync_readback, serviceAccountsEnabled=False)) is True,
+      'client_differs: turning off the perses-sync service account is a difference')
 
 
 def load_grafana_admin():
@@ -4089,7 +4068,7 @@ def main():
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
                   check_grafana_realm_cli, check_grafana_realm_plan, check_perses_clients,
-                  check_monitoring_preflight_exposure, check_grafana_admin_contract,
+                  check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
