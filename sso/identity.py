@@ -1065,7 +1065,10 @@ def refuse_loopback_public_url(url):
             address = ipaddress.IPv4Address(socket.inet_aton(host))
         except (OSError, ValueError):
             address = None
-    if (address is not None and (address.is_loopback or address.is_unspecified)) or host in LOOPBACK_HOSTS:
+    # The IPv4-mapped spelling is explicit rather than left to is_loopback: CPython only
+    # reports ::ffff:127.0.0.1 as loopback from 3.13, and installations run 3.9 (PR #42 review).
+    if ((address is not None and (address.is_loopback or address.is_unspecified))
+            or host in LOOPBACK_HOSTS or host.startswith('::ffff:127.')):
         raise ValueError('KEYCLOAK_PUBLIC_URL must name the public host: refusing a loopback or'
                          ' unspecified address (any 127.0.0.0/8 address, ::1, 0.0.0.0, ::) and localhost')
 

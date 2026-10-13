@@ -3321,7 +3321,7 @@ refuse_loopback_public_url() {
   # hostname is never refused, so 127.example.com stays legal. The old exact-name list let
   # 127.0.0.2 through here while the Python rule refused it (PR #42 review).
   if [[ "$host" == localhost || "$host" == 0.0.0.0 || "$host" == :: || "$host" == '[::]' ||
-        "$host" == ::1 || "$host" == '[::1]' ||
+        "$host" == ::1 || "$host" == '[::1]' || "$host" == '::ffff:127.'* ||
         "$host" =~ ^127(\.[0-9]{1,3}){0,3}$ || "$host" =~ ^[0-9]+$ ]]; then
     die "KEYCLOAK_PUBLIC_URL names the loopback or unspecified host '$host', which a monitoring UI on the realm cannot use: inside a container, localhost is the container itself. Set the public name first:
   krate config set KEYCLOAK_PUBLIC_URL=https://<fqdn>/identity
