@@ -45,9 +45,13 @@ Subcommands (the contract implemented for the krate Bash callers):
 
   retire-user --login LOGIN [--email-suffix SUFFIX]
       {"login": str, "email": str, "disabled": true}
-      Sets the user's e-mail to <login><suffix> (PUT /api/users/:id, keeping
-      login and name) and disables it (POST /api/admin/users/:id/disable).
-      The suffix defaults to +retired@invalid so the literal lives only here.
+      Sets the user's e-mail to <login base><suffix> (PUT /api/users/:id,
+      keeping login and name) and disables it (POST
+      /api/admin/users/:id/disable). The base is the login itself, or for an
+      email-shaped login its local part, so the result is always a valid
+      address: jane@example.com -> jane+retired@invalid, never the double-@
+      jane@example.com+retired@invalid (see retired_email). The suffix
+      defaults to +retired@invalid so the literal lives only here.
       Both steps are needed: a disabled-only user still collides with the
       realm e-mail and the OAuth sign-in fails with "User sync failed"
       (lab6 L5-5). Idempotent: a second run re-applies the same values.
@@ -55,7 +59,10 @@ Subcommands (the contract implemented for the krate Bash callers):
   service-account --name NAME --role {Viewer,Editor,Admin}
       {"id": int, "created": bool}
       GET /api/serviceaccounts/search?query=NAME; creates (POST
-      /api/serviceaccounts) only when no exact-name match exists.
+      /api/serviceaccounts) only when no exact-name match exists. An existing
+      account is reused only when it carries the requested role; a role drift
+      fails with a remediation instead of letting alert seeding run into
+      authorization failures later (PR #42 review).
 
   token-create --account-id N --days D
       {"id": int, "name": str, "expires": int|null, "key": str}
@@ -369,6 +376,30 @@ def cmd_local_users(api):
     print_json(out)
 
 
+def retired_email(login, email_suffix):
+    """The retired address for `login`, valid for plain and email-shaped logins alike.
+
+    Concatenating the suffix onto an email-shaped login yields two unquoted '@'
+    characters (jane@example.com -> jane@example.com+retired@invalid), which is
+    not a valid address: with SMTP and verify_email_enabled Grafana answers 400
+    "Invalid email address" (grafana-v12.2.0 pkg/api/user.go:244-257, through
+    mail.ParseAddress in pkg/api/utils.go:55), and with Krate's defaults
+    (verify_email_enabled = false, conf/defaults.ini:537; GF_SMTP_ENABLED=false)
+    it stores the invalid string unvalidated (pkg/services/user/userimpl/store.go
+    only lowercases it). So for an email-shaped login the suffix tags the local
+    part instead: jane@example.com -> jane+retired@invalid. A plain login keeps
+    the composition the live walk verified (t-grafana-admin A12/A13):
+    p4-collide -> p4-collide+retired@invalid. The result is deterministic, so a
+    re-run re-applies the same value, and it lands on the reserved .invalid
+    domain, so it never collides with a realm e-mail. Two retired users collide
+    only when their local parts are equal across different domains; user.email
+    carries a unique index (pkg/services/sqlstore/migrations/user_mig.go:41),
+    so that rare case fails the PUT loudly instead of overwriting, and re-running
+    with another --email-suffix resolves it.
+    """
+    return login.split('@', 1)[0] + email_suffix
+
+
 def cmd_retire_user(api, login, email_suffix):
     users = list_users(api)
     matches = [u for u in users if isinstance(u, dict) and u.get('login') == login]
@@ -378,7 +409,7 @@ def cmd_retire_user(api, login, email_suffix):
         raise OperationError('GET /api/users returned %d users with login %s' % (len(matches), login))
     user = matches[0]
     user_id = as_int(user['id'], 'user id')
-    new_email = login + email_suffix
+    new_email = retired_email(login, email_suffix)
 
     _, payload = api.request('PUT', '/api/users/%d' % user_id,
                              {'email': new_email, 'login': login, 'name': user.get('name') or ''})
@@ -393,9 +424,30 @@ def cmd_retire_user(api, login, email_suffix):
     print_json({'login': login, 'email': new_email, 'disabled': True})
 
 
+def require_account_role(account, role):
+    """Refuse an exact-name account whose role differs from the requested one.
+
+    Reusing a drifted `krate-seed` (Viewer/Editor instead of Admin) silently
+    hands alert seeding a token that gets authorization failures later (PR #42
+    review). The search DTO already carries the org role, so no extra call is
+    needed: grafana-v12.2.0 pkg/services/serviceaccounts/models.go:87
+    (ServiceAccountDTO.role), selected by the search query itself
+    (pkg/services/serviceaccounts/database/store.go:381). Refuse instead of
+    converge: rewriting an existing account's role could undo a deliberate
+    operator choice, and the caller gets one clear remediation now instead of
+    a confusing 403 during seeding. The message carries no value — neither the
+    role found nor the account name — matching this program's error policy.
+    """
+    if account.get('role') != role:
+        raise OperationError('the existing service account does not carry the requested role; '
+                             'grant it that role in Grafana (Administration > Users and access > '
+                             'Service accounts) or delete the account, then re-run')
+
+
 def cmd_service_account(api, name, role):
     found = search_service_accounts(api, name)
     if found is not None:
+        require_account_role(found, role)
         print_json({'id': as_int(found['id'], 'id'), 'created': False})
         return
     try:
@@ -406,6 +458,7 @@ def cmd_service_account(api, name, role):
             # create; Grafana answers 400 "service account already exists".
             found = search_service_accounts(api, name)
             if found is not None:
+                require_account_role(found, role)
                 print_json({'id': as_int(found['id'], 'id'), 'created': False,
                             'note': 'the service account appeared between search and create; reusing it'})
                 return
@@ -518,11 +571,11 @@ def build_parser():
                  'public-dashboard count, snapshot count')
     add('local-users', 'list local users with login, email, isDisabled, isGrafanaAdmin')
 
-    retire = add('retire-user', 'set a user e-mail to <login><suffix> and disable the user')
+    retire = add('retire-user', 'set a user e-mail to <login base><suffix> and disable the user')
     retire.add_argument('--login', required=True, help='exact login of the user to retire')
     retire.add_argument('--email-suffix', default=DEFAULT_EMAIL_SUFFIX,
-                        help='appended to the login to form the new e-mail '
-                             '(default: %(default)s)')
+                        help='appended to the login base (the login, or for an e-mail-shaped '
+                             'login its local part) to form the new e-mail (default: %(default)s)')
 
     account = add('service-account', 'find-or-create a service account by exact name')
     account.add_argument('--name', required=True, help='service-account name, e.g. krate-seed')

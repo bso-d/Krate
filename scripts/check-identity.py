@@ -3908,11 +3908,188 @@ def check_perses_clients(checks):
       f'krate-perses-sync must be a service-account client with no browser flow; got {guard}')
 
 
+def check_monitoring_preflight_exposure(checks):
+    """PR #42 F1, behaviourally: realm-mode Grafana must publish EVERY mapping on 127.0.0.1.
+
+    check_loki_gateway pins the source line; this pipes the real rendered monitoring config
+    through the shipped preflight, so the check cannot be satisfied by dead code: a loopback
+    mapping beside an all-interfaces mapping must be refused with a value-free message, and
+    local mode must keep main's exposure (every interface, its own login).
+    """
+    e = checks.expect
+    with tempfile.TemporaryDirectory() as tmp:
+        site = Path(tmp) / 'site'
+        site.mkdir()
+        identity.write_file(site / '.env', '', 0o600)
+        certs = Path(tmp) / 'certs'
+        certs.mkdir()
+        (certs / 'server.crt').write_text('not a certificate: the monitoring preflight only checks that the file exists\n')
+        try:
+            services = monitoring_services({'GRAFANA_AUTH_CONFIG': 'realm.ini',
+                                            'GRAFANA_BIND': '127.0.0.1',
+                                            'PERSES_CERTS_DIR': str(certs)})
+        except ValueError as exc:
+            e(False, f'monitoring: Compose rendering failed: {exc}')
+            return
+        rendered = json.dumps({'services': services})
+        result = preflight(site, 'monitoring', rendered)
+        e(result.returncode == 0,
+          f'preflight --mode monitoring must pass realm mode with a single loopback mapping; '
+          f'got {result.returncode}: {result.stderr.strip()[:200]}')
+        dual = json.loads(rendered)
+        mapping = dict(dual['services']['grafana']['ports'][0])
+        mapping.update({'host_ip': '0.0.0.0', 'published': '3001'})
+        dual['services']['grafana']['ports'].append(mapping)
+        result = preflight(site, 'monitoring', json.dumps(dual))
+        e(result.returncode == 1 and 'must publish its port on 127.0.0.1 only' in result.stderr
+          and '0.0.0.0' not in result.stderr,
+          f'preflight --mode monitoring must refuse a loopback mapping beside an all-interfaces mapping '
+          f'with a value-free message; got {result.returncode}: {result.stderr.strip()[:200]}')
+        local = json.loads(rendered)
+        local['services']['grafana']['environment']['GF_PATHS_CONFIG'] = '/etc/krate/auth/local.ini'
+        local['services']['grafana']['ports'][0]['host_ip'] = '0.0.0.0'
+        result = preflight(site, 'monitoring', json.dumps(local))
+        e(result.returncode == 0,
+          f'preflight --mode monitoring must leave local-mode exposure unchanged (every interface, its own login); '
+          f'got {result.returncode}: {result.stderr.strip()[:200]}')
+
+
+def load_grafana_admin():
+    spec = importlib.util.spec_from_file_location('grafana_admin', ROOT / 'monitoring/grafana-admin.py')
+    assert spec is not None and spec.loader is not None, 'monitoring/grafana-admin.py missing'
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_grafana_admin_contract(checks):
+    """PR #42 F2/F3: retire-user's address composition and service-account's role verification."""
+    e = checks.expect
+    admin = load_grafana_admin()
+
+    def run(command):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            command()
+        return json.loads(buffer.getvalue())
+
+    class RecordingApi:
+        """Stands in for grafana-admin's Api: records calls, answers Grafana v12.2.0's own shapes.
+
+        The confirmations mirror the live-provided contract (t-grafana-admin row 3):
+        PUT /api/users/:id -> {"message": "User updated"} (pkg/api/user.go:276),
+        POST /api/admin/users/:id/disable -> {"message": "User disabled"} (pkg/api/admin_users.go:307),
+        GET /api/serviceaccounts/search -> SearchOrgServiceAccountsResult (models.go:131-139) whose
+        ServiceAccountDTO entries carry `role` (models.go:87, selected at database/store.go:381).
+        """
+
+        def __init__(self, users=(), search_pages=(), create=None,
+                     put_message='User updated', disable_message='User disabled'):
+            self.users = list(users)
+            self.search_pages = list(search_pages)
+            self.create = create  # (status, payload) tuple, or an exception instance to raise
+            self.put_message = put_message
+            self.disable_message = disable_message
+            self.calls = []
+
+        def request(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            if method == 'GET' and path == '/api/users':
+                return 200, self.users
+            if method == 'GET' and path.startswith('/api/serviceaccounts/search'):
+                assert self.search_pages, 'unexpected extra search call: ' + path
+                return 200, self.search_pages.pop(0)
+            if method == 'PUT' and re.fullmatch(r'/api/users/\d+', path):
+                return 200, {'message': self.put_message}
+            if method == 'POST' and re.fullmatch(r'/api/admin/users/\d+/disable', path):
+                return 200, {'message': self.disable_message}
+            if method == 'POST' and path == '/api/serviceaccounts':
+                if isinstance(self.create, Exception):
+                    raise self.create
+                return self.create
+            raise AssertionError('unexpected call %s %s' % (method, path))
+
+    # F2 — a plain login keeps the live-walk-verified behaviour byte for byte (A12/A13).
+    api = RecordingApi(users=[{'id': 5, 'login': 'p4-collide', 'name': 'P4 Collide'}])
+    payload = run(lambda: admin.cmd_retire_user(api, 'p4-collide', admin.DEFAULT_EMAIL_SUFFIX))
+    e(payload == {'login': 'p4-collide', 'email': 'p4-collide+retired@invalid', 'disabled': True},
+      f'retire-user of a plain login must keep the <login><suffix> composition; got {payload}')
+    e([(method, path) for method, path, _ in api.calls]
+      == [('GET', '/api/users'), ('PUT', '/api/users/5'), ('POST', '/api/admin/users/5/disable')],
+      f'retire-user must PUT the e-mail and then disable, and call nothing else; got {api.calls}')
+    e(api.calls[1][2] == {'email': 'p4-collide+retired@invalid', 'login': 'p4-collide', 'name': 'P4 Collide'},
+      f'the PUT must keep login and name and move only the e-mail aside (folders/dashboards untouched); '
+      f'got {api.calls[1][2]}')
+
+    # F2 — an email-shaped login tags the local part; the double-@ address must never be composed.
+    api = RecordingApi(users=[{'id': 6, 'login': 'jane@example.com', 'name': ''}])
+    payload = run(lambda: admin.cmd_retire_user(api, 'jane@example.com', admin.DEFAULT_EMAIL_SUFFIX))
+    email = payload.get('email')
+    e(email == 'jane+retired@invalid' and isinstance(email, str) and email.count('@') == 1,
+      f'retire-user of jane@example.com must produce jane+retired@invalid (exactly one @); got {payload}')
+
+    # F2 — Grafana's own confirmation strings stay enforced on both steps.
+    for kwargs, wanted in (({'put_message': 'Nope'}, 'did not confirm "User updated"'),
+                           ({'disable_message': 'Nope'}, 'did not confirm "User disabled"')):
+        api = RecordingApi(users=[{'id': 7, 'login': 'u', 'name': ''}], **kwargs)
+        try:
+            run(lambda: admin.cmd_retire_user(api, 'u', admin.DEFAULT_EMAIL_SUFFIX))
+            e(False, f'retire-user must fail when a step is not confirmed ({wanted})')
+        except admin.OperationError as error:
+            e(wanted in str(error), f'retire-user refusal for an unconfirmed step; got {error}')
+
+    # F3 — the requested role on an existing account: idempotent reuse, no create.
+    def search_hit(role):
+        return {'totalCount': 1, 'page': 1, 'perPage': 1000,
+                'serviceAccounts': [{'id': 11, 'name': 'krate-seed', 'role': role}]}
+
+    empty = {'totalCount': 0, 'page': 1, 'perPage': 1000, 'serviceAccounts': []}
+    api = RecordingApi(search_pages=[search_hit('Admin')])
+    payload = run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+    e(payload == {'id': 11, 'created': False},
+      f'service-account with the correct existing role must stay idempotent (created: false); got {payload}')
+    e(not any(method == 'POST' for method, _, _ in api.calls),
+      f'service-account reuse must not create anything; got {api.calls}')
+
+    # F3 — a drifted role is refused with a clear, value-free message.
+    api = RecordingApi(search_pages=[search_hit('Viewer')])
+    try:
+        run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+        e(False, 'service-account must refuse an existing account whose role differs from the requested one')
+    except admin.OperationError as error:
+        message = str(error)
+        e('role' in message and 'Service accounts' in message,
+          f'the role refusal must name the problem and the remediation; got {message!r}')
+        e(not re.search(r'\b(Viewer|Editor|Admin|krate-seed)\b', message),
+          f'the role refusal must carry no value (found role, requested role, account name); got {message!r}')
+
+    # F3 — absent account: created with the requested role.
+    api = RecordingApi(search_pages=[empty], create=(201, {'id': 12, 'name': 'krate-seed'}))
+    payload = run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+    e(payload == {'id': 12, 'created': True}, f'service-account creation must report created: true; got {payload}')
+    e(api.calls[-1] == ('POST', '/api/serviceaccounts', {'name': 'krate-seed', 'role': 'Admin'}),
+      f'the create must carry the requested role; got {api.calls[-1]}')
+
+    # F3 — the 400-race reuse path verifies the role too, and stays idempotent when it matches.
+    raced = admin.HttpFailure(400, 'POST', '/api/serviceaccounts', detail='service account already exists')
+    api = RecordingApi(search_pages=[empty, search_hit('Editor')], create=raced)
+    try:
+        run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+        e(False, 'the search/create race reuse must verify the role as well')
+    except admin.OperationError as error:
+        e('role' in str(error), f'the race-path role refusal; got {error}')
+    api = RecordingApi(search_pages=[empty, search_hit('Admin')], create=raced)
+    payload = run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+    e(payload.get('created') is False and 'note' in payload,
+      f'the race reuse with the correct role stays idempotent with its note; got {payload}')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
                   check_grafana_realm_cli, check_grafana_realm_plan, check_perses_clients,
+                  check_monitoring_preflight_exposure, check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
