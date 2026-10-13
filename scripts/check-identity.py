@@ -3476,6 +3476,8 @@ def check_loki_gateway(checks):
     if not e(service is not None, 'monitoring/docker-compose.yml: the loki-gateway service is missing'):
         return
     e(not service.get('ports'), f'monitoring/loki-gateway must not publish a host port; got {service.get("ports")}')
+    e('any(port.get('host_ip') != '127.0.0.1' for port in ports)' in (ROOT / 'sso/preflight.py').read_text(),
+      'sso/preflight.py: the realm-mode bind check must cover every published port, not only the first')
     e(list(service.get('networks') or {}) == ['monitoring'],
       f'monitoring/loki-gateway must be on the monitoring network only; got {list(service.get("networks") or {})}')
     e(list(service.get('depends_on') or {}) == ['loki'], f'monitoring/loki-gateway must depend on loki; got {service.get("depends_on")}')
@@ -3857,6 +3859,7 @@ def check_grafana_realm_plan(checks):
     # The refusal is tested through the shipped subcommand (the CLI's entry point), not the
     # library function, plus a positive control so the refusal cannot be unconditional.
     for url, expected_rc in (('https://localhost/identity', 1), ('https://127.0.0.1/identity', 1),
+                             ('https://127.0.0.2/identity', 1), ('https://0.0.0.0/identity', 1),
                              ('https://[::1]/identity', 1), (SYNTHETIC['KEYCLOAK_PUBLIC_URL'], 0)):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / '.env'
@@ -3891,6 +3894,9 @@ def check_perses_clients(checks):
                                                     'https://krate.example.test:3443/api/auth/providers/oidc/krate/callback']),
       f'krate-perses must carry both callbacks (oauth2-proxy and Perses native); got {main_client["redirectUris"]}')
     e(main_client['attributes'].get('pkce.code.challenge.method') == 'S256', 'krate-perses must require PKCE S256')
+    e('perses_rep(args.name, origin, port, args.with_secret)' in (ROOT / 'sso/identity.py').read_text(),
+      'identity.py: the Perses client-differs verdict must build the plan with the secret, or a rotated '
+      'OAUTH2_PROXY_CLIENT_SECRET/PERSES_SYNC_CLIENT_SECRET is undetectable and never converged')
     guard = next(item for item in perses if item['clientId'] == 'krate-perses-sync')
     e(guard['serviceAccountsEnabled'] is True and guard['standardFlowEnabled'] is False,
       f'krate-perses-sync must be a service-account client with no browser flow; got {guard}')

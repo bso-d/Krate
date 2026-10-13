@@ -1039,7 +1039,10 @@ def refuse_loopback_public_url(url):
     URLs are for browsers on other machines. The CLI's monitor_prepare refuses the same hosts
     (plan commit 5, U14); the generator repeats the refusal so no path can write the file. The
     message names the key, never the value."""
-    if urlsplit(url or '').hostname in LOOPBACK_HOSTS:
+    host = urlsplit(url or '').hostname or ''
+    # All of 127.0.0.0/8 is loopback, and 0.0.0.0 is not a host a browser can use either:
+    # an exact-name list let 127.0.0.2 through (PR #42 review).
+    if host in LOOPBACK_HOSTS or host.startswith('127.') or host == '0.0.0.0':
         raise ValueError('KEYCLOAK_PUBLIC_URL must name the public host: refusing a loopback host'
                          ' (localhost, 127.0.0.1, [::1])')
 
@@ -1405,7 +1408,10 @@ def cmd_perses_clients(args):
     if args.item == 'client-differs':
         if not args.name:
             raise ValueError('client-differs names the client: ' + PERSES_CLIENT + ' or ' + PERSES_SYNC_CLIENT)
-        client_verdict(perses_rep(args.name, origin, port), json.load(sys.stdin))
+        # With the secret, exactly as cmd_grafana_client does: without it a rotated
+        # OAUTH2_PROXY_CLIENT_SECRET or PERSES_SYNC_CLIENT_SECRET is undetectable, so Keycloak
+        # would keep the old value while the rendered file carries the new one.
+        client_verdict(perses_rep(args.name, origin, port, args.with_secret), json.load(sys.stdin))
         return 0
     if args.client:
         # input (KCADM_STDIN=1 kcadm … -f -), never a terminal, log or command line: it is the

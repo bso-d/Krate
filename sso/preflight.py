@@ -559,7 +559,9 @@ def validate_monitoring(root, config):
     if not str((grafana.get('environment') or {}).get('GF_PATHS_CONFIG', '')).endswith('/realm.ini'):
         return  # local mode: main's exposure is unchanged (every interface, its own login)
     ports = grafana.get('ports') or []
-    if not ports or ports[0].get('host_ip') != '127.0.0.1':
+    # Every published port, not just the first: one loopback mapping beside one on every
+    # interface would otherwise pass (PR #42 review).
+    if not ports or any(port.get('host_ip') != '127.0.0.1' for port in ports):
         raise Preflight('grafana in realm mode must publish its port on 127.0.0.1 only (GRAFANA_BIND); '
                         'users reach it through the cluster proxy at /grafana/')
     # Compose renders extra_hosts as "host=ip" (the file writes "host:ip"), so accept both.
