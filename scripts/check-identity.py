@@ -4211,12 +4211,42 @@ def check_migrate_issuer(checks):
         e(census1 == census2, f'migrate_issuer: second run must not alter any file; census changed from {census1} to {census2}')
 
 
+def check_monitoring_tables(checks):
+    """Commit 12: monitoring/README.md Table 1 (all 18 services) and non-loopback bind warnings."""
+    e = checks.expect
+    text = (ROOT / 'monitoring/README.md').read_text()
+    e('## Table 1 — Service exposure and enforcement' in text,
+      'monitoring/README.md: must define Table 1 — Service exposure and enforcement')
+    parts = text.split('## Table 1 — Service exposure and enforcement')
+    table1_text = parts[1].split('## Table 2')[0] if len(parts) > 1 else ''
+    components = []
+    for line in table1_text.splitlines():
+        line = line.strip()
+        if not line.startswith('|'):
+            continue
+        cells = [c.strip().strip('`') for c in line.strip('|').split('|')]
+        if len(cells) >= 6 and cells[0] and cells[0] != 'component' and not set(cells[0]) <= {'-', ' '}:
+            components.append(cells[0])
+
+    services = monitoring_services()
+    e(len(services) == 18, f'monitoring/docker-compose.yml must have 18 services; got {len(services)}')
+    e(set(components) == set(services.keys()),
+      f'monitoring/README.md Table 1 must have one row per service in monitoring/docker-compose.yml; '
+      f'missing {sorted(set(services.keys()) - set(components))}, unexpected {sorted(set(components) - set(services.keys()))}')
+
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        prepare = function_body(cli, 'monitor_prepare')
+        e('PROM_BIND' in prepare and 'LOKI_BIND' in prepare and 'not loopback 127.0.0.1' in prepare,
+          f'{edition}/krate: monitor_prepare must warn when PROM_BIND or LOKI_BIND is not 127.0.0.1')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
                   check_grafana_realm_cli, check_grafana_realm_plan, check_perses_clients,
-                  check_render_writes, check_migrate_issuer,
+                  check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,

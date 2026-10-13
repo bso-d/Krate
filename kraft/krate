@@ -3761,6 +3761,12 @@ env_value_file() {
 monitor_prepare() {
   local env_file="$MONITOR_DIR/.env"
   prepare_monitor_env
+  for bind_var in PROM_BIND LOKI_BIND; do
+    local bind_val; bind_val="$(env_value_file "$env_file" "$bind_var" 127.0.0.1)"
+    if [[ "$bind_val" != 127.0.0.1 ]]; then
+      warn "$bind_var is '$bind_val' (not loopback 127.0.0.1): this backing service has no authentication of its own and is exposed to the host network"
+    fi
+  done
   # prepare_monitor_env only warns here, because it also runs on cluster start;
   # the monitoring stack itself does not start on the insecure default.
   if [[ "$(env_value_file "$env_file" GRAFANA_PASSWORD)" == changeme ]]; then
