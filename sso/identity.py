@@ -5,6 +5,7 @@ Secrets never enter this program's output: the realm plan and Kafbat's
 runtime.yml carry ``${VAR}`` placeholders that Keycloak and Kafbat resolve from
 their container environment.
 """
+import ipaddress
 import argparse
 from typing import Any
 import datetime
@@ -1048,11 +1049,18 @@ def refuse_loopback_public_url(url):
     (plan commit 5, U14); the generator repeats the refusal so no path can write the file. The
     message names the key, never the value."""
     host = urlsplit(url or '').hostname or ''
-    # All of 127.0.0.0/8 is loopback, and 0.0.0.0 is not a host a browser can use either:
-    # an exact-name list let 127.0.0.2 through (PR #42 review).
-    if host in LOOPBACK_HOSTS or host.startswith('127.') or host == '0.0.0.0':
-        raise ValueError('KEYCLOAK_PUBLIC_URL must name the public host: refusing a loopback host'
-                         ' (localhost, 127.0.0.1, [::1])')
+    # Parse it as an address rather than matching names: all of 127.0.0.0/8 is loopback
+    # (including the 127.1 shorthand) and neither unspecified address is reachable from a
+    # container. A host that is not an IP literal is checked against the name list only, so a
+    # legal public hostname such as 127.example.com stays accepted (PR #42 review).
+    address = None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    if (address is not None and (address.is_loopback or address.is_unspecified)) or host in LOOPBACK_HOSTS:
+        raise ValueError('KEYCLOAK_PUBLIC_URL must name the public host: refusing a loopback or'
+                         ' unspecified address (any 127.0.0.0/8 address, ::1, 0.0.0.0, ::) and localhost')
 
 
 def grafana_client(origin, with_secret=False):
@@ -1402,7 +1410,7 @@ def cmd_grafana_ini(args):
         # client secret is a $__file{} reference to the rendered file, and assert_redacted above
         # has already refused to emit any .env secret. The CLI redirects this into the file.
         # codeql[py/clear-text-logging-sensitive-data]
-        sys.stdout.write(text)
+        sys.stdout.write(text)  # codeql[py/clear-text-logging-sensitive-data]
     return 0
 
 
