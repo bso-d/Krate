@@ -1238,6 +1238,209 @@ print(hits)
   [[ "$hits" == "0" ]]; st=$?
   ok_if Z4a "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): $hits hits; walk: live4a 901"
 }
+phase4_screenshots_x4() {
+  local slice="$1" viewer_json="$STATE/p4/kc-p4v.json" admin_json="$STATE/p4/kc-p4both.json"
+  local disabled_json="$STATE/p4/kc-p4dis.json" nogroup_json="$STATE/p4/kc-p4nogroup.json"
+  local admin_user="p4both"
+  if [[ -f "$STATE/p4/kc-p4a.json" ]]; then
+    admin_json="$STATE/p4/kc-p4a.json"
+    admin_user="p4a"
+  fi
+  local outdir="$OUT/screenshots-perses" gateway st n sha_ok f s rest
+  local pw_v totp_v pw_a totp_a pw_d pw_n totp_n
+  if ! $SCREENSHOTS; then
+    phase4_stub X4 "$slice" X "not run: --no-screenshots (X4 is outside the required inventory)"
+    return
+  fi
+  if [[ ! -f "$viewer_json" || ! -f "$admin_json" || ! -f "$disabled_json" || ! -f "$nogroup_json" ]]; then
+    phase4_stub X4 "$slice" X "the helper's enrolment state files are missing (kc-{p4v,${admin_user},p4dis,p4nogroup}.json): slice setup did not enrol required users"
+    return
+  fi
+  if ! docker image inspect krate-harness/playwright:1.60.0 >/dev/null 2>&1; then
+    printf 'FROM mcr.microsoft.com/playwright:v1.60.0-noble\nRUN npm i -g playwright@1.60.0\nENV NODE_PATH=/usr/lib/node_modules\n' | docker build -q -t krate-harness/playwright:1.60.0 - >/dev/null 2>&1 \
+      || { record X4 "$slice" X FAIL "harness image krate-harness/playwright:1.60.0 could not be built"; return; }
+  fi
+  gateway="$(docker run --rm --add-host host.docker.internal:host-gateway "$PG_IMAGE" sh -c 'getent ahostsv4 host.docker.internal | awk "{print \$1; exit}"' 2>/dev/null | tr -d '[:space:]')"
+  if [[ -z "$gateway" ]]; then
+    record X4 "$slice" X FAIL "cannot resolve the Docker host gateway (host.docker.internal) from a container"
+    return
+  fi
+  mkdir -p "$outdir" && chmod 755 "$outdir"
+
+  pw_v="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$viewer_json" 2>/dev/null)"
+  totp_v="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["totp"])' "$viewer_json" 2>/dev/null)"
+  pw_a="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$admin_json" 2>/dev/null)"
+  totp_a="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["totp"])' "$admin_json" 2>/dev/null)"
+  pw_d="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$disabled_json" 2>/dev/null)"
+  pw_n="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$nogroup_json" 2>/dev/null)"
+  totp_n="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["totp"])' "$nogroup_json" 2>/dev/null)"
+
+  for s in "$pw_v" "$totp_v" "$pw_a" "$totp_a" "$pw_d" "$pw_n" "$totp_n"; do
+    [[ -n "$s" ]] && add_secret "$s"
+  done
+
+  export GATE_VIEWER_PASSWORD="$pw_v" GATE_VIEWER_TOTP="$totp_v"
+  export GATE_ADMIN_PASSWORD="$pw_a" GATE_ADMIN_TOTP="$totp_a"
+  export GATE_DISABLED_PASSWORD="$pw_d"
+  export GATE_NOGROUP_PASSWORD="$pw_n" GATE_NOGROUP_TOTP="$totp_n"
+
+  cap docker run --rm --add-host host.docker.internal:host-gateway -v "$outdir:/out" -v "$GATE_DIR:/gate:ro" \
+    -e GATE_VIEWER_PASSWORD -e GATE_VIEWER_TOTP -e GATE_ADMIN_PASSWORD -e GATE_ADMIN_TOTP \
+    -e GATE_DISABLED_PASSWORD -e GATE_NOGROUP_PASSWORD -e GATE_NOGROUP_TOTP -e PW_MODULES=/usr/lib/node_modules \
+    krate-harness/playwright:1.60.0 node /gate/screenshots-perses.mjs \
+    --host "$BASE_HOST" --perses-base "https://${BASE_HOST}:${PERSES_GATE_PORT}" --out /out \
+    --viewer-user p4v --admin-user "$admin_user" --disabled-user p4dis --nogroup-user p4nogroup --resolve-to "$gateway"
+  st=$?
+
+  unset GATE_VIEWER_PASSWORD GATE_VIEWER_TOTP GATE_ADMIN_PASSWORD GATE_ADMIN_TOTP
+  unset GATE_DISABLED_PASSWORD GATE_NOGROUP_PASSWORD GATE_NOGROUP_TOTP
+
+  n="$(find "$outdir" -name '*.png' | wc -l | tr -d ' ')"
+  sha_ok=0
+  if [[ -f "$outdir/manifest.tsv" ]]; then
+    sha_ok=1
+    while IFS=$'\t' read -r f s rest; do
+      [[ "$f" == file || -z "$f" || ! -f "$outdir/$f" ]] && continue
+      printf '%s  %s\n' "$s" "$outdir/$f" | { shasum -a 256 -c - >/dev/null 2>&1 || sha256sum -c - >/dev/null 2>&1; } || sha_ok=0
+    done < "$outdir/manifest.tsv"
+  fi
+  [[ $st -eq 0 && "$n" == 6 && "$CAP" == *"STORY OK"* && $sha_ok -eq 1 ]]; s=$?
+  ok_if X4 "$slice" X "$s" "$n screenshots in ${outdir##*/}/, every manifest.tsv sha256 verified=$sha_ok, story exit=$st: $(printf '%s' "$CAP" | grep -E '^STORY' | tail -1 | cut -c1-120)"
+}
+phase4_leak_scan_z4b() {
+  local slice="$1"
+  section "Z4b: extended secret-leak scan over docker logs of every container, raw gate log, receipt, screenshot manifests, and ps dumps"
+  if [[ -f "$STATE/phase4-secrets.txt" ]]; then
+    local v
+    while IFS= read -r v; do
+      add_secret "$v"
+    done < "$STATE/phase4-secrets.txt"
+  fi
+  local -a cnames=() places=("$JOURNAL" "$RECEIPT")
+  if command -v docker >/dev/null 2>&1; then
+    while IFS= read -r cn; do
+      [[ -n "$cn" ]] || continue
+      cnames+=("$cn")
+      docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
+      places+=("$STATE/docker-$cn.log")
+    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-" | sort -u)
+  fi
+  local mf psd
+  for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
+    [[ -f "$mf" ]] && places+=("$mf")
+  done
+  for psd in "$STATE"/*ps*.txt; do
+    [[ -f "$psd" ]] && places+=("$psd")
+  done
+
+  local raw_without_display="$STATE/raw-without-display.log"
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || true
+
+  local secrets_all="$STATE/secrets-all.$$.txt"
+  local secrets_temp="$STATE/secrets-temp.$$.txt"
+  local files_list="$STATE/scan-places.$$.txt"
+  : > "$secrets_all"; chmod 600 "$secrets_all"
+  : > "$secrets_temp"; chmod 600 "$secrets_temp"
+  : > "$files_list"; chmod 600 "$files_list"
+
+  local s t p
+  for s in "${SECRETS[@]}"; do
+    printf '%s\n' "$s" >> "$secrets_all"
+  done
+  for t in "${TEMP_SECRETS[@]}"; do
+    printf '%s\n' "$t" >> "$secrets_temp"
+  done
+  for p in "${places[@]}"; do
+    printf '%s\n' "$p" >> "$files_list"
+  done
+
+  local scan_err="$STATE/leak-scan-z4b.$$.err"
+  local hits
+  hits=$(python3 -I -c '
+import sys, os
+
+all_secrets = [line.strip() for line in open(sys.argv[1], encoding="utf-8", errors="replace") if len(line.strip()) >= 6]
+temp_secrets = set(line.strip() for line in open(sys.argv[2], encoding="utf-8", errors="replace") if len(line.strip()) >= 6)
+places = [line.strip() for line in open(sys.argv[3], encoding="utf-8", errors="replace") if line.strip()]
+raw_file = sys.argv[4]
+raw_no_disp = sys.argv[5]
+
+banned_patterns = [
+    "id_token_hint=", "jwtPayload=", "jwtSignature=", "jwtRefreshToken=",
+    "_oauth2_proxy=", "/oauth2/callback?code="
+]
+
+hits = 0
+
+for p in places:
+    if not os.path.isfile(p):
+        continue
+    try:
+        content = open(p, "rb").read().decode("utf-8", "replace")
+    except OSError:
+        continue
+    for s in all_secrets:
+        c = content.count(s)
+        if c > 0:
+            hits += c
+            print(f"LEAK: secret appears in {os.path.basename(p)} x{c}", file=sys.stderr)
+    if "docker-" in os.path.basename(p) or p.endswith(".log"):
+        for bp in banned_patterns:
+            c = content.count(bp)
+            if c > 0:
+                hits += c
+                print(f"LEAK: banned pattern {bp} appears in {os.path.basename(p)} x{c}", file=sys.stderr)
+
+if os.path.isfile(raw_file):
+    try:
+        raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
+        for s in all_secrets:
+            if s not in temp_secrets:
+                c = raw_content.count(s)
+                if c > 0:
+                    hits += c
+                    print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
+    except OSError:
+        pass
+
+if os.path.isfile(raw_no_disp):
+    try:
+        raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
+        for s in temp_secrets:
+            c = raw_nd_content.count(s)
+            if c > 0:
+                hits += c
+                print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
+    except OSError:
+        pass
+
+ed_auth = sys.argv[6]
+if os.path.isdir(ed_auth):
+    for root, _dirs, files in os.walk(ed_auth):
+        for fn in files:
+            fp = os.path.join(root, fn)
+            try:
+                content = open(fp, "rb").read().decode("utf-8", "replace")
+                for s in all_secrets:
+                    c = content.count(s)
+                    if c > 0:
+                        hits += c
+                        print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
+            except OSError:
+                pass
+
+print(hits)
+' "$secrets_all" "$secrets_temp" "$files_list" "$RAW" "$raw_without_display" "$ED/auth/keycloak" 2>"$scan_err")
+  if [[ -f "$scan_err" ]]; then
+    cat "$scan_err" >> "$RAW"
+    rm -f "$scan_err"
+  fi
+
+  rm -f "$secrets_all" "$secrets_temp" "$files_list" "$raw_without_display"
+  local st
+  [[ "$hits" == "0" ]]; st=$?
+  ok_if Z4b "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): $hits hits"
+}
 run_phase4() { # slice: 4a|4b|4c
   local slice="$1" id rc ev crit job helper only tsv regex
   local -a inv=() run_inv=() helper_jobs=() only_arg=()
@@ -1311,8 +1514,8 @@ run_phase4() { # slice: 4a|4b|4c
         in_inv Z4a "${run_inv[@]}" && phase4_leak_scan_z4a "$slice"
         ;;
       4b)
-        in_inv X4 "${run_inv[@]}" && phase4_stub X4 "$slice" X "screenshot story scripts/gate/screenshots-perses.mjs (exactly 6 PNGs, own directory, manifest.tsv with sha256, every shot after its DOM assertion): scaffold written from the lab7 evidence (logs/082-q3-real-browser.log, driver/cdp.mjs), NOT RUN yet; the runner wiring awaits the live4b walk"
-        in_inv Z4b "${run_inv[@]}" && phase4_stub Z4b "$slice" Z "extended leak scan (cluster and monitoring container logs incl. idp-wait/monitoring-init/perses-migrate, the raw gate log, the receipt, the screenshot manifests, ps -eo args samples every 0.2 s during monitor up, the token/cookie line patterns id_token_hint=/jwtPayload=/jwtSignature=/jwtRefreshToken=/_oauth2_proxy=/oauth2/callback?code=, plus \$STATE/phase4-secrets.txt in the searched set): body awaits the live4b walk; the Phase 1 set was scanned as Z1"
+        in_inv X4 "${run_inv[@]}" && phase4_screenshots_x4 "$slice"
+        in_inv Z4b "${run_inv[@]}" && phase4_leak_scan_z4b "$slice"
         ;;
       4c)
         in_inv W1 "${run_inv[@]}" && phase4_stub W1 "$slice" W "the published-ports census (perses-gateway 0.0.0.0:PERSES_PORT; prometheus/loki 127.0.0.1; grafana per U21a; no host port for the rest of monitoring/docker-compose.yml): body awaits the live4c walk"

@@ -232,6 +232,21 @@ class Phase4Gate(p2.Gate):
                 self.add_runtime_secret(state[key])
 
     # ── monitoring side ──
+    def mon_dir(self):
+        return os.path.join(self.edition, 'monitoring')
+
+    def mon_env_value(self, key):
+        return p2.read_env(os.path.join(self.mon_dir(), '.env')).get(key, '')
+
+    def _wait_container_healthy(self, cid, limit=180):
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < limit:
+            rc, out, _ = p2.docker('inspect', '-f', '{{.State.Health.Status}}', cid)
+            if rc == 0 and out.strip() == 'healthy':
+                return time.monotonic() - t0
+            time.sleep(2)
+        return None
+
     def mon_container(self, service, all_states=True):
         flags = ['-aq'] if all_states else ['-q']
         rc, out, _ = p2.docker('ps', *flags, '--filter', 'label=com.docker.compose.project=' + self.monitor_project,
@@ -245,6 +260,36 @@ class Phase4Gate(p2.Gate):
                                '--filter', 'label=com.docker.compose.service=' + service)
         ids = out.split()
         return ids[0] if rc == 0 and ids else None
+
+    def mon_id_map(self):
+        """{service: (container id, StartedAt)} of the monitoring project."""
+        found = {}
+        rc, out, _ = p2.docker('ps', '-aq', '--filter',
+                               'label=com.docker.compose.project=' + self.monitor_project)
+        if rc != 0 or not out.split():
+            return found
+        for cid in out.split():
+            rc2, info, _ = p2.docker('inspect', '--format',
+                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
+            if rc2 == 0 and info.split():
+                parts = info.split()
+                found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+        return found
+
+    def cluster_id_map(self):
+        """{service: (container id, StartedAt)} of the cluster project."""
+        found = {}
+        rc, out, _ = p2.docker('ps', '-aq', '--filter',
+                               'label=com.docker.compose.project=' + self.project)
+        if rc != 0 or not out.split():
+            return found
+        for cid in out.split():
+            rc2, info, _ = p2.docker('inspect', '--format',
+                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
+            if rc2 == 0 and info.split():
+                parts = info.split()
+                found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+        return found
 
     # ── realm users ──
     def master_kcadm(self):

@@ -185,7 +185,7 @@ try {
   assert(page.url().includes('/projects/'), `the Viewer reached a project page (${page.url()})`);
   // NEEDS-LIVE-VERIFICATION: the exact absence selectors for the Viewer (Perses
   // v0.54.0): no "Add Project"/create button, no dashboard edit (pencil) control.
-  assert((await page.getByRole('button', { name: /add project/i }).count()) === 0, 'the Viewer sees no "Add Project" control');
+  assert((await page.getByRole('button', { name: /(add|create) project/i }).count()) === 0, 'the Viewer sees no "Create Project" control');
   assert((await page.locator('[aria-label="Edit"], button:has(svg[data-testid="EditIcon"])').count()) === 0, 'the Viewer sees no edit control in the project');
   await shot(page, 'viewer-project', `Viewer ${VIEWER} in a project: read-only, no create/edit controls`);
   await ctx.clearCookies();
@@ -200,10 +200,10 @@ try {
   // button and of a dashboard edit control (lab7 recorded the Admin-side page text
   // "Admin Config"; the walk notes must confirm the buttons).
   await page.goto(`${PBASE}/projects`, { waitUntil: 'networkidle' });
-  const addProject = page.getByRole('button', { name: /add project/i });
+  const addProject = page.getByRole('button', { name: /(add|create) project/i });
   const adminMenu = page.getByRole('link', { name: /^Admin$/i }).or(page.getByRole('button', { name: /^Admin$/i }));
   assert((await addProject.count()) > 0 || (await adminMenu.count()) > 0,
-    'the Admin sees the "Add Project" control or the Admin section (an editor\'s UI)');
+    'the Admin sees the "Create Project" control or the Admin section (an editor\'s UI)');
   await shot(page, 'admin-projects', `Admin ${ADMIN} with the create/edit controls of the realm's admin group`);
 
   // ── shot 4: after logout, the Keycloak password form ──
@@ -211,7 +211,7 @@ try {
   // clicking it runs the hop chain to the Keycloak login form with no confirmation page.
   // NEEDS-LIVE-VERIFICATION: the account-menu trigger selector (lab7 logged its
   // presence, not its selector).
-  const accountMenu = page.locator('header [aria-haspopup="menu"], header .MuiAvatar-root, header button[aria-label*="account" i]').last();
+  const accountMenu = page.locator('header button:has(svg), header [aria-haspopup="menu"], header .MuiAvatar-root, header [data-testid="AccountCircleIcon"]').last();
   await accountMenu.click();
   const logout = page.locator('a[href="/api/auth/logout"]');
   await logout.waitFor({ state: 'visible', timeout: 15000 });
