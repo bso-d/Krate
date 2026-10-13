@@ -66,7 +66,8 @@ def main():
             if not (root / 'monitoring' / name).is_file():
                 raise SystemExit('Missing monitoring package file: ' + name)
     if monitor_template.is_file() and 'PERSES_IMAGE=' in monitor_template.read_text():
-        for name in ('render.py', 'perses/seed.py', 'perses/sync/perses_sync.py', 'perses/provisioning/krate.json',
+        for name in ('render.py', 'perses/seed.py', 'perses/sync/perses_sync.py', 'perses/migrate_issuer.py',
+                     'perses/provisioning/krate.json',
                      'perses/provisioning/roles.json', 'perses/dashboards/kafka-overview.json',
                      'perses/dashboards/consumer-groups.json', 'perses/dashboards/host-capacity.json',
                      'perses/dashboards/logs.json', 'perses/gateway/krate-ui.js', 'perses/vendor/notices/README.md'):

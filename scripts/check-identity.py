@@ -2688,10 +2688,10 @@ def check_broker_apply(checks):
               f'{edition}/krate: the {verdict} verdict must be captured with || die')
             e(f'identity.py" broker --plan "$plan" {verdict}' in cli and f'== differs' not in cli.split(verdict)[1].split('\n')[0],
               f'{edition}/krate: {verdict} must not be compared inside [[ ]]')
-        # Four verdict consumers: the broker provider, its mappers, its redirector config
-        # and (Phase 4) the krate-grafana client.
+        # Five verdict consumers: the broker provider, its mappers, its redirector config,
+        # krate-grafana client and (Phase 4) krate-perses client.
         unexpected = cli.count('*) die "Unexpected comparison result')  # hoisted: Python 3.9 (RHEL 9) rejects a backslash inside an f-string expression
-        e(unexpected == 4, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
+        e(unexpected == 5, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
         e('PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3' in cli,
           f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
     if bash_binary() is None:
@@ -3558,8 +3558,24 @@ def check_grafana_realm_compose(checks):
     init_env = init.get('environment') or {}
     e('GRAFANA_AUTH_CONFIG' in init_env and 'GRAFANA_OAUTH_CLIENT_SECRET' in init_env,
       f'monitoring-init: render.py renders only what its environment lists, so both Grafana keys must be there; got {sorted(init_env)}')
-    e('/rendered/grafana' in [volume.get('target') for volume in init.get('volumes') or []],
+    for key in ('PERSES_IDP', 'PERSES_GROUP_PROOF_MINUTES', 'KEYCLOAK_PUBLIC_URL',
+                'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
+                'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS'):
+        e(key in init_env, f'monitoring-init: compose environment must carry {key}')
+    init_mounts = [volume.get('target') for volume in init.get('volumes') or []]
+    e('/rendered/grafana' in init_mounts,
       'monitoring-init must mount the grafana_rendered volume it writes the client secret into')
+    e('/rendered/perses-migrate' in init_mounts,
+      'monitoring-init must mount the perses_migrate_rendered volume it writes the issuer into')
+    e('perses-migrate' in services, 'monitoring/docker-compose.yml must define the perses-migrate service')
+    perses_svc = services.get('perses') or {}
+    perses_deps = perses_svc.get('depends_on') or {}
+    e((perses_deps.get('perses-migrate') or {}).get('condition') == 'service_completed_successfully',
+      'monitoring/perses: must depend on perses-migrate with service_completed_successfully')
+    sync_svc = services.get('perses-sync') or {}
+    sync_deps = sync_svc.get('depends_on') or {}
+    e((sync_deps.get('perses-migrate') or {}).get('condition') == 'service_completed_successfully',
+      'monitoring/perses-sync: must depend on perses-migrate with service_completed_successfully')
     for name, service in services.items():
         listed = list(service.get('networks') or {})
         e(not any(network.startswith('identity') for network in listed),
@@ -3617,7 +3633,7 @@ GRAFANA_ONLY_RENDER_KEYS = {'GRAFANA_AUTH_CONFIG', 'GRAFANA_OAUTH_CLIENT_SECRET'
 RENDER_EDITION_KEYS = {'KEYCLOAK_PUBLIC_URL', 'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
                        'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS', 'PERSES_IDP',
                        'PERSES_GROUP_PROOF_MINUTES', 'PERSES_ISSUER_APPLIED'}
-RENDER_ENV_ACCESSOR = re.compile(r"(?:env\.get\(|env\[|(?:flag|require)\(env,\s*)'([A-Z][A-Z_0-9]+)'")
+RENDER_ENV_ACCESSOR = re.compile(r"(?:env\.get\(|env\[|(?:positive_int|flag|require)\(env,\s*)'([A-Z][A-Z_0-9]+)'")
 
 
 def render_env_keys():
@@ -3667,17 +3683,25 @@ def check_grafana_realm_cli(checks):
         for export in ('GRAFANA_BIND="$grafana_bind"', 'KRATE_IDP_HOST="$idp_host"', 'IDP_DISCOVERY_URL="$idp_url"',
                        'KRATE_GRAFANA_AUTH_SHA="$grafana_sha"'):
             e(export in compose, f'{edition}/krate: monitor_compose must export {export}')
+        for key in ('KEYCLOAK_PUBLIC_URL', 'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
+                    'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS',
+                    'PERSES_IDP', 'PERSES_GROUP_PROOF_MINUTES'):
+            e(f'{key}=' in compose, f'{edition}/krate: monitor_compose must export {key}')
         e('find "$env_file"' not in compose,
           f'{edition}/krate: the render revision must not hash the whole monitoring/.env (an unrelated key would recreate every consumer)')
         declared = re.search(r'KRATE_RENDER_ENV_KEYS=\(\n(.*?)\n\)\n', cli, re.S)
         e(declared is not None, f'{edition}/krate: KRATE_RENDER_ENV_KEYS is missing')
         if declared is not None:  # an explicit test: checks.expect does not narrow the type
             listed = set(declared.group(1).split())
-            e(listed == monitor_keys - GRAFANA_ONLY_RENDER_KEYS,
-              f'{edition}/krate: KRATE_RENDER_ENV_KEYS must equal the monitoring/.env keys render.py reads minus the Grafana-only ones; '
-              f'missing {sorted(monitor_keys - GRAFANA_ONLY_RENDER_KEYS - listed)}, unexpected {sorted(listed - monitor_keys)}')
+            expected_keys = (monitor_keys | edition_keys) - GRAFANA_ONLY_RENDER_KEYS
+            e(listed == expected_keys,
+              f'{edition}/krate: KRATE_RENDER_ENV_KEYS must equal the keys render.py reads minus the Grafana-only ones; '
+              f'missing {sorted(expected_keys - listed)}, unexpected {sorted(listed - expected_keys)}')
             e(not (listed & GRAFANA_ONLY_RENDER_KEYS),
               f'{edition}/krate: no GRAFANA_* key may enter the render revision (it would recreate Perses, Alertmanager and the gateway)')
+        e('PERSES_IDP' in prepare and 'refuse_loopback_public_url' in prepare, f'{edition}/krate: monitor_prepare must check PERSES_IDP')
+        e('PERSES_ISSUER_APPLIED' in prepare, f'{edition}/krate: monitor_prepare must check PERSES_ISSUER_APPLIED')
+        e('identity_reconcile_perses_clients' in cli, f'{edition}/krate: must define identity_reconcile_perses_clients')
         # No Grafana credential ever reaches a command line: the helpers pass them in the
         # environment of the call, and the CLI builds no Authorization header of its own.
         e('Authorization' not in cli and 'curl ' not in cli,
@@ -4069,11 +4093,130 @@ def check_grafana_admin_contract(checks):
       f'the race reuse with the correct role stays idempotent with its note; got {payload}')
 
 
+def check_render_writes(checks):
+    """Phase 4 slice 4b (F5): render.py file modes (0o400), directory sealing (0o500), and O_EXCL|O_NOFOLLOW open flags."""
+    e = checks.expect
+    spec = importlib.util.spec_from_file_location('render_check_mod', str(ROOT / 'monitoring/render.py'))
+    if spec is None or spec.loader is None:
+        e(False, 'cannot load monitoring/render.py')
+        return
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    chmods, chowns, opens = [], [], []
+    real_chmod, real_chown, real_open = os.chmod, os.chown, os.open
+
+    def chmod_stub(path, mode, *args, **kwargs):
+        chmods.append((str(path), mode))
+        real_chmod(path, mode, *args, **kwargs)
+
+    def chown_stub(path, uid, gid, *args, **kwargs):
+        chowns.append((str(path), uid, gid))
+
+    def open_stub(path, flags, *args, **kwargs):
+        opens.append((flags, str(path)))
+        return real_open(path, flags, *args, **kwargs)
+
+    old_chmod, old_chown, old_open = os.chmod, os.chown, os.open
+    try:
+        os.chmod = chmod_stub
+        os.chown = chown_stub
+        os.open = open_stub
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            env = {
+                'PERSES_ENCRYPTION_KEY': 'A' * 32,
+                'PERSES_ADMIN_USER': 'admin',
+                'PERSES_ADMIN_PASSWORD': 'admin-password-1234',
+            }
+            mod.render(env, out, str(out / 'perses.json'))
+            file_chmods = [(p, m) for p, m in chmods if '.tmp' in Path(p).name]
+            e(bool(file_chmods) and all(m == 0o400 for _, m in file_chmods),
+              f'render.py: every rendered file must be chmod 0o400; got {[(p, oct(m)) for p, m in file_chmods if m != 0o400]}')
+            bad_flags = [('oct=%s' % oct(f), p) for f, p in opens
+                         if f & os.O_EXCL and not (hasattr(os, 'O_NOFOLLOW') and f & os.O_NOFOLLOW)]
+            e(not bad_flags, f'render.py: every file write must open O_EXCL|O_NOFOLLOW; offenders: {bad_flags}')
+            dir_finals = {}
+            for p, m in chmods:
+                if '.tmp' in Path(p).name or Path(p).name == '':
+                    continue
+                dir_finals[p] = m
+            bad_dirs = [(p, oct(m)) for p, m in dir_finals.items() if m != 0o500]
+            e(bool(dir_finals) and not bad_dirs,
+              f'render.py: every rendered directory tree must be sealed 0o500; offenders: {bad_dirs}')
+    finally:
+        os.chmod, os.chown, os.open = old_chmod, old_chown, old_open
+
+
+def check_migrate_issuer(checks):
+    """Phase 4 slice 4b (F6, F8, F9): migrate_issuer.py idempotence, marker perms, and parity."""
+    e = checks.expect
+    text = (ROOT / 'monitoring/perses/migrate_issuer.py').read_text()
+    e('applied == issuer' in text,
+      'migrate_issuer.py: the marker-equality guard must exist; a second run with an unchanged issuer must be a strict no-op')
+    e('temporary.chmod(0o400)' in text,
+      'migrate_issuer.py: marker write must chmod 0o400 (sealing discipline)')
+
+    # Parity check: MANAGED_BINDINGS in migrate_issuer must match perses_sync.MANAGED
+    sync_text = (ROOT / 'monitoring/perses/sync/perses_sync.py').read_text()
+    mig_managed = re.search(r'MANAGED_BINDINGS = (\([^)]+\))', text)
+    sync_managed = re.search(r'MANAGED = (\([^)]+\))', sync_text)
+    e(mig_managed is not None and sync_managed is not None and mig_managed.group(1) == sync_managed.group(1),
+      'migrate_issuer.MANAGED_BINDINGS must match perses_sync.MANAGED')
+
+    # Behavioural drive: run twice on a fixture directory
+    with tempfile.TemporaryDirectory() as td:
+        fixture = Path(td)
+        data_dir = fixture / 'data'
+        users_dir = data_dir / 'users'
+        grb_dir = data_dir / 'globalrolebindings'
+        users_dir.mkdir(parents=True)
+        grb_dir.mkdir(parents=True)
+        # Old OIDC user
+        (users_dir / 'old-user.json').write_text(json.dumps({
+            'spec': {'oauthProviders': [{'issuer': 'https://old.invalid/realms/krate'}]}
+        }))
+        # Native user
+        (users_dir / 'native-user.json').write_text(json.dumps({
+            'spec': {}
+        }))
+        # Managed binding with 24-hex hash
+        (grb_dir / 'krate-admin-0123456789abcdef01234567.json').write_text('{}')
+        # Unrelated / service binding
+        (grb_dir / 'krate-sync.json').write_text('{}')
+
+        issuer_file = fixture / 'issuer'
+        new_issuer = 'https://new.invalid/realms/krate'
+        issuer_file.write_text(new_issuer + '\n')
+
+        script = ROOT / 'monitoring/perses/migrate_issuer.py'
+        # Run 1
+        res1 = subprocess.run([sys.executable, '-I', str(script), '--data-dir', str(data_dir), '--issuer-file', str(issuer_file)],
+                              capture_output=True, text=True)
+        e(res1.returncode == 0, f'migrate_issuer run 1 failed: {res1.stderr}')
+        e('removed 1 stale user(s) and 1 managed binding(s)' in res1.stdout,
+          f'migrate_issuer run 1 output unexpected: {res1.stdout}')
+        marker = data_dir / '.krate-issuer'
+        e(marker.exists() and (marker.stat().st_mode & 0o777) == 0o400,
+          'migrate_issuer: marker must exist with mode 0o400')
+        census1 = sorted(p.name for p in data_dir.rglob('*') if p.is_file())
+
+        # Run 2
+        res2 = subprocess.run([sys.executable, '-I', str(script), '--data-dir', str(data_dir), '--issuer-file', str(issuer_file)],
+                              capture_output=True, text=True)
+        e(res2.returncode == 0, f'migrate_issuer run 2 failed: {res2.stderr}')
+        e(res2.stdout.strip() == f'perses-migrate: issuer unchanged ({new_issuer}); nothing to do',
+          f'migrate_issuer run 2 output unexpected: {res2.stdout}')
+        census2 = sorted(p.name for p in data_dir.rglob('*') if p.is_file())
+        e(census1 == census2, f'migrate_issuer: second run must not alter any file; census changed from {census1} to {census2}')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
                   check_grafana_realm_cli, check_grafana_realm_plan, check_perses_clients,
+                  check_render_writes, check_migrate_issuer,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,

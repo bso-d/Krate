@@ -36,6 +36,7 @@ volumes:
   oauth2_proxy_rendered:
   perses_sync_rendered:
   grafana_rendered:
+  perses_migrate_rendered:
 
 services:
   # ── kafka-exporter — cluster/topic/consumer-group metrics as a Kafka client ──
@@ -334,6 +335,7 @@ services:
       - perses_sync_state:/rendered/state/perses-sync
       - perses_seed_state:/rendered/state/perses-seed
       - grafana_rendered:/rendered/grafana
+      - perses_migrate_rendered:/rendered/perses-migrate
     environment:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
       PYTHONDONTWRITEBYTECODE: "1"
@@ -360,6 +362,13 @@ services:
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-ops@example.com}
       ALERTMANAGER_EMAIL_ENABLED: ${ALERTMANAGER_EMAIL_ENABLED:-}
       ALERTMANAGER_SMTP_REQUIRE_TLS: ${ALERTMANAGER_SMTP_REQUIRE_TLS:-true}
+      PERSES_IDP: ${PERSES_IDP:-}
+      PERSES_GROUP_PROOF_MINUTES: ${PERSES_GROUP_PROOF_MINUTES:-}
+      KEYCLOAK_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-}
+      KEYCLOAK_VIEWER_GROUP: ${KEYCLOAK_VIEWER_GROUP:-}
+      KEYCLOAK_ADMIN_GROUP: ${KEYCLOAK_ADMIN_GROUP:-}
+      KEYCLOAK_SESSION_IDLE_MINUTES: ${KEYCLOAK_SESSION_IDLE_MINUTES:-}
+      KEYCLOAK_SESSION_MAX_HOURS: ${KEYCLOAK_SESSION_MAX_HOURS:-}
     command: ["python3", "/etc/krate/monitoring/render.py", "/rendered", "/etc/krate/site/perses.json"]
     logging:
       driver: "json-file"
@@ -444,6 +453,31 @@ services:
       driver: "json-file"
       options: { max-size: "20m", max-file: "3" }
 
+  # One-shot migration: removes stale users and bindings when the issuer changes.
+  perses-migrate:
+    image: ${PYTHON_IMAGE:-python:3.14.8-alpine}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-perses-migrate
+    restart: "no"
+    user: "65532:65532"
+    mem_limit: 64m
+    cpus: 0.2
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./perses/migrate_issuer.py:/etc/krate/perses/migrate_issuer.py:ro,z
+      - perses_data:/perses/data
+      - perses_migrate_rendered:/etc/krate/perses-migrate:ro
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: ["python3", "/etc/krate/perses/migrate_issuer.py"]
+    depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
+    logging:
+      driver: "json-file"
+      options: { max-size: "5m", max-file: "2" }
+
   # ── Perses — dashboards for Prometheus metrics and VictoriaLogs logs ───────
   # No host port: reachable only through perses-gateway.
   perses:
@@ -454,6 +488,8 @@ services:
     cpus: 1.0
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    extra_hosts:
+      - "${KRATE_IDP_HOST:-krate-idp.invalid}:host-gateway"
     command: ["--config=/etc/krate/perses/rendered/config.yaml", "--log.level=warning"]
     environment:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
@@ -461,9 +497,14 @@ services:
       - perses_data:/perses
       - ./perses/provisioning:/etc/krate/perses/provisioning:ro,z
       - perses_rendered:/etc/krate/perses/rendered:ro
+      - ${PERSES_CERTS_DIR:-../certs}/server.crt:/etc/krate/ca/server.crt:ro,z
     networks: [perses]
     depends_on:
       monitoring-init:
+        condition: service_completed_successfully
+      perses-migrate:
+        condition: service_completed_successfully
+      idp-wait:
         condition: service_completed_successfully
     logging:
       driver: "json-file"
@@ -544,6 +585,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    extra_hosts:
+      - "${KRATE_IDP_HOST:-krate-idp.invalid}:host-gateway"
     command: ["--config=/etc/oauth2-proxy/oauth2-proxy.cfg"]
     environment:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
@@ -551,9 +594,12 @@ services:
       OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:-}
     volumes:
       - oauth2_proxy_rendered:/etc/oauth2-proxy:ro
+      - ${PERSES_CERTS_DIR:-../certs}/server.crt:/etc/krate/ca/server.crt:ro,z
     networks: [perses]
     depends_on:
       monitoring-init:
+        condition: service_completed_successfully
+      idp-wait:
         condition: service_completed_successfully
     logging:
       driver: "json-file"
@@ -582,6 +628,8 @@ services:
     networks: [perses]
     depends_on:
       monitoring-init:
+        condition: service_completed_successfully
+      perses-migrate:
         condition: service_completed_successfully
       perses:
         condition: service_started
