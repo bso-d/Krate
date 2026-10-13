@@ -1441,6 +1441,254 @@ print(hits)
   [[ "$hits" == "0" ]]; st=$?
   ok_if Z4b "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): $hits hits"
 }
+phase4_row_w1() {
+  local slice="$1"
+  section "W1: published ports census (perses-gateway 0.0.0.0:PERSES_PORT; prometheus/loki 127.0.0.1; grafana per U21a; no host port for the other 14 services)"
+  local pg_cid prom_cid loki_cid graf_cid
+  pg_cid="$(mon_cid perses-gateway)"
+  prom_cid="$(mon_cid prometheus)"
+  loki_cid="$(mon_cid loki)"
+  graf_cid="$(mon_cid grafana)"
+
+  if [[ -z "$pg_cid" || -z "$prom_cid" || -z "$loki_cid" || -z "$graf_cid" ]]; then
+    phase4_stub W1 "$slice" W "precondition: missing required monitoring containers for ports census"
+    return
+  fi
+
+  # shellcheck disable=SC2016  # Go template, not shell expansion
+  local get_ports_tpl='{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}}:{{.HostPort}} {{end}}{{end}}'
+  local pg_ports prom_ports loki_ports graf_ports
+  pg_ports="$(docker inspect -f "$get_ports_tpl" "$pg_cid" 2>/dev/null | xargs)"
+  prom_ports="$(docker inspect -f "$get_ports_tpl" "$prom_cid" 2>/dev/null | xargs)"
+  loki_ports="$(docker inspect -f "$get_ports_tpl" "$loki_cid" 2>/dev/null | xargs)"
+  graf_ports="$(docker inspect -f "$get_ports_tpl" "$graf_cid" 2>/dev/null | xargs)"
+
+  local pg_ok=0
+  if [[ "$pg_ports" == *"0.0.0.0:$PERSES_GATE_PORT"* || "$pg_ports" == *":::$PERSES_GATE_PORT"* || "$pg_ports" == *":$PERSES_GATE_PORT"* ]]; then
+    pg_ok=1
+  fi
+
+  local prom_ok=0
+  if [[ "$prom_ports" == *"127.0.0.1:$PROM_GATE_PORT"* && "$prom_ports" != *"0.0.0.0:"* ]]; then
+    prom_ok=1
+  fi
+
+  local loki_ok=0
+  if [[ "$loki_ports" == *"127.0.0.1:$LOKI_GATE_PORT"* && "$loki_ports" != *"0.0.0.0:"* ]]; then
+    loki_ok=1
+  fi
+
+  local graf_ok=0
+  if [[ "$graf_ports" == *"127.0.0.1:$GRAFANA_GATE_PORT"* && "$graf_ports" != *"0.0.0.0:"* ]]; then
+    graf_ok=1
+  fi
+
+  local -a other_services=(
+    alertmanager victorialogs kafka-exporter node-exporter fluent-bit
+    perses oauth2-proxy perses-sync loki-gateway idp-wait monitoring-init
+    perses-migrate perses-seed log-discovery
+  )
+  local -a bad_services=()
+  local svc cid ports
+  for svc in "${other_services[@]}"; do
+    cid="$(mon_cid "$svc")"
+    [[ -n "$cid" ]] || continue
+    ports="$(docker inspect -f "$get_ports_tpl" "$cid" 2>/dev/null | xargs)"
+    if [[ -n "$ports" ]]; then
+      bad_services+=("$svc($ports)")
+    fi
+  done
+
+  local st
+  [[ $pg_ok -eq 1 && $prom_ok -eq 1 && $loki_ok -eq 1 && $graf_ok -eq 1 && ${#bad_services[@]} -eq 0 ]]; st=$?
+  ok_if W1 "$slice" W "$st" "published ports: perses-gateway [$pg_ports], prometheus [$prom_ports], loki [$loki_ports], grafana [$graf_ports]; 14 unpublished services bad=[${bad_services[*]}]"
+}
+phase4_row_w2() {
+  local slice="$1"
+  section "W2: Prometheus lifecycle API off (POST/PUT /-/reload and /-/quit -> 403) + in-place reload walk"
+  local prom_cid
+  prom_cid="$(mon_cid prometheus)"
+  if [[ -z "$prom_cid" ]]; then
+    phase4_stub W2 "$slice" W "precondition: missing prometheus container"
+    return
+  fi
+
+  local lg_cid
+  lg_cid="$(mon_cid loki-gateway)"
+  local st_reload_post st_reload_put st_quit
+  if [[ -n "$lg_cid" ]]; then
+    st_reload_post="$(docker exec "$lg_cid" curl -s -o /dev/null -w "%{http_code}" -X POST http://prometheus:9090/-/reload 2>/dev/null || echo 0)"
+    st_reload_put="$(docker exec "$lg_cid" curl -s -o /dev/null -w "%{http_code}" -X PUT http://prometheus:9090/-/reload 2>/dev/null || echo 0)"
+    st_quit="$(docker exec "$lg_cid" curl -s -o /dev/null -w "%{http_code}" -X POST http://prometheus:9090/-/quit 2>/dev/null || echo 0)"
+  else
+    local net="${MON_PROJECT}_monitoring"
+    st_reload_post="$(docker run --rm --network "$net" "$NGINX_IMAGE" curl -s -o /dev/null -w "%{http_code}" -X POST http://prometheus:9090/-/reload 2>/dev/null || echo 0)"
+    st_reload_put="$(docker run --rm --network "$net" "$NGINX_IMAGE" curl -s -o /dev/null -w "%{http_code}" -X PUT http://prometheus:9090/-/reload 2>/dev/null || echo 0)"
+    st_quit="$(docker run --rm --network "$net" "$NGINX_IMAGE" curl -s -o /dev/null -w "%{http_code}" -X POST http://prometheus:9090/-/quit 2>/dev/null || echo 0)"
+  fi
+  local lifecycle_403=0
+  [[ "$st_reload_post" == 403 && "$st_reload_put" == 403 && "$st_quit" == 403 ]] && lifecycle_403=1
+
+  local prom_url="http://127.0.0.1:$PROM_GATE_PORT"
+  local ts_before ts_after
+  ts_before="$(curl -s "$prom_url/metrics" 2>/dev/null | grep -E '^prometheus_config_last_reload_success_timestamp_seconds' | awk '{print $2}' || echo 0)"
+  local id_before started_before
+  id_before="$(docker inspect -f '{{.Id}}' "$prom_cid" 2>/dev/null)"
+  started_before="$(docker inspect -f '{{.State.StartedAt}}' "$prom_cid" 2>/dev/null)"
+
+  local rc_valid
+  "$KRATE" monitor reload >/dev/null 2>&1; rc_valid=$?
+  sleep 2
+  ts_after="$(curl -s "$prom_url/metrics" 2>/dev/null | grep -E '^prometheus_config_last_reload_success_timestamp_seconds' | awk '{print $2}' || echo 0)"
+  local id_after started_after
+  id_after="$(docker inspect -f '{{.Id}}' "$prom_cid" 2>/dev/null)"
+  started_after="$(docker inspect -f '{{.State.StartedAt}}' "$prom_cid" 2>/dev/null)"
+
+  local valid_reload_ok=0
+  local ts_increased=1
+  if python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[2]) > float(sys.argv[1]) else 1)' "${ts_before:-0}" "${ts_after:-0}" 2>/dev/null; then
+    ts_increased=0
+  fi
+  if [[ $rc_valid -eq 0 && $ts_increased -eq 0 && "$id_before" == "$id_after" && "$started_before" == "$started_after" ]]; then
+    valid_reload_ok=1
+  fi
+
+  local cfg_file="$ED/monitoring/prometheus/prometheus.yml"
+  local cfg_bak="$STATE/prometheus.yml.bak"
+  cp "$cfg_file" "$cfg_bak"
+  printf '\ninvalid_yaml: [unclosed\n' >> "$cfg_file"
+
+  local rc_invalid
+  "$KRATE" monitor reload >/dev/null 2>&1; rc_invalid=$?
+  sleep 2
+  local reload_success_metric ans_health
+  reload_success_metric="$(curl -s "$prom_url/metrics" 2>/dev/null | grep -E '^prometheus_config_last_reload_successful' | awk '{print $2}' || echo 1)"
+  ans_health="$(curl -sk -o /dev/null -w '%{http_code}' "$prom_url/-/healthy" 2>/dev/null || echo 0)"
+
+  cp "$cfg_bak" "$cfg_file"; rm -f "$cfg_bak"
+  "$KRATE" monitor reload >/dev/null 2>&1 || true
+
+  local invalid_reload_ok=0
+  if [[ $rc_invalid -ne 0 && "${reload_success_metric%.*}" == 0 && "$ans_health" == 200 ]]; then
+    invalid_reload_ok=1
+  fi
+
+  local st
+  [[ $lifecycle_403 -eq 1 && $valid_reload_ok -eq 1 && $invalid_reload_ok -eq 1 ]]; st=$?
+  ok_if W2 "$slice" W "$st" "Prometheus lifecycle API off (POST/PUT reload $st_reload_post/$st_reload_put, quit $st_quit); valid reload rc=$rc_valid ts $ts_before->$ts_after (same container); invalid edit reload rc=$rc_invalid metric=$reload_success_metric health=$ans_health"
+}
+phase4_row_w3() {
+  local slice="$1"
+  section "W3: foreign-source probe (macOS LAN checks (a)+(b) / Linux p4probe netns (a)-(e))"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    local lan_ip
+    lan_ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
+    [[ -n "$lan_ip" ]] || lan_ip="$(ipconfig getifaddr en1 2>/dev/null || true)"
+    [[ -n "$lan_ip" ]] || lan_ip="$(netstat -rn -f inet 2>/dev/null | awk '/default/{print $2}' | head -1)"
+    if [[ -z "$lan_ip" ]]; then
+      record W3 "$slice" W FAIL "cannot determine macOS LAN IP address"
+      return
+    fi
+
+    local rc_a
+    rc_a="$(curl -sk -o /dev/null -m 5 -w '%{http_code}' "https://$lan_ip:$PERSES_GATE_PORT/" 2>/dev/null || echo 0)"
+    local pos_ok=0
+    [[ "$rc_a" =~ ^(200|302|401|403|404)$ ]] && pos_ok=1
+
+    local p rc_p refused_count=0 total_ports=0
+    local -a loop_ports=("$PROM_GATE_PORT" "$LOKI_GATE_PORT" "$GRAFANA_GATE_PORT")
+    for p in "${loop_ports[@]}"; do
+      total_ports=$((total_ports + 1))
+      curl -s -o /dev/null -m 5 "http://$lan_ip:$p/" 2>/dev/null; rc_p=$?
+      if [[ $rc_p -eq 7 || $rc_p -eq 28 ]]; then
+        refused_count=$((refused_count + 1))
+      fi
+    done
+
+    curl -s -o /dev/null -m 5 "http://[::1]:$PROM_GATE_PORT/" 2>/dev/null || true
+
+    local st
+    [[ $pos_ok -eq 1 && $refused_count -eq $total_ports ]]; st=$?
+    ok_if W3 "$slice" W "$st" "macOS LAN probe: positive control perses-gateway reachable (HTTP $rc_a); loopback ports ($refused_count/$total_ports refused with rc 7/28 via LAN $lan_ip)"
+  elif [[ "$(uname -s)" == Linux ]]; then
+    local w1x_script="$TOPLEVEL/harness/phase4/lab8/w1x-row.sh"
+    if [[ -f "$w1x_script" ]]; then
+      local cap_w3 st_w3
+      cap_w3="$(W1X_POSITIVE_PORT="$PERSES_GATE_PORT" W1X_POSITIVE_SCHEME=https W1X_LOOPBACK_PORTS="$PROM_GATE_PORT $LOKI_GATE_PORT" bash "$w1x_script" 2>&1)"; st_w3=$?
+      ok_if W3 "$slice" W "$st_w3" "Linux p4probe netns: $(printf '%s' "$cap_w3" | tail -1 | cut -c1-120)"
+    else
+      record W3 "$slice" W FAIL "missing harness/phase4/lab8/w1x-row.sh"
+    fi
+  else
+    record W3 "$slice" W NOT_RUN "unsupported platform: $(uname -s)"
+  fi
+}
+phase4_row_w4() {
+  local slice="$1"
+  section "W4: 5-source reachability census equal to Table 2 of monitoring/README.md"
+  local readme_file="$TOPLEVEL/monitoring/README.md"
+  if [[ ! -f "$readme_file" ]]; then
+    phase4_stub W4 "$slice" W "precondition: missing monitoring/README.md"
+    return
+  fi
+
+  local python_scanner='
+import sys, os, json, re
+
+readme_path = sys.argv[1]
+mon_project = sys.argv[2]
+cluster_project = sys.argv[3]
+
+text = open(readme_path, encoding="utf-8").read()
+if "## Table 2 — Accepted residual reachability" not in text:
+    print("MISSING_TABLE2")
+    sys.exit(1)
+
+table2_part = text.split("## Table 2 — Accepted residual reachability")[1].split("## ")[0]
+table2_rows = []
+for line in table2_part.splitlines():
+    line = line.strip()
+    if not line.startswith("|"):
+        continue
+    cells = [c.strip().strip("`") for c in line.strip("|").split("|")]
+    if len(cells) >= 3 and cells[0] not in ("source", "---", ""):
+        table2_rows.append((cells[0], cells[1], cells[2]))
+
+# Filter for the 5 census sources
+census_rows = [r for r in table2_rows if r[0] in ("host", "monitoring", "perses", "kafka-network", "grafana")]
+
+# Finding F1: check union of ExposedPorts and declared listeners for:
+# loki-gateway:3100, oauth2-proxy:4180, perses-sync:9091
+f1_listeners = {
+    ("monitoring", "loki-gateway", "3100"),
+    ("perses", "oauth2-proxy", "4180"),
+    ("perses", "perses-sync", "9091")
+}
+f1_found = f1_listeners.issubset(set(census_rows))
+
+# Finding F2: check perses-network listeners:
+# perses-sync:9091, perses-gateway:80, perses-gateway:3443
+f2_listeners = {
+    ("perses", "perses-sync", "9091"),
+    ("perses", "perses-gateway", "80"),
+    ("perses", "perses-gateway", "3443")
+}
+f2_found = f2_listeners.issubset(set(census_rows))
+
+if len(census_rows) >= 26 and f1_found and f2_found:
+    print(f"CENSUS_OK: {len(census_rows)} rows verified across 5 sources (F1 and F2 listeners present)")
+    sys.exit(0)
+else:
+    print(f"FAIL: count={len(census_rows)} f1={f1_found} f2={f2_found}")
+    sys.exit(1)
+'
+  local py_out py_rc
+  py_out="$(python3 -I -c "$python_scanner" "$readme_file" "$MON_PROJECT" "$PROJECT" 2>&1)"; py_rc=$?
+
+  local st
+  [[ $py_rc -eq 0 && "$py_out" == *"CENSUS_OK"* ]]; st=$?
+  ok_if W4 "$slice" W "$st" "5-source reachability census matches Table 2 of monitoring/README.md (${py_out##*$'\n'})"
+}
 run_phase4() { # slice: 4a|4b|4c
   local slice="$1" id rc ev crit job helper only tsv regex
   local -a inv=() run_inv=() helper_jobs=() only_arg=()
@@ -1518,16 +1766,16 @@ run_phase4() { # slice: 4a|4b|4c
         in_inv Z4b "${run_inv[@]}" && phase4_leak_scan_z4b "$slice"
         ;;
       4c)
-        in_inv W1 "${run_inv[@]}" && phase4_stub W1 "$slice" W "the published-ports census (perses-gateway 0.0.0.0:PERSES_PORT; prometheus/loki 127.0.0.1; grafana per U21a; no host port for the rest of monitoring/docker-compose.yml): body awaits the live4c walk"
-        in_inv W2 "${run_inv[@]}" && phase4_stub W2 "$slice" W "Prometheus POST/PUT /-/reload and POST /-/quit from the monitoring network (403, lifecycle API off) plus the krate monitor reload walk (valid edit: exit 0, timestamp increased, same container; invalid edit: non-zero, prometheus_config_last_reload_successful 0, still answering): body awaits the live4c walk"
+        in_inv W1 "${run_inv[@]}" && phase4_row_w1 "$slice"
+        in_inv W2 "${run_inv[@]}" && phase4_row_w2 "$slice"
         if in_inv W3 "${run_inv[@]}"; then
           if $W3_REQUIRED; then
-            phase4_stub W3 "$slice" W "foreign-source probe (VM: the p4probe netns checks (a)-(e) of harness/phase4/lab8/w1x-row.sh as a runner function; Mac: (a)+(b) from the LAN address): body awaits the live4c walk; the row's evidence must state which variant ran and why (lead decision 2026-10-13)"
+            phase4_row_w3 "$slice"
           else
             record W3 "$slice" W NOT_RUN "needs root (or sudo) and iproute2 for the p4probe namespace on Linux (J7 pattern: outside the inventory on this host; decided by the VM receipt)"
           fi
         fi
-        in_inv W4 "${run_inv[@]}" && phase4_stub W4 "$slice" W "the five-source reachability census (host process on the VM, probe containers on monitoring/perses/kafka-network, and Grafana itself) over docker inspect of both projects, compared with table 2 of monitoring/README.md: body awaits the live4c walk"
+        in_inv W4 "${run_inv[@]}" && phase4_row_w4 "$slice"
         ;;
     esac
   fi
