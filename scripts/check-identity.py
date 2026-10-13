@@ -3568,6 +3568,9 @@ def check_grafana_realm_compose(checks):
     e('/rendered/perses-migrate' in init_mounts,
       'monitoring-init must mount the perses_migrate_rendered volume it writes the issuer into')
     e('perses-migrate' in services, 'monitoring/docker-compose.yml must define the perses-migrate service')
+    migrate_mounts = [volume.get('target') for volume in (services.get('perses-migrate') or {}).get('volumes') or []]
+    e('/perses' in migrate_mounts,
+      'perses-migrate: must mount perses_data to /perses matching perses service (data lives in /perses/data)')
     perses_svc = services.get('perses') or {}
     perses_deps = perses_svc.get('depends_on') or {}
     e((perses_deps.get('perses-migrate') or {}).get('condition') == 'service_completed_successfully',

@@ -466,7 +466,7 @@ services:
     security_opt: [no-new-privileges:true]
     volumes:
       - ./perses/migrate_issuer.py:/etc/krate/perses/migrate_issuer.py:ro,z
-      - perses_data:/perses/data
+      - perses_data:/perses
       - perses_migrate_rendered:/etc/krate/perses-migrate:ro
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
