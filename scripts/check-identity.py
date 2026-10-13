@@ -3894,6 +3894,12 @@ def check_perses_clients(checks):
                                                     'https://krate.example.test:3443/api/auth/providers/oidc/krate/callback']),
       f'krate-perses must carry both callbacks (oauth2-proxy and Perses native); got {main_client["redirectUris"]}')
     e(main_client['attributes'].get('pkce.code.challenge.method') == 'S256', 'krate-perses must require PKCE S256')
+    verdict_fields = (ROOT / 'sso/identity.py').read_text().split('CLIENT_VERDICT_FIELDS = (')[1].split(')')[0]
+    e(all("'" + f + "'" in verdict_fields for f in
+          ('enabled', 'protocol', 'publicClient', 'standardFlowEnabled', 'implicitFlowEnabled',
+           'directAccessGrantsEnabled', 'serviceAccountsEnabled')),
+      'sso/identity.py: the client-differs verdict must cover the client-mode fields, or a mode change '
+      'made in the Keycloak console reads back as "same" and is never converged')
     e('perses_rep(args.name, origin, port, args.with_secret)' in (ROOT / 'sso/identity.py').read_text(),
       'identity.py: the Perses client-differs verdict must build the plan with the secret, or a rotated '
       'OAUTH2_PROXY_CLIENT_SECRET/PERSES_SYNC_CLIENT_SECRET is undetectable and never converged')

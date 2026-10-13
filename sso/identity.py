@@ -159,7 +159,15 @@ PERSES_PORT_DEFAULT = '3443'
 # The client-differs verdict: the fields the CLI's reconcile converges, the ones Keycloak stores
 # as sets (its readback reorders them: lab2/logs/020-realm-setup.log), the scope fields the caller
 # only reports (a PUT never changes scopes), and the mask the admin API returns for a secret.
-CLIENT_VERDICT_FIELDS = ('redirectUris', 'webOrigins', 'frontchannelLogout', 'attributes', 'protocolMappers')
+# The client-mode fields are part of the verdict too: without them a change made in the Keycloak
+# console — turning the client public, disabling it, switching off service accounts or the
+# standard flow — reads back as "same" and is never converged (PR #42 review). client_differs
+# compares a field only when the plan declares it, so listing them cannot make the verdict
+# differ spuriously; every one of them is declared by grafana_client and the Perses clients.
+CLIENT_VERDICT_FIELDS = ('redirectUris', 'webOrigins', 'frontchannelLogout', 'attributes',
+                         'protocolMappers', 'enabled', 'protocol', 'publicClient',
+                         'standardFlowEnabled', 'implicitFlowEnabled', 'directAccessGrantsEnabled',
+                         'serviceAccountsEnabled')
 CLIENT_SET_FIELDS = ('redirectUris', 'webOrigins')
 CLIENT_SCOPE_FIELDS = ('defaultClientScopes', 'optionalClientScopes')
 KEYCLOAK_SECRET_MASK = '**********'
