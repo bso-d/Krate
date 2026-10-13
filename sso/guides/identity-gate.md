@@ -90,7 +90,7 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 | field | meaning |
 |---|---|
 | candidate commit | `git rev-parse HEAD` of the fixture checkout, or the `--candidate` sha on a host without git; neither → `bound: false` and the verdict is INCOMPLETE. With `--repo`, the row also names the checkout's HEAD the static block ran on (it must start with the candidate sha) |
-| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh`, `sso/configure-dual.py` of the fixture: what was actually tested, also when the candidate is only stated. To check a bundle-host receipt against the repository: `git show <sha>:epc/<file> \| shasum -a 256` must match for seven of the eight; `.env.template` differs by design, because `make bundle` rewrites its five `*_IMAGE` lines to the offline runtime tags (the receipt's `images` row shows them) and nothing else |
+| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh`, `sso/probe.py`, `sso/configure-dual.py` of the fixture: what was actually tested, also when the candidate is only stated. To check a bundle-host receipt against the repository, compare the first 16 hex digits of `git show <sha>:epc/<file> \| shasum -a 256` for edition files and `git show <sha>:sso/<file> \| shasum -a 256` for SSO files; eight of the nine must match. `.env.template` differs by design, because `make bundle` rewrites its five `*_IMAGE` lines to the offline runtime tags (the receipt's `images` row shows them) and nothing else |
 | dirty tracked files | `git status --porcelain --untracked-files=no` of the whole fixture repository at run time, unfiltered (must be empty for a sign-off receipt; `unknown` without git; with `--repo`, the checkout's dirty state is listed after `--repo:`) |
 | images | every `*_IMAGE` digest of the edition template |
 | runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py`, `*.mjs` and `*.sh` (file list, sorted; `stub_idp.sh` is bound by this digest and linted by S3 with the runner), plus the commit (and dirty state) of the repository the runner was executed from |
@@ -319,7 +319,10 @@ NAME, the binding constraint is X1 plus receipt comparability). `/etc/hosts` is
 never touched: the runner's `curl()` wrapper adds `--resolve NAME:<port>:127.0.0.1`
 for the HTTPS, HTTP and Perses ports, the Python helpers map the same one name
 through `scripts/gate/netmap.py` (`$GATE_PUBLIC_HOST`, exported by the runner;
-TLS keeps the real name), and the containers resolve NAME through their
+TLS keeps the real name). `auth apply` starts a separate `sso/probe.py` process;
+the runner passes `KRATE_PROBE_CONNECT_IP=127.0.0.1` to it so the public
+discovery request reaches the same fixture proxy while still checking NAME in
+the certificate and the issuer document. Containers resolve NAME through their
 `extra_hosts` host-gateway entry. `gen-cert` derives the certificate's SAN from
 `KEYCLOAK_PUBLIC_URL`, so the fixture certificate covers NAME. The receipt's
 edition/fixture row records the host actually used (`$BASE`).

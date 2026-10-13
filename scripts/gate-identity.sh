@@ -175,6 +175,10 @@ if [[ -n "$PUBLIC_HOST" ]]; then
     CURL_RESOLVE+=("--resolve" "${PUBLIC_HOST}:${gate_port}:127.0.0.1")
   done
   export GATE_PUBLIC_HOST="$PUBLIC_HOST"
+  # auth apply invokes sso/probe.py in a separate process. Give that probe the
+  # same local connection address as curl --resolve and netmap on every host;
+  # it still verifies the public hostname in TLS and the issuer document.
+  export KRATE_PROBE_CONNECT_IP=127.0.0.1
 fi
 curl() { command curl "${CURL_RESOLVE[@]}" "$@"; }
 [[ -x "$KRATE" && -f "$ED/.env.template" ]] || { echo "not an edition directory: $ED" >&2; exit 2; }
@@ -203,7 +207,7 @@ else
   BOUND=false
 fi
 EDITION_DIGESTS=""
-for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/configure-dual.py"; do
+for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/probe.py" "$SSO/configure-dual.py"; do
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
 if [[ -n "$REPO_ARG" ]]; then
