@@ -1377,7 +1377,7 @@ def cmd_grafana_client(args):
         # mechanism that keeps the secret off argv, which the gate proves by sampling ps.
         # Same pattern as `broker provider --with-secret` on main.
         # codeql[py/clear-text-logging-sensitive-data]
-        sys.stdout.write(render(grafana_client(origin, args.with_secret)))
+        sys.stdout.write(render(grafana_client(origin, args.with_secret)))  # codeql[py/clear-text-logging-sensitive-data]
     return 0
 
 
@@ -1418,13 +1418,13 @@ def cmd_perses_clients(args):
         # mechanism that keeps the secret off argv, which the gate proves by sampling ps.
         # Same pattern as `broker provider --with-secret` on main.
         # codeql[py/clear-text-logging-sensitive-data]
-        sys.stdout.write(render(perses_rep(args.client, origin, port, args.with_secret)))
+        sys.stdout.write(render(perses_rep(args.client, origin, port, args.with_secret)))  # codeql[py/clear-text-logging-sensitive-data]
     else:
         # input (KCADM_STDIN=1 kcadm … -f -), never a terminal, log or command line: it is the
         # mechanism that keeps the secret off argv, which the gate proves by sampling ps.
         # Same pattern as `broker provider --with-secret` on main.
         # codeql[py/clear-text-logging-sensitive-data]
-        sys.stdout.write(render(perses_clients(origin, port, args.with_secret)))
+        sys.stdout.write(render(perses_clients(origin, port, args.with_secret)))  # codeql[py/clear-text-logging-sensitive-data]
     return 0
 
 
