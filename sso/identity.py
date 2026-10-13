@@ -5,6 +5,7 @@ Secrets never enter this program's output: the realm plan and Kafbat's
 runtime.yml carry ``${VAR}`` placeholders that Keycloak and Kafbat resolve from
 their container environment.
 """
+import socket
 import ipaddress
 import argparse
 from typing import Any
@@ -1049,15 +1050,21 @@ def refuse_loopback_public_url(url):
     (plan commit 5, U14); the generator repeats the refusal so no path can write the file. The
     message names the key, never the value."""
     host = urlsplit(url or '').hostname or ''
-    # Parse it as an address rather than matching names: all of 127.0.0.0/8 is loopback
-    # (including the 127.1 shorthand) and neither unspecified address is reachable from a
+    # Parse it as an address rather than matching names: all of 127.0.0.0/8 is loopback,
+    # including the inet_aton shorthand, and neither unspecified address is reachable from a
     # container. A host that is not an IP literal is checked against the name list only, so a
     # legal public hostname such as 127.example.com stays accepted (PR #42 review).
     address = None
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        pass
+        # ipaddress rejects the shorthand forms that inet_aton — and therefore curl and every
+        # browser — accept: 127.1 and 2130706433 both reach the loopback interface, so neither
+        # may be a public host. A real hostname raises OSError here and stays a name.
+        try:
+            address = ipaddress.IPv4Address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            address = None
     if (address is not None and (address.is_loopback or address.is_unspecified)) or host in LOOPBACK_HOSTS:
         raise ValueError('KEYCLOAK_PUBLIC_URL must name the public host: refusing a loopback or'
                          ' unspecified address (any 127.0.0.0/8 address, ::1, 0.0.0.0, ::) and localhost')
