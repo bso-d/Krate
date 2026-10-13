@@ -3704,9 +3704,15 @@ def check_grafana_realm_cli(checks):
         # b2/S2: retiring needs the Basic admin, which realm mode disables.
         e('Grafana is in realm mode, where the Basic admin this command needs is disabled' in cli,
           f'{edition}/krate: grafana-user retire must refuse in realm mode and give the rollback-first sequence')
-        e('did not answer while renewing the seed token' in renew
-          and renew.index('did not answer while renewing') < renew.index('token-create'),
+        e('Cannot renew the Grafana seed token' in renew
+          and renew.index('Cannot renew the Grafana seed token') < renew.index('token-create'),
           f'{edition}/krate: a renewal that cannot reach Grafana must warn and continue, not die (Grafana may be held by idp-wait)')
+        e(renew.count('Recreate it: krate monitor realm') == 2,
+          f'{edition}/krate: a missing or unreadable seed-token record must warn and name the command that '
+          f'recreates it, because grafana_admin_token has nothing to authenticate with')
+        e('is STILL VALID until it is deleted or expires' in renew,
+          f'{edition}/krate: a failed token deletion must not be followed by a line claiming the previous '
+          f'token is deleted')
         # Row U13: during a Keycloak outage `monitor up` must still reach Compose, so idp-wait
         # names the failure. kcadm_login dies when the container is stopped, so the optional
         # reconcile tests reachability first and downgrades a refused login to a warning.

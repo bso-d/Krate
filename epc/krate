@@ -3478,25 +3478,41 @@ grafana_admin_token() {
 # means a renewal happens at the latest 60 days into a token's life.
 monitor_grafana_seed_renew() {
   local meta="$MONITOR_DIR/auth/secrets/grafana-seed.meta" expires now old_id account name
-  [[ -f "$meta" ]] || return 0
+  # Without the record, or with an unreadable one, grafana_admin_token has nothing to
+  # authenticate with: every admin call then fails with an error that does not name the
+  # cause. Say what recreates it instead of returning silently (PR #42 review).
+  if [[ ! -f "$meta" ]]; then
+    warn "No Grafana seed-token record ($meta is missing), so the Grafana admin calls that need it will fail. Recreate it: krate monitor realm"
+    return 0
+  fi
   expires="$(sed -n 's/^expires=//p' "$meta")"
   old_id="$(sed -n 's/^id=//p' "$meta")"
   now="$(date -u +%s)"
-  [[ "$expires" =~ ^[0-9]+$ && "$old_id" =~ ^[0-9]+$ ]] || return 0
+  if [[ ! "$expires" =~ ^[0-9]+$ || ! "$old_id" =~ ^[0-9]+$ ]]; then
+    warn "The Grafana seed-token record is unreadable, so it cannot be renewed and the admin calls that need it will fail. Recreate it: krate monitor realm"
+    return 0
+  fi
   [[ $((expires - now)) -lt 2592000 ]] || return 0
   info "Renewing the Grafana seed token (it expires in $(( (expires - now) / 86400 )) days)"
   # Grafana may be created but not started (idp-wait holds it during an outage), so a
-  # renewal that cannot run is a warning: the current token still has up to 30 days.
+  # renewal that cannot run is a warning: the current token still has up to 30 days. An
+  # expired or deleted token fails here too, and that case has a different remedy, so the
+  # warning names both causes rather than asserting an outage.
   if ! account="$(grafana_admin_token service-account --name krate-seed --role Admin \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')"; then
-    warn "Grafana did not answer while renewing the seed token, which still has $(( (expires - now) / 86400 )) days; a later krate monitor up renews it"
+    warn "Cannot renew the Grafana seed token: Grafana did not answer, or the token it was given has expired or been deleted. The token has $(( (expires - now) / 86400 )) days left. If Grafana is running, recreate the token: krate monitor realm; otherwise a later krate monitor up renews it"
     return 0
   fi
   name="$(grafana_admin_token token-create --account-id "$account" --days 90 | monitor_write_seed_token)" \
     || die "Grafana refused the successor seed token; the previous one is still in place"
-  grafana_admin_token token-delete --account-id "$account" --token-id "$old_id" >/dev/null \
-    || warn "The previous Grafana seed token (id $old_id) could not be deleted; delete it in Grafana"
-  ok "Grafana seed token $name created; the previous one (id $old_id) is deleted"
+  # The success line follows the deletion's own result: printing "is deleted" after a failed
+  # delete contradicted the warning above it and left an untracked live credential (PR #42).
+  if grafana_admin_token token-delete --account-id "$account" --token-id "$old_id" >/dev/null; then
+    ok "Grafana seed token $name created; the previous one (id $old_id) is deleted"
+  else
+    warn "The previous Grafana seed token (id $old_id) could not be deleted; delete it in Grafana"
+    ok "Grafana seed token $name created; the previous one (id $old_id) is STILL VALID until it is deleted or expires"
+  fi
 }
 
 # What every `krate monitor up` re-checks while Grafana is on the realm, before
