@@ -769,31 +769,74 @@ def check_phase4_monitor_paths(checks):
         auth = isolated / 'auth'
         auth.mkdir(parents=True)
         (auth / 'local.ini').write_text('keep local mode\n')
-        guard_start = runner.index('if [[ ! -d "$MON_DIR"')
+        (isolated / 'prometheus').mkdir()
+        (isolated / 'prometheus' / 'prometheus.yml').write_text('global: {}\n')
+        edition_fixture = base / 'edition-guard'
+        (edition_fixture / 'auth' / 'ui').mkdir(parents=True)
+        guard_start = runner.index('if [[ ! -d "$ED"')
         guard_end = runner.index('# ── candidate binding:', guard_start)
         guard = runner[guard_start:guard_end]
+
+        def run_guard(ed, mon):
+            return subprocess.run(['bash', '-euc', 'ED="$1"\nMON_DIR="$2"\n' + guard,
+                                   'bash', str(ed), str(mon)], text=True, capture_output=True)
+
+        accepted = run_guard(edition_fixture, isolated)
+        e(accepted.returncode == 0,
+          f'gate must accept real edition and monitoring directories: {accepted.stderr}')
         outside = base / 'outside-monitor-auth'
         outside.mkdir()
+        linked_edition = base / 'linked-edition'
+        os.symlink(edition_fixture, linked_edition)
+        refused = run_guard(linked_edition, isolated)
+        e(refused.returncode == 2, 'gate must refuse a symlinked edition directory')
+        for part in ('auth', 'auth/ui'):
+            real = edition_fixture / part
+            saved = edition_fixture / (part + '.real')
+            real.rename(saved)
+            os.symlink(outside, real)
+            refused = run_guard(edition_fixture, isolated)
+            e(refused.returncode == 2, f'gate must refuse a symlinked edition {part} directory')
+            real.unlink()
+            saved.rename(real)
         linked_monitor = base / 'linked-monitor'
         os.symlink(isolated, linked_monitor)
-        refused = subprocess.run(['bash', '-euc', 'MON_DIR="$1"\n' + guard, 'bash', str(linked_monitor)],
-                                 text=True, capture_output=True)
+        refused = run_guard(edition_fixture, linked_monitor)
         e(refused.returncode == 2, 'gate must refuse a symlinked monitoring directory')
         auth.rename(isolated / 'real-auth')
         os.symlink(outside, auth)
-        refused = subprocess.run(['bash', '-euc', 'MON_DIR="$1"\n' + guard, 'bash', str(isolated)],
-                                 text=True, capture_output=True)
+        refused = run_guard(edition_fixture, isolated)
         e(refused.returncode == 2, 'gate must refuse a symlinked monitoring auth parent')
         auth.unlink()
         (isolated / 'real-auth').rename(auth)
+        prom = isolated / 'prometheus'
+        prom.rename(isolated / 'real-prometheus')
+        os.symlink(outside, prom)
+        refused = run_guard(edition_fixture, isolated)
+        e(refused.returncode == 2, 'gate must refuse a symlinked monitoring prometheus directory')
+        prom.unlink()
+        (isolated / 'real-prometheus').rename(prom)
+        prom_file = prom / 'prometheus.yml'
+        (outside / 'prometheus.yml').write_text('outside: {}\n')
+        prom_file.rename(prom / 'prometheus.yml.real')
+        os.symlink(outside / 'prometheus.yml', prom_file)
+        refused = run_guard(edition_fixture, isolated)
+        e(refused.returncode == 2 and str(prom_file) in refused.stderr,
+          'gate must refuse a symlinked prometheus.yml before the W2 backup and reload probe')
+        prom_file.unlink()
+        (prom / 'prometheus.yml.real').rename(prom_file)
+        prom_file.unlink()
+        refused = run_guard(edition_fixture, isolated)
+        e(refused.returncode == 2 and str(prom_file) in refused.stderr,
+          'gate must refuse a missing prometheus.yml before the W2 backup and reload probe')
+        prom_file.write_text('global: {}\n')
         for name in ('realm.ini', 'secrets', 'perses'):
             state = auth / name
             if name == 'realm.ini':
                 state.write_text('preexisting site state\n')
             else:
                 state.mkdir()
-            refused = subprocess.run(['bash', '-euc', 'MON_DIR="$1"\n' + guard, 'bash', str(isolated)],
-                                     text=True, capture_output=True)
+            refused = run_guard(edition_fixture, isolated)
             e(refused.returncode == 2 and str(state) in refused.stderr,
               f'gate must refuse preexisting monitoring auth state {name}')
             if state.is_dir():

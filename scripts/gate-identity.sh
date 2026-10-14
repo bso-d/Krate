@@ -189,8 +189,16 @@ if [[ -e "$ENVF" ]] && ! $WIPE; then
   echo "$ENVF exists; this runner destroys the fixture it is pointed at. Pass --wipe for a disposable checkout." >&2
   exit 2
 fi
+if [[ ! -d "$ED" || -L "$ED" || ! -d "$ED/auth" || -L "$ED/auth" || ! -d "$ED/auth/ui" || -L "$ED/auth/ui" ]]; then
+  echo "$ED, auth, and auth/ui must be real fixture-owned directories before this gate can clean their children." >&2
+  exit 2
+fi
 if [[ ! -d "$MON_DIR" || -L "$MON_DIR" || ! -d "$MON_DIR/auth" || -L "$MON_DIR/auth" ]]; then
   echo "$MON_DIR and its auth directory must be real fixture-owned directories before this gate can clean them." >&2
+  exit 2
+fi
+if [[ ! -d "$MON_DIR/prometheus" || -L "$MON_DIR/prometheus" || ! -f "$MON_DIR/prometheus/prometheus.yml" || -L "$MON_DIR/prometheus/prometheus.yml" ]]; then
+  echo "$MON_DIR/prometheus/prometheus.yml must be a real fixture-owned file before the W2 backup and reload probe." >&2
   exit 2
 fi
 if [[ -e "$MON_DIR/.env" || -L "$MON_DIR/.env" ]]; then
