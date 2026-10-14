@@ -722,6 +722,83 @@ def check_gate_scripts(checks):
                   for tag, result, detail in u9_cases),
               'u9 evidence must keep per-case tag, result and detail; got ' + repr(u9_rendered))
 
+    # U28 loki_push_body must encode Stream.labels as one LogQL selector
+    # string: rocky-4a at bfd1158 answered the gate's proto push 400 with the
+    # labels built as nested LabelAdapter messages (receipt U28
+    # stored=NOT_RUN). Runs the shipped builder, not a copy.
+    if str(ROOT / 'scripts/gate') not in sys.path:
+        sys.path.insert(0, str(ROOT / 'scripts/gate'))
+    g4 = __import__('phase4_grafana')
+    u28_payload = g4.loki_push_body(
+        {'job': 'p4-u28-reach', 'source': 'u28-proto-gate'},
+        'u28 reach line check', 1791839245241486072)
+
+    def _u28_varint(buf, pos):
+        res, shift = 0, 0
+        while True:
+            byte = buf[pos]
+            pos += 1
+            res |= (byte & 0x7F) << shift
+            shift += 7
+            if not (byte & 0x80):
+                return res, pos
+
+    u28_pos = 0
+    _, u28_pos = _u28_varint(u28_payload, u28_pos)
+    u28_tag = u28_payload[u28_pos]
+    u28_pos += 1
+    e((u28_tag & 0x03) == 0, 'u28 payload must be a snappy literal')
+    u28_len = u28_tag >> 2
+    if u28_len < 60:
+        u28_len += 1
+    elif u28_len == 60:
+        u28_len = u28_payload[u28_pos] + 1
+        u28_pos += 1
+    elif u28_len == 61:
+        u28_len = int.from_bytes(u28_payload[u28_pos:u28_pos + 2], 'little') + 1
+        u28_pos += 2
+    elif u28_len == 62:
+        u28_len = int.from_bytes(u28_payload[u28_pos:u28_pos + 3], 'little') + 1
+        u28_pos += 3
+    else:
+        u28_len = int.from_bytes(u28_payload[u28_pos:u28_pos + 4], 'little') + 1
+        u28_pos += 4
+    u28_stream = u28_payload[u28_pos:u28_pos + u28_len]
+    e(len(u28_stream) == u28_len, 'u28 snappy preamble must match the literal length')
+    u28_labels = None
+    u28_at, u28_end = 0, len(u28_stream)
+    while u28_at < u28_end:
+        u28_tagno, u28_at = _u28_varint(u28_stream, u28_at)
+        u28_field, u28_wire = u28_tagno >> 3, u28_tagno & 0x07
+        if u28_wire != 2:
+            _, u28_at = _u28_varint(u28_stream, u28_at)
+            continue
+        u28_size, u28_at = _u28_varint(u28_stream, u28_at)
+        u28_val = u28_stream[u28_at:u28_at + u28_size]
+        u28_at += u28_size
+        if u28_field != 1 or len(u28_val) >= len(u28_stream):
+            continue
+        u28_in, u28_in_end = 0, len(u28_val)
+        while u28_in < u28_in_end:
+            u28_stag, u28_in = _u28_varint(u28_val, u28_in)
+            u28_sfield, u28_swire = u28_stag >> 3, u28_stag & 0x07
+            if u28_swire != 2:
+                _, u28_in = _u28_varint(u28_val, u28_in)
+                continue
+            u28_ssize, u28_in = _u28_varint(u28_val, u28_in)
+            u28_sval = u28_val[u28_in:u28_in + u28_ssize]
+            u28_in += u28_ssize
+            if u28_sfield == 1:
+                try:
+                    u28_text = u28_sval.decode()
+                except ValueError:
+                    continue
+                if 'job=' in u28_text:
+                    u28_labels = u28_text
+    e(u28_labels is not None and 'job="p4-u28-reach"' in u28_labels
+      and 'source="u28-proto-gate"' in u28_labels,
+      'u28 push labels must be one selector string; got ' + repr(u28_labels))
+
 
 def check_phase4_monitor_paths(checks):
     """The Phase IV gate must find monitoring in both source and offline bundle layouts."""

@@ -200,9 +200,8 @@ def loki_push_body(labels, line, ts_ns):
     seconds, nanos = ts_ns // 10 ** 9, ts_ns % 10 ** 9
     timestamp = _pb(1, 0, seconds) + (_pb(2, 0, nanos) if nanos else b'')
     entry = _pb(1, 2, timestamp) + _pb(2, 2, line.encode())
-    label_msgs = b''.join(_pb(1, 2, _pb(1, 2, k.encode()) + _pb(2, 2, v.encode()))
-                          for k, v in sorted(labels.items()))
-    stream = _pb(1, 2, label_msgs + _pb(2, 2, entry))
+    labels_str = '{' + ','.join('%s="%s"' % (k, v) for k, v in sorted(labels.items())) + '}'
+    stream = _pb(1, 2, _pb(1, 2, labels_str.encode()) + _pb(2, 2, entry))
     return _varint(len(stream)) + _snappy_literal(stream)
 
 
