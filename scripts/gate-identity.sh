@@ -189,10 +189,20 @@ if [[ -e "$ENVF" ]] && ! $WIPE; then
   echo "$ENVF exists; this runner destroys the fixture it is pointed at. Pass --wipe for a disposable checkout." >&2
   exit 2
 fi
+if [[ ! -d "$MON_DIR" || -L "$MON_DIR" || ! -d "$MON_DIR/auth" || -L "$MON_DIR/auth" ]]; then
+  echo "$MON_DIR and its auth directory must be real fixture-owned directories before this gate can clean them." >&2
+  exit 2
+fi
 if [[ -e "$MON_DIR/.env" || -L "$MON_DIR/.env" ]]; then
   echo "$MON_DIR/.env exists; this gate requires an empty monitoring fixture before it can own or remove that file." >&2
   exit 2
 fi
+for monitor_state in "$MON_DIR/auth/realm.ini" "$MON_DIR/auth/secrets" "$MON_DIR/auth/perses"; do
+  if [[ -e "$monitor_state" || -L "$monitor_state" ]]; then
+    echo "$monitor_state exists; this gate requires empty generated monitoring auth state before it can own or remove it." >&2
+    exit 2
+  fi
+done
 
 # ── candidate binding: a commit (git or --candidate) plus the digests of the files under test ──
 sha256file() { { shasum -a 256 "$1" 2>/dev/null || sha256sum "$1"; } | cut -c1-16; }
@@ -501,6 +511,10 @@ fixture_reset() {
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
+}
+cleanup_monitor_auth() {
+  # Preflight proved these paths absent before the gate; only this fixture can have created them.
+  rm -rf "$MON_DIR/auth/realm.ini" "$MON_DIR/auth/secrets" "$MON_DIR/auth/perses"
 }
 fixture_env() {
   FIXTURE_OWNED=true
@@ -2020,6 +2034,7 @@ teardown() {
       --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
+  cleanup_monitor_auth
   local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
   log "fixture resources left: $left"
 }

@@ -765,6 +765,59 @@ def check_phase4_monitor_paths(checks):
         else:
             e(False, 'runtime secret file must refuse a symlink')
 
+        isolated = base / 'monitor-auth-isolation'
+        auth = isolated / 'auth'
+        auth.mkdir(parents=True)
+        (auth / 'local.ini').write_text('keep local mode\n')
+        guard_start = runner.index('if [[ ! -d "$MON_DIR"')
+        guard_end = runner.index('# ── candidate binding:', guard_start)
+        guard = runner[guard_start:guard_end]
+        outside = base / 'outside-monitor-auth'
+        outside.mkdir()
+        linked_monitor = base / 'linked-monitor'
+        os.symlink(isolated, linked_monitor)
+        refused = subprocess.run(['bash', '-euc', 'MON_DIR="$1"\n' + guard, 'bash', str(linked_monitor)],
+                                 text=True, capture_output=True)
+        e(refused.returncode == 2, 'gate must refuse a symlinked monitoring directory')
+        auth.rename(isolated / 'real-auth')
+        os.symlink(outside, auth)
+        refused = subprocess.run(['bash', '-euc', 'MON_DIR="$1"\n' + guard, 'bash', str(isolated)],
+                                 text=True, capture_output=True)
+        e(refused.returncode == 2, 'gate must refuse a symlinked monitoring auth parent')
+        auth.unlink()
+        (isolated / 'real-auth').rename(auth)
+        for name in ('realm.ini', 'secrets', 'perses'):
+            state = auth / name
+            if name == 'realm.ini':
+                state.write_text('preexisting site state\n')
+            else:
+                state.mkdir()
+            refused = subprocess.run(['bash', '-euc', 'MON_DIR="$1"\n' + guard, 'bash', str(isolated)],
+                                     text=True, capture_output=True)
+            e(refused.returncode == 2 and str(state) in refused.stderr,
+              f'gate must refuse preexisting monitoring auth state {name}')
+            if state.is_dir():
+                state.rmdir()
+            else:
+                state.unlink()
+
+        cleanup_start = runner.index('cleanup_monitor_auth() {')
+        cleanup_end = runner.index('\n}\n', cleanup_start) + len('\n}\n')
+        for name in ('realm.ini', 'secrets', 'perses'):
+            state = auth / name
+            if name == 'realm.ini':
+                state.write_text('gate-created state\n')
+            else:
+                state.mkdir()
+        cleaned = subprocess.run(['bash', '-euc',
+                                  runner[cleanup_start:cleanup_end] + '\nMON_DIR="$1"\ncleanup_monitor_auth\n',
+                                  'bash', str(isolated)], text=True, capture_output=True)
+        e(cleaned.returncode == 0 and all(not (auth / name).exists()
+                                          for name in ('realm.ini', 'secrets', 'perses')),
+          'gate teardown must remove only its generated monitoring auth state')
+        e((auth / 'local.ini').read_text() == 'keep local mode\n',
+          'gate teardown must preserve packaged local.ini')
+
 
 def check_parity(checks):
     result = subprocess.run(['diff', '-U0', str(ROOT / 'kraft/krate'), str(ROOT / 'epc/krate')], text=True, capture_output=True)
