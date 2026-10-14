@@ -1000,7 +1000,9 @@ class Gate(Phase4Gate):
         # empty, no secrets directory, no krate-grafana client in the realm.
         ini = os.path.join(self.mon_dir(), 'auth', 'realm.ini')
         secrets_dir = os.path.join(self.mon_dir(), 'auth', 'secrets')
-        clients = self.keycloak().get('clients', 'clientId=krate-grafana') or []
+        # krate-cli has user/group roles only; client inventory requires the
+        # fixture's master admin (sso/identity.py CLI_ROLES).
+        clients = self.master_kcadm().get('clients', 'clientId=krate-grafana') or []
         side_free = (not os.path.isfile(ini) and not os.path.isdir(secrets_dir)
                      and not self.mon_env_value('GRAFANA_OAUTH_CLIENT_SECRET') and not clients)
         pub = self.seed_state.get('public_uid')
@@ -1030,6 +1032,20 @@ class Gate(Phase4Gate):
         if status != 'PASS':
             fail('U17 probes failed during setup: %s; %s' % (tokens, detail))
 
+    @staticmethod
+    def collision_pairs(output):
+        """Read each CLI collision warning with its immediately following command."""
+        lines = output.splitlines()
+        pairs = []
+        for index, line in enumerate(lines):
+            match = re.search(r'Local Grafana user (\S+)(?: \([^)]*\))? holds the e-mail of realm user', line)
+            if not match:
+                continue
+            command = lines[index + 1].strip() if index + 1 < len(lines) else ''
+            expected = 'krate monitor grafana-user retire ' + match.group(1)
+            pairs.append((match.group(1), command == expected))
+        return pairs
+
     def setup_switch(self):
         """The realm switch of section 5 / walk section C (logs/102,105,110):
         monitor realm (clean), the collision list, retire p4-collide only,
@@ -1042,13 +1058,13 @@ class Gate(Phase4Gate):
         # its retire command; U20's seed-token line (idempotent since 16e4203).
         collisions = [line.strip() for line in text.splitlines()
                       if 'holds the e-mail of realm user' in line]
+        pairs = self.collision_pairs(text)
         seed_line = next((line.strip() for line in text.splitlines() if 'seed token' in line.lower()), '')
         self.obs['U19-collisions'] = collisions
         self.obs['U20-seed-line'] = seed_line
-        if len(collisions) != 2 or not any('p4-collide-b' in c for c in collisions) \
-                or not any('retire p4-collide' in c and 'p4-collide-b' not in c for c in collisions):
+        if len(collisions) != 2 or sorted(pairs) != [('p4-collide', True), ('p4-collide-b', True)]:
             raise RuntimeError('monitor realm did not list both collide users with their retire '
-                               'commands: %s' % collisions)
+                               'commands: %s; pairs=%s' % (collisions, pairs))
         rc, out, err = self.krate('monitor', 'grafana-user', 'retire', 'p4-collide', timeout=180)
         text = out + err
         if rc != 0 or 'Retired the local Grafana user p4-collide' not in text:
