@@ -1623,23 +1623,30 @@ class Gate(Phase4Gate):
                     and self.mon_env_value('GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE')
                     == 'auth/secrets/grafana-seed.token')
         rc, out, err = self.grafana_admin('service-account', '--name', 'krate-seed', '--role', 'Admin')
+        acct_rc = rc
         account = json.loads(out) if rc == 0 else {}
         account_id = account.get('id')
         token = self.seed_token()
         rc, out, err = self.grafana_admin('token-list', '--account-id', str(account_id), token=token)
+        list_rc = rc
         tokens = json.loads(out) if rc == 0 else []
         creation_ok = False
         old_id = None
+        list_n = len(tokens) if isinstance(tokens, list) else -1
+        name_ok = ttl_delta = None
         if isinstance(tokens, list) and len(tokens) == 1 and isinstance(tokens[0], dict):
             entry = tokens[0]
             old_id = entry.get('id')
             match = re.fullmatch(r'krate-seed-(\d{8}T\d{6})', entry.get('name') or '')
+            name_ok = bool(match)
             if match and entry.get('expiration'):
                 created = calendar.timegm(time.strptime(match.group(1), '%Y%m%dT%H%M%S'))
                 expires = calendar.timegm(time.strptime(entry['expiration'], '%Y-%m-%dT%H:%M:%SZ'))
-                creation_ok = expires - created == 7776000
+                ttl_delta = expires - created
+                creation_ok = ttl_delta == 7776000
         meta = self.seed_meta()
-        creation_ok = creation_ok and meta.get('id') == str(old_id)
+        meta_match = meta.get('id') == str(old_id)
+        creation_ok = creation_ok and meta_match
         rc, out, err = p2.run([sys.executable, os.path.join(self.mon_dir(), 'seed-alerting.py'),
                                os.path.join(self.mon_dir(), '.env')], timeout=300)
         seeding_ok = rc == 0 and 'Grafana alerting ready' in (out + err)
@@ -1721,8 +1728,11 @@ class Gate(Phase4Gate):
                   ('successor', 'PASS' if successor_ok else 'FAIL'),
                   ('refusal', refusal_status)]
         status, tokens = aggregate(probes)
-        return status, '%s; 90-day ttl exact, CRUD %s, renewal %s/successor %s; %s; walk: live4a ' \
-                       '101-102,135-139,161' % (tokens, crud, renewal_ok, successor_ok, refusal_text[:60])
+        return status, '%s; creation (acct rc %d id %s, list rc %d n %d, name %s, ' \
+                       'ttl %s, meta %s), CRUD %s, renewal %s/successor %s; %s; walk: live4a ' \
+                       '101-102,135-139,161' % (tokens, acct_rc, account_id, list_rc, list_n,
+                                                name_ok, ttl_delta, meta_match, crud,
+                                                renewal_ok, successor_ok, refusal_text[:60])
 
     def u21a(self):
         # walk logs/111,122: loopback-only port, the anonymous surfaces, no data.
@@ -2613,6 +2623,25 @@ class Gate(Phase4Gate):
                   (v_summary or {}).get('cspViolations', -1), (v_summary or {}).get('pageErrors', -1),
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
+    def _mon_env_subset(self, cid):
+        """Non-secret compose inputs on a monitor container (U22 evidence).
+
+        Reads container env but returns only the allowlisted revision/IdP
+        keys — never passwords, secrets or keys."""
+        if not cid:
+            return {}
+        rc, out, _ = p2.docker('inspect', '-f',
+                               '{{range .Config.Env}}{{println .}}{{end}}', cid)
+        if rc != 0:
+            return {}
+        want = ('KRATE_RENDER_REVISION', 'KRATE_IDP_HOST', 'IDP_DISCOVERY_URL')
+        found = {}
+        for line in out.splitlines():
+            key, sep, value = line.partition('=')
+            if sep and key in want:
+                found[key] = value
+        return found
+
     def u22(self):
         # walk log 169 (clean cycle at HEAD 5d17495; note log 161 is fbfc872 defect evidence only):
         # Rollback probes: `config set GRAFANA_AUTH_CONFIG=local.ini` + `monitor up`: only grafana
@@ -2624,6 +2653,7 @@ class Gate(Phase4Gate):
         long_before = self.long_running(before_mon)
         if 'grafana' not in long_before:
             not_run('precondition: no grafana container before rollback')
+        perses_before = self._mon_env_subset((before_mon.get('perses') or (None,))[0])
 
         rc1, out1, err1 = self.krate('config', 'set', 'GRAFANA_AUTH_CONFIG=local.ini', timeout=180)
         if rc1 != 0:
@@ -2637,6 +2667,7 @@ class Gate(Phase4Gate):
         long_mid = self.long_running(mid_mon)
         recreated = [s for s in long_before if s in long_mid and long_before[s][0] != long_mid[s][0]]
         only_grafana = (recreated == ['grafana'])
+        perses_after = self._mon_env_subset((mid_mon.get('perses') or (None,))[0])
 
         graf_cid = (mid_mon.get('grafana') or (None,))[0]
         healthy = self._wait_grafana_healthy(graf_cid) if graf_cid else False
@@ -2750,10 +2781,12 @@ class Gate(Phase4Gate):
             ('forward_signin', 'PASS' if (rc3 == 0 and rc4 == 0 and signin_ok) else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; rollback: only grafana recreated (%s), local admin 200, 6 paths ' \
+        return status, '%s; rollback: only grafana recreated (%s), perses inputs ' \
+                       '%s -> %s, local admin 200, 6 paths ' \
                        '(5x 302 + /grafana 301 carrying port), U18 hashes equal; forward: ' \
                        'realm.ini + monitor up rc 0/0, p4v sign-in %s; walk: live4a 169' \
-               % (tokens, 'grafana only' if only_grafana else str(recreated), fwd_signin['kind'])
+               % (tokens, 'grafana only' if only_grafana else str(recreated),
+                  perses_before, perses_after, fwd_signin['kind'])
 
     def u23(self):
         # walk logs/137, 139, 162, 169: Container ledger verification:
