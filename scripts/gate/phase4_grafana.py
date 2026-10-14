@@ -195,6 +195,23 @@ def _snappy_literal(data):
     return bytes([(59 + len(extra)) << 2]) + extra + data
 
 
+def _loki_range_url(proxy_base, selector, start, end):
+    """Range-query URL for a Loki selector over [start, end] (epoch seconds).
+    Instant /query without a time selects nothing reliably on the guest Loki
+    (rocky-4a: U7 forged + U28 stored FAIL while query_range controls pass);
+    the walk's stored readback used a ranged query (log 134)."""
+    return proxy_base + '/query_range?query=%s&start=%d&end=%d&limit=50' % (
+        urllib.parse.quote(selector), start, end)
+
+
+def _empty_result(body):
+    """True when a Loki query body holds zero streams (probe-tested)."""
+    try:
+        return json.loads(body)['data']['result'] == []
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
 def loki_push_body(labels, line, ts_ns):
     """snappy(protobuf WriteRequest{streams:[{labels, values:[{time, line}]}]})."""
     seconds, nanos = ts_ns // 10 ** 9, ts_ns % 10 ** 9
@@ -1860,12 +1877,22 @@ class Gate(Phase4Gate):
         st2, _h2, _b2 = d.req(self.base + res + '/loki/api/v1/push', data=payload, method='POST',
                               headers={'Content-Type': 'application/x-protobuf'})
         stored = 'NOT_RUN'
+        rq_note = ''
         if st2 == 204:
             time.sleep(3)
-            query = urllib.parse.quote('{job="p4-u28-reach"}')
-            st3, _h3, body3 = d.req(self.base + '/grafana/api/datasources/uid/loki/resources'
-                                    + '/loki/api/v1/query?query=' + query)
+            loki_api = (self.base + '/grafana/api/datasources/uid/loki/resources'
+                        + '/loki/api/v1')
+            now_q = int(time.time())
+            st3, _h3, body3 = d.req(_loki_range_url(loki_api, '{job="p4-u28-reach"}',
+                                                   now_q - 300, now_q))
+            if not (st3 == 200 and runid in body3):
+                time.sleep(10)  # single bounded retry: index lag, not encoding
+                now_q = int(time.time())
+                st3, _h3, body3 = d.req(_loki_range_url(loki_api, '{job="p4-u28-reach"}',
+                                                       now_q - 300, now_q))
             stored = 'PASS' if (st3 == 200 and runid in body3) else 'FAIL'
+            if stored == 'FAIL':
+                rq_note = ' (rq %s %s)' % (st3, body3[:100])
         # reach 2: Kafbat's unauthenticated metrics through the repointed datasource.
         st4, body4 = self.api_json(d, 'PUT', '/grafana/api/datasources/uid/' + uid,
                                    {'name': 'p4-reach', 'type': 'prometheus', 'url': 'http://kafka-ui:8080',
@@ -1897,9 +1924,9 @@ class Gate(Phase4Gate):
                   ('table2_match', 'PASS' if table_ok else 'FAIL'),
                   ('viewer_ds_403', 'PASS' if st8 == 403 else 'FAIL')]
         status, tokens = aggregate(probes)
-        return status, '%s; loki push %s (Loki-generated), proto push %s stored=%s, kafka-ui ' \
+        return status, '%s; loki push %s (Loki-generated), proto push %s stored=%s%s, kafka-ui ' \
                        'metrics %s, deleted %s, table2 %s vs reached %s; viewer POST ds %s; ' \
-                       'walk: live4a 133-134' % (tokens, st1, st2, stored, st5, deleted,
+                       'walk: live4a 133-134' % (tokens, st1, st2, stored, rq_note, st5, deleted,
                                                  sorted(listed), sorted(reached), st8)
 
     # ── stub rows (bodies await their walk observations; rule 11) ──
@@ -1935,7 +1962,7 @@ class Gate(Phase4Gate):
         v_bad = refusals(viewer)
         a_bad = refusals(admin)
         # the 34d6ab6 read location (re-measure 160: detected_field/<name>/values 200)
-        st_det, _h, _b = admin.req(self.base + proxy + '/detected_field/job/values')
+        st_det, _h, det_b = admin.req(self.base + proxy + '/detected_field/job/values')
         # controls (walk 130/160): labels 200, query_range 200, no forged line
         quote = urllib.parse.quote
         st_lab, _h, _b = viewer.req(self.base + proxy + '/labels')
@@ -1953,8 +1980,9 @@ class Gate(Phase4Gate):
 
         now = int(time.time())
         st_q1, _h, b_q1 = query_range(now - 300, now)
-        st_f, _h, b_f = viewer.req(self.base + proxy + '/query?query=%s' % quote('{job="p4-u7-forged"}'))
-        forged_absent = st_f == 200 and '"result":[]' in b_f.replace(' ', '')
+        st_f, _h, b_f = viewer.req(_loki_range_url(self.base + proxy, '{job="p4-u7-forged"}',
+                                                  now - 300, now))
+        forged_absent = st_f == 200 and _empty_result(b_f)
         time.sleep(35)  # the walk's two samples 35 s apart: fluent-bit keeps shipping
         now2 = int(time.time())
         st_q2, _h, b_q2 = query_range(now2 - 60, now2)
@@ -1992,14 +2020,18 @@ class Gate(Phase4Gate):
                   ('tail_101', 'PASS' if tail_ok else 'FAIL'),
                   ('explore_panels', explore_status)]
         status, tokens = aggregate(probes)
+        det_note = '' if st_det == 200 else ' body=' + det_b[:120]
+        forged_note = ' (query %s)' % st_f
+        clean_note = a_summary is not None and self.browser_clean(a_summary)
         return status, '%s; 8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
-                       'labels/query_range 200, detected_field read %s, forged absent %s, ' \
-                       'fluent-bit fresh %s, tail %s; browser control (p4lokiui rows %s, panel ' \
-                       'errors %s, explore rows %s, live rows %s)%s; walk: live4a 129-130,148,160 ' \
+                       'labels/query_range 200, detected_field read %s%s, forged absent %s%s, ' \
+                       'fluent-bit fresh %s, tail %s len=%d; browser control (p4lokiui rows %s, panel ' \
+                       'errors %s, explore rows %s, live rows %s, clean=%s)%s; walk: live4a 129-130,148,160 ' \
                        '(re-measure at c8c9337; dd3a28d log-format-only per lead)' \
-               % (tokens, st_det, forged_absent, fresh, head.split('\r\n')[0][:40],
+               % (tokens, st_det, det_note, forged_absent, forged_note, fresh,
+                  head.split('\r\n')[0][:40], len(head),
                   dash_step.get('logRows', '-'), dash_step.get('panelErrorIcons', '-'),
-                  explore_step.get('logRows', '-'), live_step.get('liveRows', '-'),
+                  explore_step.get('logRows', '-'), live_step.get('liveRows', '-'), clean_note,
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
     def u9(self):
@@ -2738,14 +2770,18 @@ class Gate(Phase4Gate):
             if svc in initial and svc in curr_cluster:
                 if initial[svc] != curr_cluster[svc]:
                     core_unchanged = False
-                    diff_core.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+                    diff_core.append('%s: id %s->%s started %s->%s'
+                                     % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12],
+                                        initial[svc][1][:19], curr_cluster[svc][1][:19]))
 
         # brokers unchanged
         for svc in initial:
             if 'broker' in svc and svc in curr_cluster:
                 if initial[svc] != curr_cluster[svc]:
                     core_unchanged = False
-                    diff_core.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+                    diff_core.append('%s: id %s->%s started %s->%s'
+                                     % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12],
+                                        initial[svc][1][:19], curr_cluster[svc][1][:19]))
 
         # 2. Realm.ini-content change recreates grafana only (log 162)
         # Change KEYCLOAK_SESSION_IDLE_MINUTES 15 -> 16
@@ -2792,9 +2828,11 @@ class Gate(Phase4Gate):
         ]
         status, tokens = aggregate(probes)
         return status, '%s; core cluster (brokers, kafka-ui, keycloak, keycloak-db) unchanged%s; ' \
-                       'realm.ini 15m->16m->15m recreated grafana only; proxy untouched; ' \
+                       'realm.ini 15m->16m->15m recreated grafana only (rc %d/%d/%d/%d, ' \
+                       'mid %s, after %s, ini %s/%s); proxy untouched; ' \
                        'walk: live4a 137,139,162,169' \
-               % (tokens, '' if core_unchanged else ' (diffs: %s)' % diff_core)
+               % (tokens, '' if core_unchanged else ' (diffs: %s)' % diff_core,
+                  rc1, rc2, rc3, rc4, recreated_16, recreated_15, ini_16, ini_15)
 
     def u24(self):
         # The plan's two-command form (gen-cert → monitor up) was MEASURED AND FAILED
