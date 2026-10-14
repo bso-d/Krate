@@ -82,9 +82,24 @@ if systemctl is-active -q firewalld 2>/dev/null; then
     echo "RESULT W3 FAIL cannot mirror the primary firewalld zone on $VH"; exit 1
   fi
 fi
-for _ in 1 2 3 4 5 6 7 8 9 10; do ip -6 -o addr show dev "$VH" scope link | grep -q tentative || break; sleep 0.5; done
-LL=$(ip -6 -o addr show dev "$VH" scope link | awk '{print $4}' | cut -d/ -f1 | head -1)
+LL=""; PEER_LL=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  host_addr=$(ip -6 -o addr show dev "$VH" scope link)
+  peer_addr=$(as_root ip -n "$NS" -6 -o addr show dev "$VN" scope link)
+  if [[ "$host_addr" == *" inet6 "* && "$peer_addr" == *" inet6 "* \
+        && "$host_addr" != *tentative* && "$peer_addr" != *tentative* \
+        && "$host_addr" != *dadfailed* && "$peer_addr" != *dadfailed* ]]; then
+    LL=$(printf '%s\n' "$host_addr" | awk '{print $4}' | cut -d/ -f1 | head -1)
+    PEER_LL=$(printf '%s\n' "$peer_addr" | awk '{print $4}' | cut -d/ -f1 | head -1)
+    break
+  fi
+  sleep 0.5
+done
 echo "probe: netns $NS $NA/$PFX via $VH $HA; primary $PIF $PADDR; host link-local ${LL:-none}"
+if [[ -z "$LL" || -z "$PEER_LL" ]]; then
+  echo "RESULT W3 FAIL IPv6 link-local address on both veth ends was not ready within 5 s"
+  exit 1
+fi
 probe() { # url [control destination IP] -> 0 answered, 1 refused/timeout, 2 other
   local out rc
   if [[ -n "${2:-}" ]]; then
