@@ -191,10 +191,14 @@ fi
 # ── candidate binding: a commit (git or --candidate) plus the digests of the files under test ──
 sha256file() { { shasum -a 256 "$1" 2>/dev/null || sha256sum "$1"; } | cut -c1-16; }
 BOUND=true
+CANDIDATE_DIRTY=false
+CANDIDATE_GIT_HEAD=""
 if git -C "$ED" rev-parse HEAD >/dev/null 2>&1; then
   CANDIDATE="$(git -C "$ED" rev-parse HEAD)"
+  CANDIDATE_GIT_HEAD="$CANDIDATE"
   TOPLEVEL="$(git -C "$ED" rev-parse --show-toplevel)"
   DIRTY="$(git -C "$TOPLEVEL" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"
+  [[ -z "$DIRTY" ]] || CANDIDATE_DIRTY=true
   [[ -z "$CANDIDATE_ARG" || "$CANDIDATE" == "$CANDIDATE_ARG"* ]] || { echo "--candidate $CANDIDATE_ARG differs from the checkout's HEAD $CANDIDATE" >&2; exit 2; }
 elif [[ -n "$CANDIDATE_ARG" ]]; then
   CANDIDATE="$CANDIDATE_ARG (stated; no git here, bound by the edition file digests)"
@@ -224,10 +228,36 @@ if [[ -n "$REPO_ARG" ]]; then
   [[ "$resolved" == "$repo_head" ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG ($resolved)" >&2; exit 2; }
   TOPLEVEL="$REPO_ARG"
   CANDIDATE="$resolved (stated as $CANDIDATE_ARG and resolved in --repo; edition files bound by digest; static block on that checkout)"
+  CANDIDATE_GIT_HEAD="$resolved"
   DIRTY="edition: unknown (no git); --repo: $(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"
+  [[ -z "$(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null)" ]] || CANDIDATE_DIRTY=true
 fi
 RUNNER_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo 'no git')"
-RUNNER_DIRTY="$(git -C "$REPO" status --porcelain --untracked-files=no -- scripts/gate-identity.sh scripts/gate 2>/dev/null | tr '\n' ';')"
+RUNNER_DIRTY="$(git -C "$REPO" status --porcelain --untracked-files=normal -- scripts/gate-identity.sh scripts/gate 2>/dev/null | tr '\n' ';')"
+RUNNER_BOUND=true
+if [[ "$RUNNER_COMMIT" == 'no git' ]]; then
+  # VM bundle-host runs export the gate beside the bundle. Bind every exported
+  # gate source file to the candidate checkout named by --repo.
+  # The documented reduced bundle run has no --repo: its receipt states the
+  # candidate SHA and source digests, but has no repository equality proof.
+  RUNNER_BOUND=true
+  if [[ -n "$REPO_ARG" ]] && cmp -s "$RUNNER" "$REPO_ARG/scripts/gate-identity.sh"; then
+    RUNNER_BOUND=true
+    while IFS= read -r -d '' gate_source; do
+      [[ -f "$GATE_DIR/${gate_source#scripts/gate/}" ]] &&
+        cmp -s "$GATE_DIR/${gate_source#scripts/gate/}" "$REPO_ARG/$gate_source" || RUNNER_BOUND=false
+    done < <(git -C "$REPO_ARG" ls-files -z -- scripts/gate)
+    while IFS= read -r -d '' gate_source; do
+      git -C "$REPO_ARG" ls-files --error-unmatch -- "scripts/gate/${gate_source#"$GATE_DIR"/}" >/dev/null 2>&1 || RUNNER_BOUND=false
+    done < <(find "$GATE_DIR" -type f \( -name '*.py' -o -name '*.mjs' -o -name '*.sh' \) -print0)
+  elif [[ -n "$REPO_ARG" ]]; then
+    RUNNER_BOUND=false
+  fi
+else
+  [[ "$RUNNER_COMMIT" == "${CANDIDATE%% *}" ]] || RUNNER_BOUND=false
+fi
+RUNNER_SHA_START="$(sha256file "$RUNNER")"
+RUNNER_GATE_SHA_START="$(find "$GATE_DIR" -type f \( -name '*.py' -o -name '*.mjs' -o -name '*.sh' \) | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 [[ -n "$OUT" ]] || OUT="$REPO/harness/gate-receipts/${EDITION}-${CANDIDATE:0:7}-${STAMP}"
@@ -244,6 +274,7 @@ declare -a SECRETS=()
 declare -a TEMP_SECRETS=()
 declare -a HOLDERS=()
 declare -A SEEN=()
+declare -A SEEN_RESULT=()
 PASSES=0; FAILS=0; NOTRUN=0
 CHILD=""
 FIXTURE_OWNED=false  # set by fixture_env: only then may teardown touch Compose projects, volumes and networks
@@ -316,8 +347,18 @@ section() { log ""; log "=== $* ==="; }
 record() { # id phase criterion result evidence
   local id="$1" phase="$2" crit="$3" result="$4" evidence="$5"
   evidence="${evidence//$'\t'/ }"; evidence="${evidence//$'\n'/ | }"
-  if [[ -n "${SEEN[$id]:-}" ]]; then log "BUG: duplicate record $id"; return; fi
+  if [[ -n "${SEEN[$id]:-}" ]]; then
+    log "BUG: duplicate record $id"
+    printf '%s\t%s\t%s\tFAIL\t%s\n' "${id}.audit" "$phase" "$crit" "duplicate result row for $id" >> "$RECEIPT"
+    FAILS=$((FAILS+1))
+    return
+  fi
+  case "$result" in
+    PASS|FAIL|NOT_RUN) ;;
+    *) evidence="invalid row result '${result//[^A-Za-z0-9_-]/?}'; $evidence"; result=FAIL ;;
+  esac
   SEEN[$id]=1
+  SEEN_RESULT[$id]="$result"
   printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$phase" "$crit" "$result" "$evidence" >> "$RECEIPT"
   case "$result" in PASS) PASSES=$((PASSES+1));; FAIL) FAILS=$((FAILS+1));; *) NOTRUN=$((NOTRUN+1));; esac
   log "[$result] $id ($crit): ${evidence:0:220}"
@@ -1057,9 +1098,12 @@ phase4_ingest() { # TSV slice regex: record the helper's rows; its `setup` line 
   local tsv="$1" slice="$2" regex="$3" id result evidence crit
   [[ -f "$tsv" ]] || return 0
   while IFS=$'\t' read -r id result evidence; do
-    if [[ "$id" == setup ]]; then log "[$result] $slice setup: ${evidence:0:220}"; continue; fi
+    if [[ "$id" == setup ]]; then
+      log "[$result] $slice setup: ${evidence:0:220}"
+      [[ "$result" == PASS ]] || record "${slice}-setup" "$slice" setup FAIL "helper setup result $result: $evidence"
+      continue
+    fi
     [[ "$id" =~ $regex ]] || continue
-    [[ -n "${SEEN[$id]:-}" ]] && continue
     crit="${id%%[0-9]*}"
     record "$id" "$slice" "$crit" "$result" "$evidence"
   done < "$tsv"
@@ -1862,9 +1906,10 @@ teardown() {
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" "${MON_PROJECT}_perses" >/dev/null 2>&1 || true
   local n; for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-|^${PROJECT}-gate4-"); do docker network rm "$n" >/dev/null 2>&1; done
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done
-  # Phase 4 helper containers carry the krate.gate=phase4 label (the name filter above
-  # is the backstop for helpers that name them differently).
-  for n in $(docker ps -aq --filter "label=krate.gate=phase4"); do docker rm -f "$n" >/dev/null 2>&1; done
+  # A helper label alone is not ownership: restrict removal to this fixture's
+  # Compose project. The name-filtered removal above covers independent helpers.
+  for n in $(docker ps -aq --filter "label=krate.gate=phase4" \
+      --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
   local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
@@ -1874,11 +1919,23 @@ finish() {
   local verdict=PASS missing=() id notrun_required=0
   while IFS= read -r id; do
     [[ -n "${SEEN[$id]:-}" ]] || { missing+=("$id"); continue; }
-    grep -q -E "^${id}	.*	NOT_RUN	" "$RECEIPT" && notrun_required=$((notrun_required+1))
+    [[ "${SEEN_RESULT[$id]:-}" == NOT_RUN ]] && notrun_required=$((notrun_required+1))
   done < <(required_ids)
   (( FAILS == 0 )) || verdict=FAIL
   if (( notrun_required > 0 || ${#missing[@]} > 0 )) && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
   if ! $BOUND && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
+  # A receipt is tied to a committed candidate and runner. Tracked edits made
+  # during a long run also invalidate that binding, even if every row passes.
+  if $CANDIDATE_DIRTY || ! $RUNNER_BOUND || [[ -n "$RUNNER_DIRTY" ]] ||
+      [[ -n "$(git -C "$TOPLEVEL" status --porcelain --untracked-files=no 2>/dev/null)" ]] ||
+      [[ -n "$(git -C "$REPO" status --porcelain --untracked-files=normal -- scripts/gate-identity.sh scripts/gate 2>/dev/null)" ]] ||
+      { [[ -n "$CANDIDATE_GIT_HEAD" ]] && [[ "$(git -C "$TOPLEVEL" rev-parse HEAD 2>/dev/null || true)" != "$CANDIDATE_GIT_HEAD" ]]; } ||
+      { [[ "$RUNNER_COMMIT" != 'no git' ]] && [[ "$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)" != "$RUNNER_COMMIT" ]]; } ||
+      [[ "$(sha256file "$RUNNER")" != "$RUNNER_SHA_START" ]] ||
+      [[ "$(find "$GATE_DIR" -type f \( -name '*.py' -o -name '*.mjs' -o -name '*.sh' \) | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)" != "$RUNNER_GATE_SHA_START" ]]; then
+    log "candidate or runner source is dirty or differs from the candidate"
+    [[ "$verdict" == PASS ]] && verdict=INCOMPLETE
+  fi
   # Redact and publish: the secret values go to python through the 0600 list, never through a
   # shell expression; the raw log stays (0600) when the redacted copy could not be written.
   if python3 -I - "$RAW" "$OUT/run.log" "$RECEIPT" "$OUT/screenshots/manifest.json" "$SECRETS_FILE" <<'PYEOF'
