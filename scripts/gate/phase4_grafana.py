@@ -290,9 +290,6 @@ class Gate(Phase4Gate):
         self.cluster_initial = {}
 
     # ── fixture accessors ──
-    def mon_dir(self):
-        return os.path.join(os.path.dirname(os.path.normpath(self.edition)), 'monitoring')
-
     def grafana_loopback(self):
         return 'http://127.0.0.1:%s' % (self.monitor_env.get('GRAFANA_PORT') or '3000')
 

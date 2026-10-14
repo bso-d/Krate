@@ -157,6 +157,8 @@ KRATE="$ED/krate"
 ENVF="$ED/.env"
 JOURNAL="$ED/auth/identity-journal.log"
 TLS="$ED/auth/keycloak/db-tls"
+MON_DIR="$ED/monitoring"
+[[ -d "$MON_DIR" ]] || MON_DIR="$(cd "$ED/.." && pwd)/monitoring"
 MON_PROJECT="krate-${EDITION}-monitoring"
 CLASH_NET="${PROJECT}-gate-clash"
 # The public authority of the fixture: localhost for Phases 1-3, --public-host for
@@ -185,6 +187,10 @@ curl() { command curl "${CURL_RESOLVE[@]}" "$@"; }
 if [[ -d "$ED/sso" ]]; then SSO="$ED/sso"; elif [[ -d "$ED/../sso" ]]; then SSO="$(cd "$ED/../sso" && pwd)"; else echo "no sso/ beside $ED" >&2; exit 2; fi
 if [[ -e "$ENVF" ]] && ! $WIPE; then
   echo "$ENVF exists; this runner destroys the fixture it is pointed at. Pass --wipe for a disposable checkout." >&2
+  exit 2
+fi
+if [[ -e "$MON_DIR/.env" || -L "$MON_DIR/.env" ]]; then
+  echo "$MON_DIR/.env exists; this gate requires an empty monitoring fixture before it can own or remove that file." >&2
   exit 2
 fi
 
@@ -264,7 +270,8 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RAW="$OUT/.raw.log"; RECEIPT="$OUT/receipt.tsv"; STATE="$OUT/.state"; SECRETS_FILE="$STATE/secrets.txt"
 STUB="$GATE_DIR/stub_idp.sh"; STUB_DIR="$STATE/stub"  # the stand-in IdP's secrets and certificate live under the receipt's state directory
 open_receipt() { # the receipt folder exists only once the host accepted the run (a refused run leaves nothing behind)
-  if ! { mkdir -p "$OUT" "$OUT/screenshots" && chmod 700 "$OUT"; }; then echo "cannot create $OUT" >&2; exit 2; fi
+  if [[ -e "$OUT" || -L "$OUT" ]]; then echo "$OUT already exists; choose a fresh receipt directory" >&2; exit 2; fi
+  if ! { mkdir -p "$(dirname "$OUT")" && mkdir "$OUT" && mkdir "$OUT/screenshots" && chmod 700 "$OUT"; }; then echo "cannot create $OUT" >&2; exit 2; fi
   : > "$RAW"; chmod 600 "$RAW" || exit 2
   printf 'id\tphase\tcriterion\tresult\tevidence\n' > "$RECEIPT"
   mkdir -p "$STATE" && chmod 700 "$STATE" || exit 2
@@ -279,6 +286,7 @@ declare -A SEEN_RESULT=()
 PASSES=0; FAILS=0; NOTRUN=0
 CHILD=""
 FIXTURE_OWNED=false  # set by fixture_env: only then may teardown touch Compose projects, volumes and networks
+W2_BACKUP_OWNED=false  # set only after this run atomically saves the original Prometheus config
 J7_REQUIRED=false
 
 # ── required inventory (declared before anything runs; a missing row fails the gate) ──
@@ -395,7 +403,7 @@ add_secret() { # VALUE [temp]: a value redacted from every published file and se
 }
 collect_secrets() { # every password/secret/key of the fixture .env files
   local file key value
-  for file in "$ENVF" "$ED/monitoring/.env"; do
+  for file in "$ENVF" "$MON_DIR/.env"; do
     [[ -f "$file" ]] || continue
     while IFS='=' read -r key value; do
       [[ "$key" =~ (PASSWORD|SECRET|PASSPHRASE|_KEY)$ ]] || continue
@@ -492,7 +500,7 @@ fixture_reset() {
   local n; for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
-  rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
+  rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
 }
 fixture_env() {
   FIXTURE_OWNED=true
@@ -1608,10 +1616,25 @@ phase4_row_w2() {
     valid_reload_ok=1
   fi
 
-  local cfg_file="$ED/monitoring/prometheus/prometheus.yml"
+  local cfg_file="$MON_DIR/prometheus/prometheus.yml"
   local cfg_bak="$STATE/prometheus.yml.bak"
-  cp "$cfg_file" "$cfg_bak"
-  printf '\ninvalid_yaml: [unclosed\n' >> "$cfg_file"
+  local cfg_tmp="$STATE/prometheus.yml.bak.tmp"
+  if ! cp "$cfg_file" "$cfg_tmp"; then
+    rm -f "$cfg_tmp"
+    record W2 "$slice" W FAIL "could not back up the Prometheus configuration before the invalid-reload probe"
+    return
+  fi
+  if ! mv "$cfg_tmp" "$cfg_bak"; then
+    rm -f "$cfg_tmp"
+    record W2 "$slice" W FAIL "could not finalize the Prometheus configuration backup"
+    return
+  fi
+  W2_BACKUP_OWNED=true
+  if ! printf '\ninvalid_yaml: [unclosed\n' >> "$cfg_file"; then
+    restore_prometheus_config || true
+    record W2 "$slice" W FAIL "could not write the temporary invalid Prometheus configuration"
+    return
+  fi
 
   local rc_invalid
   "$KRATE" monitor reload >/dev/null 2>&1; rc_invalid=$?
@@ -1620,7 +1643,7 @@ phase4_row_w2() {
   reload_success_metric="$(curl -s "$prom_url/metrics" 2>/dev/null | grep -E '^prometheus_config_last_reload_successful' | awk '{print $2}' || echo 1)"
   ans_health="$(curl -sk -o /dev/null -w '%{http_code}' "$prom_url/-/healthy" 2>/dev/null || echo 0)"
 
-  cp "$cfg_bak" "$cfg_file"; rm -f "$cfg_bak"
+  restore_prometheus_config || return
   "$KRATE" monitor reload >/dev/null 2>&1 || true
 
   local invalid_reload_ok=0
@@ -1692,7 +1715,7 @@ phase4_row_w3() {
 phase4_row_w4() {
   local slice="$1"
   section "W4: 5-source reachability census equal to Table 2 of monitoring/README.md"
-  local readme_file="$TOPLEVEL/monitoring/README.md"
+  local readme_file="$MON_DIR/README.md"
   if [[ ! -f "$readme_file" ]]; then
     phase4_stub W4 "$slice" W "precondition: missing monitoring/README.md"
     return
@@ -1953,6 +1976,23 @@ leak_scan() {
   rm -f "$raw_without_display" "$one"
   [[ $hits -eq 0 ]]; st=$?; ok_if "$1" "$2" Z "$st" "${#SECRETS[@]} distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, ${#TEMP_SECRETS[@]} temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: $hits hits"
 }
+restore_prometheus_config() {
+  local backup="$STATE/prometheus.yml.bak"
+  rm -f "$STATE/prometheus.yml.bak.tmp"
+  $W2_BACKUP_OWNED || return 0
+  if [[ ! -f "$backup" ]]; then
+    record W2-restore "$PHASE" W FAIL "the gate-owned Prometheus configuration backup is missing"
+    return 1
+  fi
+  if cp "$backup" "$MON_DIR/prometheus/prometheus.yml"; then
+    rm -f "$backup"
+    W2_BACKUP_OWNED=false
+    log "W2 Prometheus configuration restored"
+  else
+    record W2-restore "$PHASE" W FAIL "could not restore the Prometheus configuration from the gate backup"
+    return 1
+  fi
+}
 teardown() {
   section "teardown"
   [[ -z "$CHILD" ]] || { kill "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; CHILD=""; }
@@ -1963,6 +2003,7 @@ teardown() {
   done
   PHASE4_CHILDREN=()
   local h; for h in "${HOLDERS[@]}"; do kill "$h" 2>/dev/null; done
+  restore_prometheus_config || true
   if ! $FIXTURE_OWNED; then log "no fixture was created; nothing to tear down"; return; fi
   if $KEEP; then log "--keep: fixture left running (project $PROJECT)"; return; fi
   "$KRATE" monitor down >/dev/null 2>&1 || true
@@ -1978,7 +2019,7 @@ teardown() {
   for n in $(docker ps -aq --filter "label=krate.gate=phase4" \
       --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
-  rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
+  rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
   local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
   log "fixture resources left: $left"
 }

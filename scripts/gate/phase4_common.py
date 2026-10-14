@@ -234,7 +234,11 @@ class Phase4Gate(p2.Gate):
 
     # ── monitoring side ──
     def mon_dir(self):
-        return os.path.join(os.path.dirname(os.path.normpath(self.edition)), 'monitoring')
+        edition = os.path.normpath(self.edition)
+        bundled = os.path.join(edition, 'monitoring')
+        if os.path.isdir(bundled):
+            return bundled
+        return os.path.join(os.path.dirname(edition), 'monitoring')
 
     def mon_env_value(self, key):
         return p2.read_env(os.path.join(self.mon_dir(), '.env')).get(key, '')

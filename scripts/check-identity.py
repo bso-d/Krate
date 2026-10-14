@@ -679,6 +679,72 @@ def check_gate_scripts(checks):
       'phase3_broker.Gate.main must call self.cleanup() in its finally block')
 
 
+def check_phase4_monitor_paths(checks):
+    """The Phase IV gate must find monitoring in both source and offline bundle layouts."""
+    from unittest.mock import patch
+    import ssl
+
+    e = lambda cond, msg: checks.expect(cond, 'phase4 monitoring path: ' + msg)  # noqa: E731
+    sys.path.insert(0, str(ROOT / 'scripts/gate'))
+    grafana = __import__('phase4_grafana')
+    perses = __import__('phase4_perses')
+    phase2 = __import__('phase2_kafbat')
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text()
+    start = runner.index('MON_DIR="$ED/monitoring"')
+    stop = runner.index('MON_PROJECT=', start)
+    select_shell = runner[start:stop]
+
+    def check_case(edition, expected):
+        for module in (grafana, perses):
+            gate = object.__new__(module.Gate)
+            gate.edition = str(edition)
+            e(gate.mon_dir() == str(expected),
+              f'{module.__name__} selected {gate.mon_dir()} for {edition}; expected {expected}')
+        script = 'ED="$1"\n' + select_shell + '\nprintf "%s" "$MON_DIR"\n'
+        selected = subprocess.run(['bash', '-euc', script, 'bash', str(edition)],
+                                  text=True, capture_output=True)
+        e(selected.returncode == 0 and selected.stdout == str(expected),
+          f'gate-identity selected {selected.stdout!r} for {edition}; expected {expected}; {selected.stderr}')
+
+    for edition in EDITIONS:
+        check_case(ROOT / edition, ROOT / 'monitoring')
+
+    fixture_root = ROOT / 'harness' / 'phase4' / 'path-contract'
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=fixture_root) as tmp:
+        base = Path(tmp)
+        for edition in EDITIONS:
+            installed = base / edition
+            nested = installed / 'monitoring'
+            nested.mkdir(parents=True)
+            check_case(installed, nested)
+        sibling = base / 'monitoring'
+        sibling.mkdir()
+        check_case(base / 'epc', base / 'epc' / 'monitoring')  # bundled path wins when both exist
+
+        link_edition = base / 'linked-epc'
+        link_edition.mkdir()
+        os.symlink(sibling, link_edition / 'monitoring')
+        check_case(link_edition, link_edition / 'monitoring')  # Bash -d follows symlinks
+
+        missing_edition = base / 'missing-epc'
+        missing_edition.mkdir()
+        (missing_edition / 'monitoring').write_text('not a directory')
+        expected = base / 'monitoring'
+        check_case(missing_edition, expected)
+        e(not (expected / '.env').is_file(), 'missing monitoring/.env fixture must have no false positive')
+        for module in (grafana, perses):
+            gate = object.__new__(module.Gate)
+            gate.edition = str(missing_edition)
+            gate.project = 'path-contract'
+            gate.tls_mode = 'pinned fixture certificate certs/server.crt'
+            gate.tls = ssl.create_default_context()
+            with patch.object(phase2.Gate, 'preflight', return_value=None):
+                reason = gate.preflight()
+            e(reason is not None and 'monitoring/.env is missing' in reason,
+              f'{module.__name__} must refuse a missing monitoring/.env: {reason}')
+
+
 def check_parity(checks):
     result = subprocess.run(['diff', '-U0', str(ROOT / 'kraft/krate'), str(ROOT / 'epc/krate')], text=True, capture_output=True)
     hunks = re.split(r'^(?=@@ )', result.stdout, flags=re.MULTILINE)[1:]
@@ -4475,7 +4541,8 @@ def main():
                   check_grafana_realm_cli, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_phase4_monitor_paths,
+                  check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
                   check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip, check_public_cert_permissions,
