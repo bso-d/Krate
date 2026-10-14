@@ -435,7 +435,7 @@ services:
       - --cluster.listen-address=
       - --web.listen-address=:9093
     environment:
-      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+      KRATE_ALERTMANAGER_REVISION: ${KRATE_ALERTMANAGER_REVISION:-}
     volumes:
       - alertmanager_rendered:/etc/alertmanager/rendered:ro
       - alertmanager_data:/alertmanager

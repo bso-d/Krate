@@ -3198,6 +3198,26 @@ render_revision() {
   } | cksum | cut -d' ' -f1
 }
 
+# Alertmanager reads only its rendered SMTP/route file. Keep its Compose revision
+# independent of Perses mode, clients and gateway certificates so an SSO switch
+# does not restart alert delivery or the Alertmanager data process.
+alertmanager_revision() {
+  local env_file="$MONITOR_DIR/.env" key val
+  local keys=(
+    ALERT_EMAIL_TO ALERTMANAGER_EMAIL_ENABLED ALERTMANAGER_SMTP_REQUIRE_TLS
+    GF_SMTP_ENABLED GF_SMTP_FROM_ADDRESS GF_SMTP_FROM_NAME GF_SMTP_HOST
+    GF_SMTP_PASSWORD GF_SMTP_SKIP_VERIFY GF_SMTP_USER
+  )
+  {
+    for key in "${keys[@]}"; do
+      val="$(env_value_file "$env_file" "$key")"
+      [[ -n "$val" ]] || val="$(env_value "$key")"
+      printf '%s=%s\n' "$key" "$val"
+    done
+    cat "$MONITOR_DIR/render.py"
+  } | cksum | cut -d' ' -f1
+}
+
 # The docker network the brokers are attached to, read from the running
 # broker container (container_name is fixed per edition). Only a broker is
 # asked: the proxy and Kafbat also sit on the identity network, which sorts
@@ -3261,8 +3281,9 @@ This bundle was built without the observability stack."
 
   # Recreate the rendered-config consumers whenever their inputs change, including a
   # renewed gateway certificate — but only for the inputs they actually read.
-  local revision
+  local revision alert_revision
   revision="$(render_revision)"
+  alert_revision="$(alertmanager_revision)"
 
   # Which monitoring UIs sign people in through the Krate realm: Grafana with
   # GRAFANA_AUTH_CONFIG=realm.ini, Perses with PERSES_IDP=krate.
@@ -3289,6 +3310,7 @@ This bundle was built without the observability stack."
   fi
 
   KRATE_RENDER_REVISION="$revision" \
+  KRATE_ALERTMANAGER_REVISION="$alert_revision" \
   COMPOSE_PROFILES="$profiles" \
   PERSES_CERTS_DIR="$CERTS_DIR" \
   KAFKA_EXPECTED_BROKERS="${expected:-1}" \
