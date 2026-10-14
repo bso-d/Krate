@@ -65,15 +65,24 @@ def remove_stale_users(data, issuer):
     users = data / 'users'
     if not users.is_dir():
         return 0
-    removed = 0
+    # Classify every user before deleting any: an unreadable file must fail
+    # the migration before the marker advances, so a later run re-inspects it
+    # instead of taking the marker fast path past a stale-issuer user.
+    classified = []
+    unreadable = []
     for path in sorted(users.glob('*.json')):
         try:
             document = json.loads(path.read_text())
         except (OSError, ValueError) as exc:
-            # Leave an unreadable file for Perses to report; do not guess.
-            print('perses-migrate: kept unreadable %s: %s' % (path.name, exc), file=sys.stderr)
+            unreadable.append('%s: %s' % (path.name, exc))
             continue
-        if is_stale_user(document, issuer):
+        classified.append((path, is_stale_user(document, issuer)))
+    if unreadable:
+        raise ValueError('unreadable user file(s), migration not advanced: %s'
+                         % '; '.join(unreadable))
+    removed = 0
+    for path, stale in classified:
+        if stale:
             path.unlink()
             removed += 1
     return removed

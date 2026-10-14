@@ -678,6 +678,29 @@ def check_gate_scripts(checks):
     e('self.cleanup()' in (ROOT / 'scripts/gate/phase3_broker.py').read_text().split('def main(self):', 1)[1].split('def finish', 1)[0],
       'phase3_broker.Gate.main must call self.cleanup() in its finally block')
 
+    # Screenshot manifests are published evidence: a verbatim page.url() would
+    # persist OAuth code/state/nonce query values (PR #42 review, 2026-10-14).
+    for name in ('screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs'):
+        story = (ROOT / 'scripts/gate' / name).read_text()
+        e('url: page.url()' not in story and 'url: publicUrl(page.url())' in story,
+          f'{name} must record only the public origin+path of each shot in its manifest')
+    browser = (ROOT / 'scripts/gate/phase4-browser.mjs').read_text()
+    e(browser.count("page.url().replace(BASE, '')") ==
+      browser.count("page.url().replace(BASE, '').split(/[?#]/)[0]"),
+      'phase4-browser.mjs must strip query and fragment from every recorded page URL')
+    # Every recorded .url() in every gate story — manifest fields, asserted
+    # strings and step records alike — must be stripped of query and fragment
+    # before it can reach a manifest or summary file.
+    for story_path in sorted((ROOT / 'scripts/gate').glob('*.mjs')):
+        story = story_path.read_text()
+        for match in re.finditer(r'\.url\(\)', story):
+            tail = story[match.end():match.end() + 80]
+            head = story[max(0, match.start() - 40):match.start()]
+            ok = (re.search(r'publicUrl\(\w+$', head) is not None or tail.startswith('.split(/[?#]/)')
+                  or tail.startswith('.includes(') or tail.startswith('.startsWith(')
+                  or (tail.startswith('.replace(') and '.split(/[?#]/)' in tail[:70]))
+            e(ok, f'{story_path.name} records a verbatim .url() near: ...{story[max(0, match.start() - 40):match.end() + 40]!r}')
+
 
 def check_phase4_monitor_paths(checks):
     """The Phase IV gate must find monitoring in both source and offline bundle layouts."""
@@ -4619,6 +4642,26 @@ def check_migrate_issuer(checks):
           f'migrate_issuer run 2 output unexpected: {res2.stdout}')
         census2 = sorted(p.name for p in data_dir.rglob('*') if p.is_file())
         e(census1 == census2, f'migrate_issuer: second run must not alter any file; census changed from {census1} to {census2}')
+
+        # An unreadable user file must fail the migration before the marker
+        # advances and before any stale user is removed, so a repaired file
+        # is re-inspected on the next run instead of being skipped forever.
+        (users_dir / 'broken-user.json').write_text('{not json')
+        (users_dir / 'stale-user.json').write_text(json.dumps({
+            'spec': {'oauthProviders': [{'issuer': 'https://old.invalid/realms/krate'}]}
+        }))
+        marker.unlink()
+        res3 = subprocess.run([sys.executable, '-I', str(script), '--data-dir', str(data_dir), '--issuer-file', str(issuer_file)],
+                              capture_output=True, text=True)
+        e(res3.returncode != 0 and 'migration not advanced' in res3.stderr,
+          f'migrate_issuer must fail before advancing the marker on an unreadable user; got rc={res3.returncode}: {res3.stdout} {res3.stderr}')
+        e(not marker.exists() and (users_dir / 'stale-user.json').exists(),
+          'migrate_issuer must neither write the marker nor remove stale users when a user is unreadable')
+        (users_dir / 'broken-user.json').write_text(json.dumps({'spec': {}}))
+        res4 = subprocess.run([sys.executable, '-I', str(script), '--data-dir', str(data_dir), '--issuer-file', str(issuer_file)],
+                              capture_output=True, text=True)
+        e(res4.returncode == 0 and not (users_dir / 'stale-user.json').exists() and marker.exists(),
+          f'migrate_issuer must complete once the unreadable user is repaired; got rc={res4.returncode}: {res4.stdout} {res4.stderr}')
 
 
 def check_monitoring_tables(checks):

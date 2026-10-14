@@ -47,13 +47,17 @@ function totp(secretBytes, t = Date.now() / 1000) {
   return String((d.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0');
 }
 
+// Manifests and step records are published evidence: keep only origin+path,
+// never the query or fragment (authorization codes, state and nonce are
+// transient credentials, not evidence).
+function publicUrl(u) { try { const x = new URL(u); return x.origin + x.pathname; } catch { return String(u).split(/[?#]/)[0]; } }
 let n = 0;
 const manifest = [];
 async function shot(page, slug, caption) {
   n += 1;
   const file = `${String(n).padStart(2, '0')}-${slug}.png`;
   await page.screenshot({ path: `${OUT}/${file}`, fullPage: false });
-  manifest.push({ file, caption, url: page.url(), asserted: asserted.splice(0) });
+  manifest.push({ file, caption, url: publicUrl(page.url()), asserted: asserted.splice(0) });
   console.log(`${file}\t${caption}`);
 }
 

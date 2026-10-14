@@ -77,6 +77,10 @@ function totp(secretB32, t = Date.now() / 1000) {
   return String((d.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0');
 }
 
+// Manifests and step records are published evidence: keep only origin+path,
+// never the query or fragment (authorization codes, state and nonce are
+// transient credentials, not evidence).
+function publicUrl(u) { try { const x = new URL(u); return x.origin + x.pathname; } catch { return String(u).split(/[?#]/)[0]; } }
 let n = 0;
 const manifest = [];
 async function capture(page, slug, caption) {
@@ -86,7 +90,7 @@ async function capture(page, slug, caption) {
   const bytes = readFileSync(`${OUT}/${file}`);
   manifest.push({
     file, sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length,
-    caption, url: page.url(), asserted: asserted.splice(0),
+    caption, url: publicUrl(page.url()), asserted: asserted.splice(0),
   });
   console.log(`${file}\t${caption}`);
 }
@@ -151,7 +155,7 @@ try {
   // ── shot 2: the Keycloak password form of realm krate ──
   await provider.first().click();
   await page.waitForSelector('#kc-form-login', { timeout: 30000 });
-  assert(page.url().includes('/identity/realms/krate/'), `the authorize redirect reached the realm krate (${page.url().split('?')[0]})`);
+  assert(page.url().includes('/identity/realms/krate/'), `the authorize redirect reached the realm krate (${page.url().split(/[?#]/)[0]})`);
   assert((await page.locator('#username').count()) === 1 && (await page.locator('#password').count()) === 1, 'the Keycloak password form is shown');
   await shot(page, 'keycloak-password-form', 'The Krate realm asks for the password (single sign-in authority for Grafana)');
 
@@ -161,7 +165,7 @@ try {
   await page.waitForLoadState('networkidle');
   await page.goto(DASHBOARD, { waitUntil: 'networkidle' });
   await page.waitForTimeout(5000);
-  assert(page.url().startsWith(DASHBOARD), `the Viewer landed on the provisioned overview dashboard (${page.url()})`);
+  assert(page.url().startsWith(DASHBOARD), `the Viewer landed on the provisioned overview dashboard (${page.url().split(/[?#]/)[0]})`);
   // NEEDS-LIVE-VERIFICATION: the exact absence selectors for the Viewer (Grafana 12.2
   // toolbar). Candidates to confirm in the walk: [aria-label="Edit dashboard"], the
   // header "Edit" button, and any "New"/add-panel control.
@@ -175,7 +179,7 @@ try {
   // ── shot 4: the Admin on the same dashboard with "Edit" ──
   const adminPage = await signedInDashboard(ctx, ADMIN, ADMIN_PW, ADMIN_TOTP);
   page = adminPage;
-  assert(adminPage.url().startsWith(DASHBOARD), `the Admin landed on the same dashboard (${adminPage.url()})`);
+  assert(adminPage.url().startsWith(DASHBOARD), `the Admin landed on the same dashboard (${adminPage.url().split(/[?#]/)[0]})`);
   // NEEDS-LIVE-VERIFICATION: the exact presence selector for the Admin's "Edit"
   // control on Grafana 12.2 (same candidates as above, positive).
   assert((await adminPage.locator('[aria-label="Edit dashboard"]').count()

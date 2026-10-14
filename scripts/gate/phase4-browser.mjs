@@ -68,15 +68,15 @@ const browser = await chromium.launch({ args: resolveTo ? [`--host-resolver-rule
 const context = await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
 const page = await context.newPage();
 page.on('console', m => {
-  const e = { type: m.type(), text: m.text().slice(0, 300), url: page.url().replace(BASE, '') };
+  const e = { type: m.type(), text: m.text().slice(0, 300), url: page.url().replace(BASE, '').split(/[?#]/)[0] };
   if (/Content Security Policy|Refused to/i.test(m.text())) result.csp.push(e);
   if (m.type() === 'error' || m.type() === 'warning') result.console.push(e);
 });
-page.on('pageerror', e => result.pageErrors.push({ text: String(e).slice(0, 300), url: page.url().replace(BASE, '') }));
-page.on('requestfailed', r => result.failed.push({ url: r.url().replace(BASE, '').split('?')[0], err: r.failure()?.errorText }));
-page.on('response', r => { if (r.status() >= 400 && r.url().startsWith(BASE)) result.http4xx5xx.push({ s: r.status(), m: r.request().method(), url: r.url().replace(BASE, '').split('?')[0] }); });
+page.on('pageerror', e => result.pageErrors.push({ text: String(e).slice(0, 300), url: page.url().replace(BASE, '').split(/[?#]/)[0] }));
+page.on('requestfailed', r => result.failed.push({ url: r.url().replace(BASE, '').split(/[?#]/)[0], err: r.failure()?.errorText }));
+page.on('response', r => { if (r.status() >= 400 && r.url().startsWith(BASE)) result.http4xx5xx.push({ s: r.status(), m: r.request().method(), url: r.url().replace(BASE, '').split(/[?#]/)[0] }); });
 page.on('websocket', ws => {
-  const w = { url: ws.url().replace(BASE.replace('https', 'wss'), ''), framesIn: 0, framesOut: 0, error: null };
+  const w = { url: ws.url().replace(BASE.replace('https', 'wss'), '').split(/[?#]/)[0], framesIn: 0, framesOut: 0, error: null };
   result.websockets.push(w);
   ws.on('framereceived', () => { w.framesIn += 1; });
   ws.on('framesent', () => { w.framesOut += 1; });
@@ -93,12 +93,12 @@ try {
   await page.waitForURL(u => u.toString().startsWith(`${G}/`) && !u.toString().includes('/login'), { timeout: 30000 });
   await page.waitForLoadState('networkidle');
   await page.waitForTimeout(4000);
-  step('home loaded', { url: page.url().replace(BASE, ''), shot: await shot(page, 'home') });
+  step('home loaded', { url: page.url().replace(BASE, '').split(/[?#]/)[0], shot: await shot(page, 'home') });
 
   await page.goto(`${G}/d/${DASH}`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(7000);
   step('dashboard loaded', {
-    dash: DASH, url: page.url().replace(BASE, ''),
+    dash: DASH, url: page.url().replace(BASE, '').split(/[?#]/)[0],
     panelErrorIcons: await page.locator('[data-testid*="Panel status error"], [data-testid*="panel status error"]').count(),
     logRows: await page.locator('[class*="logs-row"], [data-testid*="logRows"] tr, table tr').count(),
     shot: await shot(page, 'dashboard') });
@@ -107,7 +107,7 @@ try {
   await page.goto(`${G}/explore?schemaVersion=1&panes=${encodeURIComponent(JSON.stringify(panes))}&orgId=1`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(6000);
   step('explore loki loaded', {
-    url: page.url().replace(BASE, ''),
+    url: page.url().replace(BASE, '').split(/[?#]/)[0],
     logRows: await page.locator('[class*="logs-row"], [data-testid*="logRows"] tr, table tr').count(),
     shot: await shot(page, 'explore') });
   await page.getByRole('button', { name: /^Live$/ }).first().click();

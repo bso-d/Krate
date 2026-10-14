@@ -93,6 +93,10 @@ function totp(secretB32, t = Date.now() / 1000) {
   return String((d.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0');
 }
 
+// Manifests and step records are published evidence: keep only origin+path,
+// never the query or fragment (authorization codes, state and nonce are
+// transient credentials, not evidence).
+function publicUrl(u) { try { const x = new URL(u); return x.origin + x.pathname; } catch { return String(u).split(/[?#]/)[0]; } }
 let n = 0;
 const manifest = [];
 async function capture(page, slug, caption) {
@@ -102,7 +106,7 @@ async function capture(page, slug, caption) {
   const bytes = readFileSync(`${OUT}/${file}`);
   manifest.push({
     file, sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length,
-    caption, url: page.url(), asserted: asserted.splice(0),
+    caption, url: publicUrl(page.url()), asserted: asserted.splice(0),
   });
   console.log(`${file}\t${caption}`);
 }
@@ -132,7 +136,7 @@ async function openPersesAtKeycloak(page) {
   await page.goto(`${PBASE}/`, { waitUntil: 'networkidle' });
   await page.waitForSelector('#kc-form-login', { timeout: 30000 });
   assert(page.url().includes('/identity/realms/krate/protocol/openid-connect/auth'),
-    `the Perses URL reached the Keycloak authorization endpoint of realm krate (${page.url().split('?')[0]})`);
+    `the Perses URL reached the Keycloak authorization endpoint of realm krate (${page.url().split(/[?#]/)[0]})`);
   assert((await page.locator('#username').count()) === 1 && (await page.locator('#password').count()) === 1,
     'the Keycloak password form is shown');
 }
@@ -149,7 +153,7 @@ async function persesSignIn(page) {
     await page.waitForLoadState('networkidle');
   }
   assert(!page.url().includes('/sign-in') && !page.url().includes('/identity/'),
-    `signed in to Perses (${page.url()})`);
+    `signed in to Perses (${page.url().split(/[?#]/)[0]})`);
 }
 
 async function keycloakLogin(page, user, password, totpB32) {
@@ -180,7 +184,7 @@ try {
   const projectLink = page.getByRole('link', { name: /krate/i }).first();
   if (await projectLink.count()) await projectLink.click();
   await page.waitForLoadState('networkidle');
-  assert(page.url().includes('/projects/'), `the Viewer reached a project page (${page.url()})`);
+  assert(page.url().includes('/projects/'), `the Viewer reached a project page (${page.url().split(/[?#]/)[0]})`);
   // NEEDS-LIVE-VERIFICATION: the exact absence selectors for the Viewer (Perses
   // v0.54.0): no "Add Project"/create button, no dashboard edit (pencil) control.
   assert((await page.getByRole('button', { name: /(add|create) project/i }).count()) === 0, 'the Viewer sees no "Create Project" control');
@@ -243,7 +247,7 @@ try {
   // NEEDS-LIVE-VERIFICATION: the refusal page's exact content (oauth2-proxy's 403
   // answer at the callback); lab2 proved the refusal and the absent cookie by HTTP.
   assert(page.url().includes('/oauth2/callback') || /forbidden|403|access denied/i.test(await page.textContent('body')),
-    `the no-group user is refused at the gateway callback (${page.url().split('?')[0]})`);
+    `the no-group user is refused at the gateway callback (${page.url().split(/[?#]/)[0]})`);
   const cookies = (await ctx.cookies()).map((c) => c.name);
   assert(!cookies.includes('jwtPayload') && !cookies.includes('jwtRefreshToken'),
     `no Perses session cookie was set (cookies: ${cookies.join(', ') || 'none'})`);
