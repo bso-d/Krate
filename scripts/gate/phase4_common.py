@@ -437,7 +437,29 @@ class Phase4Gate(p2.Gate):
         return []
 
     # ── driver ──
+    def prepare_only(self):
+        """Prepare a shared companion fixture before either timed worker starts."""
+        try:
+            try:
+                problem = self.preflight()
+                if problem is None:
+                    problem = self.setup()
+            except Exception as error:
+                problem = 'preparation raised %s: %s' % (type(error).__name__, str(error)[:200])
+            status = 'FAIL' if problem else 'PASS'
+            print('setup\t%s\t%s' % (status, evidence(problem or 'shared fixture prepared')),
+                  flush=True)
+            return 0 if problem is None else 1
+        finally:
+            self.cleanup()
+            if self.kc:
+                self.kc.close()
+            if self._master:
+                self._master.close()
+
     def main(self):
+        if self.args.prepare_only:
+            return self.prepare_only()
         try:
             problem = self.preflight()
             if problem is not None:
@@ -519,6 +541,12 @@ def build_parser(prog, doc, extra=None):
     run.add_argument('--project', default='',
                      help='cluster Compose project (default: KRATE_PROJECT from the edition .env)')
     run.add_argument('--only', type=only_list, help='comma-separated row ids, e.g. U1,U2 (others print NOT_RUN)')
+    run.add_argument('--prepare-only', action='store_true',
+                     help='prepare the shared companion fixture without running rows')
+    run.add_argument('--prepared', action='store_true',
+                     help='run selected timed rows against an already prepared fixture')
+    run.add_argument('--session-max-minutes', type=int,
+                     help='expected live Keycloak session maximum for prepared timed rows')
     if extra is not None:
         extra(run)
     return parser
@@ -529,6 +557,12 @@ def check_run_args(parser, args, cases):
         parser.error('--base-url must be an https origin without a path')
     if args.only and any(case not in cases for case in args.only):
         parser.error('--only accepts ' + ', '.join(cases))
+    if args.prepare_only and (args.prepared or args.only or args.session_max_minutes is not None):
+        parser.error('--prepare-only cannot be combined with --prepared, --only or --session-max-minutes')
+    if args.prepared and (not args.only or args.session_max_minutes is None):
+        parser.error('--prepared requires --only and --session-max-minutes')
+    if args.session_max_minutes is not None and args.session_max_minutes < 1:
+        parser.error('--session-max-minutes must be positive')
     return args
 
 

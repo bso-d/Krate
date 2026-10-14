@@ -289,6 +289,31 @@ class Gate(Phase4Gate):
 
     def setup(self):
         """Section 5 preconditions, using the order observed in live4b."""
+        if getattr(self.args, 'prepared', False):
+            if self.args.only != ['V23'] or not getattr(self.args, 'session_max_minutes', None):
+                return 'prepared Perses worker requires --only V23 and --session-max-minutes'
+            try:
+                if (self.mon_env_value('PERSES_AUTH_MODE') != 'native'
+                        or self.mon_env_value('PERSES_IDP') != 'krate'):
+                    raise RuntimeError('Perses is not in native krate realm mode')
+                self.wait_perses_ready('native')
+                self.load_state('p4ctrl')
+                kc = self.master_kcadm()
+                uid = kc.user_id('p4ctrl')
+                if not uid:
+                    raise RuntimeError('p4ctrl realm user is absent')
+                groups = kc.get('users/%s/groups' % uid) or []
+                viewer_group = self.env.get('KEYCLOAK_VIEWER_GROUP') or 'KRATE_VIEWERS'
+                if viewer_group not in {group.get('name') for group in groups}:
+                    raise RuntimeError('p4ctrl is not in the Viewer group')
+                realm = json.loads(kc.call('get', 'realms/krate'))
+                expected = self.args.session_max_minutes * 60
+                if realm.get('ssoSessionMaxLifespan') != expected:
+                    raise RuntimeError('realm max %s s differs from requested %s s'
+                                       % (realm.get('ssoSessionMaxLifespan'), expected))
+            except Exception as error:
+                return 'prepared V23 precondition failed: %s: %s' % (type(error).__name__, str(error)[:200])
+            return None
         try:
             self.setup_realm_users()
             self.setup_grafana_realm()
@@ -1472,20 +1497,46 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         # oauth2-proxy and perses recreated, idp-wait passes, sign-in works.
         perses_before = (self.mon_id_map() or {}).get('perses')
         o2p_before = (self.mon_id_map() or {}).get('oauth2-proxy')
+        idp_filter = ('ps', '-aq', '--filter',
+                      'label=com.docker.compose.project=' + self.monitor_project,
+                      '--filter', 'label=com.docker.compose.service=idp-wait')
+        rc_ids, old_ids, _ = p2.docker(*idp_filter)
+        if rc_ids != 0:
+            return 'FAIL', 'cannot inspect idp-wait before certificate renewal'
+        old_starts = {}
+        for cid in old_ids.split():
+            rc, started, _ = p2.docker('inspect', '-f', '{{.State.StartedAt}}', cid)
+            if rc != 0:
+                return 'FAIL', 'cannot inspect prior idp-wait start time'
+            old_starts[cid] = started.strip()
 
-        self.krate('gen-cert')
+        rc_cert, _out, err = self.krate('gen-cert')
+        if rc_cert != 0:
+            return 'FAIL', 'gen-cert failed (rc %d): %s' % (rc_cert, err.strip()[-100:])
         self.tls = ssl.create_default_context(cafile=os.path.join(self.edition, 'certs', 'server.crt'))
-        self.krate('auth', 'apply')
-        rc_up, _, _ = self.krate('monitor', 'up')
+        rc_apply, _out, err = self.krate('auth', 'apply')
+        if rc_apply != 0:
+            return 'FAIL', 'auth apply failed (rc %d): %s' % (rc_apply, err.strip()[-100:])
+        rc_up, _out, err = self.krate('monitor', 'up')
+        if rc_up != 0:
+            return 'FAIL', 'monitor up failed (rc %d): %s' % (rc_up, err.strip()[-100:])
 
         perses_after = (self.mon_id_map() or {}).get('perses')
         o2p_after = (self.mon_id_map() or {}).get('oauth2-proxy')
         perses_recreated = bool(perses_before and perses_after and perses_before[0] != perses_after[0])
         o2p_recreated = bool(o2p_before and o2p_after and o2p_before[0] != o2p_after[0])
 
-        idp_cids = p2.docker('ps', '-aq', '--filter', 'label=com.docker.compose.project=' + self.monitor_project,
-                             '--filter', 'label=com.docker.compose.service=idp-wait')[1].split()
-        idp_exit0 = (p2.docker('inspect', '-f', '{{.State.ExitCode}}', idp_cids[0])[1].strip() == '0') if idp_cids else True
+        rc_ids, new_ids, _ = p2.docker(*idp_filter)
+        idp_exit0 = False
+        if rc_ids == 0:
+            for cid in new_ids.split():
+                rc, observed, _ = p2.docker(
+                    'inspect', '-f', '{{.State.StartedAt}}|{{.State.ExitCode}}|{{.State.Status}}', cid)
+                fields = observed.strip().split('|') if rc == 0 else []
+                if (len(fields) == 3 and fields[1:] == ['0', 'exited']
+                        and (cid not in old_starts or fields[0] != old_starts[cid])):
+                    idp_exit0 = True
+                    break
 
         res = self.signin('p4v', 'v18-signin', expect='ok')
         signin_ok = (res.get('kind') == 'OK' and res.get('role') == 'viewer')
@@ -1493,7 +1544,10 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         probes = [
             ('oauth2_proxy_recreated', 'PASS' if o2p_recreated else 'FAIL'),
             ('perses_recreated', 'PASS' if perses_recreated else 'FAIL'),
-            ('idp_wait_exit0', 'PASS' if (rc_up == 0 and idp_exit0) else 'FAIL'),
+            ('gen_cert_rc0', 'PASS' if rc_cert == 0 else 'FAIL'),
+            ('auth_apply_rc0', 'PASS' if rc_apply == 0 else 'FAIL'),
+            ('monitor_up_rc0', 'PASS' if rc_up == 0 else 'FAIL'),
+            ('idp_wait_new_run_exit0', 'PASS' if idp_exit0 else 'FAIL'),
             ('signin_ok', 'PASS' if signin_ok else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
@@ -1662,7 +1716,138 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                % (tokens, max_lifespan)
 
     def v23(self):
-        return self.stub('V23', 'runs only with --session-max-hours (not attempted in default walk by instruction); companion fixture')
+        if not getattr(self.args, 'session_max_minutes', None):
+            return self.stub('V23', 'runs only in the explicit session-max companion fixture')
+        if self.timed.started('V23'):
+            return self.timed.join('V23', self.args.session_max_minutes * 60 + 420)
+        return self.v23_body()
+
+    def v23_body(self):
+        """The same-jar 60 s Perses API walk observed in v23-live-polls.tsv."""
+        max_minutes = getattr(self.args, 'session_max_minutes', None)
+        if not max_minutes or max_minutes < 1:
+            not_run('V23 requires an explicit positive --session-max-minutes')
+        max_seconds = max_minutes * 60
+        kc = self.master_kcadm()
+        realm = json.loads(kc.call('get', 'realms/krate'))
+        if realm.get('ssoSessionMaxLifespan') != max_seconds:
+            return 'FAIL', 'realm session max readback %s s, expected %s s' \
+                   % (realm.get('ssoSessionMaxLifespan'), max_seconds)
+        uid = kc.user_id('p4ctrl')
+        if not uid:
+            return 'FAIL', 'p4ctrl realm user missing'
+        rc, _out, err = self.krate('identity', 'users', 'logout', 'p4ctrl', timeout=120)
+        if rc != 0:
+            return 'FAIL', 'p4ctrl pre-login logout failed (rc %d): %s' % (rc, err.strip()[-100:])
+        if kc.get('users/%s/sessions' % uid) or []:
+            return 'FAIL', 'p4ctrl still has a Keycloak session before timed sign-in'
+
+        before_ms = time.time_ns() // 1_000_000
+        result = self.signin('p4ctrl', 'v23-session', expect='ok')
+        after_ms = time.time_ns() // 1_000_000
+        t0 = time.monotonic()
+        if result.get('kind') != 'OK' or result.get('role') != 'viewer':
+            return 'FAIL', 'p4ctrl timed sign-in was not Viewer OK: %s/%s' \
+                   % (result.get('kind'), result.get('role'))
+        sessions = kc.get('users/%s/sessions' % uid) or []
+        if len(sessions) != 1 or not isinstance(sessions[0].get('start'), int):
+            return 'FAIL', 'expected exactly one new Keycloak session with start timestamp, got %d' \
+                   % len(sessions)
+        session_start_ms = sessions[0]['start']
+        if not (before_ms - 2000 <= session_start_ms <= after_ms):
+            return 'FAIL', 'Keycloak session start is outside timed sign-in bracket'
+        deadline_ms = session_start_ms + (max_seconds + 360) * 1000
+        driver = self.driver('v23-session')
+        poll_log = []
+
+        def poll():
+            api_status, _headers, body = driver.req(
+                self.gateway('/api/v1/projects'), headers={'Accept': 'application/json'})
+            at_ms = time.time_ns() // 1_000_000
+            poll_log.append((round((time.monotonic() - t0), 2), api_status, at_ms))
+            log('V23 API sample UTC-ms %d monotonic +%.2fs HTTP %d'
+                % (at_ms, poll_log[-1][0], api_status))
+            if api_status == 200:
+                try:
+                    projects = json.loads(body)
+                except ValueError:
+                    return api_status, False
+                has_seed = isinstance(projects, list) and any(
+                    isinstance(item, dict) and item.get('metadata', {}).get('name') == 'p4b-seed-proj'
+                    for item in projects)
+                return api_status, has_seed
+            return api_status, False
+
+        status, seeded = poll()
+        if status != 200 or not seeded:
+            return 'FAIL', 'initial Perses API status %s or seeded project absent' % status
+        first_refusal = None
+        minute = 1
+        while True:
+            # The extra request 15 s before the Keycloak-start deadline prevents
+            # the final whole-minute poll from missing the M+6 min bound.
+            remaining = (deadline_ms - 15000 - time.time_ns() // 1_000_000) / 1000
+            if remaining <= 0:
+                break
+            delay = min(max(0, t0 + minute * 60 - time.monotonic()), remaining)
+            if delay > 0:
+                time.sleep(delay)
+            status, seeded = poll()
+            gap = poll_log[-1][0] - poll_log[-2][0]
+            # Requests are scheduled every 60 s; allow at most 5 s for network
+            # and scheduler delay. A larger gap skips a required observation.
+            if gap > 65:
+                return 'FAIL', 'Perses API poll cadence gap %.2f s exceeds 65 s' % gap
+            elapsed_from_start_ms = poll_log[-1][2] - session_start_ms
+            if status == 401:
+                first_refusal = poll_log[-1]
+                if elapsed_from_start_ms < (max_seconds - 60) * 1000:
+                    return 'FAIL', 'Perses API refused before M-1 min at +%.2f s' \
+                           % (elapsed_from_start_ms / 1000)
+                break
+            if status != 200 or not seeded:
+                return 'FAIL', 'Perses API poll at +%.2f s returned %s or lost seed project' \
+                       % (elapsed_from_start_ms / 1000, status)
+            minute += 1
+        if first_refusal is None:
+            return 'FAIL', 'Perses API never returned 401 by M+6 min; last status %s at +%.2f s' \
+                   % (poll_log[-1][1], (poll_log[-1][2] - session_start_ms) / 1000)
+        if first_refusal[2] > deadline_ms:
+            return 'FAIL', 'Perses API first 401 occurred after M+6 min deadline'
+
+        page_status, page_headers, _ = driver.req(self.gateway('/'), headers={'Accept': 'text/html'})
+        page_at_ms = time.time_ns() // 1_000_000
+        log('V23 page sample UTC-ms %d HTTP %d' % (page_at_ms, page_status))
+        page_location = page_headers.get('Location', '')
+        page_path = urllib.parse.urlparse(page_location).path
+        if page_status != 302 or page_path != '/oauth2/start' or page_at_ms > deadline_ms:
+            return 'FAIL', 'post-refusal page was %s to %s, expected 302 /oauth2/start' \
+                   % (page_status, page_path)
+        start_status, start_headers, _ = driver.req(
+            urllib.parse.urljoin(self.gateway(), page_location), headers={'Accept': 'text/html'})
+        start_at_ms = time.time_ns() // 1_000_000
+        log('V23 oauth start sample UTC-ms %d HTTP %d' % (start_at_ms, start_status))
+        if start_status != 302 or start_at_ms > deadline_ms:
+            return 'FAIL', 'post-refusal /oauth2/start was HTTP %s, expected 302' % start_status
+        auth_url = start_headers.get('Location', '')
+        if urllib.parse.urlparse(auth_url).path != '/identity/realms/krate/protocol/openid-connect/auth':
+            return 'FAIL', 'post-refusal /oauth2/start did not reach Keycloak auth'
+        form_status, _form_headers, form_body = driver.req(auth_url, headers={'Accept': 'text/html'})
+        form_at_ms = time.time_ns() // 1_000_000
+        log('V23 Keycloak form sample UTC-ms %d HTTP %d' % (form_at_ms, form_status))
+        form_ok = (form_status == 200 and 'kc-form-login' in form_body
+                   and 'name="password"' in form_body and form_at_ms <= deadline_ms)
+        if not form_ok:
+            return 'FAIL', 'post-refusal Keycloak password form missing or late (HTTP %s)' % form_status
+        good_before = sum(1 for _elapsed, code, at_ms in poll_log
+                          if at_ms - session_start_ms < (max_seconds - 60) * 1000 and code == 200)
+        return 'PASS', ('realm max %ss; KC start %sms; sign-in %s..%sms; '
+                        '%d early API 200s (scheduled 60s, max gap 65s); '
+                        'last 200 KC+%.1fs; API 401 KC+%.1fs by M+6m; '
+                        'same jar page 302 /oauth2/start and Keycloak password form 200 by M+6m') \
+               % (max_seconds, session_start_ms, before_ms, after_ms, good_before,
+                  max((at_ms - session_start_ms) / 1000 for _elapsed, code, at_ms in poll_log
+                      if code == 200), (first_refusal[2] - session_start_ms) / 1000)
 
     def v24(self):
         # walk log 124: outage restarts under Docker backoff: Keycloak stopped,
@@ -1674,58 +1859,92 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         if not kc_cid or not perses_cid or not o2p_cid:
             not_run('precondition: missing required containers')
 
-        rc_p1 = int(p2.docker('inspect', '-f', '{{.RestartCount}}', perses_cid)[1].strip() or 0)
-        rc_o1 = int(p2.docker('inspect', '-f', '{{.RestartCount}}', o2p_cid)[1].strip() or 0)
+        def restart_count(cid):
+            rc, value, _ = p2.docker('inspect', '-f', '{{.RestartCount}}', cid)
+            if rc != 0 or not value.strip().isdigit():
+                raise RuntimeError('cannot read Docker RestartCount for %s' % cid[:12])
+            return int(value.strip())
 
-        # Stop Keycloak
-        p2.docker('stop', '-t', '5', kc_cid)
+        rc_p1 = restart_count(perses_cid)
+        rc_o1 = restart_count(o2p_cid)
+        rc_p2, rc_o2 = rc_p1, rc_o1
+        gateway_status = -1
+        outage_error = None
+        try:
+            rc_stop, _out, err = p2.docker('stop', '-t', '5', kc_cid)
+            if rc_stop != 0:
+                raise RuntimeError('docker stop Keycloak rc %d: %s' % (rc_stop, err.strip()[-100:]))
+            rc_restart, _out, err = p2.docker('restart', o2p_cid, perses_cid)
+            if rc_restart != 0:
+                raise RuntimeError('docker restart consumers rc %d: %s'
+                                   % (rc_restart, err.strip()[-100:]))
+            restart_deadline = time.monotonic() + 45
+            while time.monotonic() < restart_deadline:
+                rc_p2 = restart_count(perses_cid)
+                rc_o2 = restart_count(o2p_cid)
+                if rc_p2 > rc_p1 and rc_o2 > rc_o1:
+                    break
+                time.sleep(2)
+            driver = self.driver('v24-outage')
+            gateway_status, _, _ = driver.req(self.gateway('/'), headers={'Accept': 'text/html'})
+        except Exception as error:
+            outage_error = '%s: %s' % (type(error).__name__, error)
+        finally:
+            # Always return the fixture's IdP, including when an outage probe fails.
+            start_rc, _out, start_err = p2.docker('start', kc_cid)
+        if start_rc != 0:
+            return 'FAIL', 'Keycloak restoration failed (docker start rc %s): %s; outage error %s' \
+                   % (start_rc, start_err.strip()[-100:], outage_error or 'none')
+        if outage_error:
+            return 'FAIL', 'outage setup failed; Keycloak restored: ' + outage_error
 
-        # Restart consumers during outage
-        p2.docker('restart', o2p_cid, perses_cid)
-        time.sleep(5)
-
-        # Check gateway refuses / nobody let in
-        d = self.driver('v24-outage')
-        st, _, _ = d.req(self.gateway('/'), headers={'Accept': 'text/html'})
-        nobody_in = (st in (403, 500, 502, 503, -1))
-
-        rc_p2 = int(p2.docker('inspect', '-f', '{{.RestartCount}}', perses_cid)[1].strip() or 0)
-        rc_o2 = int(p2.docker('inspect', '-f', '{{.RestartCount}}', o2p_cid)[1].strip() or 0)
-        restarts_grew = (rc_p2 >= rc_p1 and rc_o2 >= rc_o1)
-
-        # Start Keycloak
-        p2.docker('start', kc_cid)
         healthy_secs = self._wait_container_healthy(kc_cid, limit=180)
+        if healthy_secs is None:
+            return 'FAIL', 'Keycloak did not become healthy within 180 s after restoration'
         t_healthy = time.monotonic()
 
         # Wait for consumers to recover under Docker restart manager without krate commands
         recovered = False
         while time.monotonic() - t_healthy < 60:
-            st_p = p2.docker('inspect', '-f', '{{.State.Status}}', perses_cid)[1].strip()
-            st_o = p2.docker('inspect', '-f', '{{.State.Status}}', o2p_cid)[1].strip()
-            if st_p == 'running' and st_o == 'running':
+            rc_p, st_p, _ = p2.docker('inspect', '-f', '{{.State.Status}}', perses_cid)
+            rc_o, st_o, _ = p2.docker('inspect', '-f', '{{.State.Status}}', o2p_cid)
+            if rc_p == rc_o == 0 and st_p.strip() == st_o.strip() == 'running':
                 recovered = True
                 break
             time.sleep(2)
 
         # Sign in within 90s of healthy
-        res = self.signin('p4v', 'v24-signin', expect='ok')
+        res = self.signin('p4v', 'v24-signin', expect='ok') if recovered else {'kind': 'NOT_RUN'}
         signin_elapsed = time.monotonic() - t_healthy
-        signin_ok = (res.get('kind') == 'OK' and signin_elapsed <= 90.0)
+        signin_ok = (res.get('kind') == 'OK' and res.get('role') == 'viewer'
+                     and signin_elapsed <= 90.0)
+        restarts_grew = rc_p2 > rc_p1 and rc_o2 > rc_o1
+        anonymous_refused = gateway_status in (403, 500)
 
         probes = [
-            ('outage_restarts_blocked', 'PASS' if nobody_in else 'FAIL'),
+            ('restart_counts_grew', 'PASS' if restarts_grew else 'FAIL'),
+            ('anonymous_outage_http_refusal', 'PASS' if anonymous_refused else 'FAIL'),
+            # The existing live walk probed an empty jar. A pre-existing Viewer
+            # jar must be observed during the outage before this can pass V24.
+            ('authenticated_viewer_blocked', 'NOT_RUN'),
             ('containers_recovered_running', 'PASS' if recovered else 'FAIL'),
             ('signin_within_90s', 'PASS' if signin_ok else 'FAIL'),
         ]
+        if sys.platform.startswith('linux'):
+            # The VM-only daemon restart is the last V24 subcase. It needs its
+            # own live walk after V20's final reading before it can pass.
+            probes.append(('docker_daemon_restart', 'NOT_RUN'))
         status, tokens = aggregate(probes)
-        return status, '%s; outage restart: gateway -> %d (nobody let in), restarts perses %d->%d / ' \
-                       'o2p %d->%d; containers recovered running without krate commands; ' \
+        return status, '%s; outage restart: anonymous gateway -> %d, restarts perses %d->%d / ' \
+                       'o2p %d->%d; Keycloak healthy +%.1fs; containers recovered without krate; ' \
                        'signin %s at +%.1fs (bound 90s); walk: live4b 124' \
-               % (tokens, st, rc_p1, rc_p2, rc_o1, rc_o2, res.get('kind'), signin_elapsed)
+               % (tokens, gateway_status, rc_p1, rc_p2, rc_o1, rc_o2,
+                  healthy_secs, res.get('kind'), signin_elapsed)
 
     def plan(self):
-        return [
+        plan = [
+            *([('V23@start', lambda: self.start_timed('V23', self.v23_body))]
+              if getattr(self.args, 'session_max_minutes', None) else []),
             ('V1', self.v1), ('V2', self.v2), ('V3', self.v3), ('V4', self.v4),
             ('V5', self.v5), ('V6', self.v6),
             ('V10@start', lambda: self.start_timed('V10', self.v10_body)),
@@ -1740,6 +1959,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             ('V24', self.v24),
             ('V10', self.v10), ('V7', self.v7), ('V8', self.v8), ('V15', self.v15),
         ]
+        return plan
 
 
 def stub_options(run_parser):

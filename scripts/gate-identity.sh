@@ -273,6 +273,7 @@ open_receipt() { # the receipt folder exists only once the host accepted the run
 declare -a SECRETS=()
 declare -a TEMP_SECRETS=()
 declare -a HOLDERS=()
+declare -a PHASE4_CHILDREN=()
 declare -A SEEN=()
 declare -A SEEN_RESULT=()
 PASSES=0; FAILS=0; NOTRUN=0
@@ -1100,7 +1101,9 @@ phase4_ingest() { # TSV slice regex: record the helper's rows; its `setup` line 
   while IFS=$'\t' read -r id result evidence; do
     if [[ "$id" == setup ]]; then
       log "[$result] $slice setup: ${evidence:0:220}"
-      [[ "$result" == PASS ]] || record "${slice}-setup" "$slice" setup FAIL "helper setup result $result: $evidence"
+      if [[ "$result" != PASS && -z "${SEEN[${slice}-setup]:-}" ]]; then
+        record "${slice}-setup" "$slice" setup FAIL "helper setup result $result: $evidence"
+      fi
       continue
     fi
     [[ "$id" =~ $regex ]] || continue
@@ -1798,8 +1801,39 @@ run_phase4() { # slice: 4a|4b|4c
     done
     return
   fi
-  # The slice helpers (background children, so an interrupt reaches them). Scaffold:
-  # until the live walk notes land, their rows answer NOT_RUN naming what they need.
+  # A companion prepares the shared fixture once. Both timed observers then use
+  # read-only prepared preflights and start together; their setup must not race.
+  if [[ -n "$SESSION_MAX_HOURS" ]]; then
+    local prep_helper prep_tsv prep_rc
+    case "$slice" in
+      4a) prep_helper="$GATE_DIR/phase4_grafana.py" ;;
+      4b) prep_helper="$GATE_DIR/phase4_perses.py" ;;
+    esac
+    prep_tsv="$STATE/phase4-preparation.tsv"
+    local -a prep_extra=()
+    if [[ "$slice" == 4b ]]; then
+      prep_extra=(--stub-dir "$STUB_DIR" --stub-port "$STUB_PORT" --stub-script "$STUB")
+    fi
+    python3 -I "$prep_helper" run --edition-dir "$ED" --base-url "$BASE" \
+      --monitor-project "$MON_PROJECT" --state "$STATE" --prepare-only \
+      ${prep_extra[@]+"${prep_extra[@]}"} > "$prep_tsv" 2>>"$RAW" & CHILD=$!
+    wait "$CHILD" && prep_rc=0 || prep_rc=$?
+    CHILD=""
+    phase4_ingest "$prep_tsv" "$slice" '^$'
+    if [[ $prep_rc -ne 0 || "$(awk -F '\t' '$1=="setup" {print $2}' "$prep_tsv")" != PASS ]]; then
+      if [[ -z "${SEEN[${slice}-setup]:-}" ]]; then
+        record "${slice}-setup" "$slice" setup FAIL "shared companion preparation exited $prep_rc without a PASS setup row"
+      fi
+      for id in "${run_inv[@]}"; do
+        crit="${id%%[0-9]*}"
+        record "$id" "$slice" "$crit" NOT_RUN "shared companion preparation failed; see phase4-preparation.tsv"
+      done
+      return
+    fi
+  fi
+  # The normal slice helper runs once. Companion observers start together and
+  # are all owned by PHASE4_CHILDREN so an interrupt can stop every worker.
+  local -a timed_tsvs=() timed_regexes=() timed_names=()
   for job in ${helper_jobs[@]+"${helper_jobs[@]}"}; do
     read -r helper only regex <<<"$job"
     if [[ ! -f "$helper" ]]; then log "$helper missing"; continue; fi
@@ -1809,12 +1843,39 @@ run_phase4() { # slice: 4a|4b|4c
       extra_arg=(--stub-dir "$STUB_DIR" --stub-port "$STUB_PORT" --stub-script "$STUB")  # V19 reuses phase3_broker.Gate.brokered_login
     fi
     tsv="$STATE/$(basename "$helper" .py).tsv"
+    local -a prepared_arg=()
+    if [[ -n "$SESSION_MAX_HOURS" ]]; then
+      prepared_arg=(--prepared --session-max-minutes "$((SESSION_MAX_HOURS * 60))")
+    fi
     python3 -I "$helper" run --edition-dir "$ED" --base-url "$BASE" --monitor-project "$MON_PROJECT" \
-      --state "$STATE" "${only_arg[@]}" ${extra_arg[@]+"${extra_arg[@]}"} > "$tsv" 2>>"$RAW" & CHILD=$!
-    wait "$CHILD"; rc=$?; CHILD=""
-    phase4_ingest "$tsv" "$slice" "^${regex}[0-9]+[ab]?\$"
-    log "$(basename "$helper") exit=$rc"
+      --state "$STATE" "${only_arg[@]}" "${prepared_arg[@]}" \
+      ${extra_arg[@]+"${extra_arg[@]}"} > "$tsv" 2>>"$RAW" & CHILD=$!
+    if [[ -n "$SESSION_MAX_HOURS" ]]; then
+      PHASE4_CHILDREN+=("$CHILD")
+      timed_tsvs+=("$tsv")
+      timed_regexes+=("^${only}\$")
+      timed_names+=("$(basename "$helper")")
+      CHILD=""
+    else
+      wait "$CHILD" && rc=0 || rc=$?
+      CHILD=""
+      phase4_ingest "$tsv" "$slice" "^${regex}[0-9]+[ab]?\$"
+      log "$(basename "$helper") exit=$rc"
+    fi
   done
+  if [[ -n "$SESSION_MAX_HOURS" ]]; then
+    local i
+    for i in "${!PHASE4_CHILDREN[@]}"; do
+      wait "${PHASE4_CHILDREN[$i]}" && rc=0 || rc=$?
+      phase4_ingest "${timed_tsvs[$i]}" "$slice" "${timed_regexes[$i]}"
+      if [[ $rc -ne 0 ]]; then
+        record "${slice}-helper-${timed_names[$i]%.py}" "$slice" helper FAIL \
+          "${timed_names[$i]} exited $rc after prepared observation"
+      fi
+      log "${timed_names[$i]} exit=$rc"
+    done
+    PHASE4_CHILDREN=()
+  fi
   # Runner-owned rows: the screenshot stories (scripts/gate/screenshots-{grafana,perses}.mjs
   # are scaffolds, not run: no browser here — the lead runs them against the fixture),
   # the extended leak scans and, for 4c, the W rows.
@@ -1895,6 +1956,12 @@ leak_scan() {
 teardown() {
   section "teardown"
   [[ -z "$CHILD" ]] || { kill "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; CHILD=""; }
+  local phase4_child
+  for phase4_child in "${PHASE4_CHILDREN[@]}"; do
+    kill "$phase4_child" 2>/dev/null || true
+    wait "$phase4_child" 2>/dev/null || true
+  done
+  PHASE4_CHILDREN=()
   local h; for h in "${HOLDERS[@]}"; do kill "$h" 2>/dev/null; done
   if ! $FIXTURE_OWNED; then log "no fixture was created; nothing to tear down"; return; fi
   if $KEEP; then log "--keep: fixture left running (project $PROJECT)"; return; fi

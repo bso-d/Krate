@@ -15,10 +15,9 @@ usage error.
 
 Ownership: U1-U29 (including U21a/U21b and the session-max row U27) are this
 helper's; X3 (screenshots-grafana.mjs) and Z4a (the extended leak scan) are the
-runner's. U27 runs only in the `--session-max-hours N` companion runs (the
-runner passes `--only U27`); its bound M = 60*N minutes comes from
-KEYCLOAK_SESSION_MAX_HOURS in the edition .env, which the runner set before the
-realm was created.
+runner's. U27 runs only in prepared `--session-max-hours N` companion runs (the
+runner passes `--prepared --only U27 --session-max-minutes 60*N`); its bound is
+read back from the live Keycloak realm and matched to running Grafana config.
 
 ENCODING STATUS (owner rule 11: a row is encoded only from observations seen
 working against the real stack; every encoded probe cites its walk log under
@@ -46,17 +45,20 @@ harness/phase4/live4a/, taken at candidate 379acf6 unless noted):
     2026-10-13), U25 (145), U26 (160,104), U28 (133-134), and the four timing
     rows U9 (151), U10 (152,152b), U11 (153,153b), U29 (150) — ports of the
     walk's u{9,10,11,29}_job.py + timing_common.py into TimedRows threads,
-    scheduled after the short rows exactly as the walk serialized them. The
+    scheduled after the short rows exactly as the walk serialized them. U27
+    starts in the prepared session-max companion and joins at its row. The
     browser batch follows the walk's method and policy (results.md: container
     Chromium krate-harness/playwright:1.60.0, the gate's --resolve-to mapping
     shape; Viewer p4v on krate-overview = log 146, Admin p4both on p4lokiui =
     log 148; the p4lokiui panel JSON is rebuilt — the walk's creation call was
     not kept — and the dashboard is deleted again after the runs).
   * U14 was added after its six live refusals at candidate 54472fe (see
-    harness/phase4/formal-r1/u14-live/results.md). U27 still needs the
-    --session-max-hours fixture.
-  * U21b on Linux: NOT_RUN until the VM method is encoded with the 4c netns
-    probe (the walk observed the Mac method only).
+    harness/phase4/formal-r1/u14-live/results.md). U27's polling and same-jar
+    authorize mechanics were observed in the 15-minute diagnostic at
+    harness/phase4/formal-r1/u27-v23-15m/; a matched-lifetime live walk remains
+    necessary before acceptance.
+  * U21b on Linux delegates to the independently walked 4c netns method in
+    phase4_linux.py (the Mac method was observed in live4a log 142).
 
 The frame reuses phase2_kafbat.Gate/Kcadm/Browser, keycloak_login_flow.py
 (enrol), probes.py (the row-pass rule: one `probe=PASS|FAIL|NOT_RUN` token per
@@ -70,13 +72,14 @@ TimedRows threads started after the short rows and joined at the end of the
 plan (longest first): U10 polls at 10 s with the disable+logout at t0+30 s
 (330 s bound), U11 the same shape for the group removal (300 s bound), U9 runs
 its two cases (immediate + 6 min of activity), U29 the 16-min idle with the
-once-a-minute control over 17.5 min. In the session-max runs U27 (M + 1 min)
-joins this frame when its fixture walk lands. Secrets (JWTs, cookies, tokens,
+once-a-minute control over 17.5 min. In prepared session-max runs U27 (M + 1
+min) joins this frame. Secrets (JWTs, cookies, tokens,
 enrolled passwords and TOTP seeds) go to $STATE/phase4-secrets.txt through
 add_runtime_secret(); the runner adds that file to its leak set.
 """
 import base64
 import calendar
+import datetime
 import hashlib
 import hmac
 import html as htmlmod
@@ -249,6 +252,11 @@ class GrafanaDriver:
             return response.status, response.headers, response.read().decode(errors='replace')
         except urllib.error.HTTPError as error:
             return error.code, error.headers, error.read().decode(errors='replace')
+
+    @staticmethod
+    def set_cookie_headers(headers):
+        """A redirect may expose get_all() but have no Set-Cookie values."""
+        return (headers.get_all('Set-Cookie') or []) if hasattr(headers, 'get_all') else []
 
     @staticmethod
     def form_action(page):
@@ -506,7 +514,7 @@ class Gate(Phase4Gate):
                     callback_get = status  # U15's flow probe: the callback is a GET (walk 132)
                 status, hdrs, page = d.req(url)
                 chain.append(('GET', url.split('?')[0].replace(self.base, ''), status))
-                for header in (hdrs.get_all('Set-Cookie') if hasattr(hdrs, 'get_all') else []):
+                for header in GrafanaDriver.set_cookie_headers(hdrs):
                     if header.startswith('grafana_session='):
                         set_cookie = header
                 continue
@@ -759,6 +767,10 @@ class Gate(Phase4Gate):
 
     # ── setup: the slice preconditions of section 5 (walk sections A-C) ──
     def setup(self):
+        if getattr(self.args, 'prepared', False):
+            return self.setup_prepared_u27()
+        if getattr(self.args, 'session_max_minutes', None):
+            return 'U27 timing requires --prepared so the live maxima are checked before sign-in'
         try:
             self.cluster_initial = self.cluster_id_map()
             self.setup_realm_users()   # walk logs/021-022
@@ -772,6 +784,80 @@ class Gate(Phase4Gate):
         except Exception as error:  # a setup error is reported with its step, never hidden
             return 'setup step failed: %s: %s' % (type(error).__name__, str(error)[:300])
         return None
+
+    def setup_prepared_u27(self):
+        """Read-only checks for a shared fixture prepared before the timed workers."""
+        try:
+            if self.args.only != ['U27'] or not self.args.session_max_minutes:
+                raise RuntimeError('prepared Grafana worker requires --only U27 and --session-max-minutes')
+            if self.mon_env_value('GRAFANA_AUTH_CONFIG') != 'realm.ini':
+                raise RuntimeError('Grafana is not in realm mode')
+            state = os.path.join(self.state_dir, 'p4', 'kc-p4v.json')
+            if not os.path.isfile(state) or os.stat(state).st_mode & 0o077:
+                raise RuntimeError('p4v enrolment state is missing or not private')
+            self.user_state['p4v'] = state
+            enrolled = self.load_state('p4v')
+            if enrolled.get('user') != 'p4v' or not enrolled.get('password') or not enrolled.get('totp'):
+                raise RuntimeError('p4v enrolment state is incomplete')
+            self.add_state_file_secrets(state)
+            kc = self.master_kcadm()
+            uid = kc.user_id('p4v')
+            if not uid:
+                raise RuntimeError('p4v realm user is absent')
+            groups = kc.get('users/%s/groups' % uid) or []
+            viewer = self.env.get('KEYCLOAK_VIEWER_GROUP') or 'KRATE_VIEWERS'
+            if viewer not in {group.get('name') for group in groups}:
+                raise RuntimeError('p4v is not in the Viewer group')
+            expected = self.args.session_max_minutes * 60
+            realm = kc.get('realms/krate') or {}
+            realm_max = realm.get('ssoSessionMaxLifespan')
+            if realm_max != expected:
+                raise RuntimeError('Keycloak max %s s differs from requested %s s'
+                                   % (realm_max, expected))
+            ini = os.path.join(self.mon_dir(), 'auth', 'realm.ini')
+            cid = self.grafana_container()
+            rc, out, err = p2.docker('inspect', cid)
+            if rc != 0:
+                raise RuntimeError('cannot inspect running Grafana: %s' % err.strip()[:100])
+            container = json.loads(out)[0]
+            if not container.get('State', {}).get('Running'):
+                raise RuntimeError('Grafana container is not running')
+            environ = container.get('Config', {}).get('Env') or []
+            if 'GF_PATHS_CONFIG=/etc/krate/auth/realm.ini' not in environ:
+                raise RuntimeError('running Grafana does not select realm.ini')
+            if any(item.startswith('GF_AUTH_LOGIN_MAXIMUM_LIFETIME_DURATION=') for item in environ):
+                raise RuntimeError('Grafana lifetime has an environment override')
+            mounts = container.get('Mounts') or []
+            if not any(mount.get('Destination') == '/etc/krate/auth'
+                       and os.path.realpath(mount.get('Source', ''))
+                       == os.path.realpath(os.path.join(self.mon_dir(), 'auth'))
+                       and mount.get('RW') is False for mount in mounts):
+                raise RuntimeError('Grafana realm auth directory is not the expected read-only mount')
+            rc, config, err = p2.docker('exec', cid, 'cat', '/etc/krate/auth/realm.ini')
+            if rc != 0:
+                raise RuntimeError('cannot read Grafana mounted realm.ini: %s' % err.strip()[:100])
+            with open(ini, encoding='utf-8') as handle:
+                if config != handle.read():
+                    raise RuntimeError('running Grafana mount differs from fixture realm.ini')
+            started = datetime.datetime.fromisoformat(
+                container['State']['StartedAt'].replace('Z', '+00:00')).timestamp()
+            modified = os.stat(ini).st_mtime
+            if modified > started:
+                raise RuntimeError('Grafana realm.ini changed after container start')
+            match = re.search(r'^login_maximum_lifetime_duration\s*=\s*(\d+)([mh])\s*$', config, re.M)
+            if not match:
+                raise RuntimeError('Grafana realm.ini has no supported maximum lifetime')
+            grafana_max = int(match.group(1)) * (60 if match.group(2) == 'm' else 3600)
+            if grafana_max != expected:
+                raise RuntimeError('Grafana max %s s differs from Keycloak/requested %s s'
+                                   % (grafana_max, expected))
+            health, _headers, _body = self.driver('u27-health').req(self.base + '/grafana/api/health')
+            if health != 200:
+                raise RuntimeError('Grafana public health answered HTTP %s' % health)
+            log('setup: prepared U27 p4v Viewer and matched %ss Keycloak/Grafana maxima' % expected)
+            return None
+        except Exception as error:
+            return 'prepared U27 precondition failed: %s: %s' % (type(error).__name__, str(error)[:200])
 
     def setup_realm_users(self):
         """The nine realm users of the walk (logs/021-022): eight through
@@ -1623,10 +1709,11 @@ class Gate(Phase4Gate):
     def u21b(self):
         # walk log/142 (Mac method): the loopback-bound GRAFANA_PORT refused from the
         # Mac's LAN address over IPv4 and IPv6, with both controls. On Linux the VM
-        # method (the 4c netns probe) applies and is encoded with slice 4c.
+        # method probes the same published-port boundary from a foreign netns.
         if sys.platform != 'darwin':
-            not_run('the VM variant of U21b is the 4c netns probe (W3 method); only the Mac '
-                    'method was walked (live4a log 142)')
+            from phase4_linux import u21b_probe
+            return u21b_probe(self.monitor_env.get('GRAFANA_PORT') or '3000',
+                              self.monitor_env.get('PERSES_PORT') or '3443')
         port = self.monitor_env.get('GRAFANA_PORT') or '3000'
         perses_port = self.monitor_env.get('PERSES_PORT') or '3443'
         rc, out, _ = p2.run(['ifconfig'], timeout=30)
@@ -2712,7 +2799,110 @@ class Gate(Phase4Gate):
                                           status, location[:40])
 
     def u27(self):
-        return self.stub('U27', 'runs only with --session-max-hours (not attempted in default walk by instruction); companion fixture')
+        minutes = getattr(self.args, 'session_max_minutes', None)
+        if not minutes:
+            return self.stub('U27', 'runs only in an explicit session-max companion fixture')
+        if self.timed.started('U27'):
+            return self.timed.join('U27', minutes * 60 + 180)
+        return self.u27_body()
+
+    def u27_body(self):
+        """Active Viewer polls through matching Keycloak and Grafana maxima.
+
+        The 540 s manual diagnostic in harness/phase4/formal-r1/u27-v23-15m/
+        proved the same-jar polling and password-form mechanics, and exposed the
+        need to match Grafana's own lifetime. A matched-lifetime expiry walk is
+        still required before this row can be called live-proven.
+        """
+        if not getattr(self.args, 'prepared', False):
+            not_run('U27 requires a prepared fixture with matched live maxima')
+        max_seconds = self.args.session_max_minutes * 60
+        kc = self.master_kcadm()
+        uid = kc.user_id('p4v')
+        if not uid:
+            return 'FAIL', 'p4v realm user missing'
+        if not self.force_logout('p4v') or kc.get('users/%s/sessions' % uid):
+            return 'FAIL', 'p4v did not have zero Keycloak sessions before timed sign-in'
+        before_ms = time.time_ns() // 1_000_000
+        result = self.signin('p4v', 'u27-session', expect='ok')
+        after_ms = time.time_ns() // 1_000_000
+        if result.get('kind') != 'OK':
+            return 'FAIL', 'p4v Grafana sign-in did not complete: %s' % result.get('kind')
+        sessions = kc.get('users/%s/sessions' % uid) or []
+        if len(sessions) != 1 or not isinstance(sessions[0].get('start'), int):
+            return 'FAIL', 'expected one new Keycloak session with a start timestamp; got %d' % len(sessions)
+        start_ms = sessions[0]['start']
+        if not before_ms - 2000 <= start_ms <= after_ms:
+            return 'FAIL', 'Keycloak session start is outside the fresh sign-in bracket'
+        driver = result['driver']
+        samples = []
+
+        def sample():
+            status, detail = self.one_request(driver)
+            now_ms = time.time_ns() // 1_000_000
+            now_mono = time.monotonic()
+            age = (now_ms - start_ms) / 1000
+            samples.append((age, status, now_mono, detail))
+            log('U27 p4v Keycloak-start +%.1fs /grafana/api/user -> %s' % (age, status))
+            return age, status
+
+        initial_age, initial_status = sample()
+        if initial_status != 200 or initial_age > 60:
+            return 'FAIL', 'initial Grafana API %s at Keycloak-start +%.1fs' \
+                   % (initial_status, initial_age)
+        target_ms = start_ms + (max_seconds + 15) * 1000
+        deadline_ms = start_ms + (max_seconds + 60) * 1000
+        first_after = None
+        cadence_ok = True
+        early_ok = True
+        while True:
+            _last_age, _last_status, last_mono, _last_detail = samples[-1]
+            until_target = max(0, (target_ms - time.time_ns() // 1_000_000) / 1000)
+            delay = min(max(0, last_mono + 50 - time.monotonic()), until_target)
+            if delay:
+                time.sleep(delay)
+            age, status = sample()
+            if samples[-1][2] - last_mono > 60:
+                cadence_ok = False
+            if age < max_seconds - 60 and status != 200:
+                early_ok = False
+            if age >= max_seconds + 10:
+                first_after = (age, status)
+                break
+        if first_after is None:
+            return 'FAIL', 'no request at or after M+10s before the M+60s deadline'
+        age, status = first_after
+        location = samples[-1][3]
+        sign_in = urllib.parse.urlsplit(location).path in ('/grafana/login',
+                                                          '/grafana/login/generic_oauth')
+        refused = (status == 401 or (status in (302, 303) and sign_in)) \
+            and samples[-1][0] * 1000 + start_ms <= deadline_ms
+        form = False
+        form_chain = []
+        if refused:
+            form_status, headers, page = driver.req(self.base + '/grafana/login/generic_oauth')
+            location = headers.get('Location', '') if hasattr(headers, 'get') else ''
+            form_chain.append(form_status)
+            for _ in range(6):
+                if form_status not in (302, 303) or not location:
+                    break
+                url = urllib.parse.urljoin(self.base, location)
+                self.check_url(url)
+                form_status, headers, page = driver.req(url)
+                form_chain.append(form_status)
+                location = headers.get('Location', '') if hasattr(headers, 'get') else ''
+            form = (form_status == 200 and 'id="kc-form-login"' in page
+                    and 'name="password"' in page)
+        probes = [('cadence_60s', 'PASS' if cadence_ok else 'FAIL'),
+                  ('early_200', 'PASS' if early_ok else 'FAIL'),
+                  ('refused_M10_M60', 'PASS' if refused else 'FAIL'),
+                  ('same_jar_password_form', 'PASS' if form else 'FAIL')]
+        row, tokens = aggregate(probes)
+        return row, ('%s; matched max %ss; Keycloak start %sms; sign-in bracket %s..%sms; '
+                     '%d API samples, first at +%.1fs, first M+10 request +%.1fs HTTP %s; '
+                     'same jar authorize chain %s form=%s') \
+               % (tokens, max_seconds, start_ms, before_ms, after_ms, len(samples),
+                  initial_age, age, status, form_chain, form)
 
     def u29(self):
         if self.timed.started('U29'):
@@ -2788,6 +2978,8 @@ class Gate(Phase4Gate):
         # future U12/U13 outage rows must also run before the threads start (an
         # exclusive Keycloak stop would break every polling window).
         return [
+            *([('U27@start', lambda: self.start_timed('U27', self.u27_body))]
+              if getattr(self.args, 'session_max_minutes', None) else []),
             ('U1', self.u1), ('U2', self.u2), ('U3', self.u3), ('U4', self.u4),
             ('U5', self.u5), ('U6', self.u6), ('U7', self.u7), ('U8', self.u8),
             ('U12', self.u12), ('U13', self.u13), ('U14', self.u14), ('U15', self.u15),
