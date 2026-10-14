@@ -2069,6 +2069,81 @@ SCRIPT_DIR="$1"; umask 077; ensure_identity_dirs
         e(mode(site / 'auth/keycloak/truststores') == 0o755, 'an existing 700 truststores directory is widened to 755 on the next run')
 
 
+def check_install_home_dir(checks):
+    """A fresh default install stays traversable under umask 077 without widening custom site paths."""
+    e = lambda cond, msg: checks.expect(cond, 'ensure_home_dir: ' + msg)  # noqa: E731
+    if bash_binary() is None:
+        return
+    for edition in EDITIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'opt').mkdir(mode=0o755)
+            default_base = root / 'opt' / 'krate'
+            default_home = default_base / edition
+            # Substitute only the fixed system prefix so this tests the real CLI function
+            # without creating /opt/krate or requiring elevated privileges on the host.
+            function = bash_functions(ROOT / edition / 'krate', 'ensure_home_dir').replace('/opt/krate', str(default_base))
+            script = BASH_STUBS + function + r'''
+KRATE_VARIANT="$1"; KRATE_HOME="$2"; FORCE_FALLBACK="${3:-}"; SUDO_LOG="$4"; FALLBACK_MARKER="$5"
+mkdir() {
+  if [[ "$FORCE_FALLBACK" == yes && "$1" == -p && "$2" == "$KRATE_HOME" ]]; then
+    FORCE_FALLBACK=no
+    : > "$FALLBACK_MARKER"
+    return 1
+  fi
+  command mkdir "$@"
+}
+sudo() { printf '%s\n' "$1" >> "$SUDO_LOG"; command "$@"; }
+umask 077; ensure_home_dir
+'''
+            sudo_log = root / 'sudo.log'
+            fallback_marker = root / 'fallback.marker'
+            sudo_log.write_text('')
+            result = run_bash(script, edition, default_home, 'yes', sudo_log, fallback_marker)
+            e(result.returncode == 0, f'{edition}: fresh default install failed: {result.stderr.strip()[:160]}')
+            e(fallback_marker.exists(), f'{edition}: the first mkdir must be forced through the fallback path')
+            expected_sudo = ['mkdir', 'chown', 'chmod'] if os.getuid() != 0 else []
+            e(sudo_log.read_text().splitlines() == expected_sudo,
+              f'{edition}: fallback commands must use sudo only for a non-root installer')
+            e(os.stat(default_home).st_uid == os.getuid() and os.access(default_home, os.W_OK),
+              f'{edition}: fallback must leave the edition directory owned and writable by the installer')
+            for directory in (default_base, default_home):
+                e(directory.is_dir() and mode(directory) == 0o711,
+                  f'{edition}: fresh {directory.name} must be 0711 under umask 077, got {mode(directory):o}')
+            secret = default_home / '.env'
+            secret.write_text('SYNTHETIC_SECRET=keep-private\n')
+            secret.chmod(0o600)
+            default_base.chmod(0o700)
+            default_home.chmod(0o700)
+            owners = tuple(os.stat(path).st_uid for path in (default_base, default_home))
+            sudo_log.write_text('')
+            result = run_bash(script, edition, default_home, 'no', sudo_log, fallback_marker)
+            e(result.returncode == 0, f'{edition}: existing default install failed: {result.stderr.strip()[:160]}')
+            e(sudo_log.read_text().splitlines() == (['chmod'] if os.getuid() != 0 else []),
+              f'{edition}: a writable existing directory must keep its owner without privileged chown')
+            e(all(mode(path) == 0o711 for path in (default_base, default_home)),
+              f'{edition}: existing default directories gain traversal without listing permission')
+            e(owners == tuple(os.stat(path).st_uid for path in (default_base, default_home)),
+              f'{edition}: existing default directory ownership must be preserved')
+            custom_home = root / 'private-site' / edition
+            sudo_log.write_text('')
+            result = run_bash(script, edition, custom_home, 'no', sudo_log, fallback_marker)
+            e(result.returncode == 0, f'{edition}: custom install failed: {result.stderr.strip()[:160]}')
+            e(not sudo_log.read_text(), f'{edition}: writable custom paths must not use sudo')
+            e(mode(custom_home.parent) == 0o700 and mode(custom_home) == 0o700,
+              f'{edition}: custom path must keep its umask-077 permissions')
+            e(mode(secret) == 0o600, f'{edition}: install must not widen an existing secret')
+            linked_target = root / 'linked-target'
+            linked_target.mkdir(mode=0o700)
+            default_base.rename(root / 'previous-default')
+            default_base.symlink_to(linked_target, target_is_directory=True)
+            sudo_log.write_text('')
+            result = run_bash(script, edition, default_home, 'no', sudo_log, fallback_marker)
+            e(result.returncode != 0 and mode(linked_target) == 0o700,
+              f'{edition}: a symlinked default parent must be rejected without widening its target')
+            e(not sudo_log.read_text(), f'{edition}: symlink rejection must happen before sudo')
+
+
 def check_deploy_release(checks):
     """S2: deploy_release widens only the paths the release archive held; secrets and leftovers keep 0600."""
     e = lambda cond, msg: checks.expect(cond, 'deploy_release: ' + msg)  # noqa: E731
@@ -4256,7 +4331,7 @@ def main():
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
-                  check_deploy_release, check_rpm_install, check_gen_cert_ip,
+                  check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
                   check_broker_apply, check_truststore_env, check_broker_docs):
         try:

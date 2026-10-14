@@ -259,16 +259,27 @@ is_package() {
 
 # Create the installation directory, owned by the user running krate.
 ensure_home_dir() {
-  if mkdir -p "$KRATE_HOME" 2>/dev/null && [[ -w "$KRATE_HOME" ]]; then
-    return 0
+  # Never chmod a symlink target through the privileged default install path.
+  if [[ "$KRATE_HOME" == "/opt/krate/${KRATE_VARIANT:-}" ]] \
+      && { [[ -L /opt/krate ]] || [[ -L "$KRATE_HOME" ]]; }; then
+    die "Cannot use a symlink as the default installation directory: $KRATE_HOME"
   fi
   local -a sudo_cmd=()
   if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
     sudo_cmd=(sudo)
   fi
-  info "Creating the installation directory $KRATE_HOME"
-  if ! { "${sudo_cmd[@]}" mkdir -p "$KRATE_HOME" && "${sudo_cmd[@]}" chown "$(id -u):$(id -g)" "$KRATE_HOME"; }; then
-    die "Could not create $KRATE_HOME. Create it, or install elsewhere: KRATE_HOME=/path ./krate install"
+  if ! { mkdir -p "$KRATE_HOME" 2>/dev/null && [[ -w "$KRATE_HOME" ]]; }; then
+    info "Creating the installation directory $KRATE_HOME"
+    if ! { "${sudo_cmd[@]}" mkdir -p "$KRATE_HOME" && "${sudo_cmd[@]}" chown "$(id -u):$(id -g)" "$KRATE_HOME"; }; then
+      die "Could not create $KRATE_HOME. Create it, or install elsewhere: KRATE_HOME=/path ./krate install"
+    fi
+  fi
+  # The default location is bind-mounted into unprivileged containers. A first
+  # install under umask 077 needs traversal, but directory listings and site
+  # files stay private. Do not change operator-selected KRATE_HOME paths.
+  if [[ "$KRATE_HOME" == "/opt/krate/${KRATE_VARIANT:-}" ]] \
+      && ! "${sudo_cmd[@]}" chmod go+x /opt/krate "$KRATE_HOME"; then
+    die "Could not make $KRATE_HOME traversable by the containers"
   fi
 }
 
