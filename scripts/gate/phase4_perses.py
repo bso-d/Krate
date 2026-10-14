@@ -500,6 +500,9 @@ class Gate(Phase4Gate):
                 raise RuntimeError('%s failed (rc %d): %s'
                                    % (' '.join(command), rc, (err or out).strip()[-180:]))
         self.wait_perses_ready('native')
+        sync_cid = self.mon_container('perses-sync', all_states=False)
+        if not sync_cid or self._wait_container_healthy(sync_cid, limit=180) is None:
+            raise RuntimeError('perses-sync did not become healthy after realm switch')
         log('setup: Perses switched to native realm mode')
 
     # ── rows (section 2.2 of PHASE4-INSTRUCTIONS-v3.md) ──
@@ -1180,15 +1183,17 @@ class Gate(Phase4Gate):
         # monitor up 0, perses-migrate reports 2 users and 2 managed bindings removed,
         # cookie secret rotated, perses-sync healthy, realm sign-in OK.
         cmd_seed = [
-            'run', '--rm', '-v', '%s_perses_data:/perses/data' % self.monitor_project,
+            'run', '--rm', '-v', '%s_perses_data:/perses' % self.monitor_project,
             self.monitor_env['LOG_DISCOVERY_IMAGE'], 'python3', '-c',
             '''
 import os, json
+foreign_issuer = "https://foreign-idp.example.com/realms/other"
 os.makedirs("/perses/data/users", exist_ok=True)
 os.makedirs("/perses/data/globalrolebindings", exist_ok=True)
+open("/perses/data/.krate-issuer", "w").write(foreign_issuer + "\\n")
 for i in (1, 2):
     doc = {"kind": "User", "metadata": {"name": f"user-old-{i}"},
-           "spec": {"oauthProviders": [{"issuer": "https://foreign-idp.example.com/realms/other"}]}}
+           "spec": {"oauthProviders": [{"issuer": foreign_issuer}]}}
     open(f"/perses/data/users/user-old-{i}.json", "w").write(json.dumps(doc))
 for name in ("krate-viewer-111111111111111111111111", "krate-admin-222222222222222222222222"):
     doc = {"kind": "GlobalRoleBinding", "metadata": {"name": name}}
@@ -1211,9 +1216,8 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         rc_log, pm_log, _ = p2.docker('logs', pm_cid) if pm_cid else (-1, '', '')
         pm_reported = 'removed 2 stale user(s) and 2 managed binding(s)' in pm_log
 
-        sync_cid = self.mon_container('perses-sync')
-        rc_sync, s_sync, _ = p2.docker('inspect', '-f', '{{.State.Status}}', sync_cid) if sync_cid else (-1, '', '')
-        sync_ok = (rc_sync == 0 and s_sync.strip() == 'running')
+        sync_cid = self.mon_container('perses-sync', all_states=False)
+        sync_ok = bool(sync_cid and self._wait_container_healthy(sync_cid, limit=180) is not None)
 
         res = self.signin('p4v', 'v14-signin', expect='ok')
         signin_ok = (res.get('kind') == 'OK' and res.get('role') == 'viewer')
@@ -1227,8 +1231,8 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         ]
         status, tokens = aggregate(probes)
         return status, '%s; issuer migration: monitor up rc=%d, perses-migrate reported %s, ' \
-                       'cookie secret rotated: %s, perses-sync %s, p4v sign-in %s; walk: live4b 114' \
-               % (tokens, rc_up, pm_reported, cookie_rotated, s_sync.strip(), res.get('kind'))
+                       'cookie secret rotated: %s, perses-sync healthy: %s, p4v sign-in %s; walk: live4b 114' \
+               % (tokens, rc_up, pm_reported, cookie_rotated, sync_ok, res.get('kind'))
 
     def v15(self):
         if self.timed.started('V15'):

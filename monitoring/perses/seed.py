@@ -55,7 +55,11 @@ class Perses:
                                         {'login': env['PERSES_ADMIN_USER'], 'password': env['PERSES_ADMIN_PASSWORD']})
         else:
             # The access guard's service identity also seeds dashboards.
-            client_id = json.loads(Path('/etc/krate/site/perses.json').read_text())['service_client_id']
+            # The Krate realm derives this identity from monitoring/.env; a
+            # company IdP still uses its operator-managed Perses site file.
+            settings = ('/etc/krate/perses-sync/rendered/config.json' if env.get('PERSES_IDP') == 'krate'
+                        else '/etc/krate/site/perses.json')
+            client_id = json.loads(Path(settings).read_text())['service_client_id']
             secret = env['PERSES_SYNC_CLIENT_SECRET']
             basic = base64.b64encode((client_id + ':' + secret).encode()).decode()
             status, data = self.request('POST', '/api/auth/providers/oidc/krate/token',
