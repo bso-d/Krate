@@ -52,8 +52,9 @@ harness/phase4/live4a/, taken at candidate 379acf6 unless noted):
     shape; Viewer p4v on krate-overview = log 146, Admin p4both on p4lokiui =
     log 148; the p4lokiui panel JSON is rebuilt — the walk's creation call was
     not kept — and the dashboard is deleted again after the runs).
-  * STUB rows: U14 (not in this walk's scope; plan row), U27 (needs the
-    --session-max-hours fixture).
+  * U14 was added after its six live refusals at candidate 54472fe (see
+    harness/phase4/formal-r1/u14-live/results.md). U27 still needs the
+    --session-max-hours fixture.
   * U21b on Linux: NOT_RUN until the VM method is encoded with the 4c netns
     probe (the walk observed the Mac method only).
 
@@ -97,7 +98,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python3 -I does not add the script directory
 import phase2_kafbat as p2  # noqa: E402
 from phase4_common import (Phase4Gate, helper_main, aggregate, log,  # noqa: E402
-                           Outcome, not_run, fail)
+                           Outcome, Terminated, not_run, fail)
 
 CASES = (['U%d' % i for i in range(1, 21)] + ['U21a', 'U21b']
          + ['U%d' % i for i in range(22, 30)])
@@ -282,7 +283,7 @@ class Gate(Phase4Gate):
 
     # ── fixture accessors ──
     def mon_dir(self):
-        return os.path.join(self.edition, 'monitoring')
+        return os.path.join(os.path.dirname(os.path.normpath(self.edition)), 'monitoring')
 
     def grafana_loopback(self):
         return 'http://127.0.0.1:%s' % (self.monitor_env.get('GRAFANA_PORT') or '3000')
@@ -730,11 +731,8 @@ class Gate(Phase4Gate):
 
     # ── README table 2 (U28/W4's approved residual list) ──
     def readme_path(self):
-        for candidate in (os.path.join(self.edition, 'monitoring', 'README.md'),
-                          os.path.join(os.path.dirname(self.edition), 'monitoring', 'README.md')):
-            if os.path.isfile(candidate):
-                return candidate
-        return None
+        candidate = os.path.join(self.mon_dir(), 'README.md')
+        return candidate if os.path.isfile(candidate) else None
 
     def table2_text(self):
         path = self.readme_path()
@@ -1616,18 +1614,20 @@ class Gate(Phase4Gate):
         port = self.monitor_env.get('GRAFANA_PORT') or '3000'
         perses_port = self.monitor_env.get('PERSES_PORT') or '3443'
         rc, out, _ = p2.run(['ifconfig'], timeout=30)
-        lan4 = lan6 = iface = None
+        lan4 = iface = None
         current = None
+        linklocal_by_iface = {}
         for line in out.splitlines():
             if not line.startswith(('\t', ' ')):
                 current = line.split(':', 1)[0]
-            elif current and current.startswith('en') and lan4 is None:
+            elif current and current.startswith('en'):
                 m4 = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', line)
                 m6 = re.search(r'inet6 (fe80::[0-9a-f:]+)%(\S+)', line)
-                if m4:
+                if m4 and lan4 is None:
                     lan4, iface = m4.group(1), current
-                elif m6 and iface == current:
-                    lan6 = '%s%%%s' % (m6.group(1), m6.group(2))
+                if m6:
+                    linklocal_by_iface[current] = '%s%%%s' % (m6.group(1), m6.group(2))
+        lan6 = linklocal_by_iface.get(iface)
         if not lan4:
             not_run('no LAN IPv4 address found on an en* interface (walk method, live4a 142)')
 
@@ -1653,7 +1653,7 @@ class Gate(Phase4Gate):
         status, tokens = aggregate(probes)
         return status, '%s; %s:%s via LAN %s rc=%d, via %s rc=%d, [::1] rc=%d (controls %s/%s); ' \
                        'walk: live4a 142' % (tokens, 'grafana', port, lan4, rc3, lan6 or '-', rc4,
-                                             code1, code2)
+                                             rc5, code1, code2)
 
     def u26(self):
         # walk logs/160 (realm) + 104 (realm.ini): the static session defaults.
@@ -2203,7 +2203,138 @@ class Gate(Phase4Gate):
                   recov_result['kind'])
 
     def u14(self):
-        return self.stub('U14', 'not in live4a walk scope: monitor realm / monitor up loopback refusals...')
+        """Six live loopback refusals, each with a no-side-effect snapshot.
+
+        The manual walk for this exact sequence is in
+        harness/phase4/formal-r1/u14-live/results.md (candidate 54472fe).
+        """
+        original_url = p2.read_env(os.path.join(self.edition, '.env')).get('KEYCLOAK_PUBLIC_URL', '')
+        original_mode = self.mon_env_value('GRAFANA_AUTH_CONFIG')
+        if not original_url or original_mode != 'realm.ini' or not self.mon_container('grafana', all_states=False):
+            not_run('precondition: public URL and running realm-mode Grafana are required')
+
+        def snapshot():
+            files = {}
+            roots = (os.path.join(self.edition, 'certs'),
+                     os.path.join(self.edition, 'auth'),
+                     os.path.join(self.mon_dir(), 'auth'))
+            paths = [os.path.join(self.edition, '.env'), os.path.join(self.mon_dir(), '.env')]
+            for root in roots:
+                if not os.path.isdir(root):
+                    raise RuntimeError('U14 state root is missing: ' + root)
+                for directory, _dirs, filenames in os.walk(root):
+                    paths.extend(os.path.join(directory, filename) for filename in filenames)
+            for path in paths:
+                with open(path, 'rb') as handle:
+                    digest = hashlib.sha256()
+                    for chunk in iter(lambda: handle.read(65536), b''):
+                        digest.update(chunk)
+                files[os.path.relpath(path, self.edition)] = (
+                    digest.hexdigest(), os.stat(path).st_mode & 0o777)
+
+            containers = []
+            for project in (self.project, self.monitor_project):
+                ps_rc, ps_out, ps_err = p2.docker('ps', '-aq', '--filter',
+                                                  'label=com.docker.compose.project=' + project)
+                if ps_rc != 0:
+                    raise RuntimeError('U14 docker ps failed for %s: %s' % (project, ps_err[:120]))
+                for cid in ps_out.split():
+                    inspect_rc, detail, inspect_err = p2.docker(
+                        'inspect', '--format',
+                        '{{.Id}} {{.State.StartedAt}} {{index .Config.Labels "com.docker.compose.service"}}',
+                        cid)
+                    if inspect_rc != 0:
+                        raise RuntimeError('U14 docker inspect failed: ' + inspect_err[:120])
+                    containers.append((project, detail.strip()))
+            if not containers:
+                raise RuntimeError('U14 found no fixture containers')
+            resources = []
+            for kind in ('volume', 'network'):
+                list_rc, list_out, list_err = p2.docker(kind, 'ls', '--format', '{{.Name}}')
+                if list_rc != 0:
+                    raise RuntimeError('U14 docker %s ls failed: %s' % (kind, list_err[:120]))
+                resources.extend((kind, name) for name in list_out.split()
+                                 if name.startswith(self.project + '_')
+                                 or name.startswith(self.monitor_project + '_'))
+            return files, tuple(sorted(containers)), tuple(sorted(resources))
+
+        names = [(label + '_' + command, label, host, command, mode)
+                 for label, host in (('localhost', 'localhost'),
+                                     ('ipv4', '127.0.0.1'),
+                                     ('ipv6', '[::1]'))
+                 for command, mode in (('realm', 'local.ini'), ('up', 'realm.ini'))]
+        outcomes = {name: 'NOT_RUN' for name, _label, _host, _command, _mode in names}
+        observations = []
+        problem = ''
+        current_name = names[0][0]
+        try:
+            for name, _label, host, command, mode in names:
+                current_name = name
+                url = 'https://%s/identity' % host
+                rc_set, _out, err = self.krate('config', 'set', 'KEYCLOAK_PUBLIC_URL=' + url)
+                if rc_set != 0:
+                    outcomes[name] = 'FAIL'
+                    problem = 'setting U14 public URL failed (rc %d): %s' % (rc_set, err[-120:])
+                    break
+                rc_mode, _out, err = self.krate('config', 'set', 'GRAFANA_AUTH_CONFIG=' + mode)
+                if rc_mode != 0:
+                    outcomes[name] = 'FAIL'
+                    problem = 'setting U14 Grafana mode failed (rc %d): %s' % (rc_mode, err[-120:])
+                    break
+                before = snapshot()
+                rc, out, err = self.krate('monitor', command, timeout=120)
+                after = snapshot()
+                refusal = (rc != 0
+                           and 'KEYCLOAK_PUBLIC_URL names the loopback or unspecified host' in out + err
+                           and "host '%s'" % host in out + err)
+                unchanged = before == after
+                outcomes[name] = 'PASS' if refusal and unchanged else 'FAIL'
+                observations.append('%s rc=%d refusal=%s unchanged=%s'
+                                    % (name, rc, refusal, unchanged))
+                if not unchanged:
+                    problem = '%s changed fixture state' % name
+                    break
+        except Exception as error:
+            outcomes[current_name] = 'FAIL'
+            problem = 'U14 observation error %s: %s' % (type(error).__name__, str(error)[:160])
+        finally:
+            restore_url, err_url = -1, ''
+            restore_mode, err_mode = -1, ''
+            try:
+                restore_url, _out, err_url = self.krate(
+                    'config', 'set', 'KEYCLOAK_PUBLIC_URL=' + original_url)
+            except Exception as error:
+                err_url = '%s: %s' % (type(error).__name__, str(error)[:80])
+            try:
+                restore_mode, _out, err_mode = self.krate(
+                    'config', 'set', 'GRAFANA_AUTH_CONFIG=' + original_mode)
+            except Exception as error:
+                err_mode = '%s: %s' % (type(error).__name__, str(error)[:80])
+        try:
+            restored = (restore_url == 0 and restore_mode == 0
+                        and p2.read_env(os.path.join(self.edition, '.env')).get('KEYCLOAK_PUBLIC_URL')
+                        == original_url
+                        and self.mon_env_value('GRAFANA_AUTH_CONFIG') == original_mode)
+        except OSError:
+            restored = False
+        outcomes['restored'] = 'PASS' if restored else 'FAIL'
+        if not restored:
+            problem += ' restore failed: url rc=%d %s; mode rc=%d %s' % (
+                restore_url, err_url[-80:], restore_mode, err_mode[-80:])
+        probes = [(name, outcomes[name]) for name, _label, _host, _command, _mode in names]
+        probes.append(('restored', outcomes['restored']))
+        status, tokens = aggregate(probes)
+        details = [tokens]
+        if problem:
+            details.append(problem)
+        details.extend(observations)
+        details.append('live walk: u14-live/results.md')
+        detail = '; '.join(details)
+        if status == 'FAIL':
+            self.record('U14', status, detail)
+            log('U14 failed: stopping later rows because fixture state cannot be trusted')
+            raise Terminated()
+        return status, detail
 
     def u15(self):
         # walk log 132 (headless four) + 146/148 (browser `ui` half). The four

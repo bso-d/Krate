@@ -39,6 +39,7 @@ import os
 import re
 import secrets
 import signal
+import ssl
 import sys
 import threading
 import time
@@ -233,7 +234,7 @@ class Phase4Gate(p2.Gate):
 
     # ── monitoring side ──
     def mon_dir(self):
-        return os.path.join(self.edition, 'monitoring')
+        return os.path.join(os.path.dirname(os.path.normpath(self.edition)), 'monitoring')
 
     def mon_env_value(self, key):
         return p2.read_env(os.path.join(self.mon_dir(), '.env')).get(key, '')
@@ -393,7 +394,11 @@ class Phase4Gate(p2.Gate):
         problem = super().preflight()
         if problem is not None:
             return problem
-        mon_env_path = os.path.join(self.edition, 'monitoring', '.env')
+        if (self.tls_mode != 'pinned fixture certificate certs/server.crt'
+                or self.tls is None or not self.tls.check_hostname
+                or self.tls.verify_mode != ssl.CERT_REQUIRED):
+            return 'Phase 4 requires verified TLS with the pinned fixture certificate'
+        mon_env_path = os.path.join(self.mon_dir(), '.env')
         if not os.path.isfile(mon_env_path):
             return 'monitoring/.env is missing: the fixture bring-up (krate monitor up) did not run'
         self.monitor_env = p2.read_env(mon_env_path)
@@ -433,31 +438,32 @@ class Phase4Gate(p2.Gate):
 
     # ── driver ──
     def main(self):
-        problem = self.preflight()
-        if problem is not None:
-            log('preflight: ' + problem)
-            self.setup_result = ('NOT_RUN', 'preflight failed: ' + problem)
-            for case in self.CASES:
-                self.results.setdefault(case, ('NOT_RUN', evidence('precondition: ' + problem)))
-            return self.finish()
-        setup_problem = self.setup()
-        if setup_problem is not None:
-            log('setup: ' + setup_problem)
-            # Section 5: the setup line says FAIL and every row becomes NOT_RUN;
-            # while the preconditions are still scaffold, the line says NOT_RUN.
-            status = 'FAIL' if not setup_problem.startswith('scaffold') else 'NOT_RUN'
-            self.setup_result = (status, setup_problem)
-            for case in self.CASES:
-                self.results.setdefault(case, ('NOT_RUN', evidence('setup: ' + setup_problem)))
-            return self.finish()
-        self.setup_result = ('PASS', 'preconditions ran')
         try:
-            for name, func in self.plan():
-                self.case(name, func)
-        except Terminated:
-            # SIGTERM reached the helper: the rows gathered so far are still printed.
-            self.terminated = True
-            log('terminated: stopping after the current row')
+            problem = self.preflight()
+            if problem is not None:
+                log('preflight: ' + problem)
+                self.setup_result = ('NOT_RUN', 'preflight failed: ' + problem)
+                for case in self.CASES:
+                    self.results.setdefault(case, ('NOT_RUN', evidence('precondition: ' + problem)))
+                return self.finish()
+            setup_problem = self.setup()
+            if setup_problem is not None:
+                log('setup: ' + setup_problem)
+                # Section 5: the setup line says FAIL and every row becomes NOT_RUN;
+                # while the preconditions are still scaffold, the line says NOT_RUN.
+                status = 'FAIL' if not setup_problem.startswith('scaffold') else 'NOT_RUN'
+                self.setup_result = (status, setup_problem)
+                for case in self.CASES:
+                    self.results.setdefault(case, ('NOT_RUN', evidence('setup: ' + setup_problem)))
+                return self.finish()
+            self.setup_result = ('PASS', 'preconditions ran')
+            try:
+                for name, func in self.plan():
+                    self.case(name, func)
+            except Terminated:
+                # SIGTERM reached the helper: the rows gathered so far are still printed.
+                self.terminated = True
+                log('terminated: stopping after the current row')
         finally:
             for name in self.timed.alive():
                 log('timed row %s still running at exit; joined with a 5 s bound' % name)

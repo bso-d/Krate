@@ -227,6 +227,21 @@ class Gate(Phase4Gate):
             st5, h5, page5 = d.req(action_otp, method='POST',
                                    data={'otp': code, 'login': 'Sign In'},
                                    headers={'Accept': 'text/html'})
+            if st5 == 200 and 'Invalid authenticator code' in page5:
+                retry_action = self.form_action(page5)
+                if retry_action:
+                    now = time.time()
+                    current_step = int(now // 30)
+                    delay = (current_step + 1) * 30 - now + 0.05
+                    if not 0 < delay <= 30.05:
+                        return {'kind': 'FAIL', 'detail': 'invalid TOTP replay wait'}
+                    time.sleep(delay)
+                    if int(time.time() // 30) <= current_step:
+                        return {'kind': 'FAIL', 'detail': 'TOTP step did not advance'}
+                    st5, h5, page5 = d.req(retry_action, method='POST',
+                                           data={'otp': self.totp(totp_seed),
+                                                 'login': 'Sign In'},
+                                           headers={'Accept': 'text/html'})
         else:
             st5, h5, page5 = st4, h4, page4
 
@@ -271,6 +286,195 @@ class Gate(Phase4Gate):
             login_probe=None, local_user=None, local_password_env=None, clash_user=None,
             only=None)
         return phase3_broker.Gate(args)
+
+    def setup(self):
+        """Section 5 preconditions, using the order observed in live4b."""
+        try:
+            self.setup_realm_users()
+            self.setup_grafana_realm()
+            self.setup_perses_seed()
+            self.setup_perses_realm()
+        except Exception as error:
+            return 'setup step failed: %s: %s' % (type(error).__name__, str(error)[:300])
+        return None
+
+    def setup_realm_users(self):
+        """Live4b logs/021-022: eight users, both-group assignments, enrolment."""
+        state_dir = os.path.join(self.state_dir, 'p4')
+        os.makedirs(state_dir, exist_ok=True)
+        users = (('p4v', ('--viewer',)), ('p4a', ('--admin',)),
+                 ('p4both', ('--admin',)), ('p4nogroup', ()),
+                 ('p4dis', ('--viewer',)), ('p4a2', ('--admin',)),
+                 ('p4idle', ('--viewer',)), ('p4ctrl', ('--viewer',)))
+        temporary = {}
+        for name, flags in users:
+            rc, out, err = self.krate('identity', 'users', 'add', name, *flags,
+                                      '--email', name + '@live4b.test', timeout=180)
+            if rc != 0:
+                raise RuntimeError('identity users add %s failed (rc %d): %s'
+                                   % (name, rc, (err or out).strip()[-160:]))
+            temporary[name] = self.temp_password(out)
+            if not temporary[name]:
+                raise RuntimeError('no temporary password returned for ' + name)
+            self.add_runtime_secret(temporary[name])
+        kc = self.master_kcadm()
+        viewer_group = self.env.get('KEYCLOAK_VIEWER_GROUP') or 'KRATE_VIEWERS'
+        viewer_gid = kc.group_id(viewer_group)
+        if not viewer_gid:
+            raise RuntimeError('realm group missing: ' + viewer_group)
+        for name in ('p4both', 'p4a2'):
+            uid = kc.user_id(name)
+            if not uid:
+                raise RuntimeError('realm user missing: ' + name)
+            kc.add_group(uid, viewer_gid)
+        for name, _flags in users:
+            state = os.path.join(state_dir, 'kc-%s.json' % name)
+            self.enrol_user(name, temporary[name], state)
+            self.user_state[name] = state
+        log('setup: eight live4b realm users enrolled; two in both groups')
+
+    def setup_grafana_realm(self):
+        """Section 5: 4a switch without 4a seeding or rows."""
+        for command in (('monitor', 'realm'),
+                        ('config', 'set', 'GRAFANA_AUTH_CONFIG=realm.ini'),
+                        ('monitor', 'up')):
+            rc, out, err = self.krate(*command, timeout=900)
+            if rc != 0:
+                raise RuntimeError('%s failed (rc %d): %s'
+                                   % (' '.join(command), rc, (err or out).strip()[-180:]))
+        log('setup: Grafana switched to realm mode without 4a seed')
+
+    def wait_perses_ready(self, mode, timeout=30):
+        """Wait for the observed gateway response after a local/native mode switch.
+
+        The normal PersesDriver uses the gate CA, hostname verification and the
+        public hostname in the URL. Its NoRedirect handler exposes the native
+        gateway's /oauth2/start redirect instead of following it.
+        """
+        if mode not in ('local', 'native'):
+            raise ValueError('unknown Perses readiness mode ' + str(mode))
+        url = self.gateway('/')
+        self.check_url(url)
+        driver = self.driver('readiness-%s-%s' % (mode, time.monotonic()))
+        deadline = time.monotonic() + timeout
+        last_status = None
+        last_path = ''
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('%s readiness timed out after %ss; last HTTP %s, path %s'
+                                   % (mode, timeout, last_status, last_path or '-'))
+            status, headers, body = driver.req(
+                url, headers={'Accept': 'text/html'}, timeout=min(5.0, remaining))
+            location = headers.get('Location', '')
+            redirect = urllib.parse.urlsplit(location)
+            last_status, last_path = status, redirect.path
+            completed_at = time.monotonic()
+            if completed_at > deadline:
+                raise RuntimeError('%s readiness timed out after %ss; last HTTP %s, path %s'
+                                   % (mode, timeout, last_status, last_path or '-'))
+            if mode == 'local' and status == 200:
+                return
+            if (mode == 'native' and status == 302
+                    and redirect.path == '/oauth2/start'
+                    and not redirect.scheme and not redirect.netloc):
+                return
+            if status == -1 and ('CERTIFICATE_VERIFY_FAILED' in body
+                                 or 'hostname mismatch' in body):
+                raise RuntimeError('%s readiness TLS verification failed' % mode)
+            remaining = deadline - completed_at
+            if remaining <= 0:
+                raise RuntimeError('%s readiness timed out after %ss; last HTTP %s, path %s'
+                                   % (mode, timeout, last_status, last_path or '-'))
+            time.sleep(min(0.5, remaining))
+
+    def setup_perses_seed(self):
+        """Live4b results/100 and evidence/v17-before-raw.json: four local objects."""
+        if self.mon_env_value('PERSES_IDP') or self.mon_env_value('PERSES_AUTH_MODE') != 'local':
+            raise RuntimeError('Perses must be in local mode before seeding')
+        self.wait_perses_ready('local')
+        user = self.mon_env_value('PERSES_ADMIN_USER') or 'admin'
+        password = self.mon_env_value('PERSES_ADMIN_PASSWORD')
+        if not password:
+            raise RuntimeError('PERSES_ADMIN_PASSWORD missing from monitoring/.env')
+        request = urllib.request.Request(
+            self.gateway('/api/auth/providers/native/login'), method='POST',
+            data=json.dumps({'login': user, 'password': password}).encode(),
+            headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, context=self.tls, timeout=30) as response:
+            token = json.load(response).get('access_token', '')
+        if not token:
+            raise RuntimeError('Perses local admin login returned no access token')
+        self.add_runtime_secret(token)
+        base = '/api/v1/projects/p4b-seed-proj'
+        datasource = {
+            'kind': 'Datasource',
+            'metadata': {'name': 'p4b-seed-ds', 'project': 'p4b-seed-proj'},
+            'spec': {
+                'default': False,
+                'plugin': {
+                    'kind': 'PrometheusDatasource',
+                    'spec': {'proxy': {'kind': 'HTTPProxy',
+                                       'spec': {'url': 'http://prometheus:9090'}}},
+                },
+            },
+        }
+        objects = (
+            ('/api/v1/projects', 'p4b-seed-proj',
+             {'kind': 'Project', 'metadata': {'name': 'p4b-seed-proj'},
+              'spec': {'display': {'name': 'P4B Seed Project'}}}),
+            (base + '/datasources', 'p4b-seed-ds', datasource),
+            (base + '/variables', 'p4b_var',
+             {'kind': 'Variable', 'metadata': {'name': 'p4b_var', 'project': 'p4b-seed-proj'},
+              'spec': {'kind': 'TextVariable', 'spec': {'value': 'hello'}}}),
+            (base + '/dashboards', 'p4b-seed-dash',
+             {'kind': 'Dashboard', 'metadata': {'name': 'p4b-seed-dash', 'project': 'p4b-seed-proj'},
+              'spec': {'display': {'name': 'P4B Seed Dashboard'},
+                       'panels': None, 'layouts': [], 'duration': '1h'}}),
+            (base + '/folders', 'p4b-seed-folder',
+             {'kind': 'Folder', 'metadata': {'name': 'p4b-seed-folder', 'project': 'p4b-seed-proj'},
+              'spec': {'display': {'name': 'P4B Seed Folder'},
+                       'items': [{'kind': 'Dashboard', 'name': 'p4b-seed-dash'}]}}),
+        )
+        for path, name, payload in objects:
+            headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token}
+            request = urllib.request.Request(self.gateway(path), method='POST',
+                                             data=json.dumps(payload).encode(), headers=headers)
+            with urllib.request.urlopen(request, context=self.tls, timeout=30) as response:
+                if response.status not in (200, 201):
+                    raise RuntimeError('Perses seed %s returned HTTP %d' % (name, response.status))
+            request = urllib.request.Request(self.gateway(path),
+                                             headers={'Authorization': 'Bearer ' + token})
+            with urllib.request.urlopen(request, context=self.tls, timeout=30) as response:
+                listing = json.load(response)
+            if not isinstance(listing, list):
+                raise RuntimeError('Perses seed %s readback was not a list' % name)
+            found = [item for item in listing
+                     if isinstance(item, dict) and item.get('metadata', {}).get('name') == name]
+            if len(found) != 1:
+                raise RuntimeError('Perses seed %s readback count was %d' % (name, len(found)))
+            actual = found[0]
+            metadata = actual.get('metadata') or {}
+            expected_metadata = payload['metadata']
+            actual_metadata = {key: metadata.get(key) for key in expected_metadata}
+            if (actual.get('kind') != payload['kind']
+                    or actual_metadata != expected_metadata
+                    or actual.get('spec') != payload['spec']):
+                raise RuntimeError('Perses seed %s readback model differs from request' % name)
+        self.obs['V17-baseline'] = self.hash_perses_state(token)
+        log('setup: five Perses local seed objects read back; candidate V17 baseline captured')
+
+    def setup_perses_realm(self):
+        """Live4b log/100: enable native mode and realm issuer, then monitor up."""
+        for command in (('config', 'set', 'PERSES_AUTH_MODE=native'),
+                        ('config', 'set', 'PERSES_IDP=krate'),
+                        ('monitor', 'up')):
+            rc, out, err = self.krate(*command, timeout=900)
+            if rc != 0:
+                raise RuntimeError('%s failed (rc %d): %s'
+                                   % (' '.join(command), rc, (err or out).strip()[-180:]))
+        self.wait_perses_ready('native')
+        log('setup: Perses switched to native realm mode')
 
     # ── rows (section 2.2 of PHASE4-INSTRUCTIONS-v3.md) ──
     # Every body below is a scaffold stub; `needs` records what the live4b walk
@@ -1125,85 +1329,143 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                % (tokens, rc_up1, names_idp, st_p.strip(), st_o.strip(),
                   rc_up2, st_p2.strip(), st_o2.strip(), res.get('kind'))
 
-    def hash_perses_state(self, token=None):
-        """V17 state hash (walk log 100, evidence/v17-before-hashes.tsv):
-        projects, dashboards, datasources, variables canonical sha256."""
-        headers = {}
-        if token:
-            headers['Authorization'] = 'Bearer ' + token
-        else:
-            admin_user = self.env.get('PERSES_ADMIN_USER', 'admin')
-            admin_pw = self.env.get('PERSES_ADMIN_PASSWORD', '')
-            req_l = urllib.request.Request(self.gateway('/api/auth/providers/native/login'),
-                                           data=json.dumps({'login': admin_user, 'password': admin_pw}).encode(),
-                                           headers={'Content-Type': 'application/json'}, method='POST')
-            try:
-                with urllib.request.urlopen(req_l, context=self.tls, timeout=30) as resp:
-                    data = json.loads(resp.read().decode())
-                    headers['Authorization'] = 'Bearer ' + data.get('access_token', '')
-            except Exception:
-                pass
+    def hash_perses_state(self, token=None, driver=None):
+        """Hash all five state kinds; any failed read invalidates the comparison."""
+        if not token and driver is None:
+            user = self.mon_env_value('PERSES_ADMIN_USER') or 'admin'
+            password = self.mon_env_value('PERSES_ADMIN_PASSWORD')
+            request = urllib.request.Request(
+                self.gateway('/api/auth/providers/native/login'), method='POST',
+                data=json.dumps({'login': user, 'password': password}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(request, context=self.tls, timeout=30) as response:
+                token = json.load(response).get('access_token')
+            if not token:
+                raise RuntimeError('Perses local login returned no access token')
+            self.add_runtime_secret(token)
 
         def get_json(path):
-            req = urllib.request.Request(self.gateway(path), headers=headers)
-            try:
-                with urllib.request.urlopen(req, context=self.tls, timeout=30) as r:
-                    return json.loads(r.read().decode())
-            except Exception:
-                return []
+            if driver is not None:
+                status, _headers, text = driver.req(self.gateway(path))
+                if status == 404 and path in ('/api/v1/globaldatasources', '/api/v1/globalvariables'):
+                    return []
+                if status != 200:
+                    raise RuntimeError('Perses state GET %s returned HTTP %s' % (path, status))
+                result = json.loads(text)
+            else:
+                if not isinstance(token, str):
+                    raise RuntimeError('Perses state read has no bearer token')
+                request = urllib.request.Request(self.gateway(path),
+                                                 headers={'Authorization': 'Bearer ' + token})
+                try:
+                    with urllib.request.urlopen(request, context=self.tls, timeout=30) as response:
+                        result = json.load(response)
+                except urllib.error.HTTPError as error:
+                    if error.code == 404 and path in ('/api/v1/globaldatasources',
+                                                      '/api/v1/globalvariables'):
+                        return []
+                    raise
+            if not isinstance(result, list):
+                raise RuntimeError('Perses state GET %s did not return a list' % path)
+            return result
 
-        def canon(obj):
-            return json.dumps(obj, sort_keys=True, separators=(',', ':'))
+        def stable(value):
+            if isinstance(value, dict):
+                return {key: stable(item) for key, item in value.items()
+                        if key not in ('createdAt', 'updatedAt', 'version')}
+            if isinstance(value, list):
+                return [stable(item) for item in value]
+            return value
 
-        def strip_vol(obj):
-            if isinstance(obj, dict):
-                return {k: strip_vol(v) for k, v in obj.items() if k not in ('createdAt', 'updatedAt', 'version')}
-            if isinstance(obj, list):
-                return [strip_vol(v) for v in obj]
-            return obj
-
-        projects = sorted(get_json('/api/v1/projects'), key=lambda x: x.get('metadata', {}).get('name', ''))
-        dashboards = []
-        datasources = []
-        variables = []
-        for p in projects:
-            pname = p.get('metadata', {}).get('name', '')
-            dashboards.extend(get_json('/api/v1/projects/%s/dashboards' % pname))
-            datasources.extend(get_json('/api/v1/projects/%s/datasources' % pname))
-            variables.extend(get_json('/api/v1/projects/%s/variables' % pname))
-        dashboards.extend(get_json('/api/v1/globaldatasources'))
-        variables.extend(get_json('/api/v1/globalvariables'))
-
-        dashboards = sorted(dashboards, key=lambda x: (x.get('metadata', {}).get('project', ''), x.get('metadata', {}).get('name', '')))
-        datasources = sorted(datasources, key=lambda x: (x.get('metadata', {}).get('project', ''), x.get('metadata', {}).get('name', '')))
-        variables = sorted(variables, key=lambda x: (x.get('metadata', {}).get('project', ''), x.get('metadata', {}).get('name', '')))
-
-        hashes = {
-            'projects': hashlib.sha256(canon(strip_vol(projects)).encode()).hexdigest(),
-            'dashboards': hashlib.sha256(canon(strip_vol(dashboards)).encode()).hexdigest(),
-            'datasources': hashlib.sha256(canon(strip_vol(datasources)).encode()).hexdigest(),
-            'variables': hashlib.sha256(canon(strip_vol(variables)).encode()).hexdigest(),
-        }
-        return hashes
+        projects = sorted(get_json('/api/v1/projects'),
+                          key=lambda item: item['metadata']['name'])
+        state = {'projects': projects, 'dashboards': [], 'folders': [],
+                 'datasources': [], 'variables': []}
+        for project in projects:
+            name = urllib.parse.quote(project['metadata']['name'], safe='')
+            for kind in ('dashboards', 'folders', 'datasources', 'variables'):
+                state[kind].extend(get_json('/api/v1/projects/%s/%s' % (name, kind)))
+        state['datasources'].extend(get_json('/api/v1/globaldatasources'))
+        state['variables'].extend(get_json('/api/v1/globalvariables'))
+        for kind in ('dashboards', 'folders', 'datasources', 'variables'):
+            state[kind].sort(key=lambda item: (item['metadata'].get('project', ''),
+                                                item['metadata']['name']))
+        return {kind: hashlib.sha256(
+            json.dumps(stable(items), sort_keys=True, separators=(',', ':')).encode()
+        ).hexdigest() for kind, items in state.items()}
 
     def v17(self):
-        # walk evidence v17-before-hashes.tsv, v17-before-raw.json (logs 100, 110):
-        # projects, dashboards, datasources, variables (canonical sha256) equal across switch.
-        hashes = self.hash_perses_state()
-        expected = {
-            'projects': '6de167dec5a4d1619edf7a115addf9fc38a095940f47daa3d652035636f27518',
-            'dashboards': '1a43882d0d409367615b2fc8071b679aa204f7b87ffba0c511d16133d51081a9',
-            'datasources': '419f9fa21ba4b37872f00a8f0dbdc4ae15a3ec90085ec7ef660152c78ea2cbbb',
-            'variables': 'd91315cee8ef05a78767a3ca68d8659860acd53f6e937dc0cb7e9602a2553a00',
-        }
+        """Compare the live seed across realm, local rollback and forward switch."""
+        baseline = self.obs.get('V17-baseline')
+        if not baseline:
+            not_run('precondition: no candidate-bound local Perses seed baseline')
+        before_cluster = self.cluster_id_map()
+        before_monitor = self.mon_id_map()
+        realm_login = self.signin('p4a', 'v17-realm', expect='ok')
+        if realm_login.get('kind') != 'OK' or realm_login.get('role') != 'admin':
+            return 'FAIL', 'probe=FAIL realm admin sign-in before rollback'
+        realm_hashes = self.hash_perses_state(driver=realm_login['driver'])
+
+        local_hashes = None
+        rollback_error = None
+        restore_error = None
+        try:
+            for command in (('config', 'set', 'PERSES_IDP='),
+                            ('config', 'set', 'PERSES_AUTH_MODE=local'),
+                            ('monitor', 'up')):
+                rc, out, err = self.krate(*command, timeout=900)
+                if rc != 0:
+                    raise RuntimeError('V17 rollback %s failed (rc %d): %s'
+                                       % (' '.join(command), rc, (err or out).strip()[-160:]))
+            self.wait_perses_ready('local')
+            local_hashes = self.hash_perses_state()
+        except Exception as error:
+            rollback_error = '%s: %s' % (type(error).__name__, str(error)[:180])
+        finally:
+            try:
+                self.setup_perses_realm()
+            except Exception as error:
+                restore_error = '%s: %s' % (type(error).__name__, str(error)[:180])
+        if restore_error:
+            self.record('V17', 'FAIL', 'realm restoration failed after rollback: %s; '
+                        'rollback error: %s; later Perses rows stopped'
+                        % (restore_error, rollback_error or 'none'))
+            raise p2.Terminated()
+        try:
+            forward_login = self.signin('p4a', 'v17-forward', expect='ok')
+        except Exception as error:
+            self.record('V17', 'FAIL', 'realm sign-in raised after forward switch: %s: %s; '
+                        'later Perses rows stopped' % (type(error).__name__, str(error)[:180]))
+            raise p2.Terminated()
+        if forward_login.get('kind') != 'OK' or forward_login.get('role') != 'admin':
+            self.record('V17', 'FAIL', 'realm sign-in failed after forward switch; '
+                        'later Perses rows stopped')
+            raise p2.Terminated()
+        if rollback_error:
+            return 'FAIL', ('probe=FAIL rollback failed; native realm mode restored '
+                            'and admin sign-in verified: ' + rollback_error)
+        forward_hashes = self.hash_perses_state(driver=forward_login['driver'])
+        after_cluster = self.cluster_id_map()
+        after_monitor = self.mon_id_map()
+        unaffected = ('grafana', 'prometheus', 'loki', 'victorialogs', 'alertmanager')
+        monitor_stable = all(name in before_monitor and name in after_monitor
+                             and before_monitor[name] == after_monitor[name]
+                             for name in unaffected)
+        cluster_stable = (bool(before_cluster) and before_cluster == after_cluster
+                          and all(name in before_cluster for name in
+                                  ('keycloak', 'keycloak-db', 'kafka-ui', 'proxy')))
         probes = [
-            ('projects', 'PASS' if hashes.get('projects') == expected['projects'] else 'FAIL'),
-            ('dashboards', 'PASS' if hashes.get('dashboards') == expected['dashboards'] else 'FAIL'),
-            ('datasources', 'PASS' if hashes.get('datasources') == expected['datasources'] else 'FAIL'),
-            ('variables', 'PASS' if hashes.get('variables') == expected['variables'] else 'FAIL'),
+            ('realm_hashes', 'PASS' if realm_hashes == baseline else 'FAIL'),
+            ('rollback_hashes', 'PASS' if local_hashes == baseline else 'FAIL'),
+            ('forward_hashes', 'PASS' if forward_hashes == baseline else 'FAIL'),
+            ('cluster_containers', 'PASS' if cluster_stable else 'FAIL'),
+            ('other_monitoring_containers', 'PASS' if monitor_stable else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; canonical state hashes equal before/after (4 categories); walk: live4b 100,110' % tokens
+        return status, ('%s; five candidate-bound state hashes compared across realm, '
+                        'local rollback and forward switch; cluster and unrelated monitoring '
+                        'containers unchanged; '
+                        'walk: live4b 117') % tokens
 
     def v18(self):
         # walk log 118: 3-command certificate renewal sequence (gen-cert -> auth apply -> monitor up):
