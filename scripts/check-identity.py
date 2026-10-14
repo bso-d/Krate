@@ -744,6 +744,27 @@ def check_phase4_monitor_paths(checks):
             e(reason is not None and 'monitoring/.env is missing' in reason,
               f'{module.__name__} must refuse a missing monitoring/.env: {reason}')
 
+        gate = object.__new__(grafana.Gate)
+        gate.secrets_path = str(base / 'phase4-secrets.txt')
+        Path(gate.secrets_path).write_text('prior\n')
+        os.chmod(gate.secrets_path, 0o644)
+        with gate.open_runtime_secrets():
+            pass
+        e(os.stat(gate.secrets_path).st_mode & 0o777 == 0o600,
+          'reopening a reused runtime secret file must remove group/world access')
+        gate.add_runtime_secret('fixture-secret')
+        e(Path(gate.secrets_path).read_text() == 'prior\nfixture-secret\n',
+          'the private runtime secret file must still accept appended secrets')
+        Path(gate.secrets_path).unlink()
+        os.symlink(base / 'outside-secret-file', gate.secrets_path)
+        try:
+            with gate.open_runtime_secrets():
+                pass
+        except OSError:
+            pass
+        else:
+            e(False, 'runtime secret file must refuse a symlink')
+
 
 def check_parity(checks):
     result = subprocess.run(['diff', '-U0', str(ROOT / 'kraft/krate'), str(ROOT / 'epc/krate')], text=True, capture_output=True)

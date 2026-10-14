@@ -207,6 +207,17 @@ class Phase4Gate(p2.Gate):
         self._master = None
 
     # ── runtime secrets ──
+    def open_runtime_secrets(self):
+        """Open the append-only secret list with private permissions, even if reused."""
+        fd = os.open(self.secrets_path,
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            return os.fdopen(fd, 'a', encoding='utf-8')
+        except BaseException:
+            os.close(fd)
+            raise
+
     def add_runtime_secret(self, value):
         """A runtime secret (JWT, cookie, token, enrolled password, TOTP seed).
 
@@ -218,7 +229,7 @@ class Phase4Gate(p2.Gate):
             return
         value = str(value)
         p2.REDACT.add(value)
-        with open(self.secrets_path, 'a', encoding='utf-8') as handle:
+        with self.open_runtime_secrets() as handle:
             handle.write(value + '\n')
 
     def add_state_file_secrets(self, path):
@@ -416,8 +427,8 @@ class Phase4Gate(p2.Gate):
         self.allowed_origins.add(self.perses_origin)
         try:
             os.makedirs(self.state_dir, exist_ok=True)
-            fd = os.open(self.secrets_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            os.close(fd)
+            with self.open_runtime_secrets():
+                pass
         except OSError as error:
             return 'cannot use the state directory %s: %s' % (self.state_dir, error)
         log('monitoring project %s; perses origin %s; state %s'
