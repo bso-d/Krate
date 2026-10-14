@@ -3872,6 +3872,58 @@ public_url_origin
               f'public_url_origin of {url} must be {expected} (identity.py checked_origin refuses a path); got {result.stdout.strip()!r}')
 
 
+def check_grafana_collision_paging(checks):
+    """A full realm page with absent e-mails must not hide a collision on page two."""
+    e = lambda cond, msg: checks.expect(cond, 'grafana collision paging: ' + msg)  # noqa: E731
+    if bash_binary() is None:
+        return
+    # Keycloak 26.8.0 live output: --fields email returns one JSON object per
+    # user, including {} for a user without e-mail; CSV emits an empty line.
+    page1 = [{'email': 'collision@example.test'}]
+    mixed_page = [{'email': f'user-{number:03d}@example.test'} if number not in (0, 50, 99) else {}
+                  for number in range(100)]
+    script_tail = r'''
+IDENTITY_REALM=krate
+grafana_admin() { printf '%s\n' "$LOCAL_USERS"; }
+kcadm_login() { :; }
+kcadm_logout() { :; }
+env_value() { printf '%s\n' synthetic-secret; }
+kcadm() {
+  local offset='' format=json
+  [[ " $* " == *' --format csv '* ]] && format=csv
+  while (($#)); do
+    if [[ "$1" == --offset ]]; then offset="$2"; shift 2; else shift; fi
+  done
+  printf 'offset=%s\n' "$offset" >&2
+  case "$offset/$format" in
+    0/json) printf '%s\n' "$PAGE0_JSON" ;;
+    0/csv) printf '%s' "$PAGE0_CSV" ;;
+    100/json) printf '%s\n' "$PAGE1_JSON" ;;
+    100/csv) printf '%s\n' "$PAGE1_CSV" ;;
+    *) printf '[]\n' ;;
+  esac
+}
+grafana_list_collisions
+'''
+    for edition in EDITIONS:
+        script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'grafana_list_collisions') + script_tail
+        for label, page0 in (('mixed', mixed_page), ('all absent', [{} for _ in range(100)])):
+            environment = dict(os.environ, LOCAL_USERS=json.dumps([
+                {'login': 'local-collision', 'email': 'collision@example.test', 'isDisabled': False}]),
+                PAGE0_JSON=json.dumps(page0),
+                PAGE0_CSV='\n'.join(row.get('email', '') for row in page0) + '\n',
+                PAGE1_JSON=json.dumps(page1), PAGE1_CSV='collision@example.test')
+            result = run_bash(script, env=environment)
+            e(result.returncode == 0, f'{edition}/{label}: full first page must succeed: {result.stderr.strip()[:160]}')
+            e('offset=100' in result.stderr, f'{edition}/{label}: absent e-mails must not end a 100-record page')
+            e('krate monitor grafana-user retire local-collision' in result.stdout,
+              f'{edition}/{label}: a page-two collision must be reported with its retire command')
+            environment['PAGE1_JSON'] = 'malformed-json'
+            result = run_bash(script, env=environment)
+            e(result.returncode != 0 and 'offset=100' in result.stderr,
+              f'{edition}/{label}: a malformed second page must fail closed after reading it')
+
+
 def check_grafana_realm_plan(checks):
     """Phase 4 commits 4/8: Grafana's realm.ini, the krate-grafana client and the two Perses clients."""
     e = checks.expect
@@ -4325,7 +4377,7 @@ def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_grafana_realm_plan, check_perses_clients,
+                  check_grafana_realm_cli, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,

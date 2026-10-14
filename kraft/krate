@@ -3519,7 +3519,7 @@ monitor_realm_refresh() {
 # an option (harness/phase4/lab4 Q1: e-mail linking handed the local account the
 # server admin role). So each collision is listed with the command that retires it.
 grafana_list_collisions() {
-  local users emails page rows offset
+  local users emails page parsed rows offset
   users="$(grafana_admin local-users)" || die "Grafana refused its user list"
   kcadm_login "$IDENTITY_REALM" client krate-cli "$(env_value KEYCLOAK_CLI_CLIENT_SECRET)" \
     || die "Keycloak refused the krate-cli client login. Check: krate identity status"
@@ -3531,12 +3531,34 @@ grafana_list_collisions() {
   offset=0
   while :; do
     page="$(kcadm -- get users -r "$IDENTITY_REALM" --offset "$offset" --limit 100 \
-      --fields email --format csv --noquotes)" \
+      --fields email)" \
       || { kcadm_logout; die "Keycloak refused its user list, so the collision check cannot say whether a local Grafana user holds a realm e-mail. Check: krate identity status"; }
-    rows="$(printf '%s\n' "$page" | grep -c '[^[:space:]]' || true)"
+    parsed="$(printf '%s' "$page" | python3 -c '
+import json, sys
+try:
+    users = json.load(sys.stdin)
+    if not isinstance(users, list):
+        raise ValueError()
+    emails = []
+    for user in users:
+        if not isinstance(user, dict):
+            raise ValueError()
+        email = user.get("email")
+        if email is not None and not isinstance(email, str):
+            raise ValueError()
+        if email and email.strip():
+            emails.append(email.strip().lower())
+except (ValueError, TypeError):
+    sys.exit("Keycloak user page has an invalid JSON shape")
+print(len(users))
+print("\n".join(emails))
+')" || { kcadm_logout; die "Keycloak returned an invalid user page, so the collision check cannot say whether a local Grafana user holds a realm e-mail. Check: krate identity status"; }
+    rows="${parsed%%$'\n'*}"
     [[ "$rows" -eq 0 ]] && break
-    emails+="$(printf '%s\n' "$page" | tr '[:upper:]' '[:lower:]')"
-    emails+=$'\n'
+    if [[ "$parsed" == *$'\n'* ]]; then
+      emails+="${parsed#*$'\n'}"
+      emails+=$'\n'
+    fi
     [[ "$rows" -lt 100 ]] && break
     offset=$((offset + 100))
   done
