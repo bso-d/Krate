@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 4b acceptance gate: Perses on the Krate realm (scaffold; rows await the live walk).
+"""Phase 4b acceptance gate: Perses on the Krate realm.
 
 Slice 4b of harness/phase4/PHASE4-INSTRUCTIONS-v3.md, section 2.2: rows V1-V24
 of the Perses slice (native mode, PERSES_IDP=krate). This file is the frame the
@@ -25,18 +25,19 @@ realm was created. V19 (a PingFederate-brokered user signs in to Perses) needs
 the stand-in IdP of scripts/gate/stub_idp.sh and the applied broker plan
 (commit 0); broker_gate() reuses phase3_broker.Gate.brokered_login for it.
 
-STATUS: ENCODED. Per owner rule 11 every row body is encoded from the
-live hand-walk observations (harness/phase4/live4b/) seen working against the
-real stack; all rows V1-V24 cite their corresponding walk logs. The frame reuses
+STATUS: ENCODED, pending a passing candidate-bound receipt. Earlier live walks
+under harness/phase4/live4b/ cover individual behaviors; the authenticated
+Viewer and Linux daemon-restart parts of V24 require fresh runtime proof.
+The frame reuses
 phase2_kafbat.Gate/Kcadm/Browser, keycloak_login_flow.py (enrol),
 phase3_broker.Gate.brokered_login (V19), probes.py (the row-pass rule: one
 `probe=PASS|FAIL|NOT_RUN` token per probe, the row takes the worst) and
 phase4_common.TimedRows for the timing rows.
 
-Timing design (section 5), to be wired by the row bodies: start V10 (36 min:
-20 active + 16 idle) and V7/V8/V15 (<= 420 s each) as background threads before
-the short rows; in the session-max runs start V23 (M + 6 min) as a thread; join
-with finish_timed() after the short rows. Probes reach Perses both through its
+Timing design (section 5): complete issuer, mode, certificate and container
+changes first. Then run V10 (36 min: 20 active + 16 idle) alongside V7/V8 on
+separate users; join them before V20's final snapshot and V24's outage restarts.
+In session-max runs V23 (M + 6 min) runs as a timed row. Probes reach Perses through its
 TLS gateway (https://H:PERSES_PORT, preflight adds it to the allowed origins)
 and, for the guard-bypass rows (V6), from a container on the perses network.
 Secrets (JWTs, cookies, refresh tokens, secrets read from monitoring/.env) go
@@ -1250,31 +1251,43 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         if not kc_cid:
             not_run('precondition: missing keycloak container')
 
-        t_stop = time.monotonic()
-        p2.docker('stop', '-t', '5', kc_cid)
-
-        t0 = time.monotonic()
-        deadline = t0 + 420
         refused = False
         elapsed_refused = -1.0
+        rc_r2 = -1
+        s_r2 = ''
+        stop_error = ''
+        try:
+            stop_rc, _, stop_err = p2.docker('stop', '-t', '5', kc_cid, timeout=15)
+            if stop_rc != 0:
+                stop_error = 'Keycloak stop failed (rc %d): %s' % (
+                    stop_rc, stop_err[-100:])
+            else:
+                t0 = time.monotonic()
+                deadline = t0 + 420
+                while time.monotonic() < deadline:
+                    time.sleep(15)
+                    now = time.monotonic()
+                    elapsed = now - t0
+                    s_page, h_page, _ = d.req(self.gateway('/'), headers={'Accept': 'text/html'})
+                    s_r, _, _ = d.req(self.gateway('/krate/role'))
+                    s_proj, _, _ = d.req(self.gateway('/api/v1/projects'))
 
-        while time.monotonic() < deadline:
-            time.sleep(15)
-            now = time.monotonic()
-            elapsed = now - t0
-            s_page, h_page, _ = d.req(self.gateway('/'), headers={'Accept': 'text/html'})
-            s_r, _, _ = d.req(self.gateway('/krate/role'))
-            s_proj, _, _ = d.req(self.gateway('/api/v1/projects'))
-
-            if (s_page == 302 and '/oauth2/start' in (h_page.get('Location') or '')) or s_r == 401 or s_proj == 401:
-                refused = True
-                elapsed_refused = elapsed
-                break
-
-        rc_r2, s_r2, _ = p2.docker('inspect', '-f', '{{.RestartCount}}', perses_cid) if perses_cid else (-1, '', '')
-        restarts_unchanged = (restarts_before == s_r2.strip())
-
-        p2.docker('start', kc_cid)
+                    if ((s_page == 302 and '/oauth2/start' in (h_page.get('Location') or ''))
+                            or s_r == 401 or s_proj == 401):
+                        refused = True
+                        elapsed_refused = elapsed
+                        break
+                rc_r2, s_r2, _ = (p2.docker('inspect', '-f', '{{.RestartCount}}',
+                                          perses_cid, timeout=10)
+                                   if perses_cid else (-1, '', ''))
+        finally:
+            start_rc, _, start_err = p2.docker('start', kc_cid, timeout=30)
+        if start_rc != 0:
+            return 'FAIL', 'Keycloak restoration failed (rc %d): %s' % (
+                start_rc, start_err[-100:])
+        if stop_error:
+            return 'FAIL', stop_error + '; Keycloak start attempted'
+        restarts_unchanged = (rc_r1 == rc_r2 == 0 and restarts_before == s_r2.strip())
         healthy_secs = self._wait_container_healthy(kc_cid, limit=180)
         t_healthy = time.monotonic()
 
@@ -1850,9 +1863,11 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                       if code == 200), (first_refusal[2] - session_start_ms) / 1000)
 
     def v24(self):
-        # walk log 124: outage restarts under Docker backoff: Keycloak stopped,
-        # restart of oauth2-proxy and perses -> RestartCount grows, gateway 403/500, nobody let in;
-        # Keycloak started healthy, containers recover without krate command, sign-in <= 90s.
+        """Prove a pre-existing Viewer is refused through two outage restarts.
+
+        The daemon case runs only on Linux, after V20 and every timing row.
+        Each case restores Keycloak even when a probe fails.
+        """
         kc_cid = self.cluster_container('keycloak')
         perses_cid = self.mon_container('perses')
         o2p_cid = self.mon_container('oauth2-proxy')
@@ -1860,104 +1875,205 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             not_run('precondition: missing required containers')
 
         def restart_count(cid):
-            rc, value, _ = p2.docker('inspect', '-f', '{{.RestartCount}}', cid)
+            rc, value, _ = p2.docker('inspect', '-f', '{{.RestartCount}}', cid, timeout=10)
             if rc != 0 or not value.strip().isdigit():
                 raise RuntimeError('cannot read Docker RestartCount for %s' % cid[:12])
             return int(value.strip())
 
-        rc_p1 = restart_count(perses_cid)
-        rc_o1 = restart_count(o2p_cid)
-        rc_p2, rc_o2 = rc_p1, rc_o1
-        gateway_status = -1
-        outage_error = None
-        try:
-            rc_stop, _out, err = p2.docker('stop', '-t', '5', kc_cid)
-            if rc_stop != 0:
-                raise RuntimeError('docker stop Keycloak rc %d: %s' % (rc_stop, err.strip()[-100:]))
-            rc_restart, _out, err = p2.docker('restart', o2p_cid, perses_cid)
-            if rc_restart != 0:
-                raise RuntimeError('docker restart consumers rc %d: %s'
-                                   % (rc_restart, err.strip()[-100:]))
-            restart_deadline = time.monotonic() + 45
-            while time.monotonic() < restart_deadline:
-                rc_p2 = restart_count(perses_cid)
-                rc_o2 = restart_count(o2p_cid)
-                if rc_p2 > rc_p1 and rc_o2 > rc_o1:
+        def container_status(cid):
+            rc, value, _ = p2.docker('inspect', '-f', '{{.State.Status}}', cid, timeout=10)
+            if rc != 0:
+                raise RuntimeError('cannot read Docker state for %s' % cid[:12])
+            return value.strip()
+
+        def daemon_preflight():
+            command = ['systemctl', 'restart', 'docker']
+            if os.geteuid() != 0:
+                try:
+                    sudo = subprocess.run(['sudo', '-n', 'true'], capture_output=True,
+                                          text=True, timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    return None, 'sudo -n unavailable for Docker daemon restart'
+                if sudo.returncode != 0:
+                    return None, 'sudo -n unavailable for Docker daemon restart'
+                command = ['sudo', '-n'] + command
+            rc, live_restore, err = p2.docker('info', '--format', '{{.LiveRestoreEnabled}}', timeout=10)
+            if rc != 0 or live_restore.strip().lower() != 'false':
+                return None, 'Docker live restore is not proven disabled: %s' % (err or live_restore)[-100:]
+            for cid in (kc_cid, perses_cid, o2p_cid):
+                rc, policy, err = p2.docker('inspect', '-f',
+                                            '{{.HostConfig.RestartPolicy.Name}}', cid,
+                                            timeout=10)
+                if rc != 0 or policy.strip() != 'unless-stopped':
+                    return None, 'restart policy for %s is not unless-stopped: %s' % (
+                        cid[:12], (err or policy)[-100:])
+            active = subprocess.run(['systemctl', 'is-active', 'docker'],
+                                    capture_output=True, text=True, timeout=10)
+            if active.returncode != 0 or active.stdout.strip() != 'active':
+                return None, 'Docker system unit is not active'
+            return command, None
+
+        def outage_case(label, daemon_command=None):
+            signed = self.signin('p4v', 'v24-' + label + '-existing', expect='ok')
+            if signed.get('kind') != 'OK' or signed.get('role') != 'viewer':
+                return 'FAIL', label + ': pre-existing Viewer sign-in failed'
+            viewer = signed.get('driver')
+            if not isinstance(viewer, PersesDriver):
+                return 'FAIL', label + ': sign-in yielded no persistent cookie jar'
+            initial_status, _, _ = viewer.req(self.gateway('/api/v1/projects'))
+            if initial_status != 200:
+                return 'FAIL', '%s: existing Viewer API was HTTP %s before outage' % (
+                    label, initial_status)
+
+            before_p = restart_count(perses_cid)
+            before_o = restart_count(o2p_cid)
+            after_p, after_o = before_p, before_o
+            anonymous_status, viewer_status = -1, -1
+            viewer_location = ''
+            outage_error = None
+            try:
+                rc, _, err = p2.docker('stop', '-t', '5', kc_cid, timeout=15)
+                if rc != 0:
+                    raise RuntimeError('docker stop Keycloak rc %d: %s' % (rc, err[-100:]))
+                if daemon_command is None:
+                    rc, _, err = p2.docker('restart', o2p_cid, perses_cid, timeout=30)
+                    if rc != 0:
+                        raise RuntimeError('docker restart consumers rc %d: %s' % (
+                            rc, err[-100:]))
+                else:
+                    result = subprocess.run(daemon_command, capture_output=True,
+                                            text=True, timeout=120)
+                    if result.returncode != 0:
+                        raise RuntimeError('systemctl restart docker rc %d: %s' % (
+                            result.returncode, result.stderr[-100:]))
+                    ready_deadline = time.monotonic() + 30
+                    while time.monotonic() < ready_deadline:
+                        rc, _, _ = p2.docker('info', '--format', '{{.ServerVersion}}',
+                                             timeout=5)
+                        if rc == 0:
+                            break
+                        time.sleep(2)
+                    else:
+                        raise RuntimeError('Docker API unavailable after daemon restart')
+                if container_status(kc_cid) != 'exited':
+                    raise RuntimeError('Keycloak did not remain stopped during outage')
+                restart_deadline = time.monotonic() + (90 if daemon_command else 45)
+                while time.monotonic() < restart_deadline:
+                    after_p = restart_count(perses_cid)
+                    after_o = restart_count(o2p_cid)
+                    if after_p > before_p and after_o > before_o:
+                        break
+                    time.sleep(2)
+                anonymous = self.driver('v24-' + label + '-anonymous')
+                anonymous_status, _, _ = anonymous.req(
+                    self.gateway('/'), headers={'Accept': 'text/html'}, timeout=10)
+                viewer_status, viewer_headers, _ = viewer.req(
+                    self.gateway('/api/v1/projects'), timeout=10)
+                viewer_location = viewer_headers.get('Location', '')
+            except (OSError, subprocess.TimeoutExpired, RuntimeError) as error:
+                outage_error = '%s: %s' % (type(error).__name__, error)
+            finally:
+                start_rc, _, start_err = p2.docker('start', kc_cid, timeout=30)
+                if start_rc != 0 and daemon_command is not None:
+                    # A failed daemon restart must not leave this VM fixture's
+                    # identity service stopped without a recovery attempt.
+                    recover_command = daemon_command[:-2] + ['start', 'docker']
+                    try:
+                        recovery = subprocess.run(recover_command, capture_output=True,
+                                                  text=True, timeout=60)
+                        if recovery.returncode == 0:
+                            start_rc, _, start_err = p2.docker('start', kc_cid,
+                                                               timeout=30)
+                        else:
+                            start_err += '; systemctl start docker rc %d: %s' % (
+                                recovery.returncode, recovery.stderr[-100:])
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        start_err += '; Docker daemon recovery: %s: %s' % (
+                            type(error).__name__, error)
+            if start_rc != 0:
+                return 'FAIL', '%s: Keycloak restore rc %d: %s; outage %s' % (
+                    label, start_rc, start_err[-100:], outage_error or 'none')
+            if outage_error:
+                return 'FAIL', '%s: outage probe failed; Keycloak restored: %s' % (
+                    label, outage_error)
+
+            healthy_secs = self._wait_container_healthy(kc_cid, limit=180)
+            if healthy_secs is None:
+                return 'FAIL', label + ': Keycloak did not become healthy within 180s'
+            healthy_at = time.monotonic()
+            recovered = False
+            while time.monotonic() - healthy_at < 60:
+                if (container_status(perses_cid) == 'running'
+                        and container_status(o2p_cid) == 'running'):
+                    recovered = True
                     break
                 time.sleep(2)
-            driver = self.driver('v24-outage')
-            gateway_status, _, _ = driver.req(self.gateway('/'), headers={'Accept': 'text/html'})
-        except Exception as error:
-            outage_error = '%s: %s' % (type(error).__name__, error)
-        finally:
-            # Always return the fixture's IdP, including when an outage probe fails.
-            start_rc, _out, start_err = p2.docker('start', kc_cid)
-        if start_rc != 0:
-            return 'FAIL', 'Keycloak restoration failed (docker start rc %s): %s; outage error %s' \
-                   % (start_rc, start_err.strip()[-100:], outage_error or 'none')
-        if outage_error:
-            return 'FAIL', 'outage setup failed; Keycloak restored: ' + outage_error
+            fresh = (self.signin('p4v', 'v24-' + label + '-recovered', expect='ok')
+                     if recovered else {'kind': 'NOT_RUN'})
+            signin_seconds = time.monotonic() - healthy_at
+            viewer_refused = (viewer_status in (401, 403, 500)
+                              or (viewer_status == 302
+                                  and '/oauth2/start' in viewer_location))
+            probes = [
+                ('restart_counts_grew',
+                 'PASS' if after_p > before_p and after_o > before_o else 'FAIL'),
+                ('anonymous_outage_http_refusal',
+                 'PASS' if anonymous_status in (403, 500) else 'FAIL'),
+                ('authenticated_viewer_blocked',
+                 'PASS' if viewer_refused else 'FAIL'),
+                ('containers_recovered_running', 'PASS' if recovered else 'FAIL'),
+                ('signin_within_90s',
+                 'PASS' if (fresh.get('kind') == 'OK'
+                            and fresh.get('role') == 'viewer'
+                            and signin_seconds <= 90) else 'FAIL'),
+            ]
+            status, tokens = aggregate(probes)
+            return status, ('%s: %s; anonymous HTTP %s, existing Viewer HTTP %s; '
+                            'restarts perses %d->%d/o2p %d->%d; KC healthy +%.1fs; '
+                            'fresh Viewer %s at +%.1fs') % (
+                                label, tokens, anonymous_status, viewer_status,
+                                before_p, after_p, before_o, after_o, healthy_secs,
+                                fresh.get('kind'), signin_seconds)
 
-        healthy_secs = self._wait_container_healthy(kc_cid, limit=180)
-        if healthy_secs is None:
-            return 'FAIL', 'Keycloak did not become healthy within 180 s after restoration'
-        t_healthy = time.monotonic()
+        direct_status, direct_evidence = outage_case('consumer-restart')
+        if direct_status != 'PASS':
+            return direct_status, direct_evidence
+        if not sys.platform.startswith('linux'):
+            return 'PASS', direct_evidence + '; Docker daemon restart is VM-only'
 
-        # Wait for consumers to recover under Docker restart manager without krate commands
-        recovered = False
-        while time.monotonic() - t_healthy < 60:
-            rc_p, st_p, _ = p2.docker('inspect', '-f', '{{.State.Status}}', perses_cid)
-            rc_o, st_o, _ = p2.docker('inspect', '-f', '{{.State.Status}}', o2p_cid)
-            if rc_p == rc_o == 0 and st_p.strip() == st_o.strip() == 'running':
-                recovered = True
-                break
-            time.sleep(2)
-
-        # Sign in within 90s of healthy
-        res = self.signin('p4v', 'v24-signin', expect='ok') if recovered else {'kind': 'NOT_RUN'}
-        signin_elapsed = time.monotonic() - t_healthy
-        signin_ok = (res.get('kind') == 'OK' and res.get('role') == 'viewer'
-                     and signin_elapsed <= 90.0)
-        restarts_grew = rc_p2 > rc_p1 and rc_o2 > rc_o1
-        anonymous_refused = gateway_status in (403, 500)
-
-        probes = [
-            ('restart_counts_grew', 'PASS' if restarts_grew else 'FAIL'),
-            ('anonymous_outage_http_refusal', 'PASS' if anonymous_refused else 'FAIL'),
-            # The existing live walk probed an empty jar. A pre-existing Viewer
-            # jar must be observed during the outage before this can pass V24.
-            ('authenticated_viewer_blocked', 'NOT_RUN'),
-            ('containers_recovered_running', 'PASS' if recovered else 'FAIL'),
-            ('signin_within_90s', 'PASS' if signin_ok else 'FAIL'),
-        ]
-        if sys.platform.startswith('linux'):
-            # The VM-only daemon restart is the last V24 subcase. It needs its
-            # own live walk after V20's final reading before it can pass.
-            probes.append(('docker_daemon_restart', 'NOT_RUN'))
-        status, tokens = aggregate(probes)
-        return status, '%s; outage restart: anonymous gateway -> %d, restarts perses %d->%d / ' \
-                       'o2p %d->%d; Keycloak healthy +%.1fs; containers recovered without krate; ' \
-                       'signin %s at +%.1fs (bound 90s); walk: live4b 124' \
-               % (tokens, gateway_status, rc_p1, rc_p2, rc_o1, rc_o2,
-                  healthy_secs, res.get('kind'), signin_elapsed)
+        try:
+            daemon_command, preflight_problem = daemon_preflight()
+        except (OSError, subprocess.TimeoutExpired, RuntimeError) as error:
+            daemon_command = None
+            preflight_problem = '%s: %s' % (type(error).__name__, error)
+        if preflight_problem:
+            return 'NOT_RUN', (direct_evidence + '; docker_daemon_restart=NOT_RUN: '
+                               + preflight_problem)
+        daemon_status, daemon_evidence = outage_case('daemon-restart', daemon_command)
+        return daemon_status, (direct_evidence + '; docker_daemon_restart=%s; %s' % (
+            daemon_status, daemon_evidence))
 
     def plan(self):
+        # Destructive changes to the issuer, monitoring mode, certificates and
+        # Docker containers finish before the uninterrupted V10 activity walk.
+        # V7/V8 use separate users, so they can share V10's timing window.
         plan = [
             *([('V23@start', lambda: self.start_timed('V23', self.v23_body))]
               if getattr(self.args, 'session_max_minutes', None) else []),
             ('V1', self.v1), ('V2', self.v2), ('V3', self.v3), ('V4', self.v4),
             ('V5', self.v5), ('V6', self.v6),
+            ('V9', self.v9), ('V11', self.v11), ('V12', self.v12),
+            ('V13', self.v13), ('V14', self.v14), ('V15', self.v15),
+            ('V16', self.v16), ('V17', self.v17), ('V18', self.v18),
+            ('V19', self.v19), ('V21', self.v21), ('V22', self.v22),
+            ('V23', self.v23),
             ('V10@start', lambda: self.start_timed('V10', self.v10_body)),
             ('V7@start', lambda: self.start_timed('V7', self.v7_body)),
             ('V8@start', lambda: self.start_timed('V8', self.v8_body)),
-            ('V15@start', lambda: self.start_timed('V15', self.v15_body)),
-            ('V9', self.v9), ('V11', self.v11),
-            ('V12', self.v12), ('V13', self.v13), ('V14', self.v14),
-            ('V16', self.v16), ('V17', self.v17),
-            ('V18', self.v18), ('V19', self.v19), ('V20', self.v20),
-            ('V21', self.v21), ('V22', self.v22), ('V23', self.v23),
-            ('V24', self.v24),
-            ('V10', self.v10), ('V7', self.v7), ('V8', self.v8), ('V15', self.v15),
+            ('V7', self.v7), ('V8', self.v8), ('V10', self.v10),
+            # V20 is the final container snapshot. V24 is the last runtime row;
+            # screenshots and the leak scan follow in the outer runner.
+            ('V20', self.v20), ('V24', self.v24),
         ]
         return plan
 

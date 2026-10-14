@@ -352,9 +352,12 @@ one `probe=PASS|FAIL|NOT_RUN` token per probe in the row's listed order (U15:
 one implementation, `scripts/gate/probes.py`. The slice preconditions (seeding
 through the local login, the state hashes, the realm switch) run in the helper
 after `start_cluster` and are reported as a leading `setup` line; a setup FAIL
-makes every row NOT_RUN (the inventory then gives INCOMPLETE, not FAIL). The
-long rows run in background threads (V10 36 min, U29 17 min, U10/U11 ≤ 330 s,
-V7/V8/V15 ≤ 420 s, U27/V23 in the companion runs). Runtime secrets (JWTs,
+makes every row NOT_RUN and the runner records a failing setup row. The
+long rows run in background threads where they do not disrupt each other:
+V15's Keycloak outage runs before V10's 36-minute uninterrupted activity walk;
+V7/V8 run alongside V10 on separate users, and V24 follows their joins and
+V20's final snapshot. U29 takes 17 minutes; U10/U11 and V7/V8 are bounded by
+330/420 seconds; U27/V23 run in the session companions. Runtime secrets (JWTs,
 cookies, tokens, enrolled passwords and TOTP seeds) go to
 `$STATE/phase4-secrets.txt`, which the runner adds to its leak set. W3 follows
 the J7 pattern: on the Mac it always runs, variant (a)+(b) from the Mac's LAN
@@ -362,10 +365,13 @@ address; on Linux it needs root (or sudo) and iproute2 for the `p4probe`
 namespace and leaves the inventory without them (decided by the VM receipt);
 the row's evidence states which variant ran and why.
 
-**Status (runner v7)**: Phase 4a rows (U1–U29, X3, Z4a) are fully encoded from the
-live hand-walk observations (`harness/phase4/live4a/`, owner rule 11); 4b and 4c
-(V/W rows, X4, Z4b) remain scaffolds awaiting their live walk notes. A slice receipt
-is therefore INCOMPLETE until its walk has landed and its rows are encoded and run.
+**Status at candidate `77e2333`**: The 4a, 4b and 4c row bodies are encoded, but
+there is no passing Phase 4 receipt on this candidate. Its V24 row always
+reported the authenticated-Viewer outage probe as NOT_RUN and the Linux
+Docker-daemon restart probe as NOT_RUN. The repaired row and timing order need
+live validation; the session-maximum companions and the remaining Mac and VM
+slices also need candidate-bound runs. The earlier Mac 4a receipt at `7ccb503` failed during
+`auth apply` and does not accept the current candidate.
 The canonical pass-condition text of every row is
 `harness/phase4/PHASE4-INSTRUCTIONS-v3.md` section 2; the tables below name the
 owner and the test per id.
