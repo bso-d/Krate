@@ -2320,7 +2320,8 @@ def check_gen_cert_ip(checks):
     """S7: gen-cert gives an IP-literal public host an iPAddress SAN; the preflight checks an IP host with -checkip."""
     e = checks.expect
     if bash_binary() is not None:
-        script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'get_fqdn', 'public_url_host', 'san_entry', 'cmd_gen_cert') + r'''
+        script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'get_fqdn', 'public_url_host',
+                                            'san_entry', 'ensure_public_cert_readable', 'cmd_gen_cert') + r'''
 ENV_FILE="$1/.env"; CERTS_DIR="$1/certs"; CERT_CRT="$CERTS_DIR/server.crt"; CERT_KEY="$CERTS_DIR/server.key"
 hostname() { return 1; }
 cmd_gen_cert >/dev/null
@@ -2362,6 +2363,64 @@ openssl x509 -in "$CERT_CRT" -noout -ext subjectAltName
             else:
                 e(result.returncode == 1 and 'does not cover the public hostname' in result.stderr,
                   f'preflight must refuse a certificate with only {san} for the IP host {public}; got {result.returncode}: {result.stderr.strip()}')
+
+
+def check_public_cert_permissions(checks):
+    """A restrictive install umask must not hide the public CA from unprivileged monitoring readers."""
+    if bash_binary() is None:
+        return
+    e = checks.expect
+    for edition in EDITIONS:
+        script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'env_value', 'get_fqdn',
+                                            'public_url_host', 'san_entry', 'ensure_public_cert_readable',
+                                            'cmd_gen_cert', 'ensure_cert') + r'''
+ENV_FILE="$1/.env"; CERTS_DIR="$1/certs"; CERT_CRT="$CERTS_DIR/server.crt"; CERT_KEY="$CERTS_DIR/server.key"
+umask 077
+ensure_cert >/dev/null
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp)
+            write_env(site, {'KAFKA_UI_FQDN': 'krate.example.test',
+                             'KEYCLOAK_PUBLIC_URL': 'https://krate.example.test/identity'})
+            result = run_bash(script, site)
+            if not e(result.returncode == 0, f'{edition}: ensure_cert under umask 077 failed: {result.stderr.strip()[:200]}'):
+                continue
+            cert = site / 'certs/server.crt'
+            key = site / 'certs/server.key'
+            e((site / 'certs').stat().st_mode & 0o777 == 0o700,
+              f'{edition}: private certs directory should retain mode 0700')
+            e(cert.stat().st_mode & 0o777 == 0o644,
+              f'{edition}: generated public certificate must be mode 0644 for unprivileged monitoring readers')
+            e(key.stat().st_mode & 0o777 == 0o600,
+              f'{edition}: generated private key must remain mode 0600')
+            cert.chmod(0o600)
+            result = run_bash(script, site)
+            e(result.returncode == 0 and cert.stat().st_mode & 0o777 == 0o644,
+              f'{edition}: ensure_cert must restore an existing public certificate from mode 0600; '
+              f'got exit {result.returncode}, mode {cert.stat().st_mode & 0o777:04o}: {result.stderr.strip()[:200]}')
+            e(key.stat().st_mode & 0o777 == 0o600,
+              f'{edition}: repairing a public certificate must not widen the private key')
+            cert.unlink()
+            linked = site / 'linked.crt'
+            linked.write_bytes(b'org-issued certificate')
+            linked.chmod(0o600)
+            cert.symlink_to(linked)
+            result = run_bash(script, site)
+            e(result.returncode != 0 and linked.read_bytes() == b'org-issued certificate',
+              f'{edition}: a restrictive linked certificate must be refused without editing its target')
+            linked.unlink()
+            result = run_bash(script, site)
+            e(result.returncode != 0 and not linked.exists(),
+              f'{edition}: a dangling certificate symlink must be refused without creating its target')
+            cert.unlink()
+            cert.write_bytes(b'org-issued certificate')
+            key.unlink()
+            linked_key = site / 'linked.key'
+            key.symlink_to(linked_key)
+            result = run_bash(script, site)
+            e(result.returncode != 0 and not linked_key.exists()
+              and cert.read_bytes() == b'org-issued certificate',
+              f'{edition}: a dangling private-key symlink must be refused without altering either target')
 
 
 def check_renew_db_tls_order(checks):
@@ -4124,9 +4183,10 @@ def check_grafana_admin_contract(checks):
         ServiceAccountDTO entries carry `role` (models.go:87, selected at database/store.go:381).
         """
 
-        def __init__(self, users=(), search_pages=(), create=None,
+        def __init__(self, users=(), search_pages=(), create=None, user_pages=None,
                      put_message='User updated', disable_message='User disabled'):
             self.users = list(users)
+            self.user_pages = user_pages
             self.search_pages = list(search_pages)
             self.create = create  # (status, payload) tuple, or an exception instance to raise
             self.put_message = put_message
@@ -4135,8 +4195,12 @@ def check_grafana_admin_contract(checks):
 
         def request(self, method, path, body=None):
             self.calls.append((method, path, body))
-            if method == 'GET' and path == '/api/users':
-                return 200, self.users
+            match = re.fullmatch(r'/api/users\?perpage=(\d+)&page=(\d+)', path)
+            if method == 'GET' and match:
+                per_page, page = map(int, match.groups())
+                if self.user_pages is not None:
+                    return 200, self.user_pages[page - 1]
+                return 200, self.users[(page - 1) * per_page:page * per_page]
             if method == 'GET' and path.startswith('/api/serviceaccounts/search'):
                 assert self.search_pages, 'unexpected extra search call: ' + path
                 return 200, self.search_pages.pop(0)
@@ -4156,11 +4220,31 @@ def check_grafana_admin_contract(checks):
     e(payload == {'login': 'p4-collide', 'email': 'p4-collide+retired@invalid', 'disabled': True},
       f'retire-user of a plain login must keep the <login><suffix> composition; got {payload}')
     e([(method, path) for method, path, _ in api.calls]
-      == [('GET', '/api/users'), ('PUT', '/api/users/5'), ('POST', '/api/admin/users/5/disable')],
+      == [('GET', '/api/users?perpage=1000&page=1'), ('PUT', '/api/users/5'),
+          ('POST', '/api/admin/users/5/disable')],
       f'retire-user must PUT the e-mail and then disable, and call nothing else; got {api.calls}')
     e(api.calls[1][2] == {'email': 'p4-collide+retired@invalid', 'login': 'p4-collide', 'name': 'P4 Collide'},
       f'the PUT must keep login and name and move only the e-mail aside (folders/dashboards untouched); '
       f'got {api.calls[1][2]}')
+
+    # User search must not omit a collision or retirement target on the next page.
+    users = [{'id': i, 'login': f'user{i}'} for i in range(1, 1001)]
+    users.append({'id': 1001, 'login': 'target', 'name': 'Target'})
+    api = RecordingApi(users=users)
+    payload = run(lambda: admin.cmd_retire_user(api, 'target', admin.DEFAULT_EMAIL_SUFFIX))
+    e(payload['disabled'] is True and payload['login'] == 'target',
+      f'retire-user must find the account on page two; got {payload}')
+    e([(method, path) for method, path, _ in api.calls[:2]]
+      == [('GET', '/api/users?perpage=1000&page=1'),
+          ('GET', '/api/users?perpage=1000&page=2')],
+      f'user pagination must cross the 1000-user boundary; got {api.calls[:2]}')
+    for label, bad_page in (('malformed', {'users': []}), ('duplicate', [{'id': 1}])):
+        api = RecordingApi(users=users, user_pages=[users[:1000], bad_page])
+        try:
+            admin.list_users(api)
+            e(False, f'{label} second user page must fail closed')
+        except admin.OperationError:
+            pass
 
     # F2 — an email-shaped login tags the local part; the double-@ address must never be composed.
     api = RecordingApi(users=[{'id': 6, 'login': 'jane@example.com', 'name': ''}])
@@ -4234,6 +4318,17 @@ def check_render_writes(checks):
         return
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+
+    ipv6_site = mod.realm_site({
+        'KEYCLOAK_PUBLIC_URL': 'https://[2001:db8::10]/identity',
+        'KEYCLOAK_VIEWER_GROUP': 'KRATE_VIEWERS',
+        'KEYCLOAK_ADMIN_GROUP': 'KRATE_ADMINS',
+        'KEYCLOAK_SESSION_IDLE_MINUTES': '15',
+        'KEYCLOAK_SESSION_MAX_HOURS': '8',
+        'PERSES_PORT': '3443',
+    })
+    e(ipv6_site['public_url'] == 'https://[2001:db8::10]:3443',
+      f'realm Perses origin must retain IPv6 brackets; got {ipv6_site["public_url"]}')
 
     chmods, chowns, opens = [], [], []
     real_chmod, real_chown, real_open = os.chmod, os.chown, os.open
@@ -4383,7 +4478,7 @@ def main():
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
-                  check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip,
+                  check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip, check_public_cert_permissions,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
                   check_broker_apply, check_truststore_env, check_broker_docs):
         try:

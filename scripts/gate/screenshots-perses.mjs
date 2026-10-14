@@ -1,11 +1,9 @@
 // End-user screenshot story for the identity gate, Phase 4b Perses (row X4).
-// STATUS: SCAFFOLD, NOT RUN (no browser was available where it was written). The
-// sign-in, logout and refusal flows are taken from the live lab7 run
-// (harness/phase4/lab7/logs/082-q3-real-browser.log and results.md Q3, observed in
-// a real Chromium against Perses v0.54.0 on the Krate realm) and the lab2 refusal
-// messages; every assertion marked NEEDS-LIVE-VERIFICATION below was NOT observed
-// yet and must be confirmed by the lead's live 4b walk (harness/phase4/live4b/)
-// before X4 is wired into the runner and encoded (owner rule 11).
+// STATUS: LIVE-VERIFIED AND WIRED as runner-owned X4 in gate-identity.sh.
+// The live 4b walk ran this story in container Chromium: see
+// harness/phase4/live4b/results.md (X4) and logs/144 for 20 assertions,
+// six screenshots and a verified manifest. NEEDS-LIVE-VERIFICATION comments
+// below are historical markers for selectors verified by that walk.
 //
 // Runs inside the harness Playwright container (krate-harness/playwright:1.60.0),
 // the same image and invocation shape as screenshots.mjs (X1, unchanged):

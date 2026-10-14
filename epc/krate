@@ -2567,8 +2567,20 @@ san_entry() {
 }
 
 # Generate a self-signed TLS cert (CN/SAN = FQDN, plus the host IP) for nginx.
+ensure_public_cert_readable() {
+  local mode
+  mode="$(python3 -c 'import os, stat, sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$CERT_CRT")" \
+    || die "Cannot inspect the public TLS certificate at $CERT_CRT."
+  if (( (mode & 4) == 0 )); then
+    [[ ! -L "$CERT_CRT" ]] || die "Public TLS certificate is a symlink without public read access: $CERT_CRT. Fix its target permissions."
+    chmod go+r "$CERT_CRT" || die "Cannot make the public TLS certificate readable at $CERT_CRT."
+  fi
+}
+
 cmd_gen_cert() {
   command -v openssl &>/dev/null || die "openssl not found — needed to generate the TLS certificate."
+  [[ ! -L "$CERT_CRT" ]] || die "Refusing to generate a certificate through symlink $CERT_CRT."
+  [[ ! -L "$CERT_KEY" ]] || die "Refusing to generate a private key through symlink $CERT_KEY."
   mkdir -p "$CERTS_DIR"
   local fqdn ip san public_host
   fqdn="$(get_fqdn)"
@@ -2588,12 +2600,14 @@ cmd_gen_cert() {
     -subj "/CN=${fqdn}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \
     || die "openssl failed to generate the certificate."
   chmod 600 "$CERT_KEY"
+  ensure_public_cert_readable
   ok "Certificate written to certs/server.crt (replace with an org-CA cert anytime)"
 }
 
 # Ensure a cert exists before the proxy starts; generate one if missing.
 ensure_cert() {
   if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
+    ensure_public_cert_readable
     return 0
   fi
   warn "No TLS certificate found — generating a self-signed one."

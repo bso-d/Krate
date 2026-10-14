@@ -127,7 +127,8 @@ def realm_site(env):
                           'KEYCLOAK_SESSION_IDLE_MINUTES (%d)' % (proof, idle))
     return {
         'issuer': public + '/realms/krate',
-        'public_url': 'https://%s:%d' % (parts.hostname, port),
+        'public_url': 'https://%s:%d' % (
+            '[%s]' % parts.hostname if ':' in parts.hostname else parts.hostname, port),
         'client_id': 'krate-perses',
         'service_client_id': 'krate-perses-sync',
         'viewer_group': viewer,

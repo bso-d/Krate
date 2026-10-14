@@ -103,6 +103,7 @@ import urllib.request
 PROGRAM = 'grafana-admin'
 TIMEOUT_SECONDS = 30
 SNAPSHOT_LIST_LIMIT = 1000
+USER_PAGE_SIZE = 1000
 SERVICE_ACCOUNT_PAGE_SIZE = 1000
 TOKEN_NAME_PREFIX = 'krate-seed-'
 DEFAULT_EMAIL_SUFFIX = '+retired@invalid'
@@ -353,10 +354,24 @@ def cmd_reads(api):
 
 
 def list_users(api):
-    _, payload = api.request('GET', '/api/users')
-    if not isinstance(payload, list):
-        raise OperationError('unexpected response shape: GET /api/users')
-    return payload
+    users = []
+    seen_ids = set()
+    page = 1
+    while True:
+        path = '/api/users?perpage=%d&page=%d' % (USER_PAGE_SIZE, page)
+        _, payload = api.request('GET', path)
+        if not isinstance(payload, list) or len(payload) > USER_PAGE_SIZE:
+            raise OperationError('unexpected response shape: GET ' + path)
+        if any(not isinstance(user, dict) or 'id' not in user for user in payload):
+            raise OperationError('unexpected response shape: GET ' + path + ' list entry')
+        ids = [as_int(user['id'], 'user id') for user in payload]
+        if len(set(ids)) != len(ids) or seen_ids.intersection(ids):
+            raise OperationError('GET ' + path + ' returned duplicate user ids')
+        seen_ids.update(ids)
+        users.extend(payload)
+        if len(payload) < USER_PAGE_SIZE:
+            return users
+        page += 1
 
 
 def cmd_local_users(api):

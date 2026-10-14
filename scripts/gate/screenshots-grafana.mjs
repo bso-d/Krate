@@ -1,11 +1,9 @@
 // End-user screenshot story for the identity gate, Phase 4a Grafana (row X3).
-// STATUS: SCAFFOLD, NOT RUN (no browser was available where it was written). The
-// flow and the Keycloak/Grafana-login selectors are taken from the live lab6 run
-// (harness/phase4/lab6/scripts/ui.mjs and its logs/170 evidence, observed on a
-// real Krate fixture under a non-localhost public host); every assertion marked
-// NEEDS-LIVE-VERIFICATION below was NOT observed yet and must be confirmed by
-// the lead's live 4a walk (harness/phase4/live4a/) before X3 is wired into the
-// runner and encoded (owner rule 11).
+// STATUS: LIVE-VERIFIED AND WIRED as runner-owned X3 in gate-identity.sh.
+// The live 4a walk ran this story unmodified in container Chromium: see
+// harness/phase4/live4a/results.md (X3) and logs/143-144 for 12 assertions,
+// five screenshots and a verified manifest. NEEDS-LIVE-VERIFICATION comments
+// below are historical markers for selectors verified by that walk.
 //
 // Runs inside the harness Playwright container (krate-harness/playwright:1.60.0),
 // the same image and invocation shape as screenshots.mjs (X1, unchanged):
