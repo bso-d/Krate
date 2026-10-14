@@ -1826,7 +1826,7 @@ def bash_binary():
     return found if len(version) == 2 and (int(version[0]), int(version[1])) >= (4, 4) else None
 
 
-def bash_functions(path, *names):
+def bash_functions(path, *names) -> str:
     """The source of the named top-level functions of a Bash script, in the given order."""
     text = Path(path).read_text()
     parts = []
