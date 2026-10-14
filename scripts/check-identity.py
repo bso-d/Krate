@@ -701,6 +701,27 @@ def check_gate_scripts(checks):
                   or (tail.startswith('.replace(') and '.split(/[?#]/)' in tail[:70]))
             e(ok, f'{story_path.name} records a verbatim .url() near: ...{story[max(0, match.start() - 40):match.end() + 40]!r}')
 
+    # U9 evidence must render (tag, result, detail) 3-tuples: the rocky-4a run
+    # at 959fed2 failed the gate with `TypeError: not all arguments converted`
+    # (harness/gate-receipts/rocky-4a-959fed2/raw.log:85) because u9_body
+    # joined its cases with `'%s: %s' % c`. The format string is read from the
+    # real u9_body source so this test runs the shipped expression, not a copy.
+    u9_body = (ROOT / 'scripts/gate/phase4_grafana.py').read_text().split(
+        'def u9_body', 1)[1].split('\n    def ', 1)[0]
+    u9_fmt = re.search(r"'([^']*%s[^']*)' % c for c in cases", u9_body)
+    e(u9_fmt is not None, 'u9_body must join per-case evidence from its cases')
+    if u9_fmt is not None:
+        u9_cases = [('a-immediate', 'PASS', 'sessions 1->0 form=True confirmation=False old-cookie=401'),
+                    ('b-after-6min', 'FAIL', 'only 5/6 keep-alive 200s')]
+        try:
+            u9_rendered = ' | '.join(u9_fmt.group(1) % c for c in u9_cases)
+        except TypeError as exc:
+            e(False, 'u9 evidence formatting must accept (tag, result, detail) cases; got TypeError: ' + str(exc))
+        else:
+            e(all(tag in u9_rendered and result in u9_rendered and detail in u9_rendered
+                  for tag, result, detail in u9_cases),
+              'u9 evidence must keep per-case tag, result and detail; got ' + repr(u9_rendered))
+
 
 def check_phase4_monitor_paths(checks):
     """The Phase IV gate must find monitoring in both source and offline bundle layouts."""

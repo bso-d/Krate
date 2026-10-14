@@ -518,6 +518,9 @@ class Gate(Phase4Gate):
             break
         session = [c for c in d.jar if c.name == 'grafana_session']
         if not login_error and not session:
+            # Keycloak may re-show the form with an inline error (status 200,
+            # no redirect): parse it so expect='refused:...' sees a REFUSED.
+            login_error = self.kc_refusal_reason(page, status)
             # Grafana 12 renders the OAuth failure in the login page's boot data, not
             # only in the redirect query (observed live 2026-10-12, walk log 125).
             match = re.search(r'"loginError"\s*:\s*"([^"]+)"', page)
@@ -533,6 +536,30 @@ class Gate(Phase4Gate):
             if kind != 'REFUSED' or (want and want not in login_error):
                 fail('%s sign-in expected REFUSED %r, got %s (%s)' % (user, want, kind, login_error))
         return result
+
+    @staticmethod
+    def kc_refusal_reason(page, st):
+        """Keycloak-side refusal: the login form re-shown with an inline error
+        (e.g. a disabled account), or the error page. Port of the walk's
+        harness/phase4/live4a/scripts/p4driver.py kc_refusal_reason, mirroring
+        keycloak_login_flow.py's parser (keycloak.v2 theme). Rocky 4a at
+        959fed2: U10's disabled sign-in ended here with status 200 and no
+        loginError query, so signin() called it FAIL instead of REFUSED."""
+        if st != 200:
+            return ''
+        on_form = 'id="kc-form-login"' in page
+        on_error_page = 'id="kc-error-message"' in page
+        if not (on_form or on_error_page):
+            return ''
+        match = (re.search(r'id="input-error[^"]*".*?helper-text__item-text[^>]*>\s*([^<]*?)\s*<',
+                           page, re.S)
+                 or re.search(r'id="kc-error-message".*?<p[^>]*>([^<]*)<', page, re.S)
+                 or re.search(r'<span[^>]*kc-feedback-text[^>]*>([^<]*)<', page))
+        reason = htmlmod.unescape(match.group(1).strip()) if match else '(no message parsed)'
+        # a plain login form with NO error (e.g. flow restart) is not a refusal
+        if not match and on_form and 'kc-feedback-text' not in page and 'input-error' not in page:
+            return ''
+        return reason
 
     def ws_upgrade(self, driver, path, subprotocol=None):
         """Raw WebSocket-upgrade probe (port of the walk's scripts/ws_probe.py, logs
@@ -726,9 +753,32 @@ class Gate(Phase4Gate):
         return [w for w in (summary or {}).get('websockets') or []
                 if contains in (w.get('url') or '') and (w.get('framesIn') or 0) > 0]
 
+    def krate_locked(self, *args, timeout=300, attempts=6, gap=10):
+        """Run the CLI, retrying while another timed row holds the identity
+        lock. Timed rows (U9/U10/U11/...) run concurrently, so a logout or
+        disable can land while a sibling's mutating CLI command still holds
+        it (Rocky 4a at 959fed2: U11 `identity users logout p4a2 rc=1`).
+        Only the lock contention is retried; any other failure returns at once."""
+        last = (1, '', '')
+        for _ in range(attempts):
+            rc, out, err = self.krate(*args, timeout=timeout)
+            if rc == 0 or 'Another krate identity command is running' not in (out + err):
+                return rc, out, err
+            last = (rc, out, err)
+            time.sleep(gap)
+        return last
+
     def api_json(self, driver, method, path, body=None, headers=None):
-        status, _hdrs, text = driver.req(self.base + path, data=body if isinstance(body, dict) else None,
-                                         method=method, headers=headers)
+        # Grafana's JSON APIs need a JSON body: the driver's default dict
+        # encoding is form-urlencoded, which they answer with 400 (Rocky 4a
+        # at 959fed2: U6 admin_control, U15 origin, U28 create).
+        sent = dict(headers or {})
+        data = body
+        if isinstance(body, dict):
+            data = json.dumps(body).encode()
+            sent.setdefault('Content-Type', 'application/json')
+        status, _hdrs, text = driver.req(self.base + path, data=data,
+                                         method=method, headers=sent)
         try:
             return status, json.loads(text)
         except ValueError:
@@ -2012,7 +2062,7 @@ class Gate(Phase4Gate):
                              (' keeps=%d' % keeps) if minutes else '')))
         probes = [('case_a', cases[0][1]), ('case_b', cases[1][1] if len(cases) > 1 else 'NOT_RUN')]
         status, tokens = aggregate(probes)
-        return status, '%s; %s; walk: live4a 151' % (tokens, ' | '.join('%s: %s' % c for c in cases))
+        return status, '%s; %s; walk: live4a 151' % (tokens, ' | '.join('%s: %s (%s)' % c for c in cases))
 
     def u10(self):
         if self.timed.started('U10'):
@@ -2036,8 +2086,8 @@ class Gate(Phase4Gate):
         while True:
             now = time.monotonic()
             if revoked_at is None and now >= t0 + 30:
-                rc1, _o, _e = self.krate('identity', 'users', 'disable', 'p4dis', timeout=120)
-                rc2, _o, _e = self.krate('identity', 'users', 'logout', 'p4dis', timeout=120)
+                rc1, _o, _e = self.krate_locked('identity', 'users', 'disable', 'p4dis', timeout=120)
+                rc2, _o, _e = self.krate_locked('identity', 'users', 'logout', 'p4dis', timeout=120)
                 if rc1 != 0 or rc2 != 0:
                     return 'FAIL', 'disable/logout rc %s/%s' % (rc1, rc2)
                 revoked_at = time.monotonic()
@@ -2061,7 +2111,7 @@ class Gate(Phase4Gate):
         except Outcome:
             refused_ok = False
         finally:
-            rc3, _o, _e = self.krate('identity', 'users', 'enable', 'p4dis', timeout=120)
+            rc3, _o, _e = self.krate_locked('identity', 'users', 'enable', 'p4dis', timeout=120)
         probes = [('first_401', 'PASS' if first_refusal[1] == 401 else 'FAIL'),
                   ('expired_token', 'PASS' if 'oauth.expired-token' in (first_refusal[2] or '') else 'FAIL'),
                   ('within_330s', 'PASS' if since_revoke <= 330 else 'FAIL'),
@@ -2112,7 +2162,7 @@ class Gate(Phase4Gate):
             now = time.monotonic()
             if removed_at is None and now >= t0 + 30:
                 kc.remove_group(uid, admin_gid)
-                rc, _o, _e = self.krate('identity', 'users', 'logout', 'p4a2', timeout=120)
+                rc, _o, _e = self.krate_locked('identity', 'users', 'logout', 'p4a2', timeout=120)
                 if rc != 0:
                     return 'FAIL', 'identity users logout p4a2 rc=%d' % rc
                 removed_at = time.monotonic()
