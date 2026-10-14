@@ -455,7 +455,7 @@ services:
 
   # One-shot migration: removes stale users and bindings when the issuer changes.
   perses-migrate:
-    image: ${PYTHON_IMAGE:-python:3.14.8-alpine}
+    image: ${LOG_DISCOVERY_IMAGE:?Merge LOG_DISCOVERY_IMAGE from monitoring/.env.template into .env}
     container_name: ${MONITOR_PROJECT:-krate-monitoring}-perses-migrate
     restart: "no"
     user: "65532:65532"

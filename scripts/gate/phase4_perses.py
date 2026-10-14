@@ -1181,7 +1181,7 @@ class Gate(Phase4Gate):
         # cookie secret rotated, perses-sync healthy, realm sign-in OK.
         cmd_seed = [
             'run', '--rm', '-v', '%s_perses_data:/perses/data' % self.monitor_project,
-            self.env.get('PYTHON_IMAGE', 'python:3.14.8-alpine'), 'python3', '-c',
+            self.monitor_env['LOG_DISCOVERY_IMAGE'], 'python3', '-c',
             '''
 import os, json
 os.makedirs("/perses/data/users", exist_ok=True)
