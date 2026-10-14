@@ -212,6 +212,13 @@ def _empty_result(body):
         return False
 
 
+def _dict_diff(before, after):
+    """Changed keys as {key: (old, new)}; a missing side reads as None."""
+    keys = sorted(set(before) | set(after))
+    return {k: (before.get(k), after.get(k)) for k in keys
+            if before.get(k) != after.get(k)}
+
+
 def loki_push_body(labels, line, ts_ns):
     """snappy(protobuf WriteRequest{streams:[{labels, values:[{time, line}]}]})."""
     seconds, nanos = ts_ns // 10 ** 9, ts_ns % 10 ** 9
@@ -1624,6 +1631,7 @@ class Gate(Phase4Gate):
                     == 'auth/secrets/grafana-seed.token')
         rc, out, err = self.grafana_admin('service-account', '--name', 'krate-seed', '--role', 'Admin')
         acct_rc = rc
+        acct_note = ' '.join((err or '').split())[-80:]
         account = json.loads(out) if rc == 0 else {}
         account_id = account.get('id')
         token = self.seed_token()
@@ -1647,6 +1655,17 @@ class Gate(Phase4Gate):
         meta = self.seed_meta()
         meta_match = meta.get('id') == str(old_id)
         creation_ok = creation_ok and meta_match
+        # Read-only role evidence: the search DTO carries the org role, so a
+        # refusal names the drift without printing any secret value.
+        sa_role = '?'
+        st_sa, sa_body = self.grafana_api('GET', '/grafana/api/serviceaccounts/search?query=krate-seed',
+                                          auth=self.admin_basic())
+        if st_sa == 200 and isinstance(sa_body, dict):
+            for cand in sa_body.get('serviceAccounts') or []:
+                if isinstance(cand, dict) and cand.get('name') == 'krate-seed':
+                    sa_role = cand.get('role', '?')
+        else:
+            sa_role = 'search-%d' % st_sa
         rc, out, err = p2.run([sys.executable, os.path.join(self.mon_dir(), 'seed-alerting.py'),
                                os.path.join(self.mon_dir(), '.env')], timeout=300)
         seeding_ok = rc == 0 and 'Grafana alerting ready' in (out + err)
@@ -1728,10 +1747,10 @@ class Gate(Phase4Gate):
                   ('successor', 'PASS' if successor_ok else 'FAIL'),
                   ('refusal', refusal_status)]
         status, tokens = aggregate(probes)
-        return status, '%s; creation (acct rc %d id %s, list rc %d n %d, name %s, ' \
-                       'ttl %s, meta %s), CRUD %s, renewal %s/successor %s; %s; walk: live4a ' \
-                       '101-102,135-139,161' % (tokens, acct_rc, account_id, list_rc, list_n,
-                                                name_ok, ttl_delta, meta_match, crud,
+        return status, '%s; creation (acct rc %d role %s err %r, list rc %d n %d, ' \
+                       'name %s, ttl %s, meta %s), CRUD %s, renewal %s/successor %s; %s; walk: live4a ' \
+                       '101-102,135-139,161' % (tokens, acct_rc, sa_role, acct_note, list_rc,
+                                                list_n, name_ok, ttl_delta, meta_match, crud,
                                                 renewal_ok, successor_ok, refusal_text[:60])
 
     def u21a(self):
@@ -1890,7 +1909,11 @@ class Gate(Phase4Gate):
         rq_note = ''
         if st2 == 204:
             time.sleep(3)
-            loki_api = (self.base + '/grafana/api/datasources/uid/loki/resources'
+            # Walk results.md U28: the line is STORED by the push above and a
+            # gateway query returns it; U7's controls prove this proxy path
+            # 200s. The uid/.../resources query route answered 403 (rocky-4a
+            # at 8036910), so the readback uses the walk's gateway query.
+            loki_api = (self.base + '/grafana/api/datasources/proxy/uid/loki'
                         + '/loki/api/v1')
             now_q = int(time.time())
             st3, _h3, body3 = d.req(_loki_range_url(loki_api, '{job="p4-u28-reach"}',
@@ -2033,13 +2056,13 @@ class Gate(Phase4Gate):
         det_note = '' if st_det == 200 else ' body=' + det_b[:120]
         forged_note = ' (query %s)' % st_f
         clean_note = a_summary is not None and self.browser_clean(a_summary)
-        return status, '%s; 8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
-                       'labels/query_range 200, detected_field read %s%s, forged absent %s%s, ' \
-                       'fluent-bit fresh %s, tail %s len=%d; browser control (p4lokiui rows %s, panel ' \
+        return status, '%s; detected_field read %s%s, tail %s len=%d, forged absent %s%s; ' \
+                       '8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
+                       'labels/query_range 200, fluent-bit fresh %s; browser control (p4lokiui rows %s, panel ' \
                        'errors %s, explore rows %s, live rows %s, clean=%s)%s; walk: live4a 129-130,148,160 ' \
                        '(re-measure at c8c9337; dd3a28d log-format-only per lead)' \
-               % (tokens, st_det, det_note, forged_absent, forged_note, fresh,
-                  head.split('\r\n')[0][:40], len(head),
+               % (tokens, st_det, det_note, head.split('\r\n')[0][:40], len(head),
+                  forged_absent, forged_note, fresh,
                   dash_step.get('logRows', '-'), dash_step.get('panelErrorIcons', '-'),
                   explore_step.get('logRows', '-'), live_step.get('liveRows', '-'), clean_note,
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
@@ -2781,12 +2804,12 @@ class Gate(Phase4Gate):
             ('forward_signin', 'PASS' if (rc3 == 0 and rc4 == 0 and signin_ok) else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; rollback: only grafana recreated (%s), perses inputs ' \
-                       '%s -> %s, local admin 200, 6 paths ' \
+        return status, '%s; rollback: only grafana recreated (%s), perses changed %s, ' \
+                       'local admin 200, 6 paths ' \
                        '(5x 302 + /grafana 301 carrying port), U18 hashes equal; forward: ' \
                        'realm.ini + monitor up rc 0/0, p4v sign-in %s; walk: live4a 169' \
                % (tokens, 'grafana only' if only_grafana else str(recreated),
-                  perses_before, perses_after, fwd_signin['kind'])
+                  _dict_diff(perses_before, perses_after), fwd_signin['kind'])
 
     def u23(self):
         # walk logs/137, 139, 162, 169: Container ledger verification:
@@ -2803,8 +2826,10 @@ class Gate(Phase4Gate):
             if svc in initial and svc in curr_cluster:
                 if initial[svc] != curr_cluster[svc]:
                     core_unchanged = False
-                    diff_core.append('%s: id %s->%s started %s->%s'
-                                     % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12],
+                    same = initial[svc][0] == curr_cluster[svc][0]
+                    diff_core.append('%s: %s id %s->%s started %s->%s'
+                                     % (svc, 'SAME_ID' if same else 'NEW_ID',
+                                        initial[svc][0][:12], curr_cluster[svc][0][:12],
                                         initial[svc][1][:19], curr_cluster[svc][1][:19]))
 
         # brokers unchanged
@@ -2812,8 +2837,10 @@ class Gate(Phase4Gate):
             if 'broker' in svc and svc in curr_cluster:
                 if initial[svc] != curr_cluster[svc]:
                     core_unchanged = False
-                    diff_core.append('%s: id %s->%s started %s->%s'
-                                     % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12],
+                    same = initial[svc][0] == curr_cluster[svc][0]
+                    diff_core.append('%s: %s id %s->%s started %s->%s'
+                                     % (svc, 'SAME_ID' if same else 'NEW_ID',
+                                        initial[svc][0][:12], curr_cluster[svc][0][:12],
                                         initial[svc][1][:19], curr_cluster[svc][1][:19]))
 
         # 2. Realm.ini-content change recreates grafana only (log 162)
