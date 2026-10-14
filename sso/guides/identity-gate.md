@@ -1,4 +1,4 @@
-# Identity acceptance gate (Phase 1, Phase 2 and Phase 3)
+# Identity acceptance gate (Phase 1, Phase 2, Phase 3 and the Phase 4 slices)
 
 This is the executable gate for the Keycloak-first programme. It answers, per
 acceptance criterion of the owner's handover, which test proves it, how that
@@ -7,6 +7,16 @@ test is run, and what the last run produced. The gate is a script,
 off on the receipt, not on prose. Phase 2 is accepted only together with
 Phase 1, and Phase 3 (PingFederate brokering, proven against a stand-in IdP)
 only together with both: they run against one candidate commit, in one receipt.
+Phase 4 applies the same contract to the other browser UIs, in separately gated
+slices in a fixed order — 4a Grafana, then 4b Perses, then 4c backing services.
+A slice runs `REQUIRED_P1` plus its own inventory under a non-loopback public
+host (`--public-host NAME`, required for 4a/4b/4c and refused for 1-3), on the
+Mac and on both VMs; 4a and 4b each need one `--session-max-hours 1` companion
+receipt per host, and 4b additionally one Mac run at the shipped 8 h. A slice is
+complete only with both receipts per host. Phase 4 rows are encoded from a live
+hand-walk of each slice (`harness/phase4/live4a|4b|4c/`, owner rule 11); a row
+whose walk has not landed is a NOT_RUN scaffold, so a slice receipt is
+INCOMPLETE until its rows are encoded and run.
 
 ## How to run it
 
@@ -17,6 +27,8 @@ git -C /path/to/Krate worktree add --detach harness/worktrees/gate HEAD
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe            # Phase 1 + screenshots + Phase 2 + Phase 3 (--phase all)
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 2  # Phases 1 and 2 only
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 3 --stub-port 18444   # all three; the stand-in IdP on another port
+scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test   # Phase 1 + the Grafana slice
+scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1   # companion run: REQUIRED_P1 + U27 + V23
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo             # the same with the full inventory (see below)
 ```
@@ -78,15 +90,17 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 | field | meaning |
 |---|---|
 | candidate commit | `git rev-parse HEAD` of the fixture checkout, or the `--candidate` sha on a host without git; neither → `bound: false` and the verdict is INCOMPLETE. With `--repo`, the row also names the checkout's HEAD the static block ran on (it must start with the candidate sha) |
-| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh`, `sso/configure-dual.py` of the fixture: what was actually tested, also when the candidate is only stated. To check a bundle-host receipt against the repository: `git show <sha>:epc/<file> \| shasum -a 256` must match for seven of the eight; `.env.template` differs by design, because `make bundle` rewrites its five `*_IMAGE` lines to the offline runtime tags (the receipt's `images` row shows them) and nothing else |
+| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh`, `sso/probe.py`, `sso/configure-dual.py` of the fixture: what was actually tested, also when the candidate is only stated. To check a bundle-host receipt against the repository, compare the first 16 hex digits of `git show <sha>:epc/<file> \| shasum -a 256` for edition files and `git show <sha>:sso/<file> \| shasum -a 256` for SSO files; eight of the nine must match. `.env.template` differs by design, because `make bundle` rewrites its five `*_IMAGE` lines to the offline runtime tags (the receipt's `images` row shows them) and nothing else |
 | dirty tracked files | `git status --porcelain --untracked-files=no` of the whole fixture repository at run time, unfiltered (must be empty for a sign-off receipt; `unknown` without git; with `--repo`, the checkout's dirty state is listed after `--repo:`) |
 | images | every `*_IMAGE` digest of the edition template |
 | runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py`, `*.mjs` and `*.sh` (file list, sorted; `stub_idp.sh` is bound by this digest and linted by S3 with the runner), plus the commit (and dirty state) of the repository the runner was executed from |
 | host | OS, Docker, Compose, python, openssl versions |
-| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `REQUIRED_P3` with `--phase 3` or `all`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
+| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `REQUIRED_P3` with `--phase 3` or `all`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. For a Phase 4 slice (`--phase 4a\|4b\|4c`) the inventory is `REQUIRED_P1` plus the slice's own list (`REQUIRED_P4A`/`REQUIRED_P4B`/`REQUIRED_P4C` — no Phase 2/3 ids, and `X1` is not part of it); with `--session-max-hours N` it is `REQUIRED_P1` plus U27 (4a) or U27 and V23 (4b) only, and the receipt names N; `X3`/`X4` leave it under `--no-screenshots` like `X1`, and `W3` leaves it on a Linux host without root (or sudo) or without iproute2 (the J7 pattern; the Mac always runs its W3 variant). Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
 
 The required inventory is declared in the runner before anything runs
-(`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_P3`, `REQUIRED_X`): a test that never reports cannot
+(`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_P3`, `REQUIRED_X`, and for the Phase 4
+slices `REQUIRED_P4A`, `REQUIRED_P4B`, `REQUIRED_P4C` with the session-maximum
+lists `SESSION_P4A`/`SESSION_P4B`): a test that never reports cannot
 pass by absence. Secret values never travel on a command line (the runner reads
 `.env` in the shell, passes secrets through the environment or 0600 files, runs
 every helper with `python3 -I`, and works under `umask 077`); the receipt files
@@ -257,7 +271,7 @@ from every published line.
 
 | id | test | pass condition |
 |---|---|---|
-| P1 | `auth configure <site.json>` with the stand-in's site file (after removing the Phase 2 `runtime.yml`, which configure refuses to replace) | exit 0; `auth/keycloak/pingfederate-idp.json` has the D2/D3 shape (`phase3_realm.py --shape`): provider `pingfederate` with `firstBrokerLoginFlowAlias` `krate first broker login`, `syncMode FORCE`; flow `krate browser` = `auth-cookie` ALTERNATIVE 10, `identity-provider-redirector` ALTERNATIVE 20 with config `PingFederate redirect` → `defaultProvider pingfederate`, sub-flow `krate forms` ALTERNATIVE 30 = `auth-username-password-form` REQUIRED 10 + sub-flow `krate otp` CONDITIONAL 20 = `conditional-user-configured` REQUIRED 10 + `auth-otp-form` REQUIRED 20; flow `krate first broker login` = `idp-create-user-if-unique` REQUIRED 10 (every requirement and priority is asserted); `browserFlow` `krate browser`; two `oidc-advanced-group-idp-mapper` mappers with `syncMode FORCE`; the file carries the `${PING_KEYCLOAK_CLIENT_SECRET}` placeholder and none of the run's secret values |
+| P1 | `auth configure <site.json>` with the stand-in's site file (after removing the Phase 2 `runtime.yml`, which configure refuses to replace) | exit 0; `auth/keycloak/pingfederate-idp.json` has the D2/D3 shape (`phase3_realm.py --shape`): provider `pingfederate` with `firstBrokerLoginFlowAlias` `krate first broker login`, `syncMode FORCE`, `enabled`/`trustEmail`/`storeToken` = true/true/false (Keycloak carries the e-mail verification PingFederate asserts; an unverified brokered user is refused by the Phase 4 UIs); flow `krate browser` = `auth-cookie` ALTERNATIVE 10, `identity-provider-redirector` ALTERNATIVE 20 with config `PingFederate redirect` → `defaultProvider pingfederate`, sub-flow `krate forms` ALTERNATIVE 30 = `auth-username-password-form` REQUIRED 10 + sub-flow `krate otp` CONDITIONAL 20 = `conditional-user-configured` REQUIRED 10 + `auth-otp-form` REQUIRED 20; flow `krate first broker login` = `idp-create-user-if-unique` REQUIRED 10 (every requirement and priority is asserted); `browserFlow` `krate browser`; two `oidc-advanced-group-idp-mapper` mappers with `syncMode FORCE`; the file carries the `${PING_KEYCLOAK_CLIENT_SECRET}` placeholder and none of the run's secret values |
 | P2 | preflight `--mode runtime.yml` in ping mode (the stand-in's PEM in `auth/keycloak/truststores`, 644): without `PING_KEYCLOAK_CLIENT_SECRET`; with the PEM at 600; with the plan's `tokenUrl` rewritten to `http://`; then restored | the three runs exit non-zero naming `PING_KEYCLOAK_CLIENT_SECRET is not set`, `must be world-readable and writable by its owner only (chmod 644)` and `tokenUrl must be an https URL`; the restored run exits 0 (positive control). The secret is written into `.env` through the environment, never on a command line |
 | P3 | `auth apply` with the plan, then a second `auth apply` | first apply exit 0; `phase3_realm.py --expect <plan>`: the provider (every non-secret config key), its two mappers (type, claims, group, syncMode), the four flows with each execution's authenticator or sub-flow, requirement and priority, the redirector's config and the realm `browserFlow` equal the plan (a top-level plan key outside these, such as `truststore`, is not compared); journal `apply reconciled identity provider`; the second apply exits 0, prints the line `Identity provider pingfederate: No changes` and adds no reconciliation line |
 | P4 | the PEM added before P3; a second PEM added after P3; container ids and `KRATE_TRUSTSTORE_SHA` around each apply | the first apply recreated Keycloak (new container id) and set `KRATE_TRUSTSTORE_SHA` in `.env` and in the container's environment; the second apply (nothing changed) kept the container; a second PEM → recreated again with a new digest; journal `apply recreated keycloak: truststores changed`; the Keycloak log's truststore line is quoted |
@@ -279,7 +293,140 @@ from every published line.
 full inventory of `--phase 3`/`all` is 119 ids (113 with `--no-static --no-screenshots`).
 The rows run in the order P1, P2, P3, P4, P5–P13 (helper), P16, P14, P15, Z3.
 On an EPC edition directory the Phase 3 rows are NOT_RUN for the same reason as
-Phase 2 (the Kafbat runtime fixture is KRaft on this runner).
+Phase 2 (the Kafbat runtime fixture is KRaft on this runner). Phase 4 is different:
+its slices run on **both** editions (the slice acceptance includes the EPC receipt
+from the Rocky VM), and the shared bring-up (`start_cluster`) on EPC is the first
+item of each slice's VM live walk.
+
+### Phase 4: how the slices run (4a Grafana, 4b Perses, 4c backing services)
+
+Slices are gated separately and in the fixed order 4a, then 4b, then 4c. A slice
+runs `REQUIRED_P1` (with its Z1 scan; X1's story does not run and is not in the
+inventory) plus its own rows: `REQUIRED_P4A` (U1–U20, U21a, U21b, U22–U26, U28,
+U29, X3, Z4a), `REQUIRED_P4B` (V1–V22, V24, X4, Z4b), `REQUIRED_P4C` (W1–W4).
+No Phase 4 inventory holds a Phase 2/3 id. The session-maximum rows U27 (4a) and
+U27+V23 (4b) run only in the `--session-max-hours N` companion receipts and are
+not part of the default inventories; a slice is complete with both receipts per
+host (default and `--session-max-hours 1`), and 4b also with the Mac's
+`--session-max-hours 8` receipt at the shipped value.
+
+Public host: the realm-mode monitoring UIs refuse a loopback `KEYCLOAK_PUBLIC_URL`,
+so a slice runs under `--public-host NAME` (required for 4a/4b/4c, refused for
+1–3 — the Phase 1–3 inventory and receipts are localhost runs: X1's browser story
+maps the name `localhost` in Chromium, and K33 probes plain HTTP with
+`Host: localhost` against `$BASE`; a K33-style probe would itself still pass under
+NAME, the binding constraint is X1 plus receipt comparability). `/etc/hosts` is
+never touched: the runner's `curl()` wrapper adds `--resolve NAME:<port>:127.0.0.1`
+for the HTTPS, HTTP and Perses ports, the Python helpers map the same one name
+through `scripts/gate/netmap.py` (`$GATE_PUBLIC_HOST`, exported by the runner;
+TLS keeps the real name). `auth apply` starts a separate `sso/probe.py` process;
+the runner passes `KRATE_PROBE_CONNECT_IP=127.0.0.1` to it so the public
+discovery request reaches the same fixture proxy while still checking NAME in
+the certificate and the issuer document. Containers resolve NAME through their
+`extra_hosts` host-gateway entry. `gen-cert` derives the certificate's SAN from
+`KEYCLOAK_PUBLIC_URL`, so the fixture certificate covers NAME. The receipt's
+edition/fixture row records the host actually used (`$BASE`).
+
+Bring-up: `start_cluster()` (one implementation, shared with the K1 prelude) runs
+`auth configure`, `config set KAFKA_UI_AUTH_CONFIG=runtime.yml`, `start`,
+`auth apply`, `monitor up`. Slice 4b runs it in broker mode (lead decision
+2026-10-13): the runner owns the stand-in IdP — `stub_idp.sh up` (the Phase 3
+project/port convention) first, any stale `pingfederate-idp.json`/`runtime.yml`
+removed (since the e-mail-trust change `broker_plan` refuses a stale plan naming
+the differing field), then `auth configure <site.json>` so `auth apply` applies
+the broker plan of commit 0, with the stand-in's PEM (644) and
+`PING_KEYCLOAK_CLIENT_SECRET` (through the environment, never argv) set as
+Phase 3's P2 requires. `--session-max-hours N` sets
+`KEYCLOAK_SESSION_MAX_HOURS=N` in the fixture `.env` **before** `start_cluster`
+(the realm plan applies it at realm creation only), and the receipt names N.
+
+Rows: the slice helpers `scripts/gate/phase4_grafana.py` (U rows) and
+`scripts/gate/phase4_perses.py` (V rows) print TSV rows
+`<id>\tPASS|FAIL|NOT_RUN\t<evidence>` with `phase2_kafbat.py`'s exit codes; the
+runner-owned rows are X3/X4 (screenshot stories `screenshots-grafana.mjs` /
+`screenshots-perses.mjs`, own directories and `manifest.tsv` with sha256; X1's
+script stays unchanged), Z4a/Z4b (the extended leak scans) and W1–W4. A row that
+lists several probes passes only when every probe passes: the evidence carries
+one `probe=PASS|FAIL|NOT_RUN` token per probe in the row's listed order (U15:
+`flow`, `cookie`, `origin`, `ws`, `ui`) and the row takes the worst token —
+one implementation, `scripts/gate/probes.py`. The slice preconditions (seeding
+through the local login, the state hashes, the realm switch) run in the helper
+after `start_cluster` and are reported as a leading `setup` line; a setup FAIL
+makes every row NOT_RUN and the runner records a failing setup row. The
+long rows run in background threads where they do not disrupt each other:
+V15's Keycloak outage runs before V10's 36-minute uninterrupted activity walk;
+V7/V8 run alongside V10 on separate users, and V24 follows their joins and
+V20's final snapshot. U29 takes 17 minutes; U10/U11 and V7/V8 are bounded by
+330/420 seconds; U27/V23 run in the session companions. Runtime secrets (JWTs,
+cookies, tokens, enrolled passwords and TOTP seeds) go to
+`$STATE/phase4-secrets.txt`, which the runner adds to its leak set. W3 follows
+the J7 pattern: on the Mac it always runs, variant (a)+(b) from the Mac's LAN
+address; on Linux it needs root (or sudo) and iproute2 for the `p4probe`
+namespace and leaves the inventory without them (decided by the VM receipt);
+the row's evidence states which variant ran and why.
+
+**Status at candidate `77e2333`**: The 4a, 4b and 4c row bodies are encoded, but
+there is no passing Phase 4 receipt on this candidate. Its V24 row always
+reported the authenticated-Viewer outage probe as NOT_RUN and the Linux
+Docker-daemon restart probe as NOT_RUN. The repaired row and timing order need
+live validation; the session-maximum companions and the remaining Mac and VM
+slices also need candidate-bound runs. The earlier Mac 4a receipt at `7ccb503` failed during
+`auth apply` and does not accept the current candidate.
+The canonical pass-condition text of every row is
+`harness/phase4/PHASE4-INSTRUCTIONS-v3.md` section 2; the tables below name the
+owner and the test per id.
+
+### U: Phase 4a, "the Kafbat contract applied to Grafana"
+
+| id | owner | test |
+|---|---|---|
+| U1–U6 | helper | the login page offers only "Krate sign-in"; the built-in admin password and Basic are refused while the seed token works; realm groups map to Viewer/Admin (both → Admin, `isGrafanaAdmin` false); no group → refused, no user row; no e-mail → refused until `identity users set-email`; Viewer writes 403, Admin datasource 200 |
+| U7–U8 | helper | Viewer through the Loki datasource proxy: the write/admin paths 403 at `loki-gateway`, no forged line, fluent-bit alive, Explore/Live 101 control; Viewer through the Prometheus datasource resources: lifecycle 403, delete_series/remote-write non-2xx, `up` unchanged |
+| U9–U13 | helper | logout ends the Keycloak session with no confirmation page; `disable`+`users logout` revokes ≤ 330 s (timed); group removal + logout ≤ 300 s and the next sign-in is Viewer; Keycloak outage: sign-in fails closed, live session 401 ≤ 300 s, no restart loop, recovery ≤ 60 s; `monitor up` during a long outage exits non-zero naming `idp-wait` with Grafana created-not-started (the outage-tolerant refresh's warning lines are captured in the evidence) |
+| U14 | helper | `monitor realm`/`monitor up` refuse a loopback `KEYCLOAK_PUBLIC_URL` (localhost, 127.0.0.1, `[::1]`) changing nothing |
+| U15–U16 | helper | through `https://<host>/grafana/`: the five probes `flow`, `cookie`, `origin`, `ws`, `ui` (worst token rules); no x509 error in the Grafana log, with the CA-removal negative control |
+| U17–U20 | helper | the local-mode preflight reads and their refusal with seeded state; the state/volume preservation hashes; the collide/retire sequence; the seed-token lifecycle (90-day, meta 0600, the 29-day renewal, the missing-meta refusal) |
+| U21a–U21b | helper | Grafana published on 127.0.0.1 only, the anonymous surfaces answered without data and listed in table 2; foreign-source refusal on the Grafana port over IPv4 and IPv6 |
+| U22–U24 | helper | rollback to `local.ini` (login, state, recreation list, the six `/grafana…` paths 302 to Kafbat's `/login`); the across-slice container ledger; `gen-cert` recreates Grafana and sign-in works |
+| U25–U26 | helper | `identity users logout` ends a live Kafbat session ≤ 5 s; the static session defaults (realm 28800, `realm.ini` 8h/15m equal to the `.env` keys) |
+| U27 | helper (companion runs only) | at `--session-max-hours N` (M = 60·N min): 200 before M−1 min, refused in [M+10 s, M+1 min], then the Keycloak password form |
+| U28–U29 | helper | the Admin-datasource residual measured against table 2 of `monitoring/README.md`; the 16-min idle expiry with the once-a-minute control (timed) |
+| X3 | runner | `screenshots-grafana.mjs` (Chromium against the fixture): exactly 5 PNGs, own directory, `manifest.tsv` with sha256, none empty, each shot taken after its DOM assertion passed (login page, realm form, Viewer without Edit/New, Admin with Edit, after logout) |
+| Z4a | runner | the extended leak scan: no `GRAFANA_OAUTH_CLIENT_SECRET`, seed token, enrolled password, TOTP seed or session cookie in any searched file (both projects' container logs, the raw gate log, the receipt, the screenshot manifests, `ps -eo args` samples every 0.2 s during `monitor realm`/`monitor up`/`grafana-user retire`) |
+
+### V: Phase 4b, "the Kafbat contract applied to Perses (native mode on the realm)"
+
+| id | owner | test |
+|---|---|---|
+| V1–V2 | helper | `PERSES_IDP=krate` with gateway/local mode refused before any container change; `enable_auth: true` rendered, unauthenticated 401s from the `perses` network, the former local admin refused, no `jwtPayload` cookie |
+| V3–V6 | helper | realm groups → `/krate/role` and Perses permissions; no group → refused at `/oauth2/callback`; Viewer writes 403 through the gateway and, guard bypassed, 403 from Perses itself at `perses:8080`; Admin controls pass |
+| V7–V8 | helper | admin-group removal ≤ 420 s (timed); `disable`+`users logout` ≤ 420 s, next sign-in "Account is disabled" (timed) |
+| V9–V10 | helper | one UI logout ends the Perses, oauth2-proxy and Keycloak sessions with no confirmation page; the 36-min activity/idle walk at realm defaults with the derived proof window (timed) |
+| V11–V14 | helper | first sign-in of an `identity users add` user passes enrolment; `--email` required and unverified e-mail refused; equal e-mail local parts refused; the issuer migration (`perses-migrate`) removes the stale users and rotates the cookie secret |
+| V15–V16 | helper | Keycloak outage: refusal at the next refresh ≤ 420 s, guard 403, no restart, recovery ≤ 60 s (timed); `monitor up` during the outage, both idp-wait cases |
+| V17–V18 | helper | Perses state preserved across switch/rollback/return with only Perses-side containers recreated; `gen-cert` recreates oauth2-proxy and Perses and sign-in works |
+| V19 | helper | a user brokered from the PingFederate stand-in signs in to Perses as viewer (`phase3_broker.Gate.brokered_login`); the evidence records that this exercises commit 0 (`trustEmail: true` — the brokered user arrives e-mail-verified) |
+| V20–V22 | helper | the across-slice container ledger; the loopback `KEYCLOAK_PUBLIC_URL` refusals before any container change; the static session defaults (rendered `cookie_expire 8h`, `cookie_refresh 5m` = derived proof, realm 28800) |
+| V23 | helper (companion runs only) | at `--session-max-hours N` (M = 60·N min): API 401 and page 302 → `/oauth2/start` → password form by M+6 min |
+| V24 | helper | restart during the outage: Docker's back-off recorded, nobody let in, recovery without a `krate` command ≤ 90 s; on the VMs additionally `systemctl restart docker` as the slice's last row |
+| X4 | runner | `screenshots-perses.mjs` (Chromium against the fixture): exactly 6 PNGs, own directory, `manifest.tsv` with sha256, none empty, each shot after its DOM assertion (realm form from the Perses URL, Viewer project, Admin controls, after logout, disabled user, no-group refusal at `/oauth2/callback`) |
+| Z4b | runner | the extended leak scan: no Perses/guard/cookie secret, JWT, refresh token or oauth2-proxy cookie in any searched file, and no line matching `id_token_hint=`, `jwtPayload=`, `jwtSignature=`, `jwtRefreshToken=`, `_oauth2_proxy=`, `/oauth2/callback?code=` (both projects' container logs incl. `perses-migrate`, the raw gate log, the receipt, the manifests, `ps -eo args` samples every 0.2 s during `monitor up`) |
+
+Recorded limits of 4b (measured by the gate, not failures): cookies copied
+before a logout stay valid until oauth2-proxy's next refresh (≤ 420 s); a logout
+without an oauth2-proxy session reaches Keycloak with the literal placeholder
+(400) and the Keycloak session stays; brokered users keep their PingFederate
+session (no `logoutUrl`), so their next sign-in passes the stand-in without a
+password while that session lives.
+
+### W: Phase 4c, "the backing services stay unreachable"
+
+| id | owner | test |
+|---|---|---|
+| W1 | runner | the published-port census: exactly perses-gateway on all addresses, prometheus/loki on loopback, grafana per U21a, no host port for anything else of the monitoring project |
+| W2 | runner | Prometheus lifecycle 403 from the `monitoring` network; `krate monitor reload` (SIGHUP) succeeds on a valid edit with the same container and increased reload timestamp, and fails on an invalid edit with `prometheus_config_last_reload_successful 0` and Prometheus still answering |
+| W3 | runner | the foreign-source probe: on a VM as root the `p4probe` netns checks (a)–(e) of `harness/phase4/lab8/w1x-row.sh` (firewalld zone mirrored when active); on the Mac (a)+(b) from the LAN address; without root/iproute2 on Linux it leaves the inventory (J7 pattern) and the evidence names the variant that ran |
+| W4 | runner | the five-source reachability census (host process on the VM, probe containers on `monitoring`, `perses` and `kafka-network`, and Grafana itself) over every container and `ExposedPorts` port of both projects, equal to table 2 of `monitoring/README.md` — any reachable pair not listed fails, a listed pair now unreachable is reported; plus one README row per compose service |
 
 ### Not covered by this runner, proven elsewhere
 

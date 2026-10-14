@@ -14,9 +14,10 @@ from pathlib import Path
 import re
 import shutil
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 PERSES_UID = 65532       # persesdev/perses and oauth2-proxy run as nonroot
+GRAFANA_UID = 472        # grafana/grafana image config User=472
 ALERTMANAGER_UID = 65534  # prom/alertmanager runs as nobody
 SYNC_UID = 65534
 GROUP = re.compile(r'[^,\s"\'\\]{1,256}')
@@ -46,6 +47,29 @@ def flag(env, key, default=False):
     raise ConfigError(key + ' must be true or false')
 
 
+def positive_int(env, key, default=None):
+    """A positive whole number from the environment, or default when unset.
+
+    A missing value with no default is an error: the realm session settings
+    must reach monitoring-init through its environment.
+    """
+    value = env.get(key, '').strip()
+    if not value:
+        if default is None:
+            raise ConfigError(key + ' must be set in monitoring/.env')
+        return default
+    if not re.fullmatch(r'[0-9]+', value) or int(value) < 1:
+        raise ConfigError(key + ' must be a positive whole number')
+    return int(value)
+
+
+def perses_port(env):
+    port = env.get('PERSES_PORT', '3443')
+    if not re.fullmatch(r'[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
+        raise ConfigError('PERSES_PORT must be a port number from 1 to 65535')
+    return int(port)
+
+
 def https_url(value, key):
     parts = urlsplit(value)
     if parts.scheme != 'https' or not parts.hostname or parts.query or parts.fragment:
@@ -71,6 +95,56 @@ def site_settings(path, mode):
     if mode == 'native' and not NAME.fullmatch(site.get('service_client_id', '')):
         raise ConfigError('site settings: service_client_id must be a valid Perses user name')
     return site
+
+
+def realm_site(env):
+    """Site settings for the Krate realm (PERSES_IDP=krate), derived from monitoring/.env.
+
+    Realm mode replaces the sso/configure.py --app perses file: the issuer, the
+    public URL, the two client ids, the group names and the session timings all
+    come from the environment the operator already set for Keycloak, so there is
+    no second site file to keep in step. The group-proof period is derived from
+    the realm's idle timeout (max(1, idle // 3)) unless PERSES_GROUP_PROOF_MINUTES
+    overrides it; a proof at or beyond the idle timeout would refresh the session
+    only after Keycloak already ended it, which logs the user out at the idle mark
+    (defect 4 on main, where the proof default of 15 equalled the idle of 15).
+    """
+    public = https_url(require(env, 'KEYCLOAK_PUBLIC_URL'), 'KEYCLOAK_PUBLIC_URL')
+    parts = urlsplit(public)
+    port = perses_port(env)
+    viewer = require(env, 'KEYCLOAK_VIEWER_GROUP')
+    admin = require(env, 'KEYCLOAK_ADMIN_GROUP')
+    for key, value in (('KEYCLOAK_VIEWER_GROUP', viewer), ('KEYCLOAK_ADMIN_GROUP', admin)):
+        if not GROUP.fullmatch(value):
+            raise ConfigError(key + ' must not contain commas, quotes or whitespace')
+    if viewer == admin:
+        raise ConfigError('KEYCLOAK_VIEWER_GROUP and KEYCLOAK_ADMIN_GROUP must differ')
+    idle = positive_int(env, 'KEYCLOAK_SESSION_IDLE_MINUTES')
+    hours = positive_int(env, 'KEYCLOAK_SESSION_MAX_HOURS')
+    proof = positive_int(env, 'PERSES_GROUP_PROOF_MINUTES', max(1, idle // 3))
+    if not 1 <= proof < idle:
+        raise ConfigError('PERSES_GROUP_PROOF_MINUTES (%d) must be at least 1 and below '
+                          'KEYCLOAK_SESSION_IDLE_MINUTES (%d)' % (proof, idle))
+    return {
+        'issuer': public + '/realms/krate',
+        'public_url': 'https://%s:%d' % (
+            '[%s]' % parts.hostname if ':' in parts.hostname else parts.hostname, port),
+        'client_id': 'krate-perses',
+        'service_client_id': 'krate-perses-sync',
+        'viewer_group': viewer,
+        'admin_group': admin,
+        'groups_claim': 'groups',
+        'scopes': ['openid', 'profile', 'email'],
+        'session_hours': hours,
+        # The cluster CA, mounted at the same path in Perses, OAuth2 Proxy and
+        # Grafana, so the realm's self-signed certificate verifies without
+        # turning off certificate checks.
+        'ca_file': '/etc/krate/ca/server.crt',
+        # The realm's authority (host[:port] of KEYCLOAK_PUBLIC_URL), whitelisted
+        # so the logout redirect below may send the browser there.
+        'logout_authority': parts.netloc,
+        'group_proof_minutes': proof,
+    }
 
 
 def bounded_int(site, key, default, low, high):
@@ -115,6 +189,14 @@ def perses_config(mode, site):
                 '          redirect_uri: %s' % yaml_string(site['public_url'] + '/api/auth/providers/oidc/krate/callback'),
                 '          scopes: %s' % json.dumps(site.get('scopes', ['openid', 'profile', 'email'])),
             ]
+            if site.get('ca_file'):
+                # Verify the realm's certificate with the cluster CA instead of
+                # the image's trust store (which does not carry it).
+                lines += [
+                    '          http:',
+                    '            tls_config:',
+                    '              caFile: %s' % yaml_string(site['ca_file']),
+                ]
         lines += [
             '  authorization:',
             '    provider:',
@@ -168,6 +250,12 @@ def oauth2_proxy_config(site, env):
     minutes = bounded_int(site, 'group_proof_minutes', 15, 1, 60)
     hours = bounded_int(site, 'session_hours', 8, 1, 24)
     scopes = ' '.join(site.get('scopes', ['openid', 'profile', 'email']))
+    # The gateway's own host, plus the realm authority so the one-logout
+    # redirect (GATEWAY_SSO) may send the browser to Keycloak's logout endpoint.
+    whitelist = [host]
+    logout_authority = site.get('logout_authority')
+    if logout_authority and logout_authority not in whitelist:
+        whitelist.append(logout_authority)
     settings = {
         'provider': 'oidc',
         'oidc_issuer_url': site['issuer'],
@@ -177,6 +265,10 @@ def oauth2_proxy_config(site, env):
         'reverse_proxy': True,
         # Only the gateway reaches OAuth2 Proxy (no host port), over a private network.
         'trusted_proxy_ips': ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
+        # request_logging defaults to true and logs each request URI, which for a
+        # callback carries the one-time code and state (lead-o2p-request-logging.txt;
+        # --help "Log HTTP requests (default true)"). Off, so no credential is logged.
+        'request_logging': False,
         'email_domains': ['*'],
         'scope': scopes,
         'oidc_groups_claim': site['groups_claim'],
@@ -200,9 +292,12 @@ def oauth2_proxy_config(site, env):
         # no older than the group-proof period (see perses_sync.Guard.proof).
         'set_authorization_header': True,
         'upstreams': ['static://202'],
-        'whitelist_domains': [host],
+        'whitelist_domains': whitelist,
         'skip_auth_routes': [],
     }
+    if site.get('ca_file'):
+        # Verify the realm's certificate with the cluster CA (as Perses does).
+        settings['provider_ca_files'] = [site['ca_file']]
     lines = ['# Rendered by monitoring/render.py; do not edit. Secrets come from the environment.']
     for key, value in settings.items():
         lines.append('%s = %s' % (key, json.dumps(value)))
@@ -313,7 +408,7 @@ GATEWAY_LOCAL = '''    location = /api/auth/providers/native/login {
 
 GATEWAY_SSO = '''    set $krate_oauth2 http://oauth2-proxy:4180;
     set $krate_sync http://perses-sync:9091;
-    location /oauth2/ {
+%(logout)s    location /oauth2/ {
         limit_req zone=krate_perses_login burst=20 nodelay;
         proxy_pass $krate_oauth2;
     }
@@ -383,18 +478,71 @@ map $request_uri $krate_return {
 '''
 
 
-def gateway_config(mode, env):
-    port = env.get('PERSES_PORT', '3443')
-    if not re.fullmatch(r'[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
-        raise ConfigError('PERSES_PORT must be a port number from 1 to 65535')
+def logout_location(site, env=None):
+    """The realm's one-logout location for GATEWAY_SSO.
+
+    Variant B2 (default, lab7-verified):
+    lab7 Q3 verified this end to end in a real Chromium (results.md:100-119, logs/061,063):
+    a constant 302 to OAuth2 Proxy's /oauth2/sign_out whose rd is the realm's logout URL.
+    Perses' `logout:` stays unset and this does NOT proxy to Perses; nginx clears Perses'
+    three JWT cookies itself (the flags below match what Perses set at login), OAuth2 Proxy
+    replaces the {id_token} placeholder with the session's ID token (oauthproxy.go SignOut)
+    and ends the Keycloak session, which returns the browser to the public URL - one
+    GET /api/auth/logout ends all three sessions with no confirmation page. No auth_request:
+    a lost or expired session can still log out, and the rd target is a constant (no open
+    redirect). The four security headers are restated because a location with its own
+    add_header loses the server-level set.
+
+    Variant B1 (toggleable via KRATE_PERSES_LOGOUT_VARIANT=B1):
+    Proxies to Perses and rewrites `Location: /` to `/oauth2/sign_out?rd=...`.
+    """
+    post_logout = quote(site['public_url'] + '/', safe='')
+    realm_logout = (site['issuer'] + '/protocol/openid-connect/logout'
+                    '?id_token_hint={id_token}&post_logout_redirect_uri=' + post_logout)
+    redirect = '/oauth2/sign_out?rd=' + quote(realm_logout, safe='')
+
+    variant = os.environ.get('KRATE_PERSES_LOGOUT_VARIANT', '')
+
+    if variant.upper() == 'B1':
+        headers = indent(GATEWAY_FORWARD + 'proxy_set_header Authorization "";\n', 8)
+        return ('    # One logout ends the Perses, OAuth2 Proxy and Keycloak sessions.\n'
+                '    # No auth_request: a lost session can still log out; rd is a constant.\n'
+                '    location = /api/auth/logout {\n'
+                '        proxy_pass $krate_perses;\n'
+                '        proxy_http_version 1.1;\n'
+                + headers +
+                '        proxy_redirect / "' + redirect + '";\n'
+                '    }\n')
+
+    return ('    # One logout ends the Perses, OAuth2 Proxy and Keycloak sessions (lab7 Q3).\n'
+            '    # No auth_request: a lost session can still log out; rd is a constant.\n'
+            '    location = /api/auth/logout {\n'
+            '        add_header Set-Cookie "jwtPayload=; Path=/; Max-Age=0; Secure; SameSite=Lax" always;\n'
+            '        add_header Set-Cookie "jwtSignature=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax" always;\n'
+            '        add_header Set-Cookie "jwtRefreshToken=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax" always;\n'
+            '        add_header Cache-Control "no-store" always;\n'
+            '        # add_header here stops inheritance from the server block, so repeat them.\n'
+            '        add_header X-Frame-Options SAMEORIGIN always;\n'
+            '        add_header X-Content-Type-Options nosniff always;\n'
+            '        add_header Referrer-Policy no-referrer always;\n'
+            '        add_header Strict-Transport-Security "max-age=31536000" always;\n'
+            '        return 302 "' + redirect + '";\n'
+            '    }\n')
+
+
+def gateway_config(mode, env, site):
+    port = perses_port(env)
     perses = GATEWAY_FORWARD + GATEWAY_INJECT + ('' if mode == 'local' else GATEWAY_COOKIE_ONLY)
-    body = (GATEWAY_LOCAL if mode == 'local' else GATEWAY_SSO) % {'inject': indent(perses, 8)}
+    # The one-logout location is realm-only: its target is the Keycloak logout URL.
+    logout = logout_location(site, env) if mode == 'native' and env.get('PERSES_IDP') == 'krate' else ''
+    body = (GATEWAY_LOCAL if mode == 'local' else GATEWAY_SSO) % {'inject': indent(perses, 8), 'logout': logout}
     return GATEWAY_HTTP + GATEWAY_COMMON % {'port': port, 'forward': indent(GATEWAY_FORWARD, 4)} + body
 
 
 def alertmanager_config(env):
     enabled = flag(env, 'ALERTMANAGER_EMAIL_ENABLED', flag(env, 'GF_SMTP_ENABLED'))
     lines = ['# Rendered by monitoring/render.py; do not edit.']
+    recipients = []  # rebound in the enabled block; the join below runs only when enabled
     if enabled:
         smarthost = require(env, 'GF_SMTP_HOST')
         if not re.fullmatch(r'[A-Za-z0-9.-]+:\d{1,5}', smarthost):
@@ -474,10 +622,22 @@ def render(env, out, site_path):
     mode = env.get('PERSES_AUTH_MODE', 'local')
     if mode not in ('local', 'native', 'gateway'):
         raise ConfigError('PERSES_AUTH_MODE must be local, native or gateway')
+    idp = env.get('PERSES_IDP', '').strip()
+    if idp and idp != 'krate':
+        raise ConfigError('PERSES_IDP must be empty or krate')
+    if idp == 'krate' and mode != 'native':
+        # The realm signs users in through Perses' own OIDC; the gateway mode has
+        # no Perses session to end at logout and the local mode has no realm.
+        raise ConfigError('PERSES_IDP=krate requires PERSES_AUTH_MODE=native')
     key = require(env, 'PERSES_ENCRYPTION_KEY')
     if len(key.encode()) != 32:
         raise ConfigError('PERSES_ENCRYPTION_KEY must be exactly 32 bytes')
-    site = site_settings(site_path, mode) if mode != 'local' else {}
+    if mode == 'local':
+        site = {}
+    elif idp == 'krate':
+        site = realm_site(env)
+    else:
+        site = site_settings(site_path, mode)
     if mode != 'local':
         require(env, 'OAUTH2_PROXY_COOKIE_SECRET')
         require(env, 'OAUTH2_PROXY_CLIENT_SECRET')
@@ -487,19 +647,29 @@ def render(env, out, site_path):
             'encryption.key': key,
             'provisioning/site.json': json.dumps(perses_provisioning(mode, env, site), indent=2) + '\n',
         }),
-        'gateway': (0, {'default.conf': gateway_config(mode, env)}),
+        'gateway': (0, {'default.conf': gateway_config(mode, env, site)}),
         'alertmanager': (ALERTMANAGER_UID, {'alertmanager.yml': alertmanager_config(env)}),
     }
     if env.get('GF_SMTP_USER') and flag(env, 'ALERTMANAGER_EMAIL_ENABLED', flag(env, 'GF_SMTP_ENABLED')):
         outputs['alertmanager'][1]['smtp-password'] = env.get('GF_SMTP_PASSWORD', '')
     if mode == 'native':
         outputs['perses'][1]['oidc-client-secret'] = require(env, 'OAUTH2_PROXY_CLIENT_SECRET')
+        # The current issuer for the perses-migrate one-shot, which removes the
+        # users and managed bindings a previous issuer left behind (see
+        # perses/migrate_issuer.py). Rendered into its own volume, read-only there.
+        outputs['perses-migrate'] = (PERSES_UID, {'issuer': site['issuer'] + '\n'})
     if mode != 'local':
         outputs['oauth2-proxy'] = (PERSES_UID, {'oauth2-proxy.cfg': oauth2_proxy_config(site, env)})
         sync = {'config.json': sync_config(mode, site)}
         if mode == 'native':
             sync['service-client-secret'] = require(env, 'PERSES_SYNC_CLIENT_SECRET')
         outputs['perses-sync'] = (SYNC_UID, sync)
+    # Grafana's realm client secret, rendered independent of PERSES_AUTH_MODE:
+    # Grafana on the realm with Perses local must work. It reaches Grafana as
+    # /etc/krate/grafana/client-secret (uid 472, mode 0400), read by realm.ini's
+    # client_secret = $__file{...}, so it is never in the environment or an argument.
+    if env.get('GRAFANA_AUTH_CONFIG') == 'realm.ini':
+        outputs['grafana'] = (GRAFANA_UID, {'client-secret': require(env, 'GRAFANA_OAUTH_CLIENT_SECRET')})
     # Validate everything before touching any output volume.
     for name, (uid, files) in outputs.items():
         target = out / name
@@ -507,7 +677,7 @@ def render(env, out, site_path):
         for relative, content in files.items():
             write(target / relative, content, uid)
         seal(target, uid)
-    for name in ('oauth2-proxy', 'perses-sync'):
+    for name in ('oauth2-proxy', 'perses-sync', 'grafana', 'perses-migrate'):
         if name not in outputs and (out / name).exists():
             clear(out / name)
             seal(out / name, 0)

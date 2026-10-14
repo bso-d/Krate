@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Static checks for the Krate identity foundation (templates, realm plan, Compose, CLI parity)."""
+import configparser
 import contextlib
 import importlib.util
 from typing import Callable
@@ -453,8 +454,10 @@ def check_monitoring_binds(checks):
                       f'monitoring/{name}: must publish only 127.0.0.1:{port}:{port} by default; got {ports}')
     for name, port in (('grafana', 3000), ('perses-gateway', 3443)):
         ports = services.get(name, {}).get('ports', [])
-        checks.expect(len(ports) == 1 and not ports[0].get('host_ip') and ports[0].get('published') == str(port),
-                      f'monitoring/{name}: must still publish {port} on every interface; got {ports}')
+        # Grafana's default keeps main's behaviour (every interface, gate row M1); realm mode
+        # sets GRAFANA_BIND=127.0.0.1, which check_grafana_realm_compose renders separately.
+        checks.expect(len(ports) == 1 and ports[0].get('host_ip') in (None, '0.0.0.0') and ports[0].get('published') == str(port),
+                      f'monitoring/{name}: must still publish {port} on every interface by default; got {ports}')
 
 
 def check_logrotate(checks):
@@ -535,9 +538,15 @@ def check_exposure(checks):
                 continue  # no own headers: the server-level set applies
             e(server_level <= own, f'{edition}/nginx.conf: a location that sets proxy_set_header must restate the server-level set;'
                                    f' missing {sorted(server_level - own)} in {block.strip()[:60]!r}')
+        # Derived, not hard-coded: the server level plus every location that restates the header set
+        # must also clear the client-supplied ones. A location that proxies without restating
+        # (/login, /oauth2/, /login/oauth2/) inherits the server-level set and is not counted.
+        restating = 1 + len([body for body in re.findall(r'location [^{]+\{(.*?)\n    \}', nginx, re.S)
+                             if 'proxy_set_header X-Forwarded-Host' in body])
+        e(restating == 6, f'{edition}/nginx.conf: expected the server level and five restating locations (identity realms, identity resources, /, /grafana/login, /grafana/); got {restating}')
         for header in ('Forwarded', 'X-Forwarded-Prefix', 'X-Forwarded-Ssl', 'X-Forwarded-Port'):
-            e(nginx.count(f'proxy_set_header {header} "";') == nginx.count('proxy_set_header X-Forwarded-Host $http_host;') == 4,
-              f'{edition}/nginx.conf: every proxied location must clear the client-supplied {header} header')
+            e(nginx.count(f'proxy_set_header {header} "";') == nginx.count('proxy_set_header X-Forwarded-Host $http_host;') == restating,
+              f'{edition}/nginx.conf: every proxied location must clear the client-supplied {header} header ({restating} of them)')
         cli = (ROOT / edition / 'krate').read_text()
         prepare = cli[cli.index('\nprepare() {'):cli.index('\n}', cli.index('\nprepare() {'))]
         e('identity_network_clash' in prepare and prepare.index('identity_network_clash') < prepare.index('generate_secrets'),
@@ -651,8 +660,11 @@ def check_gate_scripts(checks):
     docker_calls = []
     saved = module.service_container, module.docker
     try:
-        module.service_container = lambda project, service: 'cid-1' if (project, service) == ('p-x', 'kafka-92') else None
-        module.docker = lambda *args, **kwargs: (docker_calls.append(args), (0, '', ''))[1]
+        # setattr, not direct assignment: Pyright rejects module-attribute assignment
+        # (reportAttributeAccessIssue — ModuleType declares no such attributes).
+        setattr(module, 'service_container',
+                lambda project, service: 'cid-1' if (project, service) == ('p-x', 'kafka-92') else None)
+        setattr(module, 'docker', lambda *args, **kwargs: (docker_calls.append(args), (0, '', ''))[1])
         p3_module.Gate.cleanup(types.SimpleNamespace(project='p-x', cleanup_topics={'gate3-p6', 'gate3-p5'}))
         e(len(docker_calls) == 2 and all(a[0] == 'exec' and a[1] == 'cid-1' and '--delete' in a and '--if-exists' in a for a in docker_calls)
           and [a[-1] for a in docker_calls] == ['gate3-p5', 'gate3-p6'],
@@ -661,9 +673,334 @@ def check_gate_scripts(checks):
         p3_module.Gate.cleanup(types.SimpleNamespace(project='other', cleanup_topics={'gate3-p6'}))
         e(docker_calls == [], f'Gate.cleanup must make no docker call without a kafka-92 container; got {docker_calls}')
     finally:
-        module.service_container, module.docker = saved
+        setattr(module, 'service_container', saved[0])
+        setattr(module, 'docker', saved[1])
     e('self.cleanup()' in (ROOT / 'scripts/gate/phase3_broker.py').read_text().split('def main(self):', 1)[1].split('def finish', 1)[0],
       'phase3_broker.Gate.main must call self.cleanup() in its finally block')
+
+    # Screenshot manifests are published evidence: a verbatim page.url() would
+    # persist OAuth code/state/nonce query values (PR #42 review, 2026-10-14).
+    for name in ('screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs'):
+        story = (ROOT / 'scripts/gate' / name).read_text()
+        e('url: page.url()' not in story and 'url: publicUrl(page.url())' in story,
+          f'{name} must record only the public origin+path of each shot in its manifest')
+    browser = (ROOT / 'scripts/gate/phase4-browser.mjs').read_text()
+    e(browser.count("page.url().replace(BASE, '')") ==
+      browser.count("page.url().replace(BASE, '').split(/[?#]/)[0]"),
+      'phase4-browser.mjs must strip query and fragment from every recorded page URL')
+    # Every recorded .url() in every gate story — manifest fields, asserted
+    # strings and step records alike — must be stripped of query and fragment
+    # before it can reach a manifest or summary file.
+    for story_path in sorted((ROOT / 'scripts/gate').glob('*.mjs')):
+        story = story_path.read_text()
+        for match in re.finditer(r'\.url\(\)', story):
+            tail = story[match.end():match.end() + 80]
+            head = story[max(0, match.start() - 40):match.start()]
+            ok = (re.search(r'publicUrl\(\w+$', head) is not None or tail.startswith('.split(/[?#]/)')
+                  or tail.startswith('.includes(') or tail.startswith('.startsWith(')
+                  or (tail.startswith('.replace(') and '.split(/[?#]/)' in tail[:70]))
+            e(ok, f'{story_path.name} records a verbatim .url() near: ...{story[max(0, match.start() - 40):match.end() + 40]!r}')
+
+    # U9 evidence must render (tag, result, detail) 3-tuples: the rocky-4a run
+    # at 959fed2 failed the gate with `TypeError: not all arguments converted`
+    # (harness/gate-receipts/rocky-4a-959fed2/raw.log:85) because u9_body
+    # joined its cases with `'%s: %s' % c`. The format string is read from the
+    # real u9_body source so this test runs the shipped expression, not a copy.
+    u9_body = (ROOT / 'scripts/gate/phase4_grafana.py').read_text().split(
+        'def u9_body', 1)[1].split('\n    def ', 1)[0]
+    u9_fmt = re.search(r"'([^']*%s[^']*)' % c for c in cases", u9_body)
+    e(u9_fmt is not None, 'u9_body must join per-case evidence from its cases')
+    if u9_fmt is not None:
+        u9_cases = [('a-immediate', 'PASS', 'sessions 1->0 form=True confirmation=False old-cookie=401'),
+                    ('b-after-6min', 'FAIL', 'only 5/6 keep-alive 200s')]
+        try:
+            u9_rendered = ' | '.join(u9_fmt.group(1) % c for c in u9_cases)
+        except TypeError as exc:
+            e(False, 'u9 evidence formatting must accept (tag, result, detail) cases; got TypeError: ' + str(exc))
+        else:
+            e(all(tag in u9_rendered and result in u9_rendered and detail in u9_rendered
+                  for tag, result, detail in u9_cases),
+              'u9 evidence must keep per-case tag, result and detail; got ' + repr(u9_rendered))
+
+    # U28 loki_push_body must encode Stream.labels as one LogQL selector
+    # string: rocky-4a at bfd1158 answered the gate's proto push 400 with the
+    # labels built as nested LabelAdapter messages (receipt U28
+    # stored=NOT_RUN). Runs the shipped builder, not a copy.
+    if str(ROOT / 'scripts/gate') not in sys.path:
+        sys.path.insert(0, str(ROOT / 'scripts/gate'))
+    g4 = __import__('phase4_grafana')
+    u28_payload = g4.loki_push_body(
+        {'job': 'p4-u28-reach', 'source': 'u28-proto-gate'},
+        'u28 reach line check', 1791839245241486072)
+
+    def _u28_varint(buf, pos):
+        res, shift = 0, 0
+        while True:
+            byte = buf[pos]
+            pos += 1
+            res |= (byte & 0x7F) << shift
+            shift += 7
+            if not (byte & 0x80):
+                return res, pos
+
+    u28_pos = 0
+    _, u28_pos = _u28_varint(u28_payload, u28_pos)
+    u28_tag = u28_payload[u28_pos]
+    u28_pos += 1
+    e((u28_tag & 0x03) == 0, 'u28 payload must be a snappy literal')
+    u28_len = u28_tag >> 2
+    if u28_len < 60:
+        u28_len += 1
+    elif u28_len == 60:
+        u28_len = u28_payload[u28_pos] + 1
+        u28_pos += 1
+    elif u28_len == 61:
+        u28_len = int.from_bytes(u28_payload[u28_pos:u28_pos + 2], 'little') + 1
+        u28_pos += 2
+    elif u28_len == 62:
+        u28_len = int.from_bytes(u28_payload[u28_pos:u28_pos + 3], 'little') + 1
+        u28_pos += 3
+    else:
+        u28_len = int.from_bytes(u28_payload[u28_pos:u28_pos + 4], 'little') + 1
+        u28_pos += 4
+    u28_stream = u28_payload[u28_pos:u28_pos + u28_len]
+    e(len(u28_stream) == u28_len, 'u28 snappy preamble must match the literal length')
+    u28_labels = None
+    u28_at, u28_end = 0, len(u28_stream)
+    while u28_at < u28_end:
+        u28_tagno, u28_at = _u28_varint(u28_stream, u28_at)
+        u28_field, u28_wire = u28_tagno >> 3, u28_tagno & 0x07
+        if u28_wire != 2:
+            _, u28_at = _u28_varint(u28_stream, u28_at)
+            continue
+        u28_size, u28_at = _u28_varint(u28_stream, u28_at)
+        u28_val = u28_stream[u28_at:u28_at + u28_size]
+        u28_at += u28_size
+        if u28_field != 1 or len(u28_val) >= len(u28_stream):
+            continue
+        u28_in, u28_in_end = 0, len(u28_val)
+        while u28_in < u28_in_end:
+            u28_stag, u28_in = _u28_varint(u28_val, u28_in)
+            u28_sfield, u28_swire = u28_stag >> 3, u28_stag & 0x07
+            if u28_swire != 2:
+                _, u28_in = _u28_varint(u28_val, u28_in)
+                continue
+            u28_ssize, u28_in = _u28_varint(u28_val, u28_in)
+            u28_sval = u28_val[u28_in:u28_in + u28_ssize]
+            u28_in += u28_ssize
+            if u28_sfield == 1:
+                try:
+                    u28_text = u28_sval.decode()
+                except ValueError:
+                    continue
+                if 'job=' in u28_text:
+                    u28_labels = u28_text
+    e(u28_labels is not None and 'job="p4-u28-reach"' in u28_labels
+      and 'source="u28-proto-gate"' in u28_labels,
+      'u28 push labels must be one selector string; got ' + repr(u28_labels))
+
+    # U9 keep-alive must observe all six minute boundaries: rocky-4a at
+    # bfd1158 got only 5/6 keeps because the loop ran while < start+360.
+    # Runs the shipped scheduler with a fake clock, not a copy.
+    import time as _u9_time
+    u9_gate = g4
+    u9_real_mono, u9_real_sleep = _u9_time.monotonic, _u9_time.sleep
+    u9_now = [1000.0]
+    u9_hits = []
+    _u9_time.monotonic = lambda: u9_now[0]  # noqa: E731
+    _u9_time.sleep = lambda s: u9_now.__setitem__(0, u9_now[0] + s)  # noqa: E731
+    try:
+        u9_probe = types.SimpleNamespace(
+            one_request=lambda driver: (u9_hits.append(1), (200, ''))[1])
+        u9_keeps = u9_gate.Gate._u9_keep_active.__get__(u9_probe, u9_gate.Gate)(None, 6)
+    finally:
+        _u9_time.monotonic, _u9_time.sleep = u9_real_mono, u9_real_sleep
+    e(u9_keeps == 6 and len(u9_hits) == 6 and u9_now[0] - 1000.0 >= 360,
+      'u9 keep-alive must make all 6 boundary requests over the real 6-minute '
+      'interval; got %s keeps in %.0f s' % (u9_keeps, u9_now[0] - 1000.0))
+
+
+def check_phase4_monitor_paths(checks):
+    """The Phase IV gate must find monitoring in both source and offline bundle layouts."""
+    from unittest.mock import patch
+    import ssl
+
+    e = lambda cond, msg: checks.expect(cond, 'phase4 monitoring path: ' + msg)  # noqa: E731
+    sys.path.insert(0, str(ROOT / 'scripts/gate'))
+    grafana = __import__('phase4_grafana')
+    perses = __import__('phase4_perses')
+    phase2 = __import__('phase2_kafbat')
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text()
+    start = runner.index('MON_DIR="$ED/monitoring"')
+    stop = runner.index('MON_PROJECT=', start)
+    select_shell = runner[start:stop]
+
+    def check_case(edition, expected):
+        for module in (grafana, perses):
+            gate = object.__new__(module.Gate)
+            gate.edition = str(edition)
+            e(gate.mon_dir() == str(expected),
+              f'{module.__name__} selected {gate.mon_dir()} for {edition}; expected {expected}')
+        script = 'ED="$1"\n' + select_shell + '\nprintf "%s" "$MON_DIR"\n'
+        selected = subprocess.run(['bash', '-euc', script, 'bash', str(edition)],
+                                  text=True, capture_output=True)
+        e(selected.returncode == 0 and selected.stdout == str(expected),
+          f'gate-identity selected {selected.stdout!r} for {edition}; expected {expected}; {selected.stderr}')
+
+    for edition in EDITIONS:
+        check_case(ROOT / edition, ROOT / 'monitoring')
+
+    fixture_root = ROOT / 'harness' / 'phase4' / 'path-contract'
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=fixture_root) as tmp:
+        base = Path(tmp)
+        for edition in EDITIONS:
+            installed = base / edition
+            nested = installed / 'monitoring'
+            nested.mkdir(parents=True)
+            check_case(installed, nested)
+        sibling = base / 'monitoring'
+        sibling.mkdir()
+        check_case(base / 'epc', base / 'epc' / 'monitoring')  # bundled path wins when both exist
+
+        link_edition = base / 'linked-epc'
+        link_edition.mkdir()
+        os.symlink(sibling, link_edition / 'monitoring')
+        check_case(link_edition, link_edition / 'monitoring')  # Bash -d follows symlinks
+
+        missing_edition = base / 'missing-epc'
+        missing_edition.mkdir()
+        (missing_edition / 'monitoring').write_text('not a directory')
+        expected = base / 'monitoring'
+        check_case(missing_edition, expected)
+        e(not (expected / '.env').is_file(), 'missing monitoring/.env fixture must have no false positive')
+        for module in (grafana, perses):
+            gate = object.__new__(module.Gate)
+            gate.edition = str(missing_edition)
+            gate.project = 'path-contract'
+            gate.tls_mode = 'pinned fixture certificate certs/server.crt'
+            gate.tls = ssl.create_default_context()
+            with patch.object(phase2.Gate, 'preflight', return_value=None):
+                reason = gate.preflight()
+            e(reason is not None and 'monitoring/.env is missing' in reason,
+              f'{module.__name__} must refuse a missing monitoring/.env: {reason}')
+
+        gate = object.__new__(grafana.Gate)
+        gate.secrets_path = str(base / 'phase4-secrets.txt')
+        Path(gate.secrets_path).write_text('prior\n')
+        os.chmod(gate.secrets_path, 0o644)
+        with gate.open_runtime_secrets():
+            pass
+        e(os.stat(gate.secrets_path).st_mode & 0o777 == 0o600,
+          'reopening a reused runtime secret file must remove group/world access')
+        gate.add_runtime_secret('fixture-secret')
+        e(Path(gate.secrets_path).read_text() == 'prior\nfixture-secret\n',
+          'the private runtime secret file must still accept appended secrets')
+        Path(gate.secrets_path).unlink()
+        os.symlink(base / 'outside-secret-file', gate.secrets_path)
+        try:
+            with gate.open_runtime_secrets():
+                pass
+        except OSError:
+            pass
+        else:
+            e(False, 'runtime secret file must refuse a symlink')
+
+        isolated = base / 'monitor-auth-isolation'
+        auth = isolated / 'auth'
+        auth.mkdir(parents=True)
+        (auth / 'local.ini').write_text('keep local mode\n')
+        (isolated / 'prometheus').mkdir()
+        (isolated / 'prometheus' / 'prometheus.yml').write_text('global: {}\n')
+        edition_fixture = base / 'edition-guard'
+        (edition_fixture / 'auth' / 'ui').mkdir(parents=True)
+        guard_start = runner.index('if [[ ! -d "$ED"')
+        guard_end = runner.index('# ── candidate binding:', guard_start)
+        guard = runner[guard_start:guard_end]
+
+        def run_guard(ed, mon):
+            return subprocess.run(['bash', '-euc', 'ED="$1"\nMON_DIR="$2"\n' + guard,
+                                   'bash', str(ed), str(mon)], text=True, capture_output=True)
+
+        accepted = run_guard(edition_fixture, isolated)
+        e(accepted.returncode == 0,
+          f'gate must accept real edition and monitoring directories: {accepted.stderr}')
+        outside = base / 'outside-monitor-auth'
+        outside.mkdir()
+        linked_edition = base / 'linked-edition'
+        os.symlink(edition_fixture, linked_edition)
+        refused = run_guard(linked_edition, isolated)
+        e(refused.returncode == 2, 'gate must refuse a symlinked edition directory')
+        for part in ('auth', 'auth/ui'):
+            real = edition_fixture / part
+            saved = edition_fixture / (part + '.real')
+            real.rename(saved)
+            os.symlink(outside, real)
+            refused = run_guard(edition_fixture, isolated)
+            e(refused.returncode == 2, f'gate must refuse a symlinked edition {part} directory')
+            real.unlink()
+            saved.rename(real)
+        linked_monitor = base / 'linked-monitor'
+        os.symlink(isolated, linked_monitor)
+        refused = run_guard(edition_fixture, linked_monitor)
+        e(refused.returncode == 2, 'gate must refuse a symlinked monitoring directory')
+        auth.rename(isolated / 'real-auth')
+        os.symlink(outside, auth)
+        refused = run_guard(edition_fixture, isolated)
+        e(refused.returncode == 2, 'gate must refuse a symlinked monitoring auth parent')
+        auth.unlink()
+        (isolated / 'real-auth').rename(auth)
+        prom = isolated / 'prometheus'
+        prom.rename(isolated / 'real-prometheus')
+        os.symlink(outside, prom)
+        refused = run_guard(edition_fixture, isolated)
+        e(refused.returncode == 2, 'gate must refuse a symlinked monitoring prometheus directory')
+        prom.unlink()
+        (isolated / 'real-prometheus').rename(prom)
+        prom_file = prom / 'prometheus.yml'
+        (outside / 'prometheus.yml').write_text('outside: {}\n')
+        prom_file.rename(prom / 'prometheus.yml.real')
+        os.symlink(outside / 'prometheus.yml', prom_file)
+        refused = run_guard(edition_fixture, isolated)
+        e(refused.returncode == 2 and str(prom_file) in refused.stderr,
+          'gate must refuse a symlinked prometheus.yml before the W2 backup and reload probe')
+        prom_file.unlink()
+        (prom / 'prometheus.yml.real').rename(prom_file)
+        prom_file.unlink()
+        refused = run_guard(edition_fixture, isolated)
+        e(refused.returncode == 2 and str(prom_file) in refused.stderr,
+          'gate must refuse a missing prometheus.yml before the W2 backup and reload probe')
+        prom_file.write_text('global: {}\n')
+        for name in ('realm.ini', 'secrets', 'perses'):
+            state = auth / name
+            if name == 'realm.ini':
+                state.write_text('preexisting site state\n')
+            else:
+                state.mkdir()
+            refused = run_guard(edition_fixture, isolated)
+            e(refused.returncode == 2 and str(state) in refused.stderr,
+              f'gate must refuse preexisting monitoring auth state {name}')
+            if state.is_dir():
+                state.rmdir()
+            else:
+                state.unlink()
+
+        cleanup_start = runner.index('cleanup_monitor_auth() {')
+        cleanup_end = runner.index('\n}\n', cleanup_start) + len('\n}\n')
+        for name in ('realm.ini', 'secrets', 'perses'):
+            state = auth / name
+            if name == 'realm.ini':
+                state.write_text('gate-created state\n')
+            else:
+                state.mkdir()
+        cleaned = subprocess.run(['bash', '-euc',
+                                  runner[cleanup_start:cleanup_end] + '\nMON_DIR="$1"\ncleanup_monitor_auth\n',
+                                  'bash', str(isolated)], text=True, capture_output=True)
+        e(cleaned.returncode == 0 and all(not (auth / name).exists()
+                                          for name in ('realm.ini', 'secrets', 'perses')),
+          'gate teardown must remove only its generated monitoring auth state')
+        e((auth / 'local.ini').read_text() == 'keep local mode\n',
+          'gate teardown must preserve packaged local.ini')
 
 
 def check_parity(checks):
@@ -1286,6 +1623,10 @@ def check_broker_plan_shape(checks, idp):
     e(provider.get('firstBrokerLoginFlowAlias') == 'krate first broker login',
       f'the provider must use the flow "krate first broker login" (D2); got {provider.get("firstBrokerLoginFlowAlias")!r}')
     e(provider.get('config', {}).get('syncMode') == 'FORCE', 'the provider syncs on every login (syncMode FORCE: group removal takes effect at the next sign-in)')
+    e(all(provider.get(key) is value for key, value in identity.BROKER_PROVIDER_FLAGS.items()),
+      f'the provider carries the Krate flags {sorted(identity.BROKER_PROVIDER_FLAGS)} exactly (trustEmail true: Keycloak sets the realm user\'s e-mail '
+      f'verification from the email_verified claim PingFederate asserts, which the Phase 4 UIs require); got '
+      f'{{{", ".join(f"{key}={provider.get(key)!r}" for key in sorted(identity.BROKER_PROVIDER_FLAGS))}}}')
     e(all(m.get('config', {}).get('syncMode') == 'FORCE' and m.get('identityProviderMapper') == 'oidc-advanced-group-idp-mapper'
           for m in idp['identityProviderMappers']), 'both mappers are oidc-advanced-group-idp-mapper with syncMode FORCE')
     e(idp.get('authenticatorConfig') == [{'alias': 'PingFederate redirect', 'config': {'defaultProvider': 'pingfederate'}}],
@@ -1340,6 +1681,9 @@ def check_broker_plan_shape(checks, idp):
                 ('an unknown sub-flow', lambda p: p['authenticationFlows'][0]['authenticationExecutions'][2].__setitem__('flowAlias', 'other'), 'not planned'),
                 ('a non-integer priority', lambda p: p['authenticationFlows'][0]['authenticationExecutions'][0].__setitem__('priority', '10'), 'priority'),
                 ('another browser flow', lambda p: p.__setitem__('browserFlow', 'browser'), 'browserFlow'),
+                ('a provider that does not trust the asserted e-mail', lambda p: p['identityProviders'][0].__setitem__('trustEmail', False), 'trustEmail'),
+                ('a provider that keeps the IdP token', lambda p: p['identityProviders'][0].__setitem__('storeToken', True), 'storeToken'),
+                ('a disabled provider', lambda p: p['identityProviders'][0].__setitem__('enabled', False), 'enabled'),
                 ('an unknown truststore mode', lambda p: p.__setitem__('truststore', 'none'), 'truststore')) + tuple(
                 (label, mutate, needle) for label, mutate, needle in PLAN_SHAPE_MUTATIONS):
             mutated = json.loads(json.dumps(idp))
@@ -1375,7 +1719,7 @@ def check_broker_plan_shape(checks, idp):
         os.environ.pop('PING_KEYCLOAK_CLIENT_SECRET', None)
         if env_backup is not None:
             os.environ['PING_KEYCLOAK_CLIENT_SECRET'] = env_backup
-    current = {'alias': 'pingfederate', 'internalId': 'x', 'providerId': 'oidc', 'enabled': True, 'trustEmail': False, 'storeToken': False,
+    current = {'alias': 'pingfederate', 'internalId': 'x', 'providerId': 'oidc', 'enabled': True, 'trustEmail': True, 'storeToken': False,
                'displayName': 'Company sign-in', 'firstBrokerLoginFlowAlias': 'krate first broker login', 'types': ['USER_AUTHENTICATION'],
                'config': dict(idp['identityProviders'][0]['config'], clientSecret='**********', extra='ignored')}
     e(identity.differs(identity.broker_provider(idp), current) is False, 'differs(): Keycloak extras (internalId, types, masked secret, extra config) are not a difference')
@@ -1383,6 +1727,8 @@ def check_broker_plan_shape(checks, idp):
       'differs(): a changed first-broker-login alias is a difference')
     e(identity.differs(identity.broker_provider(idp), dict(current, config=dict(current['config'], tokenUrl='https://x'))) is True,
       'differs(): a changed endpoint is a difference')
+    e(identity.differs(identity.broker_provider(idp), dict(current, trustEmail=False)) is True,
+      'differs(): a provider that does not trust the asserted e-mail is a difference, so auth apply converges a console-only change back')
 
 
 def truststore_pem(site, name='enterprise-ca.pem', mode=0o644):
@@ -1804,7 +2150,7 @@ def bash_binary():
     return found if len(version) == 2 and (int(version[0]), int(version[1])) >= (4, 4) else None
 
 
-def bash_functions(path, *names):
+def bash_functions(path, *names) -> str:
     """The source of the named top-level functions of a Bash script, in the given order."""
     text = Path(path).read_text()
     parts = []
@@ -2047,6 +2393,81 @@ SCRIPT_DIR="$1"; umask 077; ensure_identity_dirs
         e(mode(site / 'auth/keycloak/truststores') == 0o755, 'an existing 700 truststores directory is widened to 755 on the next run')
 
 
+def check_install_home_dir(checks):
+    """A fresh default install stays traversable under umask 077 without widening custom site paths."""
+    e = lambda cond, msg: checks.expect(cond, 'ensure_home_dir: ' + msg)  # noqa: E731
+    if bash_binary() is None:
+        return
+    for edition in EDITIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'opt').mkdir(mode=0o755)
+            default_base = root / 'opt' / 'krate'
+            default_home = default_base / edition
+            # Substitute only the fixed system prefix so this tests the real CLI function
+            # without creating /opt/krate or requiring elevated privileges on the host.
+            function = bash_functions(ROOT / edition / 'krate', 'ensure_home_dir').replace('/opt/krate', str(default_base))
+            script = BASH_STUBS + function + r'''
+KRATE_VARIANT="$1"; KRATE_HOME="$2"; FORCE_FALLBACK="${3:-}"; SUDO_LOG="$4"; FALLBACK_MARKER="$5"
+mkdir() {
+  if [[ "$FORCE_FALLBACK" == yes && "$1" == -p && "$2" == "$KRATE_HOME" ]]; then
+    FORCE_FALLBACK=no
+    : > "$FALLBACK_MARKER"
+    return 1
+  fi
+  command mkdir "$@"
+}
+sudo() { printf '%s\n' "$1" >> "$SUDO_LOG"; command "$@"; }
+umask 077; ensure_home_dir
+'''
+            sudo_log = root / 'sudo.log'
+            fallback_marker = root / 'fallback.marker'
+            sudo_log.write_text('')
+            result = run_bash(script, edition, default_home, 'yes', sudo_log, fallback_marker)
+            e(result.returncode == 0, f'{edition}: fresh default install failed: {result.stderr.strip()[:160]}')
+            e(fallback_marker.exists(), f'{edition}: the first mkdir must be forced through the fallback path')
+            expected_sudo = ['mkdir', 'chown', 'chmod'] if os.getuid() != 0 else []
+            e(sudo_log.read_text().splitlines() == expected_sudo,
+              f'{edition}: fallback commands must use sudo only for a non-root installer')
+            e(os.stat(default_home).st_uid == os.getuid() and os.access(default_home, os.W_OK),
+              f'{edition}: fallback must leave the edition directory owned and writable by the installer')
+            for directory in (default_base, default_home):
+                e(directory.is_dir() and mode(directory) == 0o711,
+                  f'{edition}: fresh {directory.name} must be 0711 under umask 077, got {mode(directory):o}')
+            secret = default_home / '.env'
+            secret.write_text('SYNTHETIC_SECRET=keep-private\n')
+            secret.chmod(0o600)
+            default_base.chmod(0o700)
+            default_home.chmod(0o700)
+            owners = tuple(os.stat(path).st_uid for path in (default_base, default_home))
+            sudo_log.write_text('')
+            result = run_bash(script, edition, default_home, 'no', sudo_log, fallback_marker)
+            e(result.returncode == 0, f'{edition}: existing default install failed: {result.stderr.strip()[:160]}')
+            e(sudo_log.read_text().splitlines() == (['chmod'] if os.getuid() != 0 else []),
+              f'{edition}: a writable existing directory must keep its owner without privileged chown')
+            e(all(mode(path) == 0o711 for path in (default_base, default_home)),
+              f'{edition}: existing default directories gain traversal without listing permission')
+            e(owners == tuple(os.stat(path).st_uid for path in (default_base, default_home)),
+              f'{edition}: existing default directory ownership must be preserved')
+            custom_home = root / 'private-site' / edition
+            sudo_log.write_text('')
+            result = run_bash(script, edition, custom_home, 'no', sudo_log, fallback_marker)
+            e(result.returncode == 0, f'{edition}: custom install failed: {result.stderr.strip()[:160]}')
+            e(not sudo_log.read_text(), f'{edition}: writable custom paths must not use sudo')
+            e(mode(custom_home.parent) == 0o700 and mode(custom_home) == 0o700,
+              f'{edition}: custom path must keep its umask-077 permissions')
+            e(mode(secret) == 0o600, f'{edition}: install must not widen an existing secret')
+            linked_target = root / 'linked-target'
+            linked_target.mkdir(mode=0o700)
+            default_base.rename(root / 'previous-default')
+            default_base.symlink_to(linked_target, target_is_directory=True)
+            sudo_log.write_text('')
+            result = run_bash(script, edition, default_home, 'no', sudo_log, fallback_marker)
+            e(result.returncode != 0 and mode(linked_target) == 0o700,
+              f'{edition}: a symlinked default parent must be rejected without widening its target')
+            e(not sudo_log.read_text(), f'{edition}: symlink rejection must happen before sudo')
+
+
 def check_deploy_release(checks):
     """S2: deploy_release widens only the paths the release archive held; secrets and leftovers keep 0600."""
     e = lambda cond, msg: checks.expect(cond, 'deploy_release: ' + msg)  # noqa: E731
@@ -2223,7 +2644,8 @@ def check_gen_cert_ip(checks):
     """S7: gen-cert gives an IP-literal public host an iPAddress SAN; the preflight checks an IP host with -checkip."""
     e = checks.expect
     if bash_binary() is not None:
-        script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'get_fqdn', 'public_url_host', 'san_entry', 'cmd_gen_cert') + r'''
+        script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'get_fqdn', 'public_url_host',
+                                            'san_entry', 'ensure_public_cert_readable', 'cmd_gen_cert') + r'''
 ENV_FILE="$1/.env"; CERTS_DIR="$1/certs"; CERT_CRT="$CERTS_DIR/server.crt"; CERT_KEY="$CERTS_DIR/server.key"
 hostname() { return 1; }
 cmd_gen_cert >/dev/null
@@ -2265,6 +2687,64 @@ openssl x509 -in "$CERT_CRT" -noout -ext subjectAltName
             else:
                 e(result.returncode == 1 and 'does not cover the public hostname' in result.stderr,
                   f'preflight must refuse a certificate with only {san} for the IP host {public}; got {result.returncode}: {result.stderr.strip()}')
+
+
+def check_public_cert_permissions(checks):
+    """A restrictive install umask must not hide the public CA from unprivileged monitoring readers."""
+    if bash_binary() is None:
+        return
+    e = checks.expect
+    for edition in EDITIONS:
+        script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'env_value', 'get_fqdn',
+                                            'public_url_host', 'san_entry', 'ensure_public_cert_readable',
+                                            'cmd_gen_cert', 'ensure_cert') + r'''
+ENV_FILE="$1/.env"; CERTS_DIR="$1/certs"; CERT_CRT="$CERTS_DIR/server.crt"; CERT_KEY="$CERTS_DIR/server.key"
+umask 077
+ensure_cert >/dev/null
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp)
+            write_env(site, {'KAFKA_UI_FQDN': 'krate.example.test',
+                             'KEYCLOAK_PUBLIC_URL': 'https://krate.example.test/identity'})
+            result = run_bash(script, site)
+            if not e(result.returncode == 0, f'{edition}: ensure_cert under umask 077 failed: {result.stderr.strip()[:200]}'):
+                continue
+            cert = site / 'certs/server.crt'
+            key = site / 'certs/server.key'
+            e((site / 'certs').stat().st_mode & 0o777 == 0o700,
+              f'{edition}: private certs directory should retain mode 0700')
+            e(cert.stat().st_mode & 0o777 == 0o644,
+              f'{edition}: generated public certificate must be mode 0644 for unprivileged monitoring readers')
+            e(key.stat().st_mode & 0o777 == 0o600,
+              f'{edition}: generated private key must remain mode 0600')
+            cert.chmod(0o600)
+            result = run_bash(script, site)
+            e(result.returncode == 0 and cert.stat().st_mode & 0o777 == 0o644,
+              f'{edition}: ensure_cert must restore an existing public certificate from mode 0600; '
+              f'got exit {result.returncode}, mode {cert.stat().st_mode & 0o777:04o}: {result.stderr.strip()[:200]}')
+            e(key.stat().st_mode & 0o777 == 0o600,
+              f'{edition}: repairing a public certificate must not widen the private key')
+            cert.unlink()
+            linked = site / 'linked.crt'
+            linked.write_bytes(b'org-issued certificate')
+            linked.chmod(0o600)
+            cert.symlink_to(linked)
+            result = run_bash(script, site)
+            e(result.returncode != 0 and linked.read_bytes() == b'org-issued certificate',
+              f'{edition}: a restrictive linked certificate must be refused without editing its target')
+            linked.unlink()
+            result = run_bash(script, site)
+            e(result.returncode != 0 and not linked.exists(),
+              f'{edition}: a dangling certificate symlink must be refused without creating its target')
+            cert.unlink()
+            cert.write_bytes(b'org-issued certificate')
+            key.unlink()
+            linked_key = site / 'linked.key'
+            key.symlink_to(linked_key)
+            result = run_bash(script, site)
+            e(result.returncode != 0 and not linked_key.exists()
+              and cert.read_bytes() == b'org-issued certificate',
+              f'{edition}: a dangling private-key symlink must be refused without altering either target')
 
 
 def check_renew_db_tls_order(checks):
@@ -2666,8 +3146,10 @@ def check_broker_apply(checks):
               f'{edition}/krate: the {verdict} verdict must be captured with || die')
             e(f'identity.py" broker --plan "$plan" {verdict}' in cli and f'== differs' not in cli.split(verdict)[1].split('\n')[0],
               f'{edition}/krate: {verdict} must not be compared inside [[ ]]')
+        # Five verdict consumers: the broker provider, its mappers, its redirector config,
+        # krate-grafana client and (Phase 4) krate-perses client.
         unexpected = cli.count('*) die "Unexpected comparison result')  # hoisted: Python 3.9 (RHEL 9) rejects a backslash inside an f-string expression
-        e(unexpected == 3, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
+        e(unexpected == 5, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
         e('PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3' in cli,
           f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
     if bash_binary() is None:
@@ -3145,6 +3627,7 @@ def check_broker_docs(checks):
                         ('krate browser', 'the browser flow (D3)'), ('krate forms', 'the forms sub-flow'), ('krate otp', 'the OTP sub-flow'),
                         ('owner to confirm', 'the decisions are marked owner to confirm'),
                         ('syncMode', 'revocation through syncMode FORCE at the next sign-in'),
+                        ('trustEmail', 'the e-mail trust the plan states (a brokered user without it is unverified, which the Phase 4 UIs refuse)'),
                         ('KRATE_TRUSTSTORE_SHA', 'the truststore digest and Keycloak recreation'),
                         ('idp-create-user-if-unique', 'the no-linking authenticator'), ('No changes', 'the idempotent second apply'),
                         ('identity provider pingfederate', 'the journal line'), ('auth configure --local', 'the way back to local sign-in')):
@@ -3210,12 +3693,1137 @@ def check_install_lock(checks):
 
 
 
+# Phase 4: every function the programme adds to the two CLIs must have the same body in both
+# (the files differ only in the known edition hunks, which check_parity enforces separately).
+P4_PARITY_FUNCTIONS = ('identity_email_address', 'identity_realm_ui', 'cmd_identity_users')
+
+
+def check_identity_users(checks):
+    """Phase 4 commit 1: `identity users logout` and `set-email`, the e-mail a realm UI needs, CLI parity."""
+    e = checks.expect
+    bodies = {}
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        users = function_body(cli, 'cmd_identity_users')
+        bodies[edition] = users
+        e('krate identity users {enable|disable|reset-password|groups|logout} <username>' in cli
+          and 'krate identity users set-email <username> <address>' in cli,
+          f'{edition}/krate: the users usage must list logout and set-email')
+        e('identity users {enable|disable|reset-password|groups|logout} U' in cli and 'identity users set-email U A' in cli,
+          f'{edition}/krate: the help must list the new users actions')
+        e('kcadm -- create "users/$uid/logout" -r "$IDENTITY_REALM"' in users,
+          f'{edition}/krate: users logout must create the user\'s logout resource through the kcadm helper')
+        logout_line = next((line for line in cli.splitlines() if 'users/$uid/logout' in line), '')
+        e(logout_line and re.search(r'\s-n(\s|$)', logout_line) is None,
+          f'{edition}/krate: users logout must not pass -n (kcadm rejects it on the logout resource, rc 2)')
+        e('identity_journal "users logout" ok "$user"' in users and 'identity_journal "users set-email" ok "$user"' in users,
+          f'{edition}/krate: both new actions must write a journal line')
+        e('[[ "$action" == list || "$action" == groups ]] || identity_lock' in users,
+          f'{edition}/krate: every mutating users action (logout and set-email included) must take the identity lock; only list and groups may skip it')
+        e('kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s "email=$email" -s emailVerified=true' in users,
+          f'{edition}/krate: users set-email must set the address and mark it verified')
+        e('-s "email=$email" -s emailVerified=true >/dev/null' in users,
+          f'{edition}/krate: users add --email must create the user with a verified address (a realm UI refuses an unverified one)')
+        e('if [[ "$action" == add ]] && identity_realm_ui && [[ -z "$email" ]]' in users
+          and users.index('identity_realm_ui') < users.index('require_compose'),
+          f'{edition}/krate: users add must refuse a missing --email while a realm UI is on, before it touches anything')
+        realm_ui = function_body(cli, 'identity_realm_ui')
+        e('GRAFANA_AUTH_CONFIG local.ini)" == realm.ini' in realm_ui and 'PERSES_IDP)" == krate' in realm_ui
+          and 'env_value_file "$env_file"' in realm_ui and 'MONITOR_DIR/.env' in realm_ui,
+          f'{edition}/krate: identity_realm_ui must read both realm-mode keys from monitoring/.env')
+    e(bodies[EDITIONS[0]] == bodies[EDITIONS[1]], 'kraft/epc parity: cmd_identity_users must have the same body in both editions')
+    for name in P4_PARITY_FUNCTIONS:
+        first, second = (function_body((ROOT / edition / 'krate').read_text(), name) for edition in EDITIONS)
+        e(first == second, f'kraft/epc parity: {name} must have the same body in both editions')
+    if bash_binary() is None:
+        return
+    # Behavioural proof of the two new helpers (extracted, run against a temporary monitoring/.env).
+    realm_script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value_file', 'identity_realm_ui') + r'''
+MONITOR_DIR="$1"
+if identity_realm_ui; then echo realm; else echo local; fi
+'''
+    mail_script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'identity_email_address') + r'''
+if address="$(identity_email_address "$1")"; then echo "ok $address"; else echo refused; fi
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        monitor = Path(tmp)
+        for label, content, expected in (
+                ('no monitoring/.env', None, 'local'),
+                ('Grafana local', 'GRAFANA_AUTH_CONFIG=local.ini\n', 'local'),
+                ('Grafana on the realm', 'GRAFANA_AUTH_CONFIG=realm.ini\n', 'realm'),
+                ('Grafana realm.ini quoted', 'GRAFANA_AUTH_CONFIG="realm.ini"\n', 'realm'),
+                ('Perses on the realm', 'PERSES_IDP=krate\nPERSES_AUTH_MODE=native\n', 'realm'),
+                ('Perses rolled back', 'PERSES_IDP=\nPERSES_AUTH_MODE=local\n', 'local'),
+                ('Perses native with a company IdP', 'PERSES_AUTH_MODE=native\nPERSES_IDP=\n', 'local'),
+                ('both UIs local', 'GRAFANA_AUTH_CONFIG=local.ini\nPERSES_IDP=\n', 'local')):
+            if content is None:
+                (monitor / '.env').unlink(missing_ok=True)
+            else:
+                (monitor / '.env').write_text(content)
+            result = run_bash(realm_script, monitor)
+            e(result.stdout.strip() == expected,
+              f'identity_realm_ui with {label} must report {expected}; got {result.stdout.strip()!r} {result.stderr.strip()[:120]}')
+        for address, expected in (('jane@example.test', 'ok jane@example.test'), ('jane', 'refused'),
+                                  ('a b@example.test', 'refused'), ('', 'refused'), ('a@b c', 'refused')):
+            result = run_bash(mail_script, address)
+            e(result.stdout.strip() == expected, f'identity_email_address {address!r} must give {expected}; got {result.stdout.strip()!r}')
+
+
+def prometheus_metrics(successful, timestamp):
+    """A Prometheus exposition body with the two configuration-reload metrics."""
+    return ('# TYPE prometheus_config_last_reload_successful gauge\n'
+            f'prometheus_config_last_reload_successful {successful}\n'
+            '# TYPE prometheus_config_last_reload_success_timestamp_seconds gauge\n'
+            f'prometheus_config_last_reload_success_timestamp_seconds {timestamp}\n')
+
+
+def check_prometheus_reload(checks):
+    """Phase 4 commit 2: the lifecycle API is off and `monitor reload` proves its result from Prometheus's own metrics."""
+    e = checks.expect
+    # The rendered command, not the file text: the service's comment explains why the flag is gone.
+    result = subprocess.run(['docker', 'compose', '--env-file', str(ROOT / 'monitoring/.env.template'),
+                             '-f', str(ROOT / 'monitoring/docker-compose.yml'), 'config', '--format', 'json'],
+                            cwd=ROOT, text=True, capture_output=True)
+    if e(result.returncode == 0, 'monitoring: Compose rendering from the template failed'):
+        command = [str(part) for part in (json.loads(result.stdout)['services']['prometheus'].get('command') or [])]
+        e(not any(flag in part for part in command for flag in ('enable-lifecycle', 'enable-admin-api', 'enable-remote-write-receiver')),
+          f'monitoring/prometheus: the lifecycle API, the admin API and the remote-write receiver must stay off (a Grafana Viewer reached '
+          f'reload and quit through a datasource); got {command}')
+    bodies = {}
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        body = function_body(cli, 'monitor_reload_prometheus')
+        bodies[edition] = body
+        e('--post-data' not in cli, f'{edition}/krate: no HTTP reload may be left (the lifecycle API is off)')
+        e('monitor_compose kill -s SIGHUP prometheus' in body, f'{edition}/krate: the reload must send SIGHUP to the prometheus service')
+        state = function_body(cli, 'monitor_prometheus_reload_state')
+        e('prometheus_config_last_reload_success_timestamp_seconds' in state and 'prometheus_config_last_reload_successful' in state
+          and 'http://127.0.0.1:9090/metrics' in state,
+          f'{edition}/krate: the reload must read both reload metrics from Prometheus itself')
+        e('rejected the configuration and keeps running with the previous one' in body,
+          f'{edition}/krate: a rejected configuration must be reported as such, not as a timeout')
+        e('monitor_reload_prometheus' in function_body(cli, 'cmd_monitor'), f'{edition}/krate: cmd_monitor reload must call monitor_reload_prometheus')
+    e(bodies[EDITIONS[0]] == bodies[EDITIONS[1]], 'kraft/epc parity: monitor_reload_prometheus must have the same body in both editions')
+    if bash_binary() is None:
+        return
+    # Behavioural proof with a stubbed monitor_compose: the four outcomes an operator can hit,
+    # plus the two S2 edges that start from an already-rejected previous state. The `stale`
+    # file is the first poll's answer AFTER the SIGHUP: Prometheus can process the signal
+    # after that poll ran, so the poll still sees the BEFORE state — the race that made the
+    # pre-fix decision order report a good file as rejected.
+    script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'monitor_prometheus_reload_state', 'monitor_reload_prometheus') + r'''
+monitor_compose() {
+  case "$1" in
+    exec)
+      if [[ -f "$STATE/killed" && -f "$STATE/stale" ]]; then
+        mv "$STATE/stale" "$STATE/stale.used"; cat "$STATE/stale.used"; return 0
+      fi
+      [[ -f "$STATE/metrics" ]] || return 1; cat "$STATE/metrics" ;;
+    kill)
+      touch "$STATE/killed"
+      if [[ -f "$STATE/after" ]]; then cp "$STATE/after" "$STATE/metrics"; else rm -f "$STATE/metrics"; fi ;;
+  esac
+}
+sleep() { :; }
+STATE="$1"
+monitor_reload_prometheus
+'''
+    cases = (
+        ('a valid change', prometheus_metrics(1, '1.7918145079e+09'), None, prometheus_metrics(1, '1.7918145217e+09'),
+         0, 'Prometheus reloaded its configuration and alert rules.'),
+        ('a rejected file', prometheus_metrics(1, '1.7918145079e+09'), None, prometheus_metrics(0, '1.7918145079e+09'),
+         1, 'rejected the configuration and keeps running with the previous one'),
+        ('no reload reported', prometheus_metrics(1, '1.7918145079e+09'), None, prometheus_metrics(1, '1.7918145079e+09'),
+         1, 'reported no reload after 20 polls'),
+        # S2: the flag was already 0 from an earlier rejection, so a lingering 0 must not be
+        # reported as a new rejection — the good reload moves the timestamp and sets it to 1.
+        ('a good reload after an earlier rejection', prometheus_metrics(0, '1.7918145079e+09'), None,
+         prometheus_metrics(1, '1.7918145217e+09'), 0, 'Prometheus reloaded its configuration and alert rules.'),
+        # The S2 race itself: the first poll after the SIGHUP still reads the stale rejected
+        # state; the pre-fix order (flag before the timestamp comparison) died with
+        # "rejected" here, on a good file.
+        ('a good reload whose first poll still sees the stale rejected state', prometheus_metrics(0, '1.7918145079e+09'),
+         prometheus_metrics(0, '1.7918145079e+09'), prometheus_metrics(1, '1.7918145217e+09'),
+         0, 'Prometheus reloaded its configuration and alert rules.'),
+        # A file rejected twice in a row never moves the success timestamp, so the rejected
+        # verdict comes at the end of the polling budget, from the last observed flag.
+        ('a file rejected again after an earlier rejection', prometheus_metrics(0, '1.7918145079e+09'), None,
+         prometheus_metrics(0, '1.7918145079e+09'),
+         1, 'rejected the configuration and keeps running with the previous one'),
+    )
+    for label, before, stale, after, code, needle in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / 'metrics').write_text(before)
+            (state / 'after').write_text(after)
+            if stale is not None:
+                (state / 'stale').write_text(stale)
+            result = run_bash(script, state)
+            e(result.returncode == code, f'monitor reload with {label} must exit {code}; got {result.returncode} ({result.stderr.strip()[:120]})')
+            e(needle in result.stdout + result.stderr, f'monitor reload with {label} must report {needle!r}; got {(result.stdout + result.stderr).strip()[:160]!r}')
+    with tempfile.TemporaryDirectory() as tmp:  # Prometheus not answering at all
+        result = run_bash(script, Path(tmp))
+        e(result.returncode == 1 and 'did not answer' in result.stderr,
+          f'monitor reload without Prometheus must say it did not answer; got {result.returncode} {result.stderr.strip()[:120]!r}')
+
+
+# The five Loki read locations the gateway may proxy, and the methods each allows (S6: pinned, so
+# neither a widened selector nor a widened method list can pass gmake check).
+LOKI_GATEWAY_READ_LOCATIONS = (
+    '~ ^/loki/api/v1/(query|query_range|labels|series|index/stats|index/volume|index/volume_range|detected_fields|detected_labels|patterns)$',
+    '~ ^/loki/api/v1/label/[^/]+/values$',
+    '~ ^/loki/api/v1/detected_field/[^/]+/values$',
+    '= /loki/api/v1/tail',
+    '= /ready',
+)
+LOKI_GATEWAY_METHODS = {
+    '~ ^/loki/api/v1/(query|query_range|labels|series|index/stats|index/volume|index/volume_range|detected_fields|detected_labels|patterns)$': 'GET POST',
+    '~ ^/loki/api/v1/label/[^/]+/values$': 'GET',
+    '~ ^/loki/api/v1/detected_field/[^/]+/values$': 'GET POST',
+    '= /loki/api/v1/tail': 'GET',
+    '= /ready': 'GET',
+}
+
+
+def check_loki_gateway(checks):
+    """Phase 4 commit 3: Grafana reaches Loki only through the read-only gateway; the log write path stays direct."""
+    e = checks.expect
+    path = ROOT / 'monitoring/loki/gateway.conf'
+    if not e(path.is_file(), 'monitoring/loki/gateway.conf is missing'):
+        return
+    text = path.read_text()
+    blocks = re.findall(r'location ([^{]+)\{(.*?)\n    \}', text, re.S)
+    e(len(blocks) == 6, f'monitoring/loki/gateway.conf: expected the five read locations and the default; got {len(blocks)}')
+    proxied = [(selector.strip(), body) for selector, body in blocks if 'proxy_pass' in body]
+    # Pinned, not counted: a regression that widened a selector (or added one for a write path)
+    # must fail here, because Loki has no authentication of its own to fall back on.
+    e(sorted(selector for selector, _ in proxied) == sorted(LOKI_GATEWAY_READ_LOCATIONS),
+      f'monitoring/loki/gateway.conf: the proxied locations must be exactly the read paths '
+      f'{sorted(LOKI_GATEWAY_READ_LOCATIONS)}; got {sorted(selector for selector, _ in proxied)}')
+    e(not any('push' in selector or 'delete' in selector or 'rules' in selector for selector, _ in proxied),
+      'monitoring/loki/gateway.conf: no write or lifecycle path may be proxied')
+    for selector, body in proxied:
+        e(body.count('proxy_pass http://loki:3100;') == 1,
+          f'monitoring/loki/gateway.conf: {selector} must proxy to Loki only')
+        # limit_except lists the allowed methods and denies the rest; without deny all it would only
+        # require authentication for the others (nginx limit_except semantics, Context7
+        # /websites/nginx_en). The list is pinned per location: widening it (PUT, DELETE) must fail.
+        methods = LOKI_GATEWAY_METHODS.get(selector)
+        e(methods is not None and f'limit_except methods {{ deny all; }}'.replace('methods', methods) in body,
+          f'monitoring/loki/gateway.conf: {selector} must allow exactly {methods} and deny every other method; got {body.strip()[:100]!r}')
+        e(selector.startswith('~ ^/loki/api/v1/') or selector in ('= /loki/api/v1/tail', '= /ready'),
+          f'monitoring/loki/gateway.conf: {selector} is not one of Loki\'s read paths')
+    defaults = [body for selector, body in blocks if 'proxy_pass' not in body]
+    e(len(defaults) == 1 and 'return 403;' in defaults[0],
+      'monitoring/loki/gateway.conf: the default location must refuse everything else with 403')
+    e('listen 3100;' in text and 'client_max_body_size' in text,
+      'monitoring/loki/gateway.conf: must listen on 3100 (the datasource URL) and bound the request body')
+    datasources = (ROOT / 'monitoring/grafana/provisioning/datasources/datasources.yml').read_text()
+    e('url: http://loki-gateway:3100' in datasources and 'url: http://loki:3100' not in datasources,
+      'Grafana\'s Loki datasource must point at loki-gateway, not at loki (a Viewer could otherwise write to Loki)')
+    e(re.search(r'^\s+uid:\s*loki\s*$', datasources, re.M) is not None,
+      'Grafana\'s Loki datasource keeps uid `loki`: provisioned dashboards bind to it')
+    e('url: http://prometheus:9090' in datasources, 'Grafana\'s Prometheus datasource is unchanged')
+    fluent = (ROOT / 'monitoring/fluent-bit/fluent-bit.conf').read_text()
+    e(re.search(r'^\s+Host\s+loki$', fluent, re.M) is not None,
+      'Fluent Bit must keep shipping logs to loki directly: the gateway is read-only')
+    makefile = (ROOT / 'Makefile').read_text()
+    e('monitoring/loki' in makefile, 'Makefile: the bundle must copy monitoring/loki (gateway.conf ships with it)')
+    result = subprocess.run(['docker', 'compose', '--env-file', str(ROOT / 'monitoring/.env.template'),
+                             '-f', str(ROOT / 'monitoring/docker-compose.yml'), '--profile', '*', 'config', '--format', 'json'],
+                            cwd=ROOT, text=True, capture_output=True)
+    if not e(result.returncode == 0, 'monitoring: Compose rendering from the template failed'):
+        return
+    service = json.loads(result.stdout)['services'].get('loki-gateway')
+    if not e(service is not None, 'monitoring/docker-compose.yml: the loki-gateway service is missing'):
+        return
+    e(not service.get('ports'), f'monitoring/loki-gateway must not publish a host port; got {service.get("ports")}')
+    e("any(port.get('host_ip') != '127.0.0.1' for port in ports)" in (ROOT / 'sso/preflight.py').read_text(),
+      'sso/preflight.py: the realm-mode bind check must cover every published port, not only the first')
+    e(list(service.get('networks') or {}) == ['monitoring'],
+      f'monitoring/loki-gateway must be on the monitoring network only; got {list(service.get("networks") or {})}')
+    e(list(service.get('depends_on') or {}) == ['loki'], f'monitoring/loki-gateway must depend on loki; got {service.get("depends_on")}')
+    volumes = [(volume.get('source', ''), volume.get('target'), volume.get('read_only')) for volume in service.get('volumes') or []]
+    e(any(source.endswith('monitoring/loki/gateway.conf') and target == '/etc/nginx/conf.d/default.conf' and read_only
+          for source, target, read_only in volumes),
+      f'monitoring/loki-gateway must mount loki/gateway.conf read-only as its nginx config; got {volumes}')
+
+
+def monitoring_services(env=None):
+    """The rendered monitoring Compose services, with optional interpolation overrides."""
+    environment = dict(os.environ) if env is None else dict(os.environ, **env)
+    result = subprocess.run(['docker', 'compose', '--env-file', str(ROOT / 'monitoring/.env.template'),
+                             '-f', str(ROOT / 'monitoring/docker-compose.yml'), '--profile', '*', 'config', '--format', 'json'],
+                            cwd=ROOT, text=True, capture_output=True, env=environment)
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip()[:400])
+    return json.loads(result.stdout)['services']
+
+
+def check_grafana_realm_compose(checks):
+    """Phase 4 commit 5: Grafana's realm-mode shape, the idp-wait one-shot and monitoring-init's new inputs."""
+    e = checks.expect
+    try:
+        services = monitoring_services()
+        loopback = monitoring_services({'GRAFANA_BIND': '127.0.0.1'})
+    except ValueError as exc:
+        e(False, f'monitoring: Compose rendering failed: {exc}')
+        return
+    grafana = services['grafana']
+    ports = grafana.get('ports') or []
+    e(len(ports) == 1 and ports[0].get('host_ip') == '0.0.0.0' and ports[0].get('published') == '3000',
+      f'monitoring/grafana: local mode keeps publishing 3000 on every interface; got {ports}')
+    loop_ports = loopback['grafana'].get('ports') or []
+    e(len(loop_ports) == 1 and loop_ports[0].get('host_ip') == '127.0.0.1',
+      f'monitoring/grafana: GRAFANA_BIND=127.0.0.1 (realm mode) must bind the port to the loopback interface; got {loop_ports}')
+    networks = grafana.get('networks') or {}
+    e(sorted(networks) == ['kafka-network', 'monitoring']
+      and (networks.get('kafka-network') or {}).get('aliases') == ['krate-grafana'],
+      f'monitoring/grafana: must be on monitoring and kafka-network with the alias krate-grafana (the cluster proxy\'s route); got {networks}')
+    depends = grafana.get('depends_on') or {}
+    e((depends.get('monitoring-init') or {}).get('condition') == 'service_completed_successfully'
+      and (depends.get('idp-wait') or {}).get('condition') == 'service_completed_successfully'
+      and (depends.get('prometheus') or {}).get('condition') == 'service_started',
+      f'monitoring/grafana: must wait for the rendered secret and for the realm; got {depends}')
+    mounts = {(volume.get('target'), volume.get('read_only')): volume.get('source', '') for volume in grafana.get('volumes') or []}
+    e(('/etc/krate/grafana', True) in mounts and mounts[('/etc/krate/grafana', True)] == 'grafana_rendered',
+      f'monitoring/grafana: must mount the rendered secret volume read-only at /etc/krate/grafana; got {mounts}')
+    e(any(target == '/etc/krate/ca/server.crt' and read_only and source.endswith('certs/server.crt')
+          for (target, read_only), source in mounts.items()),
+      f'monitoring/grafana: must mount the cluster CA read-only at /etc/krate/ca/server.crt; got {mounts}')
+    e('KRATE_GRAFANA_AUTH_SHA' in (grafana.get('environment') or {}),
+      'monitoring/grafana: KRATE_GRAFANA_AUTH_SHA must be part of its environment, so a sign-in input change recreates it')
+    e((grafana.get('extra_hosts') or [''])[0].endswith(':host-gateway') or 'host-gateway' in str(grafana.get('extra_hosts')),
+      f'monitoring/grafana: must resolve the realm\'s public host to the host gateway; got {grafana.get("extra_hosts")}')
+    waiter = services.get('idp-wait')
+    if not e(waiter is not None, 'monitoring/docker-compose.yml: the idp-wait one-shot is missing'):
+        return
+    e(not waiter.get('ports'), f'monitoring/idp-wait must not publish a port; got {waiter.get("ports")}')
+    e(list(waiter.get('networks') or {}) == ['monitoring'], f'monitoring/idp-wait must be on the monitoring network only; got {waiter.get("networks")}')
+    e(waiter.get('read_only') is True and waiter.get('user') == '65534:65534' and waiter.get('cap_drop') == ['ALL']
+      and waiter.get('restart') == 'no',
+      f'monitoring/idp-wait must be read-only, unprivileged and run once; got user={waiter.get("user")} read_only={waiter.get("read_only")} '
+      f'cap_drop={waiter.get("cap_drop")} restart={waiter.get("restart")}')
+    e(waiter.get('command') == ['python3', '/etc/krate/idp/idp_wait.py'], f'monitoring/idp-wait command; got {waiter.get("command")}')
+    e('IDP_DISCOVERY_URL' in (waiter.get('environment') or {}), 'monitoring/idp-wait: IDP_DISCOVERY_URL must reach it (empty means no realm UI)')
+    waiter_mounts = {volume.get('target'): volume.get('source', '') for volume in waiter.get('volumes') or []}
+    e('/etc/krate/idp' in waiter_mounts and waiter_mounts['/etc/krate/idp'].endswith('monitoring/idp'),
+      f'monitoring/idp-wait must mount monitoring/idp read-only; got {waiter_mounts}')
+    e(any(target == '/etc/krate/ca/server.crt' for target in waiter_mounts), f'monitoring/idp-wait must mount the cluster CA; got {waiter_mounts}')
+    e(waiter.get('image') == services['monitoring-init'].get('image'),
+      'monitoring/idp-wait must use the same pinned Python image as monitoring-init (no new image)')
+    init = services['monitoring-init']
+    init_env = init.get('environment') or {}
+    e('GRAFANA_AUTH_CONFIG' in init_env and 'GRAFANA_OAUTH_CLIENT_SECRET' in init_env,
+      f'monitoring-init: render.py renders only what its environment lists, so both Grafana keys must be there; got {sorted(init_env)}')
+    for key in ('PERSES_IDP', 'PERSES_GROUP_PROOF_MINUTES', 'KEYCLOAK_PUBLIC_URL',
+                'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
+                'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS'):
+        e(key in init_env, f'monitoring-init: compose environment must carry {key}')
+    init_mounts = [volume.get('target') for volume in init.get('volumes') or []]
+    e('/rendered/grafana' in init_mounts,
+      'monitoring-init must mount the grafana_rendered volume it writes the client secret into')
+    e('/rendered/perses-migrate' in init_mounts,
+      'monitoring-init must mount the perses_migrate_rendered volume it writes the issuer into')
+    e('perses-migrate' in services, 'monitoring/docker-compose.yml must define the perses-migrate service')
+    e((services.get('perses-migrate') or {}).get('image') == init.get('image'),
+      'monitoring/perses-migrate must use the same pinned Python image as monitoring-init')
+    migrate_mounts = [volume.get('target') for volume in (services.get('perses-migrate') or {}).get('volumes') or []]
+    e('/perses' in migrate_mounts,
+      'perses-migrate: must mount perses_data to /perses matching perses service (data lives in /perses/data)')
+    perses_svc = services.get('perses') or {}
+    perses_deps = perses_svc.get('depends_on') or {}
+    e((perses_deps.get('perses-migrate') or {}).get('condition') == 'service_completed_successfully',
+      'monitoring/perses: must depend on perses-migrate with service_completed_successfully')
+    sync_svc = services.get('perses-sync') or {}
+    sync_deps = sync_svc.get('depends_on') or {}
+    e((sync_deps.get('perses-migrate') or {}).get('condition') == 'service_completed_successfully',
+      'monitoring/perses-sync: must depend on perses-migrate with service_completed_successfully')
+    for name, service in services.items():
+        listed = list(service.get('networks') or {})
+        e(not any(network.startswith('identity') for network in listed),
+          f'monitoring/{name}: no monitoring service may join an identity network; got {listed}')
+
+
+def check_grafana_front(checks):
+    """Phase 4 commit 5: the cluster proxy serves Grafana at /grafana/, rate limiting the sign-in path only."""
+    e = checks.expect
+    for edition in EDITIONS:
+        nginx = (ROOT / edition / 'nginx.conf').read_text()
+        blocks = {selector.strip(): body for selector, body in re.findall(r'location ([^{]+)\{(.*?)\n    \}', nginx, re.S)}
+        e('set $grafana http://krate-grafana:3000;' in nginx,
+          f'{edition}/nginx.conf: must resolve Grafana at request time through its kafka-network alias krate-grafana')
+        redirect = blocks.get('= /grafana')
+        e(redirect is not None and 'return 301 https://$http_host/grafana/;' in redirect,
+          f'{edition}/nginx.conf: /grafana must redirect to an absolute https://$http_host/grafana/ (a relative 301 '
+          f'would be absolutized with the listen port and drop a non-443 public port)')
+        login, app = blocks.get('^~ /grafana/login'), blocks.get('^~ /grafana/')
+        for name, body in (('/grafana/login', login), ('/grafana/', app)):
+            if body is None:  # an explicit test: checks.expect does not narrow the type
+                e(False, f'{edition}/nginx.conf: the {name} location is missing')
+                continue
+            e('proxy_pass $grafana;' in body and 'access_log /var/log/nginx/access.log krate_identity;' in body,
+              f'{edition}/nginx.conf: {name} must proxy to Grafana and log without query strings (the OAuth callback carries a one-time code)')
+            csp = [line for line in body.splitlines() if 'add_header Content-Security-Policy' in line]
+            e(len(csp) == 1 and "worker-src 'self' blob:" in csp[0],
+              f'{edition}/nginx.conf: {name} must extend its Content-Security-Policy header with worker-src '
+              f'(Grafana\'s Monaco editor starts blob: workers); asserting on the block text alone is satisfied by a comment')
+            for header in ('X-Frame-Options SAMEORIGIN', 'X-Content-Type-Options nosniff', 'Referrer-Policy no-referrer',
+                           'Permissions-Policy', 'Content-Security-Policy'):
+                e(f'add_header {header}' in body,
+                  f'{edition}/nginx.conf: {name} must restate {header} (a location with its own add_header loses the server-level set)')
+        if login is None or app is None:
+            continue
+        e('limit_req zone=krate_login burst=20 nodelay;' in login, f'{edition}/nginx.conf: /grafana/login must be rate limited')
+        e('limit_req' not in app,
+          f'{edition}/nginx.conf: /grafana/ must not be rate limited (the SPA loads ~100 assets at once; a limit_req with burst=40 answered 503 to 51 of them)')
+        e('proxy_read_timeout 3600s;' in app and 'proxy_set_header Upgrade $http_upgrade;' in app
+          and 'proxy_set_header Connection "upgrade";' in app,
+          f'{edition}/nginx.conf: /grafana/ must carry the WebSocket upgrade Grafana Live tail needs')
+        e('proxy_read_timeout' not in login and 'Upgrade' not in login,
+          f'{edition}/nginx.conf: the WebSocket upgrade belongs to /grafana/ only')
+        e(nginx.index('    location ^~ /grafana/') < nginx.index('    location ^~ /metrics {') < nginx.index('    location / {'),
+          f'{edition}/nginx.conf: the Grafana locations must precede the 404 blocks and the catch-all location /')
+
+
+# render.py reads these two for its Grafana output only. They reach it through
+# monitoring-init's own environment, so a change recreates monitoring-init and Grafana
+# (KRATE_GRAFANA_AUTH_SHA) and must NOT recreate Perses, Alertmanager or the gateway:
+# they are deliberately absent from the CLI's KRATE_RENDER_ENV_KEYS.
+GRAFANA_ONLY_RENDER_KEYS = {'GRAFANA_AUTH_CONFIG', 'GRAFANA_OAUTH_CLIENT_SECRET'}
+# The edition .env keys render.py may read (they come from the cluster's .env, not from
+# monitoring/.env, so monitor_compose passes them and hashes them separately).
+RENDER_EDITION_KEYS = {'KEYCLOAK_PUBLIC_URL', 'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
+                       'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS', 'PERSES_IDP',
+                       'PERSES_GROUP_PROOF_MINUTES', 'PERSES_ISSUER_APPLIED'}
+RENDER_ENV_ACCESSOR = re.compile(r"(?:env\.get\(|env\[|(?:positive_int|flag|require)\(env,\s*)'([A-Z][A-Z_0-9]+)'")
+
+
+def render_env_keys():
+    """Every monitoring/.env key render.py reads, whatever accessor it uses, plus a closure guard.
+
+    Keys that are not in monitoring/.env.template are edition values (the KEYCLOAK_* keys
+    `monitor_compose` passes in); they are hashed separately, not through KRATE_RENDER_ENV_KEYS.
+    """
+    text = (ROOT / 'monitoring/render.py').read_text()
+    derived = set(RENDER_ENV_ACCESSOR.findall(text))
+    # A new accessor style would silently shrink the derived set: any all-caps literal that is
+    # also a monitoring/.env.template key must be explained by the pattern above.
+    template_keys = set(identity.read_env(ROOT / 'monitoring/.env.template'))
+    literals = set(re.findall(r"'([A-Z][A-Z_0-9]{3,})'", text))
+    unexplained = (literals & template_keys) - derived
+    if unexplained:
+        raise ValueError(f'monitoring/render.py reads {sorted(unexplained)} through an accessor RENDER_ENV_ACCESSOR does not match')
+    return derived & template_keys, derived - template_keys
+
+
+def check_grafana_realm_cli(checks):
+    """Phase 4 commits 4-5: the CLI side of the Grafana realm switch."""
+    e = checks.expect
+    try:
+        monitor_keys, edition_keys = render_env_keys()
+    except ValueError as exc:
+        e(False, str(exc))
+        monitor_keys, edition_keys = set(), set()
+    e(edition_keys <= RENDER_EDITION_KEYS,
+      f'monitoring/render.py reads edition .env keys outside the realm set {sorted(RENDER_EDITION_KEYS)}: {sorted(edition_keys - RENDER_EDITION_KEYS)}')
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        e('Usage: krate monitor {up|down|status|logs|reload|ui|realm|grafana-user retire <login>}' in cli,
+          f'{edition}/krate: the monitor usage must list realm and grafana-user retire')
+        monitor = function_body(cli, 'cmd_monitor')
+        for branch in ('\n    realm)\n', '\n    grafana-user)\n'):
+            e(branch in monitor, f'{edition}/krate: cmd_monitor must have a {branch.strip()} branch')
+        e('refuse_loopback_public_url' in monitor and 'grafana-seed.meta' not in monitor,
+          f'{edition}/krate: cmd_monitor realm must refuse a loopback public host (the seed-meta refusal belongs to monitor_prepare)')
+        prepare = function_body(cli, 'monitor_prepare')
+        e('refuse_loopback_public_url' in prepare and 'auth/secrets/grafana-seed.meta' in prepare
+          and prepare.index('refuse_loopback_public_url') < prepare.index('preflight.py'),
+          f'{edition}/krate: monitor_prepare must refuse a loopback host and a missing seed meta in realm mode, before Compose runs')
+        e('preflight.py" --directory "$SCRIPT_DIR" --mode monitoring' in prepare,
+          f'{edition}/krate: monitor_prepare must run the monitoring preflight')
+        compose = function_body(cli, 'monitor_compose')
+        for export in ('GRAFANA_BIND="$grafana_bind"', 'KRATE_IDP_HOST="$idp_host"', 'IDP_DISCOVERY_URL="$idp_url"',
+                       'KRATE_GRAFANA_AUTH_SHA="$grafana_sha"'):
+            e(export in compose, f'{edition}/krate: monitor_compose must export {export}')
+        for key in ('KEYCLOAK_PUBLIC_URL', 'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
+                    'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS',
+                    'PERSES_IDP', 'PERSES_GROUP_PROOF_MINUTES'):
+            e(f'{key}=' in compose, f'{edition}/krate: monitor_compose must export {key}')
+        e('find "$env_file"' not in compose,
+          f'{edition}/krate: the render revision must not hash the whole monitoring/.env (an unrelated key would recreate every consumer)')
+        declared = re.search(r'KRATE_RENDER_ENV_KEYS=\(\n(.*?)\n\)\n', cli, re.S)
+        e(declared is not None, f'{edition}/krate: KRATE_RENDER_ENV_KEYS is missing')
+        if declared is not None:  # an explicit test: checks.expect does not narrow the type
+            listed = set(declared.group(1).split())
+            expected_keys = (monitor_keys | edition_keys) - GRAFANA_ONLY_RENDER_KEYS
+            e(listed == expected_keys,
+              f'{edition}/krate: KRATE_RENDER_ENV_KEYS must equal the keys render.py reads minus the Grafana-only ones; '
+              f'missing {sorted(expected_keys - listed)}, unexpected {sorted(listed - expected_keys)}')
+            e(not (listed & GRAFANA_ONLY_RENDER_KEYS),
+              f'{edition}/krate: no GRAFANA_* key may enter the render revision (it would recreate Perses, Alertmanager and the gateway)')
+        e('PERSES_IDP' in prepare and 'refuse_loopback_public_url' in prepare, f'{edition}/krate: monitor_prepare must check PERSES_IDP')
+        e('PERSES_ISSUER_APPLIED' in prepare, f'{edition}/krate: monitor_prepare must check PERSES_ISSUER_APPLIED')
+        e('identity_reconcile_perses_clients' in cli, f'{edition}/krate: must define identity_reconcile_perses_clients')
+        # No Grafana credential ever reaches a command line: the helpers pass them in the
+        # environment of the call, and the CLI builds no Authorization header of its own.
+        e('Authorization' not in cli and 'curl ' not in cli,
+          f'{edition}/krate: the CLI must build no HTTP credential and call no curl (grafana-admin.py authenticates in-process)')
+        e('GRAFANA_ADMIN_PASSWORD="$(env_value_file "$env_file" GRAFANA_PASSWORD)" \\' in cli
+          and 'GRAFANA_SERVICE_ACCOUNT_TOKEN="$(cat "$token_file")" \\' in cli,
+          f'{edition}/krate: the Grafana credentials must reach grafana-admin.py as environment assignments')
+        realm_refresh = function_body(cli, 'monitor_realm_refresh')
+        e('cmp -s "$ini" "$ini.new"' in realm_refresh,
+          f'{edition}/krate: monitor_realm_refresh must write realm.ini only when it changed, so an unchanged file does not recreate Grafana')
+        renew = function_body(cli, 'monitor_grafana_seed_renew')
+        e('2592000' in renew and 'token-delete' in renew and renew.index('token-create') < renew.index('token-delete'),
+          f'{edition}/krate: the renewal must create the successor before deleting the old token id, within 30 days of expiry')
+        reconcile = function_body(cli, 'identity_reconcile_grafana_client')
+        # B5: the verdict must be computed WITH the plan secret, or rotating
+        # GRAFANA_OAUTH_CLIENT_SECRET leaves Keycloak on the old value while Grafana reads the
+        # new one, and the CLI reports "unchanged" (review-phase4-batch-b-COMPLETE.md, B5).
+        e(reconcile.count('GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)"') == 3
+          and reconcile.count('--with-secret') == 3,
+          f'{edition}/krate: the create, the update and the verdict must all carry the client secret '
+          f'(got {reconcile.count("--with-secret")} of 3 --with-secret uses)')
+        e('client_verdict(grafana_client(origin, args.with_secret)' in (ROOT / 'sso/identity.py').read_text(),
+          'sso/identity.py: the client-differs verdict must build the plan with the secret, or client_differs\' secret branch is dead code')
+        # b2/S2: retiring needs the Basic admin, which realm mode disables.
+        e('Grafana is in realm mode, where the Basic admin this command needs is disabled' in cli,
+          f'{edition}/krate: grafana-user retire must refuse in realm mode and give the rollback-first sequence')
+        e('Cannot renew the Grafana seed token' in renew
+          and renew.index('Cannot renew the Grafana seed token') < renew.index('token-create'),
+          f'{edition}/krate: a renewal that cannot reach Grafana must warn and continue, not die (Grafana may be held by idp-wait)')
+        e(renew.count('Recreate it: krate monitor realm') == 2,
+          f'{edition}/krate: a missing or unreadable seed-token record must warn and name the command that '
+          f'recreates it, because grafana_admin_token has nothing to authenticate with')
+        e('is STILL VALID until it is deleted or expires' in renew,
+          f'{edition}/krate: a failed token deletion must not be followed by a line claiming the previous '
+          f'token is deleted')
+        # Row U13: during a Keycloak outage `monitor up` must still reach Compose, so idp-wait
+        # names the failure. kcadm_login dies when the container is stopped, so the optional
+        # reconcile tests reachability first and downgrades a refused login to a warning.
+        e('identity_reconcile_grafana_client "$origin" optional' in function_body(cli, 'monitor_realm_refresh'),
+          f'{edition}/krate: monitor_realm_refresh must reconcile optionally, so an outage still reaches Compose')
+        reconcile = function_body(cli, 'identity_reconcile_grafana_client')
+        e('if ! identity_keycloak_running; then' in reconcile
+          and reconcile.index('if ! identity_keycloak_running; then') < reconcile.index('kcadm_login master user'),
+          f'{edition}/krate: the optional reconcile must test reachability before kcadm_login, which dies when Keycloak is stopped')
+        # The client representation takes the bare origin: identity.py's checked_origin refuses a
+        # path, and KEYCLOAK_PUBLIC_URL always ends in /identity (live4a defect D1).
+        e(cli.count('origin="$(public_url_origin)"') == 2 and 'origin="$(env_value KEYCLOAK_PUBLIC_URL)"' not in cli,
+          f'{edition}/krate: both client call sites must derive the bare public origin, not pass KEYCLOAK_PUBLIC_URL')
+        seed = function_body(cli, 'monitor_grafana_seed_token')
+        e('grafana-seed.meta' in seed and seed.index('grafana-seed.meta') < seed.index('service-account'),
+          f'{edition}/krate: a re-run of the switch must not pile up seed tokens (skip while one has 30+ days left)')
+    for name in ('refuse_loopback_public_url', 'grafana_admin', 'grafana_admin_token', 'identity_reconcile_grafana_client',
+                 'identity_keycloak_running', 'public_url_origin',
+                 'monitor_write_seed_token', 'monitor_grafana_seed_token', 'monitor_grafana_seed_renew',
+                 'monitor_realm_refresh', 'grafana_list_collisions', 'monitor_compose', 'monitor_prepare'):
+        first, second = (function_body((ROOT / edition / 'krate').read_text(), name) for edition in EDITIONS)
+        e(first == second, f'kraft/epc parity: {name} must have the same body in both editions')
+    if bash_binary() is None:
+        return
+    script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'public_url_host', 'refuse_loopback_public_url') + r'''
+ENV_FILE="$1"
+refuse_loopback_public_url
+echo accepted
+'''
+    for url, expected in (('https://localhost/identity', 1), ('https://127.0.0.1/identity', 1), ('https://[::1]/identity', 1),
+                          ('http://[::1]:8080/identity', 1), ('https://krate.example.test/identity', 0)):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / '.env'
+            env.write_text(f'KEYCLOAK_PUBLIC_URL={url}\n')
+            result = run_bash(script, env)
+            e(result.returncode == expected,
+              f'refuse_loopback_public_url with {url} must exit {expected}; got {result.returncode} ({result.stderr.strip()[:100]})')
+            if expected == 1:
+                e('KEYCLOAK_PUBLIC_URL' in result.stderr, f'the refusal of {url} must name KEYCLOAK_PUBLIC_URL; got {result.stderr.strip()[:120]!r}')
+    origin_script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', 'env_value', 'public_url_origin') + r'''
+ENV_FILE="$1"
+public_url_origin
+'''
+    for url, expected in (('https://krate.example.test/identity', 'https://krate.example.test'),
+                          ('https://krate.example.test:8443/identity', 'https://krate.example.test:8443'),
+                          ('https://[fd00::1]:8443/identity', 'https://[fd00::1]:8443'),
+                          ('https://krate.example.test/identity/', 'https://krate.example.test')):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / '.env'
+            env.write_text(f'KEYCLOAK_PUBLIC_URL={url}\n')
+            result = run_bash(origin_script, env)
+            e(result.stdout.strip() == expected,
+              f'public_url_origin of {url} must be {expected} (identity.py checked_origin refuses a path); got {result.stdout.strip()!r}')
+
+
+def check_grafana_collision_paging(checks):
+    """A full realm page with absent e-mails must not hide a collision on page two."""
+    e = lambda cond, msg: checks.expect(cond, 'grafana collision paging: ' + msg)  # noqa: E731
+    if bash_binary() is None:
+        return
+    # Keycloak 26.8.0 live output: --fields email returns one JSON object per
+    # user, including {} for a user without e-mail; CSV emits an empty line.
+    page1 = [{'email': 'collision@example.test'}]
+    mixed_page = [{'email': f'user-{number:03d}@example.test'} if number not in (0, 50, 99) else {}
+                  for number in range(100)]
+    script_tail = r'''
+IDENTITY_REALM=krate
+grafana_admin() { printf '%s\n' "$LOCAL_USERS"; }
+kcadm_login() { :; }
+kcadm_logout() { :; }
+env_value() { printf '%s\n' synthetic-secret; }
+kcadm() {
+  local offset='' format=json
+  [[ " $* " == *' --format csv '* ]] && format=csv
+  while (($#)); do
+    if [[ "$1" == --offset ]]; then offset="$2"; shift 2; else shift; fi
+  done
+  printf 'offset=%s\n' "$offset" >&2
+  case "$offset/$format" in
+    0/json) printf '%s\n' "$PAGE0_JSON" ;;
+    0/csv) printf '%s' "$PAGE0_CSV" ;;
+    100/json) printf '%s\n' "$PAGE1_JSON" ;;
+    100/csv) printf '%s\n' "$PAGE1_CSV" ;;
+    *) printf '[]\n' ;;
+  esac
+}
+grafana_list_collisions
+'''
+    for edition in EDITIONS:
+        script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'grafana_list_collisions') + script_tail
+        for label, page0 in (('mixed', mixed_page), ('all absent', [{} for _ in range(100)])):
+            environment = dict(os.environ, LOCAL_USERS=json.dumps([
+                {'login': 'local-collision', 'email': 'collision@example.test', 'isDisabled': False}]),
+                PAGE0_JSON=json.dumps(page0),
+                PAGE0_CSV='\n'.join(row.get('email', '') for row in page0) + '\n',
+                PAGE1_JSON=json.dumps(page1), PAGE1_CSV='collision@example.test')
+            result = run_bash(script, env=environment)
+            e(result.returncode == 0, f'{edition}/{label}: full first page must succeed: {result.stderr.strip()[:160]}')
+            e('offset=100' in result.stderr, f'{edition}/{label}: absent e-mails must not end a 100-record page')
+            e('krate monitor grafana-user retire local-collision' in result.stdout,
+              f'{edition}/{label}: a page-two collision must be reported with its retire command')
+            environment['PAGE1_JSON'] = 'malformed-json'
+            result = run_bash(script, env=environment)
+            e(result.returncode != 0 and 'offset=100' in result.stderr,
+              f'{edition}/{label}: a malformed second page must fail closed after reading it')
+
+
+def check_grafana_realm_plan(checks):
+    """Phase 4 commits 4/8: Grafana's realm.ini, the krate-grafana client and the two Perses clients."""
+    e = checks.expect
+    values = identity.settings(SYNTHETIC)
+    origin = values['public_origin']
+    ini = identity.grafana_ini(values)
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.read_string(ini)
+    wanted_ini = {
+        ('server', 'root_url'): origin + '/grafana/',
+        ('server', 'serve_from_sub_path'): 'true',
+        ('security', 'cookie_secure'): 'true',
+        ('security', 'cookie_samesite'): 'lax',
+        ('auth', 'disable_login_form'): 'true',
+        ('auth', 'disable_login'): 'true',
+        ('auth', 'login_maximum_inactive_lifetime_duration'): '%dm' % values['session_idle_minutes'],
+        ('auth', 'login_maximum_lifetime_duration'): '%dh' % values['session_max_hours'],
+        ('auth.basic', 'enabled'): 'false',
+        ('auth.generic_oauth', 'enabled'): 'true',
+        ('auth.generic_oauth', 'name'): 'Krate sign-in',
+        ('auth.generic_oauth', 'allow_sign_up'): 'true',
+        ('auth.generic_oauth', 'client_id'): 'krate-grafana',
+        ('auth.generic_oauth', 'scopes'): 'openid profile email',
+        ('auth.generic_oauth', 'login_attribute_path'): 'sub',
+        ('auth.generic_oauth', 'groups_attribute_path'): 'groups',
+        ('auth.generic_oauth', 'role_attribute_strict'): 'true',
+        ('auth.generic_oauth', 'skip_org_role_sync'): 'false',
+        ('auth.generic_oauth', 'allow_assign_grafana_admin'): 'false',
+        ('auth.generic_oauth', 'use_pkce'): 'true',
+        ('auth.generic_oauth', 'use_refresh_token'): 'true',
+        ('auth.generic_oauth', 'tls_skip_verify_insecure'): 'false',
+        ('auth.generic_oauth', 'tls_client_ca'): '/etc/krate/ca/server.crt',
+        ('auth.generic_oauth', 'client_secret'): '$__file{/etc/krate/grafana/client-secret}',
+        ('sso_settings', 'configurable_providers'): 'none',
+        ('metrics', 'enabled'): 'false',
+        ('auth.anonymous', 'hide_version'): 'true',
+        ('public_dashboards', 'enabled'): 'false',
+        ('snapshots', 'enabled'): 'false',
+        ('news', 'news_feed_enabled'): 'false',
+        ('dashboards', 'default_home_dashboard_path'): '/var/lib/grafana/dashboards/kafka-overview.json',
+    }
+    for (section, key), expected in wanted_ini.items():
+        e(parser.has_option(section, key) and parser.get(section, key) == expected,
+          f'realm.ini [{section}] {key} must be {expected!r} (row U26 and the plan\'s commit 4); got '
+          f'{parser.get(section, key, fallback=None)!r}')
+    for name, expected in (('auth_url', 'auth'), ('token_url', 'token'), ('api_url', 'userinfo')):
+        e(parser.get('auth.generic_oauth', name, fallback='') == f'{origin}/identity/realms/krate/protocol/openid-connect/{expected}',
+          f'realm.ini auth.generic_oauth {name} must be the realm\'s explicit {expected} endpoint')
+    signout = parser.get('auth', 'signout_redirect_url', fallback='')
+    e(signout.startswith(f'{origin}/identity/realms/krate/protocol/openid-connect/logout?')
+      and 'post_logout_redirect_uri=' in signout and 'client_id=krate-grafana' in signout,
+      f'realm.ini signout_redirect_url must end the realm session and return to the Grafana login; got {signout[:120]!r}')
+    role = parser.get('auth.generic_oauth', 'role_attribute_path', fallback='')
+    for group, wanted_role in ((values['admin_group'], 'Admin'), (values['viewer_group'], 'Viewer')):
+        e(group in role and wanted_role in role, f'realm.ini role_attribute_path must map {group} to {wanted_role}; got {role!r}')
+    e("''" in role and role.index(values['admin_group']) < role.index(values['viewer_group']),
+      f'realm.ini role_attribute_path must prefer Admin and fall back to the empty role (role_attribute_strict refuses it); got {role!r}')
+    for secret in ALL_SECRETS:
+        e(secret not in ini, 'realm.ini must carry no secret value (the client secret is a $__file reference)')
+    e((ROOT / 'monitoring/grafana/dashboards/kafka-overview.json').is_file(),
+      'monitoring/grafana/dashboards/kafka-overview.json must exist: realm.ini makes it the home dashboard')
+
+    client = identity.grafana_client(origin)
+    e(client['clientId'] == 'krate-grafana' and client['publicClient'] is False and client['standardFlowEnabled'] is True
+      and client['implicitFlowEnabled'] is False and client['directAccessGrantsEnabled'] is False
+      and client['serviceAccountsEnabled'] is False and client['frontchannelLogout'] is False,
+      f'krate-grafana must be a confidential standard-flow client with no front-channel logout; got {client}')
+    e(client['redirectUris'] == [origin + '/grafana/login/generic_oauth'] and client['webOrigins'] == [origin],
+      f'krate-grafana redirectUris/webOrigins; got {client["redirectUris"]} {client["webOrigins"]}')
+    e(client['attributes'].get('pkce.code.challenge.method') == 'S256'
+      and client['attributes'].get('post.logout.redirect.uris') == origin + '/grafana/login',
+      f'krate-grafana attributes; got {client["attributes"]}')
+    e(not any('backchannel' in key for key in client['attributes']),
+      'krate-grafana must register no back-channel logout URL: Grafana has no such endpoint')
+    e(sorted(client['defaultClientScopes']) == ['basic', 'email', 'profile', 'roles', 'web-origins']
+      and client['optionalClientScopes'] == [],
+      f'krate-grafana scopes must be the krate-ui default set and nothing optional; got {client["defaultClientScopes"]} {client["optionalClientScopes"]}')
+    e(client['protocolMappers'] == [identity.groups_mapper()],
+      'krate-grafana must carry the same groups mapper as krate-ui (one source: identity.groups_mapper)')
+    e('secret' not in client, 'krate-grafana without --with-secret must carry no secret key')
+    e('GRAFANA_OAUTH_CLIENT_SECRET' in identity.GRAFANA_SECRET_KEY, 'the Grafana secret key name')
+    environment = dict(os.environ, GRAFANA_OAUTH_CLIENT_SECRET='synthetic-grafana-secret-7c1d2e')
+    saved = {key: os.environ.pop(key, None) for key in ('GRAFANA_OAUTH_CLIENT_SECRET',)}
+    try:
+        try:
+            identity.grafana_client(origin, with_secret=True)
+            e(False, 'grafana_client --with-secret must refuse an unset GRAFANA_OAUTH_CLIENT_SECRET')
+        except ValueError as exc:
+            e('GRAFANA_OAUTH_CLIENT_SECRET' in str(exc) and 'synthetic' not in str(exc),
+              f'the refusal must name the key and no value; got {exc}')
+        os.environ['GRAFANA_OAUTH_CLIENT_SECRET'] = environment['GRAFANA_OAUTH_CLIENT_SECRET']
+        with_secret = identity.grafana_client(origin, with_secret=True)
+        e(with_secret['secret'] == environment['GRAFANA_OAUTH_CLIENT_SECRET'], 'grafana_client --with-secret substitutes the environment value')
+    finally:
+        for key, value in saved.items():
+            os.environ.pop(key, None)
+            if value is not None:
+                os.environ[key] = value
+    # The refusal is tested through the shipped subcommand (the CLI's entry point), not the
+    # library function, plus a positive control so the refusal cannot be unconditional.
+    for url, expected_rc in (('https://localhost/identity', 1), ('https://127.0.0.1/identity', 1),
+                             ('https://127.0.0.2/identity', 1), ('https://0.0.0.0/identity', 1),
+                             ('https://[::1]/identity', 1), (SYNTHETIC['KEYCLOAK_PUBLIC_URL'], 0)):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / '.env'
+            env_file.write_text(''.join(f'{key}={value}\n' for key, value in dict(SYNTHETIC, KEYCLOAK_PUBLIC_URL=url).items()))
+            result = subprocess.run([sys.executable, str(ROOT / 'sso/identity.py'), 'grafana-ini', '--env-file', str(env_file)],
+                                    text=True, capture_output=True)
+            e((result.returncode != 0) == (expected_rc != 0),
+              f'identity.py grafana-ini with KEYCLOAK_PUBLIC_URL={url} must exit {expected_rc}; got {result.returncode} {result.stderr.strip()[:120]!r}')
+            if expected_rc != 0:
+                e('KEYCLOAK_PUBLIC_URL' in result.stderr,
+                  f'the refusal of {url} must name KEYCLOAK_PUBLIC_URL and no value; got {result.stderr.strip()[:160]!r}')
+            else:
+                e('[auth.generic_oauth]' in result.stdout, 'identity.py grafana-ini prints the ini on stdout')
+    same = dict(client, id='generated-id', internalId='x', secret='**********',
+                redirectUris=list(reversed(client['redirectUris'])), extra='ignored')
+    e(identity.client_differs(client, same) is False,
+      'client_differs: Keycloak additions, a masked secret and a reordered set are not a difference')
+    e(identity.client_differs(client, dict(same, redirectUris=[origin + '/other'])) is True,
+      'client_differs: a changed redirect URI is a difference')
+    e(identity.client_differs(client, dict(same, attributes=dict(client['attributes'], **{'pkce.code.challenge.method': ''}))) is True,
+      'client_differs: a dropped PKCE method is a difference')
+    # The client-mode scalars, behaviourally (PR #42 review, identity.py:162 thread): flipping any
+    # one of them in Keycloak's readback must flip the verdict — a mode change made in the console
+    # (public client, disabled, a dropped flow, service accounts off) may never read back "same",
+    # or the reconcile never converges it. The textual CLIENT_VERDICT_FIELDS check below pins the
+    # list; this pins the behaviour the list exists for.
+    for field, flipped in (('enabled', False), ('protocol', 'saml'), ('publicClient', True),
+                           ('frontchannelLogout', not client['frontchannelLogout']),
+                           ('standardFlowEnabled', not client['standardFlowEnabled']),
+                           ('implicitFlowEnabled', not client['implicitFlowEnabled']),
+                           ('directAccessGrantsEnabled', not client['directAccessGrantsEnabled']),
+                           ('serviceAccountsEnabled', not client['serviceAccountsEnabled'])):
+        e(identity.client_differs(client, dict(same, **{field: flipped})) is True,
+          f'client_differs: a changed {field} is a difference (the client-mode fields take part in the verdict)')
+
+def check_perses_clients(checks):
+    """Phase 4 commit 8's generators, landed with the Grafana ones because they share groups_mapper,
+    checked_origin and env_secret: the two Perses realm clients."""
+    e = checks.expect
+    perses = identity.perses_clients('https://krate.example.test', '3443')
+    ids = sorted(item['clientId'] for item in perses)
+    e(ids == ['krate-perses', 'krate-perses-sync'], f'the Perses clients; got {ids}')
+    main_client = next(item for item in perses if item['clientId'] == 'krate-perses')
+    e(sorted(main_client['redirectUris']) == sorted(['https://krate.example.test:3443/oauth2/callback',
+                                                    'https://krate.example.test:3443/api/auth/providers/oidc/krate/callback']),
+      f'krate-perses must carry both callbacks (oauth2-proxy and Perses native); got {main_client["redirectUris"]}')
+    e(main_client['attributes'].get('pkce.code.challenge.method') == 'S256', 'krate-perses must require PKCE S256')
+    verdict_fields = (ROOT / 'sso/identity.py').read_text().split('CLIENT_VERDICT_FIELDS = (')[1].split(')')[0]
+    e(all("'" + f + "'" in verdict_fields for f in
+          ('enabled', 'protocol', 'publicClient', 'standardFlowEnabled', 'implicitFlowEnabled',
+           'directAccessGrantsEnabled', 'serviceAccountsEnabled')),
+      'sso/identity.py: the client-differs verdict must cover the client-mode fields, or a mode change '
+      'made in the Keycloak console reads back as "same" and is never converged')
+    e('perses_rep(args.name, origin, port, args.with_secret)' in (ROOT / 'sso/identity.py').read_text(),
+      'identity.py: the Perses client-differs verdict must build the plan with the secret, or a rotated '
+      'OAUTH2_PROXY_CLIENT_SECRET/PERSES_SYNC_CLIENT_SECRET is undetectable and never converged')
+    guard = next(item for item in perses if item['clientId'] == 'krate-perses-sync')
+    e(guard['serviceAccountsEnabled'] is True and guard['standardFlowEnabled'] is False,
+      f'krate-perses-sync must be a service-account client with no browser flow; got {guard}')
+    # The sync shape in the verdict too: it declares no frontchannelLogout/attributes/protocolMappers,
+    # and client_differs compares a field only when the plan declares it — so a faithful readback
+    # stays "same" while flipping its service-account flag is a difference (PR #42 review, :162).
+    sync_readback = dict(guard, id='generated-id', realm_client=True, secret=identity.KEYCLOAK_SECRET_MASK)
+    e(identity.client_differs(guard, sync_readback) is False,
+      'client_differs: the perses-sync readback with Keycloak additions and a masked secret is not a difference')
+    e(identity.client_differs(guard, dict(sync_readback, serviceAccountsEnabled=False)) is True,
+      'client_differs: turning off the perses-sync service account is a difference')
+
+
+def load_grafana_admin():
+    spec = importlib.util.spec_from_file_location('grafana_admin', ROOT / 'monitoring/grafana-admin.py')
+    assert spec is not None and spec.loader is not None, 'monitoring/grafana-admin.py missing'
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_grafana_admin_contract(checks):
+    """PR #42 F2/F3: retire-user's address composition and service-account's role verification."""
+    e = checks.expect
+    admin = load_grafana_admin()
+
+    def run(command):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            command()
+        return json.loads(buffer.getvalue())
+
+    class RecordingApi:
+        """Stands in for grafana-admin's Api: records calls, answers Grafana v12.2.0's own shapes.
+
+        The confirmations mirror the live-provided contract (t-grafana-admin row 3):
+        PUT /api/users/:id -> {"message": "User updated"} (pkg/api/user.go:276),
+        POST /api/admin/users/:id/disable -> {"message": "User disabled"} (pkg/api/admin_users.go:307),
+        GET /api/serviceaccounts/search -> SearchOrgServiceAccountsResult (models.go:131-139) whose
+        ServiceAccountDTO entries carry `role` (models.go:87, selected at database/store.go:381).
+        """
+
+        def __init__(self, users=(), search_pages=(), create=None, user_pages=None,
+                     put_message='User updated', disable_message='User disabled'):
+            self.users = list(users)
+            self.user_pages = user_pages
+            self.search_pages = list(search_pages)
+            self.create = create  # (status, payload) tuple, or an exception instance to raise
+            self.put_message = put_message
+            self.disable_message = disable_message
+            self.calls = []
+
+        def request(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            match = re.fullmatch(r'/api/users\?perpage=(\d+)&page=(\d+)', path)
+            if method == 'GET' and match:
+                per_page, page = map(int, match.groups())
+                if self.user_pages is not None:
+                    return 200, self.user_pages[page - 1]
+                return 200, self.users[(page - 1) * per_page:page * per_page]
+            if method == 'GET' and path.startswith('/api/serviceaccounts/search'):
+                assert self.search_pages, 'unexpected extra search call: ' + path
+                return 200, self.search_pages.pop(0)
+            if method == 'PUT' and re.fullmatch(r'/api/users/\d+', path):
+                return 200, {'message': self.put_message}
+            if method == 'POST' and re.fullmatch(r'/api/admin/users/\d+/disable', path):
+                return 200, {'message': self.disable_message}
+            if method == 'POST' and path == '/api/serviceaccounts':
+                if isinstance(self.create, Exception):
+                    raise self.create
+                return self.create
+            raise AssertionError('unexpected call %s %s' % (method, path))
+
+    # F2 — a plain login keeps the live-walk-verified behaviour byte for byte (A12/A13).
+    api = RecordingApi(users=[{'id': 5, 'login': 'p4-collide', 'name': 'P4 Collide'}])
+    payload = run(lambda: admin.cmd_retire_user(api, 'p4-collide', admin.DEFAULT_EMAIL_SUFFIX))
+    e(payload == {'login': 'p4-collide', 'email': 'p4-collide+retired@invalid', 'disabled': True},
+      f'retire-user of a plain login must keep the <login><suffix> composition; got {payload}')
+    e([(method, path) for method, path, _ in api.calls]
+      == [('GET', '/api/users?perpage=1000&page=1'), ('PUT', '/api/users/5'),
+          ('POST', '/api/admin/users/5/disable')],
+      f'retire-user must PUT the e-mail and then disable, and call nothing else; got {api.calls}')
+    e(api.calls[1][2] == {'email': 'p4-collide+retired@invalid', 'login': 'p4-collide', 'name': 'P4 Collide'},
+      f'the PUT must keep login and name and move only the e-mail aside (folders/dashboards untouched); '
+      f'got {api.calls[1][2]}')
+
+    # User search must not omit a collision or retirement target on the next page.
+    users = [{'id': i, 'login': f'user{i}'} for i in range(1, 1001)]
+    users.append({'id': 1001, 'login': 'target', 'name': 'Target'})
+    api = RecordingApi(users=users)
+    payload = run(lambda: admin.cmd_retire_user(api, 'target', admin.DEFAULT_EMAIL_SUFFIX))
+    e(payload['disabled'] is True and payload['login'] == 'target',
+      f'retire-user must find the account on page two; got {payload}')
+    e([(method, path) for method, path, _ in api.calls[:2]]
+      == [('GET', '/api/users?perpage=1000&page=1'),
+          ('GET', '/api/users?perpage=1000&page=2')],
+      f'user pagination must cross the 1000-user boundary; got {api.calls[:2]}')
+    for label, bad_page in (('malformed', {'users': []}), ('duplicate', [{'id': 1}])):
+        api = RecordingApi(users=users, user_pages=[users[:1000], bad_page])
+        try:
+            admin.list_users(api)
+            e(False, f'{label} second user page must fail closed')
+        except admin.OperationError:
+            pass
+
+    # F2 — an email-shaped login tags the local part; the double-@ address must never be composed.
+    api = RecordingApi(users=[{'id': 6, 'login': 'jane@example.com', 'name': ''}])
+    payload = run(lambda: admin.cmd_retire_user(api, 'jane@example.com', admin.DEFAULT_EMAIL_SUFFIX))
+    email = payload.get('email')
+    e(email == 'jane+retired@invalid' and isinstance(email, str) and email.count('@') == 1,
+      f'retire-user of jane@example.com must produce jane+retired@invalid (exactly one @); got {payload}')
+
+    # F2 — Grafana's own confirmation strings stay enforced on both steps.
+    for kwargs, wanted in (({'put_message': 'Nope'}, 'did not confirm "User updated"'),
+                           ({'disable_message': 'Nope'}, 'did not confirm "User disabled"')):
+        api = RecordingApi(users=[{'id': 7, 'login': 'u', 'name': ''}], **kwargs)
+        try:
+            run(lambda: admin.cmd_retire_user(api, 'u', admin.DEFAULT_EMAIL_SUFFIX))
+            e(False, f'retire-user must fail when a step is not confirmed ({wanted})')
+        except admin.OperationError as error:
+            e(wanted in str(error), f'retire-user refusal for an unconfirmed step; got {error}')
+
+    # F3 — the requested role on an existing account: idempotent reuse, no create.
+    def search_hit(role):
+        return {'totalCount': 1, 'page': 1, 'perPage': 1000,
+                'serviceAccounts': [{'id': 11, 'name': 'krate-seed', 'role': role}]}
+
+    empty = {'totalCount': 0, 'page': 1, 'perPage': 1000, 'serviceAccounts': []}
+    api = RecordingApi(search_pages=[search_hit('Admin')])
+    payload = run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+    e(payload == {'id': 11, 'created': False},
+      f'service-account with the correct existing role must stay idempotent (created: false); got {payload}')
+    e(not any(method == 'POST' for method, _, _ in api.calls),
+      f'service-account reuse must not create anything; got {api.calls}')
+
+    # F3 — a drifted role is refused with a clear, value-free message.
+    api = RecordingApi(search_pages=[search_hit('Viewer')])
+    try:
+        run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+        e(False, 'service-account must refuse an existing account whose role differs from the requested one')
+    except admin.OperationError as error:
+        message = str(error)
+        e('role' in message and 'Service accounts' in message,
+          f'the role refusal must name the problem and the remediation; got {message!r}')
+        e(not re.search(r'\b(Viewer|Editor|Admin|krate-seed)\b', message),
+          f'the role refusal must carry no value (found role, requested role, account name); got {message!r}')
+
+    # F3 — absent account: created with the requested role.
+    api = RecordingApi(search_pages=[empty], create=(201, {'id': 12, 'name': 'krate-seed'}))
+    payload = run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+    e(payload == {'id': 12, 'created': True}, f'service-account creation must report created: true; got {payload}')
+    e(api.calls[-1] == ('POST', '/api/serviceaccounts', {'name': 'krate-seed', 'role': 'Admin'}),
+      f'the create must carry the requested role; got {api.calls[-1]}')
+
+    # F3 — the 400-race reuse path verifies the role too, and stays idempotent when it matches.
+    raced = admin.HttpFailure(400, 'POST', '/api/serviceaccounts', detail='service account already exists')
+    api = RecordingApi(search_pages=[empty, search_hit('Editor')], create=raced)
+    try:
+        run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+        e(False, 'the search/create race reuse must verify the role as well')
+    except admin.OperationError as error:
+        e('role' in str(error), f'the race-path role refusal; got {error}')
+    api = RecordingApi(search_pages=[empty, search_hit('Admin')], create=raced)
+    payload = run(lambda: admin.cmd_service_account(api, 'krate-seed', 'Admin'))
+    e(payload.get('created') is False and 'note' in payload,
+      f'the race reuse with the correct role stays idempotent with its note; got {payload}')
+
+
+def check_render_writes(checks):
+    """Phase 4 slice 4b (F5): render.py file modes (0o400), directory sealing (0o500), and O_EXCL|O_NOFOLLOW open flags."""
+    e = checks.expect
+    spec = importlib.util.spec_from_file_location('render_check_mod', str(ROOT / 'monitoring/render.py'))
+    if spec is None or spec.loader is None:
+        e(False, 'cannot load monitoring/render.py')
+        return
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    ipv6_site = mod.realm_site({
+        'KEYCLOAK_PUBLIC_URL': 'https://[2001:db8::10]/identity',
+        'KEYCLOAK_VIEWER_GROUP': 'KRATE_VIEWERS',
+        'KEYCLOAK_ADMIN_GROUP': 'KRATE_ADMINS',
+        'KEYCLOAK_SESSION_IDLE_MINUTES': '15',
+        'KEYCLOAK_SESSION_MAX_HOURS': '8',
+        'PERSES_PORT': '3443',
+    })
+    e(ipv6_site['public_url'] == 'https://[2001:db8::10]:3443',
+      f'realm Perses origin must retain IPv6 brackets; got {ipv6_site["public_url"]}')
+
+    chmods, chowns, opens = [], [], []
+    real_chmod, real_chown, real_open = os.chmod, os.chown, os.open
+
+    def chmod_stub(path, mode, *args, **kwargs):
+        chmods.append((str(path), mode))
+        real_chmod(path, mode, *args, **kwargs)
+
+    def chown_stub(path, uid, gid, *args, **kwargs):
+        chowns.append((str(path), uid, gid))
+
+    def open_stub(path, flags, *args, **kwargs):
+        opens.append((flags, str(path)))
+        return real_open(path, flags, *args, **kwargs)
+
+    old_chmod, old_chown, old_open = os.chmod, os.chown, os.open
+    try:
+        os.chmod = chmod_stub
+        os.chown = chown_stub
+        os.open = open_stub
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            env = {
+                'PERSES_ENCRYPTION_KEY': 'A' * 32,
+                'PERSES_ADMIN_USER': 'admin',
+                'PERSES_ADMIN_PASSWORD': 'admin-password-1234',
+            }
+            mod.render(env, out, str(out / 'perses.json'))
+            file_chmods = [(p, m) for p, m in chmods if '.tmp' in Path(p).name]
+            e(bool(file_chmods) and all(m == 0o400 for _, m in file_chmods),
+              f'render.py: every rendered file must be chmod 0o400; got {[(p, oct(m)) for p, m in file_chmods if m != 0o400]}')
+            bad_flags = [('oct=%s' % oct(f), p) for f, p in opens
+                         if f & os.O_EXCL and not (hasattr(os, 'O_NOFOLLOW') and f & os.O_NOFOLLOW)]
+            e(not bad_flags, f'render.py: every file write must open O_EXCL|O_NOFOLLOW; offenders: {bad_flags}')
+            dir_finals = {}
+            for p, m in chmods:
+                if '.tmp' in Path(p).name or Path(p).name == '':
+                    continue
+                dir_finals[p] = m
+            bad_dirs = [(p, oct(m)) for p, m in dir_finals.items() if m != 0o500]
+            e(bool(dir_finals) and not bad_dirs,
+              f'render.py: every rendered directory tree must be sealed 0o500; offenders: {bad_dirs}')
+    finally:
+        os.chmod, os.chown, os.open = old_chmod, old_chown, old_open
+
+
+def check_migrate_issuer(checks):
+    """Phase 4 slice 4b (F6, F8, F9): migrate_issuer.py idempotence, marker perms, and parity."""
+    e = checks.expect
+    text = (ROOT / 'monitoring/perses/migrate_issuer.py').read_text()
+    e('applied == issuer' in text,
+      'migrate_issuer.py: the marker-equality guard must exist; a second run with an unchanged issuer must be a strict no-op')
+    e('temporary.chmod(0o400)' in text,
+      'migrate_issuer.py: marker write must chmod 0o400 (sealing discipline)')
+
+    # Parity check: MANAGED_BINDINGS in migrate_issuer must match perses_sync.MANAGED
+    sync_text = (ROOT / 'monitoring/perses/sync/perses_sync.py').read_text()
+    mig_managed = re.search(r'MANAGED_BINDINGS = (\([^)]+\))', text)
+    sync_managed = re.search(r'MANAGED = (\([^)]+\))', sync_text)
+    e(mig_managed is not None and sync_managed is not None and mig_managed.group(1) == sync_managed.group(1),
+      'migrate_issuer.MANAGED_BINDINGS must match perses_sync.MANAGED')
+
+    # Behavioural drive: run twice on a fixture directory
+    with tempfile.TemporaryDirectory() as td:
+        fixture = Path(td)
+        data_dir = fixture / 'data'
+        users_dir = data_dir / 'users'
+        grb_dir = data_dir / 'globalrolebindings'
+        users_dir.mkdir(parents=True)
+        grb_dir.mkdir(parents=True)
+        # Old OIDC user
+        (users_dir / 'old-user.json').write_text(json.dumps({
+            'spec': {'oauthProviders': [{'issuer': 'https://old.invalid/realms/krate'}]}
+        }))
+        # Native user
+        (users_dir / 'native-user.json').write_text(json.dumps({
+            'spec': {}
+        }))
+        # Managed binding with 24-hex hash
+        (grb_dir / 'krate-admin-0123456789abcdef01234567.json').write_text('{}')
+        # Unrelated / service binding
+        (grb_dir / 'krate-sync.json').write_text('{}')
+
+        issuer_file = fixture / 'issuer'
+        new_issuer = 'https://new.invalid/realms/krate'
+        issuer_file.write_text(new_issuer + '\n')
+
+        script = ROOT / 'monitoring/perses/migrate_issuer.py'
+        # Run 1
+        res1 = subprocess.run([sys.executable, '-I', str(script), '--data-dir', str(data_dir), '--issuer-file', str(issuer_file)],
+                              capture_output=True, text=True)
+        e(res1.returncode == 0, f'migrate_issuer run 1 failed: {res1.stderr}')
+        e('removed 1 stale user(s) and 1 managed binding(s)' in res1.stdout,
+          f'migrate_issuer run 1 output unexpected: {res1.stdout}')
+        marker = data_dir / '.krate-issuer'
+        e(marker.exists() and (marker.stat().st_mode & 0o777) == 0o400,
+          'migrate_issuer: marker must exist with mode 0o400')
+        census1 = sorted(p.name for p in data_dir.rglob('*') if p.is_file())
+
+        # Run 2
+        res2 = subprocess.run([sys.executable, '-I', str(script), '--data-dir', str(data_dir), '--issuer-file', str(issuer_file)],
+                              capture_output=True, text=True)
+        e(res2.returncode == 0, f'migrate_issuer run 2 failed: {res2.stderr}')
+        e(res2.stdout.strip() == f'perses-migrate: issuer unchanged ({new_issuer}); nothing to do',
+          f'migrate_issuer run 2 output unexpected: {res2.stdout}')
+        census2 = sorted(p.name for p in data_dir.rglob('*') if p.is_file())
+        e(census1 == census2, f'migrate_issuer: second run must not alter any file; census changed from {census1} to {census2}')
+
+        # An unreadable user file must fail the migration before the marker
+        # advances and before any stale user is removed, so a repaired file
+        # is re-inspected on the next run instead of being skipped forever.
+        (users_dir / 'broken-user.json').write_text('{not json')
+        (users_dir / 'stale-user.json').write_text(json.dumps({
+            'spec': {'oauthProviders': [{'issuer': 'https://old.invalid/realms/krate'}]}
+        }))
+        marker.unlink()
+        res3 = subprocess.run([sys.executable, '-I', str(script), '--data-dir', str(data_dir), '--issuer-file', str(issuer_file)],
+                              capture_output=True, text=True)
+        e(res3.returncode != 0 and 'migration not advanced' in res3.stderr,
+          f'migrate_issuer must fail before advancing the marker on an unreadable user; got rc={res3.returncode}: {res3.stdout} {res3.stderr}')
+        e(not marker.exists() and (users_dir / 'stale-user.json').exists(),
+          'migrate_issuer must neither write the marker nor remove stale users when a user is unreadable')
+        (users_dir / 'broken-user.json').write_text(json.dumps({'spec': {}}))
+        res4 = subprocess.run([sys.executable, '-I', str(script), '--data-dir', str(data_dir), '--issuer-file', str(issuer_file)],
+                              capture_output=True, text=True)
+        e(res4.returncode == 0 and not (users_dir / 'stale-user.json').exists() and marker.exists(),
+          f'migrate_issuer must complete once the unreadable user is repaired; got rc={res4.returncode}: {res4.stdout} {res4.stderr}')
+
+
+def check_monitoring_tables(checks):
+    """Commit 12: monitoring/README.md Table 1 (all 18 services) and non-loopback bind warnings."""
+    e = checks.expect
+    text = (ROOT / 'monitoring/README.md').read_text()
+    e('## Table 1 — Service exposure and enforcement' in text,
+      'monitoring/README.md: must define Table 1 — Service exposure and enforcement')
+    parts = text.split('## Table 1 — Service exposure and enforcement')
+    table1_text = parts[1].split('## Table 2')[0] if len(parts) > 1 else ''
+    components = []
+    for line in table1_text.splitlines():
+        line = line.strip()
+        if not line.startswith('|'):
+            continue
+        cells = [c.strip().strip('`') for c in line.strip('|').split('|')]
+        if len(cells) >= 6 and cells[0] and cells[0] != 'component' and not set(cells[0]) <= {'-', ' '}:
+            components.append(cells[0])
+
+    services = monitoring_services()
+    e(len(services) == 18, f'monitoring/docker-compose.yml must have 18 services; got {len(services)}')
+    e(set(components) == set(services.keys()),
+      f'monitoring/README.md Table 1 must have one row per service in monitoring/docker-compose.yml; '
+      f'missing {sorted(set(services.keys()) - set(components))}, unexpected {sorted(set(components) - set(services.keys()))}')
+
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        prepare = function_body(cli, 'monitor_prepare')
+        e('PROM_BIND' in prepare and 'LOKI_BIND' in prepare and 'not loopback 127.0.0.1' in prepare,
+          f'{edition}/krate: monitor_prepare must warn when PROM_BIND or LOKI_BIND is not 127.0.0.1')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_parity, check_zk_frozen, check_writers, check_backup_seal,
+                  check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
+                  check_grafana_realm_cli, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
+                  check_render_writes, check_migrate_issuer, check_monitoring_tables,
+                  check_grafana_admin_contract,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_phase4_monitor_paths,
+                  check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
-                  check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_deploy_release, check_rpm_install, check_gen_cert_ip,
+                  check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
+                  check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip, check_public_cert_permissions,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
                   check_broker_apply, check_truststore_env, check_broker_docs):
         try:
@@ -3229,7 +4837,9 @@ def main():
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
           'runtime.yml incl. refusals), configure-dual, stub_idp.sh down, proxy environment and edge rules, release permissions, RPM dependency '
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
-          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs.')
+          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
+          'Prometheus lifecycle off and the SIGHUP reload result, the read-only Loki gateway, '
+          'the Grafana realm switch (compose, proxy front, CLI, realm.ini and clients).')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
         print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0

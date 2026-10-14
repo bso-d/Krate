@@ -184,20 +184,26 @@ request.
   required" on. When a Keycloak session ends by logout, Keycloak POSTs a
   signed logout token to Kafbat and Kafbat ends the matching session at
   once. This happens when the user logs out (also through Kafbat's own Log
-  out, see below), and when an administrator signs the user out, from the
-  host: `./krate identity users` has no sign-out command yet; use the admin
-  CLI in the Keycloak container (`kcadm.sh create users/<id>/logout -r
-  krate`, see "Keycloak administration") or the realm's "Sign out all active
-  sessions". Keycloak notes that signing out "does not revoke outstanding
-  access tokens"; Kafbat does not use them after login, so the session ends
-  with the back-channel request.
+  out, see below), and when an administrator signs the user out from the host
+  with `./krate identity users logout <name>`, which ends every session of
+  that user in the realm (`kcadm create users/<id>/logout`; the `krate-cli`
+  client's manage-users scope is enough). Keycloak notes that signing out
+  "does not revoke outstanding access tokens"; Kafbat does not use them after
+  login, so the session ends with the back-channel request (measured: gone
+  within 5 s, gate row U25). The realm's "Sign out all active sessions" is
+  **not** a way to end a Kafbat session: Keycloak ends the realm sessions and
+  sets the realm's not-before, but sends no back-channel logout token to any
+  client (measured at 26.8.0, `harness/phase4/lab1` K-a), so a live Kafbat
+  session survives it until its idle limit.
 - Disabling a user (`./krate identity users disable <name>`) prevents new
   logins but does not end a session that already exists: that session lasts
-  until the idle limit or until the user is signed out as above. Removing a
-  user from a group has effect at the next login, because Kafbat computes the
-  roles once at login. The exact times (back-channel propagation, idle
-  expiry after disablement) are measured in the Phase 2 fixture and recorded
-  in the pull request.
+  until the idle limit unless `./krate identity users logout <name>` ends it.
+  Revocation is therefore the pair, in this order: `disable` then `logout`
+  (gate rows U10, V8). Removing a user from a group has effect at the next
+  login, because Kafbat computes the roles once at login; `users logout`
+  forces that next login now (gate row U11). The exact times (back-channel
+  propagation, idle expiry after disablement) are measured in the Phase 2
+  fixture and recorded in the pull request.
 - `./krate identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET` recreates `kafka-ui`
   in this mode, which ends every Kafbat session. `./krate auth apply` itself
   recreates `kafka-ui` only when the applied auth file or the image changed
@@ -287,8 +293,9 @@ without query strings.
 
 Administer Keycloak only from the installation host. Run these commands in the
 installation directory. Local users in realm `krate` are managed with
-`./krate identity users list|add|disable|enable|reset-password|groups`; that
-is the supported path and it does not need the master admin. A lost admin
+`./krate identity users` (`list`, `add`, `disable`, `enable`,
+`reset-password`, `groups`, `logout`, `set-email`); that is the supported path
+and it does not need the master admin. A lost admin
 login is repaired with `./krate identity recover-admin` (Keycloak stopped);
 see the identity foundation guide. Use the admin CLI in the Keycloak container
 only for realm-level changes such as the ones below. The Compose file has no
@@ -381,8 +388,9 @@ identities (no session, viewer, administrator): a viewer is answered 403 on
 every mutation in the table above and 200 on the reads; an administrator
 succeeds; a user in neither group is refused at login; an unauthenticated API
 call is redirected to the login; Kafbat's Log out ends the Keycloak session;
-a sign-out in Keycloak ends the Kafbat session; a disabled user cannot sign in
-again. Repository-side qualification uses disposable local identities; actual
+`./krate identity users logout <name>` ends the Kafbat session; a disabled
+user cannot sign in again. Repository-side qualification uses disposable
+local identities; actual
 enterprise federation acceptance (Phase 3) is performed on the production
 network.
 
@@ -494,6 +502,12 @@ truststore is relied on. `runtime.yml` must equal the Krate plan for this
 file `auth/keycloak/krate-realm.json` still must not define
 `identityProviders`: the realm plan is local-only in both modes.
 
+A plan file an earlier Krate wrote is refused by the field that differs (the
+message names the field and the remedy): remove both generated files
+(`auth/ui/runtime.yml` and `auth/keycloak/pingfederate-idp.json` —
+`auth configure` refuses to replace either one), rerun
+`./krate auth configure /path/to/site.json`, then `./krate auth apply`.
+
 `auth apply` then takes the identity lock, records the truststore digest
 (below), reconciles Keycloak, and applies the plan to realm `krate` with
 `kcadm` inside the Keycloak container (logged in as `KEYCLOAK_ADMIN_USER`;
@@ -576,6 +590,25 @@ The realm flows the plan states:
   viewer group only = `viewer`, admin group = `administrator`, both =
   `administrator`, neither = refused at Kafbat's login (`/login?error`), no
   session.
+- Keycloak trusts the e-mail PingFederate asserts (`trustEmail` `true` in the
+  plan): at every brokered sign-in the realm user's e-mail verification is set
+  from the `email_verified` claim PingFederate asserts — Keycloak reads it from
+  the ID token and re-reads it from the userinfo response whenever that
+  response returns an `email`, where a claim PingFederate did not send parses
+  as **false** (`OIDCIdentityProvider.extractIdentity`, 26.8.0:599-606).
+  **PingFederate must therefore assert `email_verified: true`**, or brokered
+  users stay unverified and the Phase 4 UIs refuse them; only when the claim
+  reaches neither response — the ID token lacks it and the userinfo response
+  returns no e-mail — does the fallback apply, which marks a new user or a
+  changed address verified and leaves an existing user's flag as it was
+  (`AbstractIdentityProvider.setEmailVerified`, 26.8.0:214-230). With the flag
+  false every brokered user is unverified and the Phase 4 UIs refuse the
+  sign-in (Perses' oauth2-proxy answers `500` "email in id_token (…) isn't
+  verified"). Trusting the address is not account linking:
+  the first-login flow stays Create User If Unique (D2), so a clash with a
+  local user is still an error page. A user brokered before this change keeps
+  its unverified flag until a sign-in in which PingFederate asserts a verified
+  address, or until an administrator sets it in Keycloak.
 - SSO users get no Keycloak TOTP and no profile page: MFA is the enterprise
   identity provider's (D1).
 - Revocation: the mappers and the provider sync with `syncMode` `FORCE`, so

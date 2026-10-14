@@ -274,7 +274,7 @@ bundle: offline-check
 >    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py sso/identity.py "$$bundle_dir/sso/"
 >    # Rendered by `krate identity logrotate` with the installation's journal path.
 >    cp sso/logrotate/krate-identity.conf "$$bundle_dir/sso/logrotate/"
->    cp sso/guides/identity-foundation.md sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md "$$bundle_dir/docs/"
+>    cp sso/guides/identity-foundation.md sso/guides/dual-login.md sso/guides/pingfederate-sso.md sso/guides/pingfederate-iam-guide.md sso/guides/sso-flows.md sso/guides/perses-sso.md sso/guides/grafana-sso.md "$$bundle_dir/docs/"
 >  fi
 >  # The CLI ships as ./krate everywhere except the frozen ZooKeeper edition,
 >  # whose published v5 bundle documents ./kafka.
@@ -290,8 +290,8 @@ bundle: offline-check
 >  if [[ "$$mode" != "zk" && -d monitoring ]]; then
 >    mkdir -p "$$bundle_dir/monitoring"
 >    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py monitoring/render.py "$$bundle_dir/monitoring/"
->    cp monitoring/README.md "$$bundle_dir/monitoring/"
->    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit monitoring/perses "$$bundle_dir/monitoring/"
+>    cp monitoring/grafana-admin.py monitoring/README.md "$$bundle_dir/monitoring/"
+>    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit monitoring/perses monitoring/idp "$$bundle_dir/monitoring/"
 >    # Local test runs leave Python bytecode beside discovery.py; never ship it.
 >    find "$$bundle_dir/monitoring" -name __pycache__ -type d -prune -exec rm -rf {} +
 >    # Only the local default is copied: never stage site auth files or secrets.

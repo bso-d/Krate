@@ -485,10 +485,12 @@ All subcommands use `kcadm` with the `krate-cli` client credentials in realm
 | Command | Effect |
 | --- | --- |
 | `users list` | one line per user: `USERNAME ENABLED EMAIL`; groups are shown by `users groups <username>` |
-| `users add <username> [--admin\|--viewer] [--email <addr>]` | creates the user in the chosen group, prints a one-time temporary password once, and sets the user's `requiredActions` to `CONFIGURE_TOTP` and `UPDATE_PASSWORD` (`identity.USER_REQUIRED_ACTIONS`); neither is a realm default action, so a user PingFederate brokers in is never asked for them |
+| `users add <username> [--admin\|--viewer] [--email <addr>]` | creates the user in the chosen group, prints a one-time temporary password once, and sets the user's `requiredActions` to `CONFIGURE_TOTP` and `UPDATE_PASSWORD` (`identity.USER_REQUIRED_ACTIONS`); neither is a realm default action, so a user PingFederate brokers in is never asked for them. With `--email` the address is created verified; `--email` is required while a monitoring UI signs people in through the realm (`GRAFANA_AUTH_CONFIG=realm.ini` or `PERSES_IDP=krate`), because such a UI refuses a user without a verified address |
 | `users disable <username>` / `users enable <username>` | toggles the account |
 | `users reset-password <username>` | new one-time temporary password, printed once, same required actions |
 | `users groups <username>` | shows group membership |
+| `users logout <username>` | ends every session of the user in the realm; Keycloak then posts a back-channel logout token to each client of those sessions that has a reachable URL, so Kafbat ends at once. Pair it with `users disable` to revoke. The realm's "Sign out all active sessions" is not a substitute: it sends no logout token, so a live Kafbat session survives it until its idle limit |
+| `users set-email <username> <addr>` | sets the user's e-mail address and marks it verified; also the way to verify the address of a user brokered in before the provider trusted it |
 
 Passwords are never accepted on the command line. The user changes the
 temporary password and enrols TOTP at first login.

@@ -259,16 +259,27 @@ is_package() {
 
 # Create the installation directory, owned by the user running krate.
 ensure_home_dir() {
-  if mkdir -p "$KRATE_HOME" 2>/dev/null && [[ -w "$KRATE_HOME" ]]; then
-    return 0
+  # Never chmod a symlink target through the privileged default install path.
+  if [[ "$KRATE_HOME" == "/opt/krate/${KRATE_VARIANT:-}" ]] \
+      && { [[ -L /opt/krate ]] || [[ -L "$KRATE_HOME" ]]; }; then
+    die "Cannot use a symlink as the default installation directory: $KRATE_HOME"
   fi
   local -a sudo_cmd=()
   if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
     sudo_cmd=(sudo)
   fi
-  info "Creating the installation directory $KRATE_HOME"
-  if ! { "${sudo_cmd[@]}" mkdir -p "$KRATE_HOME" && "${sudo_cmd[@]}" chown "$(id -u):$(id -g)" "$KRATE_HOME"; }; then
-    die "Could not create $KRATE_HOME. Create it, or install elsewhere: KRATE_HOME=/path ./krate install"
+  if ! { mkdir -p "$KRATE_HOME" 2>/dev/null && [[ -w "$KRATE_HOME" ]]; }; then
+    info "Creating the installation directory $KRATE_HOME"
+    if ! { "${sudo_cmd[@]}" mkdir -p "$KRATE_HOME" && "${sudo_cmd[@]}" chown "$(id -u):$(id -g)" "$KRATE_HOME"; }; then
+      die "Could not create $KRATE_HOME. Create it, or install elsewhere: KRATE_HOME=/path ./krate install"
+    fi
+  fi
+  # The default location is bind-mounted into unprivileged containers. A first
+  # install under umask 077 needs traversal, but directory listings and site
+  # files stay private. Do not change operator-selected KRATE_HOME paths.
+  if [[ "$KRATE_HOME" == "/opt/krate/${KRATE_VARIANT:-}" ]] \
+      && ! "${sudo_cmd[@]}" chmod go+x /opt/krate "$KRATE_HOME"; then
+    die "Could not make $KRATE_HOME traversable by the containers"
   fi
 }
 
@@ -421,6 +432,9 @@ prepare_monitor_env() {
       "") warn "GRAFANA_PASSWORD is empty but Grafana's volume exists: its stored password stays in use. Record it with: krate config set GRAFANA_PASSWORD=..." ;;
       changeme) warn "GRAFANA_PASSWORD is changeme (insecure) and Grafana's volume exists: change it in Grafana, then record it with: krate config set GRAFANA_PASSWORD=..." ;;
     esac
+  fi
+  if [[ "$(env_value_file "$env_file" PERSES_IDP)" == krate ]]; then
+    keys+=(OAUTH2_PROXY_CLIENT_SECRET PERSES_SYNC_CLIENT_SECRET)
   fi
   generated="$({ fill_secrets "$env_file" 24 "${keys[@]}"
     fill_secrets "$env_file" 32 PERSES_ENCRYPTION_KEY OAUTH2_PROXY_COOKIE_SECRET; } | xargs)"
@@ -1926,7 +1940,28 @@ identity_username() {
 identity_users_usage() {
   die "Usage: krate identity users list
        krate identity users add <username> [--admin|--viewer] [--email <address>]
-       krate identity users {enable|disable|reset-password|groups} <username>"
+       krate identity users {enable|disable|reset-password|groups|logout} <username>
+       krate identity users set-email <username> <address>"
+}
+
+# The e-mail address the CLI accepts: one @ and no whitespace (Keycloak checks the
+# rest). Shared by `users add --email` and `users set-email`.
+identity_email_address() {
+  local address="${1:-}"
+  [[ "$address" == *@* && "$address" != *[[:space:]]* ]] || return 1
+  printf '%s' "$address"
+}
+
+# True while a monitoring UI signs people in through the Krate realm: Grafana with
+# GRAFANA_AUTH_CONFIG=realm.ini, Perses with PERSES_IDP=krate. Such a UI needs the
+# user's address — Grafana reads it from userinfo and refuses a sign-in without it,
+# Perses' oauth2-proxy answers 500 "email in id_token (…) isn't verified" — so
+# `users add` requires --email and marks the address verified.
+identity_realm_ui() {
+  local env_file="$MONITOR_DIR/.env"
+  [[ "$(env_value_file "$env_file" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]] && return 0
+  [[ "$(env_value_file "$env_file" PERSES_IDP)" == krate ]] && return 0
+  return 1
 }
 
 # A user's temporary password: generated, shown once, must be changed at the
@@ -1954,19 +1989,27 @@ cmd_identity_users() {
           --admin)  group="$(env_value KEYCLOAK_ADMIN_GROUP)"; group="${group:-KRATE_ADMINS}"; shift ;;
           --viewer) group="$(env_value KEYCLOAK_VIEWER_GROUP)"; group="${group:-KRATE_VIEWERS}"; shift ;;
           --email)
-            email="${2:-}"
-            [[ "$email" == *@* && "$email" != *[[:space:]]* ]] || die "--email needs an address"
+            email="$(identity_email_address "${2:-}")" || die "--email needs an address"
             shift 2 ;;
           *) identity_users_usage ;;
         esac
       done
       ;;
-    enable|disable|reset-password|groups)
+    enable|disable|reset-password|groups|logout)
       [[ $# -eq 1 ]] || identity_users_usage
       user="$(identity_username "$1")"
       ;;
+    set-email)
+      [[ $# -eq 2 ]] || identity_users_usage
+      user="$(identity_username "$1")"
+      email="$(identity_email_address "$2")" || die "set-email needs an address"
+      ;;
     *) identity_users_usage ;;
   esac
+  # A monitoring UI on the realm needs the user's address, so it is not optional then.
+  if [[ "$action" == add ]] && identity_realm_ui && [[ -z "$email" ]]; then
+    die "--email is required while a monitoring UI signs in through the Krate realm (GRAFANA_AUTH_CONFIG=realm.ini or PERSES_IDP=krate): Grafana reads the address from userinfo and Perses refuses a user without one"
+  fi
   require_compose; require_compose_file; require_env
   [[ "$action" == list || "$action" == groups ]] || identity_lock
   kcadm_login "$IDENTITY_REALM" client krate-cli "$(env_value KEYCLOAK_CLI_CLIENT_SECRET)" \
@@ -1991,7 +2034,9 @@ cmd_identity_users() {
         [[ -n "$gid" ]] || die "Group $group does not exist in realm $IDENTITY_REALM (KEYCLOAK_VIEWER_GROUP/KEYCLOAK_ADMIN_GROUP changed after the realm was created? See the guide: rename it in Keycloak, or set .env back)"
       fi
       if [[ -n "$email" ]]; then
-        kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true -s "email=$email" >/dev/null
+        # Verified because the operator typed the address: a realm UI refuses an
+        # unverified one (oauth2-proxy: 500 "email in id_token (…) isn't verified").
+        kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true -s "email=$email" -s emailVerified=true >/dev/null
       else
         kcadm -- create users -r "$IDENTITY_REALM" -s "username=$user" -s enabled=true >/dev/null
       fi
@@ -2018,6 +2063,25 @@ cmd_identity_users() {
       ;;
     groups)
       kcadm -- get "users/$uid/groups" -r "$IDENTITY_REALM" --fields name --format csv --noquotes | sed 's/^/  /'
+      ;;
+    logout)
+      # Ends every session of this user in the realm; Keycloak then posts a back-channel
+      # logout token to each client of those sessions that has a reachable URL, so Kafbat
+      # ends at once (harness/phase4/lab1 K-a: 204, tokens within ~25 ms). The realm's
+      # "Sign out all active sessions" sends no logout token, so a live Kafbat session
+      # survives it until its idle limit. kcadm rejects the no-merge flag on this
+      # resource (rc 2); krate-cli's manage-users scope is enough
+      # (harness/phase4/lab6 L5-8).
+      kcadm -- create "users/$uid/logout" -r "$IDENTITY_REALM"
+      identity_journal "users logout" ok "$user"
+      ok "Sessions of $user ended; the next access needs a new sign-in"
+      ;;
+    set-email)
+      # Verified because the operator typed the address. This is also the way to verify
+      # the address of a user brokered in before the provider trusted it.
+      kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -s "email=$email" -s emailVerified=true
+      identity_journal "users set-email" ok "$user"
+      ok "E-mail address of $user set and marked verified"
       ;;
   esac
   kcadm_logout
@@ -2503,8 +2567,20 @@ san_entry() {
 }
 
 # Generate a self-signed TLS cert (CN/SAN = FQDN, plus the host IP) for nginx.
+ensure_public_cert_readable() {
+  local mode
+  mode="$(python3 -c 'import os, stat, sys; print(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))' "$CERT_CRT")" \
+    || die "Cannot inspect the public TLS certificate at $CERT_CRT."
+  if (( (mode & 4) == 0 )); then
+    [[ ! -L "$CERT_CRT" ]] || die "Public TLS certificate is a symlink without public read access: $CERT_CRT. Fix its target permissions."
+    chmod go+r "$CERT_CRT" || die "Cannot make the public TLS certificate readable at $CERT_CRT."
+  fi
+}
+
 cmd_gen_cert() {
   command -v openssl &>/dev/null || die "openssl not found — needed to generate the TLS certificate."
+  [[ ! -L "$CERT_CRT" ]] || die "Refusing to generate a certificate through symlink $CERT_CRT."
+  [[ ! -L "$CERT_KEY" ]] || die "Refusing to generate a private key through symlink $CERT_KEY."
   mkdir -p "$CERTS_DIR"
   local fqdn ip san public_host
   fqdn="$(get_fqdn)"
@@ -2524,12 +2600,14 @@ cmd_gen_cert() {
     -subj "/CN=${fqdn}" -addext "subjectAltName=${san}" >/dev/null 2>&1 \
     || die "openssl failed to generate the certificate."
   chmod 600 "$CERT_KEY"
+  ensure_public_cert_readable
   ok "Certificate written to certs/server.crt (replace with an org-CA cert anytime)"
 }
 
 # Ensure a cert exists before the proxy starts; generate one if missing.
 ensure_cert() {
   if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
+    ensure_public_cert_readable
     return 0
   fi
   warn "No TLS certificate found — generating a self-signed one."
@@ -2553,6 +2631,18 @@ public_url_authority() {
   if [[ "$authority" == \[* ]]; then port="${authority#*]}"; else port="${authority#"${authority%%:*}"}"; fi
   port="${port#:}"
   if [[ -n "$port" && "$port" != 443 ]]; then printf '%s:%s\n' "$(public_url_host)" "$port"; else public_url_host; fi
+}
+
+# The bare public origin: KEYCLOAK_PUBLIC_URL without its /identity path. The realm
+# clients' redirect URIs and web origins are built from it (sso/identity.py
+# public_origin/checked_origin refuse a path), while the ini's endpoints keep the
+# /identity path and are rendered from the .env by identity.py itself.
+public_url_origin() {
+  local url scheme authority
+  url="$(env_value KEYCLOAK_PUBLIC_URL)"
+  scheme="${url%%://*}"
+  authority="${url#*://}"; authority="${authority%%/*}"
+  printf '%s://%s\n' "$scheme" "$authority"
 }
 
 # The proxy's Compose environment follows its inputs, so `up` recreates it exactly when
@@ -3101,6 +3191,58 @@ cmd_uninstall() {
 MONITOR_DIR="$SCRIPT_DIR/monitoring"
 [[ -d "$MONITOR_DIR" ]] || MONITOR_DIR="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)/monitoring"
 
+# The monitoring/.env keys render.py reads. They, the render sources and the cluster
+# certificate decide KRATE_RENDER_REVISION, so a change of any other key (a GRAFANA_*
+# key, a publish address) no longer recreates Perses, Alertmanager and the gateway:
+# hashing the whole .env file did exactly that, and a changed public URL or group did
+# not reach the consumers at all (harness/phase4/lab6, Phase 4 defect 7).
+# scripts/check-identity.py asserts this list equals the keys render.py reads.
+KRATE_RENDER_ENV_KEYS=(
+  ALERT_EMAIL_TO ALERTMANAGER_EMAIL_ENABLED ALERTMANAGER_SMTP_REQUIRE_TLS
+  GF_SMTP_ENABLED GF_SMTP_FROM_ADDRESS GF_SMTP_FROM_NAME GF_SMTP_HOST GF_SMTP_PASSWORD
+  GF_SMTP_SKIP_VERIFY GF_SMTP_USER
+  KEYCLOAK_ADMIN_GROUP KEYCLOAK_PUBLIC_URL KEYCLOAK_SESSION_IDLE_MINUTES
+  KEYCLOAK_SESSION_MAX_HOURS KEYCLOAK_VIEWER_GROUP
+  OAUTH2_PROXY_CLIENT_SECRET OAUTH2_PROXY_COOKIE_SECRET
+  PERSES_ADMIN_PASSWORD PERSES_ADMIN_USER PERSES_AUTH_MODE PERSES_ENCRYPTION_KEY
+  PERSES_GROUP_PROOF_MINUTES PERSES_IDP PERSES_PORT
+  PERSES_SYNC_CLIENT_SECRET
+)
+
+render_revision() {
+  local env_file="$MONITOR_DIR/.env" key val
+  {
+    for key in "${KRATE_RENDER_ENV_KEYS[@]}"; do
+      val="$(env_value_file "$env_file" "$key")"
+      [[ -n "$val" ]] || val="$(env_value "$key")"
+      printf '%s=%s\n' "$key" "$val"
+    done
+    find "$MONITOR_DIR/auth/perses" "$MONITOR_DIR/render.py" "$MONITOR_DIR/perses" \
+      "$CERT_CRT" "$CERT_KEY" -type f ! -path '*/__pycache__/*' 2>/dev/null \
+      | LC_ALL=C sort | xargs cat 2>/dev/null
+  } | cksum | cut -d' ' -f1
+}
+
+# Alertmanager reads only its rendered SMTP/route file. Keep its Compose revision
+# independent of Perses mode, clients and gateway certificates so an SSO switch
+# does not restart alert delivery or the Alertmanager data process.
+alertmanager_revision() {
+  local env_file="$MONITOR_DIR/.env" key val
+  local keys=(
+    ALERT_EMAIL_TO ALERTMANAGER_EMAIL_ENABLED ALERTMANAGER_SMTP_REQUIRE_TLS
+    GF_SMTP_ENABLED GF_SMTP_FROM_ADDRESS GF_SMTP_FROM_NAME GF_SMTP_HOST
+    GF_SMTP_PASSWORD GF_SMTP_SKIP_VERIFY GF_SMTP_USER
+  )
+  {
+    for key in "${keys[@]}"; do
+      val="$(env_value_file "$env_file" "$key")"
+      [[ -n "$val" ]] || val="$(env_value "$key")"
+      printf '%s=%s\n' "$key" "$val"
+    done
+    cat "$MONITOR_DIR/render.py"
+  } | cksum | cut -d' ' -f1
+}
+
 # The docker network the brokers are attached to, read from the running
 # broker container (container_name is fixed per edition). Only a broker is
 # asked: the proxy and Kafbat also sit on the identity network, which sorts
@@ -3162,20 +3304,55 @@ This bundle was built without the observability stack."
   esac
   [[ "$1" == "up" ]] || profiles="perses-sso"
 
-  # Recreate the rendered-config consumers whenever their inputs change,
-  # including a renewed gateway certificate.
-  local revision
-  revision="$(find "$env_file" "$MONITOR_DIR/auth/perses" "$MONITOR_DIR/render.py" "$MONITOR_DIR/perses" \
-    "$CERT_CRT" "$CERT_KEY" -type f ! -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort | xargs cat 2>/dev/null \
-    | cksum | cut -d' ' -f1)"
+  # Recreate the rendered-config consumers whenever their inputs change, including a
+  # renewed gateway certificate — but only for the inputs they actually read.
+  local revision alert_revision
+  revision="$(render_revision)"
+  alert_revision="$(alertmanager_revision)"
+
+  # Which monitoring UIs sign people in through the Krate realm: Grafana with
+  # GRAFANA_AUTH_CONFIG=realm.ini, Perses with PERSES_IDP=krate.
+  local grafana_realm=false perses_realm=false
+  [[ "$(env_value_file "$env_file" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]] && grafana_realm=true
+  [[ "$(env_value_file "$env_file" PERSES_IDP)" == krate ]] && perses_realm=true
+
+  # In realm mode the containers resolve the realm's public host to the Docker host,
+  # whose published 443 is the cluster proxy; idp-wait holds them until the realm
+  # answers; and Grafana's own port, which has no login left, moves to the loopback
+  # interface. With no UI on the realm both are empty and idp-wait exits at once.
+  local idp_host="" idp_url="" public grafana_bind="" grafana_sha=""
+  if $grafana_realm || $perses_realm; then
+    public="$(env_value KEYCLOAK_PUBLIC_URL)"; public="${public%/}"
+    idp_host="$(public_url_host)"
+    idp_url="$public/realms/$IDENTITY_REALM/.well-known/openid-configuration"
+  fi
+  if $grafana_realm; then
+    grafana_bind=127.0.0.1
+    # Grafana reads realm.ini, the cluster CA and the rendered client secret at start
+    # only, so a change of any of them must recreate it; Compose compares environments.
+    grafana_sha="$( { cat "$MONITOR_DIR/auth/realm.ini" "$CERT_CRT" 2>/dev/null
+                      env_value_file "$env_file" GRAFANA_OAUTH_CLIENT_SECRET; } | cksum | cut -d' ' -f1)"
+  fi
 
   KRATE_RENDER_REVISION="$revision" \
+  KRATE_ALERTMANAGER_REVISION="$alert_revision" \
   COMPOSE_PROFILES="$profiles" \
   PERSES_CERTS_DIR="$CERTS_DIR" \
   KAFKA_EXPECTED_BROKERS="${expected:-1}" \
   KAFKA_NETWORK="$net" \
   KAFKA_EXPORTER_TARGETS="$(monitor_targets)" \
   CLUSTER_LABEL="$KRATE_VARIANT" \
+  GRAFANA_BIND="$grafana_bind" \
+  KRATE_IDP_HOST="$idp_host" \
+  IDP_DISCOVERY_URL="$idp_url" \
+  KRATE_GRAFANA_AUTH_SHA="$grafana_sha" \
+  KEYCLOAK_PUBLIC_URL="$(env_value KEYCLOAK_PUBLIC_URL)" \
+  KEYCLOAK_VIEWER_GROUP="$(env_value KEYCLOAK_VIEWER_GROUP)" \
+  KEYCLOAK_ADMIN_GROUP="$(env_value KEYCLOAK_ADMIN_GROUP)" \
+  KEYCLOAK_SESSION_IDLE_MINUTES="$(env_value KEYCLOAK_SESSION_IDLE_MINUTES)" \
+  KEYCLOAK_SESSION_MAX_HOURS="$(env_value KEYCLOAK_SESSION_MAX_HOURS)" \
+  PERSES_IDP="$(env_value_file "$env_file" PERSES_IDP)" \
+  PERSES_GROUP_PROOF_MINUTES="$(env_value_file "$env_file" PERSES_GROUP_PROOF_MINUTES)" \
   MONITOR_PROJECT="krate-${KRATE_VARIANT}-monitoring" \
   "${COMPOSE_BIN[@]}" -p "krate-${KRATE_VARIANT}-monitoring" --env-file "$env_file" -f "$MONITOR_DIR/docker-compose.yml" "$@"
 }
@@ -3201,6 +3378,354 @@ monitor_port_conflicts() {
   done
 }
 
+# ─── Grafana on the Krate realm ──────────────────────────────────────────────
+# A monitoring UI on the realm needs a public name: inside a container
+# "localhost" is the container itself, so the token and userinfo calls it makes
+# to KEYCLOAK_PUBLIC_URL would never reach Keycloak (harness/phase4/lab3 L-2).
+refuse_loopback_public_url() {
+  local host
+  host="$(public_url_host)"
+  # One rule with sso/identity.py's refuse_loopback_public_url: any 127.0.0.0/8 address in
+  # dotted or inet_aton shorthand, the two unspecified addresses, and localhost by name. A
+  # hostname is never refused, so 127.example.com stays legal. The old exact-name list let
+  # 127.0.0.2 through here while the Python rule refused it (PR #42 review).
+  if [[ "$host" == localhost || "$host" == 0.0.0.0 || "$host" == :: || "$host" == '[::]' ||
+        "$host" == ::1 || "$host" == '[::1]' || "$host" == '::ffff:127.'* ||
+        "$host" =~ ^127(\.[0-9]{1,3}){0,3}$ || "$host" =~ ^[0-9]+$ ]]; then
+    die "KEYCLOAK_PUBLIC_URL names the loopback or unspecified host '$host', which a monitoring UI on the realm cannot use: inside a container, localhost is the container itself. Set the public name first:
+  krate config set KEYCLOAK_PUBLIC_URL=https://<fqdn>/identity
+  krate gen-cert && krate auth apply"
+  fi
+}
+
+# Grafana's admin API from the host, with the local-mode Basic credentials in the
+# environment of the call: no password or token ever reaches a command line (the
+# gate samples ps to prove it, rows Z4a/Z4b).
+grafana_admin() {
+  local env_file="$MONITOR_DIR/.env"
+  GRAFANA_URL="http://127.0.0.1:$(env_value_file "$env_file" GRAFANA_PORT 3000)" \
+  GRAFANA_ADMIN_USER="$(env_value_file "$env_file" GRAFANA_USER admin)" \
+  GRAFANA_ADMIN_PASSWORD="$(env_value_file "$env_file" GRAFANA_PASSWORD)" \
+    python3 "$MONITOR_DIR/grafana-admin.py" "$@"
+}
+
+# The realm's krate-grafana client: created when absent, converged when it differs.
+# The secret reaches Keycloak through identity.py's environment and kcadm's standard
+# input, never as an argument. Scopes are compared and reported, not converged: a
+# PUT of the representation never changes a client's scopes.
+identity_keycloak_running() {
+  local cid
+  cid="$(identity_container keycloak)" || return 1
+  [[ -n "$cid" && "$(container_status "$cid")" == running ]]
+}
+
+identity_reconcile_grafana_client() {
+  local origin="$1" optional="${2:-}" sso id verdict
+  sso="$(sso_dir)"
+  if [[ "$optional" == optional ]]; then
+    # Called from `monitor up`, which must reach Compose even during a Keycloak outage:
+    # idp-wait is what names that failure (row U13), not this login. kcadm_login itself
+    # dies when the container is stopped, so reachability is checked first and a refused
+    # login is a warning; the next `monitor up` reconciles the client.
+    if ! identity_keycloak_running; then
+      warn "Keycloak is not running: the krate-grafana client is not reconciled now (a later krate monitor up does it)"
+      return 0
+    fi
+    kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" \
+      || { warn "Keycloak did not accept the master admin login: the krate-grafana client is not reconciled now (a later krate monitor up does it)"; return 0; }
+  else
+    kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" \
+      || die "Keycloak refused the master admin login. Check: krate identity status"
+  fi
+  id="$(kcadm_client_id "$IDENTITY_REALM" krate-grafana)" || die "Keycloak query failed"
+  local err
+  if [[ -z "$id" ]]; then
+    # kcadm announces a creation on stderr; only a real failure reaches the operator.
+    err="$(mktemp)" || die "Cannot create a temporary file"
+    GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
+      python3 "$sso/identity.py" grafana-client --origin "$origin" --with-secret \
+      | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null 2>"$err" \
+      || { sed 's/^/  /' "$err" >&2; rm -f "$err"
+           die "Cannot create the krate-grafana client: either its representation did not render or Keycloak refused it"; }
+    rm -f "$err"
+    identity_journal "monitor realm" created "krate-grafana client"
+    ok "Created the krate-grafana client in realm $IDENTITY_REALM"
+    kcadm_logout
+    return 0
+  fi
+  # With the secret, so a rotated GRAFANA_OAUTH_CLIENT_SECRET is detected and converged
+  # instead of leaving Keycloak on the old value while Grafana reads the new one.
+  verdict="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" \
+    | GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
+      python3 "$sso/identity.py" grafana-client --origin "$origin" --with-secret client-differs)" \
+    || die "Cannot compare the krate-grafana client with the plan"
+  case "$verdict" in
+    *scopes-differ*) warn "krate-grafana: its scopes differ from the plan, and a client update never changes scopes — set them in Keycloak" ;;
+  esac
+  case "$verdict" in
+    same*) ok "krate-grafana client unchanged" ;;
+    differs*)
+      err="$(mktemp)" || die "Cannot create a temporary file"
+      GRAFANA_OAUTH_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_OAUTH_CLIENT_SECRET)" \
+        python3 "$sso/identity.py" grafana-client --origin "$origin" --with-secret \
+        | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m >/dev/null 2>"$err" \
+        || { sed 's/^/  /' "$err" >&2; rm -f "$err"
+             die "Cannot update the krate-grafana client: either its representation did not render or Keycloak refused it"; }
+      rm -f "$err"
+      identity_journal "monitor realm" reconciled "krate-grafana client"
+      ok "krate-grafana client updated from the plan" ;;
+    *) die "Unexpected comparison result for the krate-grafana client: $verdict" ;;
+  esac
+  kcadm_logout
+}
+
+identity_reconcile_perses_clients() {
+  local optional="${1:-}" sso
+  sso="$(sso_dir)"
+  if [[ "$optional" == optional ]]; then
+    if ! identity_keycloak_running; then
+      warn "Keycloak is not running: the Perses clients are not reconciled now (a later krate monitor up does it)"
+      return 0
+    fi
+    kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" \
+      || { warn "Keycloak did not accept the master admin login: the Perses clients are not reconciled now (a later krate monitor up does it)"; return 0; }
+  else
+    kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" \
+      || die "Keycloak refused the master admin login. Check: krate identity status"
+  fi
+  local client_name id verdict err
+  for client_name in krate-perses krate-perses-sync; do
+    id="$(kcadm_client_id "$IDENTITY_REALM" "$client_name")" || die "Keycloak query failed"
+    if [[ -z "$id" ]]; then
+      err="$(mktemp)" || die "Cannot create a temporary file"
+      OAUTH2_PROXY_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" OAUTH2_PROXY_CLIENT_SECRET)" \
+      PERSES_SYNC_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" PERSES_SYNC_CLIENT_SECRET)" \
+        python3 "$sso/identity.py" perses-clients --env-file "$ENV_FILE" --monitor-env-file "$MONITOR_DIR/.env" --client "$client_name" --with-secret \
+        | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null 2>"$err" \
+        || { sed 's/^/  /' "$err" >&2; rm -f "$err"
+             die "Cannot create the $client_name client: either its representation did not render or Keycloak refused it"; }
+      rm -f "$err"
+      identity_journal "monitor reconciled" created "$client_name client"
+      ok "Created the $client_name client in realm $IDENTITY_REALM"
+      continue
+    fi
+    verdict="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" \
+      | OAUTH2_PROXY_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" OAUTH2_PROXY_CLIENT_SECRET)" \
+        PERSES_SYNC_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" PERSES_SYNC_CLIENT_SECRET)" \
+        python3 "$sso/identity.py" perses-clients --env-file "$ENV_FILE" --monitor-env-file "$MONITOR_DIR/.env" client-differs "$client_name" --with-secret)" \
+      || die "Cannot compare the $client_name client with the plan"
+    case "$verdict" in
+      *scopes-differ*) warn "$client_name: its scopes differ from the plan, and a client update never changes scopes — set them in Keycloak" ;;
+    esac
+    case "$verdict" in
+      same*) ok "$client_name client unchanged" ;;
+      differs*)
+        err="$(mktemp)" || die "Cannot create a temporary file"
+        OAUTH2_PROXY_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" OAUTH2_PROXY_CLIENT_SECRET)" \
+        PERSES_SYNC_CLIENT_SECRET="$(env_value_file "$MONITOR_DIR/.env" PERSES_SYNC_CLIENT_SECRET)" \
+          python3 "$sso/identity.py" perses-clients --env-file "$ENV_FILE" --monitor-env-file "$MONITOR_DIR/.env" --client "$client_name" --with-secret \
+          | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m >/dev/null 2>"$err" \
+          || { sed 's/^/  /' "$err" >&2; rm -f "$err"
+               die "Cannot update the $client_name client: either its representation did not render or Keycloak refused it"; }
+        rm -f "$err"
+        identity_journal "monitor reconciled" reconciled "$client_name client"
+        ok "$client_name client updated from the plan" ;;
+      *) die "Unexpected comparison result for the $client_name client: $verdict" ;;
+    esac
+  done
+  kcadm_logout
+}
+
+# The alert-seeding service account and its token. Grafana's own API creates both;
+# the token stays on the host (seed-alerting.py runs there) in a 0600 file under
+# monitoring/auth/secrets/, which import_site_files carries across an upgrade and
+# no release file contains. Only the token's name is printed: the value goes from
+# the helper's standard output straight into the file, and its id and expiry into
+# the meta file beside it.
+# Writes the helper's token document into the 0600 token and meta files and prints
+# only the token's name: the value goes from standard input straight into the file,
+# never into a shell variable, a log line or an argument.
+monitor_write_seed_token() {
+  python3 -c '
+import json, os, sys
+data = json.load(sys.stdin)
+token_path, meta_path = sys.argv[1], sys.argv[2]
+with open(token_path, "w", encoding="utf-8") as handle:
+    handle.write(data["key"] + "\n")
+os.chmod(token_path, 0o600)
+with open(meta_path, "w", encoding="utf-8") as handle:
+    handle.write("id=%d\nexpires=%d\n" % (data["id"], data["expires"]))
+os.chmod(meta_path, 0o600)
+print(data["name"])' "$MONITOR_DIR/auth/secrets/grafana-seed.token" "$MONITOR_DIR/auth/secrets/grafana-seed.meta"
+}
+
+# The alert-seeding service account and its 90-day token. Grafana's own API creates
+# both; the token stays on the host (seed-alerting.py runs there) in a 0600 file
+# under monitoring/auth/secrets/, which import_site_files carries across an upgrade
+# and no release file contains.
+monitor_grafana_seed_token() {
+  local days="${1:-90}" dir="$MONITOR_DIR/auth/secrets" meta="$MONITOR_DIR/auth/secrets/grafana-seed.meta"
+  local account name expires now
+  install -d -m 700 "$dir" || die "Cannot create $dir"
+  # Re-running the switch must not pile up tokens: one with more than 30 days left stays
+  # in use (the same threshold monitor_grafana_seed_renew uses).
+  if [[ -f "$meta" ]]; then
+    expires="$(sed -n 's/^expires=//p' "$meta")"
+    now="$(date -u +%s)"
+    if [[ "$expires" =~ ^[0-9]+$ && $((expires - now)) -ge 2592000 ]]; then
+      set_env_file_value "$MONITOR_DIR/.env" GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE auth/secrets/grafana-seed.token
+      ok "Grafana seed token still valid for $(( (expires - now) / 86400 )) days; not creating another"
+      return 0
+    fi
+  fi
+  account="$(grafana_admin service-account --name krate-seed --role Admin \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')" \
+    || die "Grafana refused the krate-seed service account — is it running? (krate monitor status)"
+  name="$(grafana_admin token-create --account-id "$account" --days "$days" | monitor_write_seed_token)" \
+    || die "Grafana refused the seed token"
+  set_env_file_value "$MONITOR_DIR/.env" GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE auth/secrets/grafana-seed.token
+  ok "Grafana seed token $name created (id and expiry in monitoring/auth/secrets/grafana-seed.meta)"
+}
+
+# The same helper with the seed token instead of the Basic admin, which realm mode
+# turned off: a service account may manage the tokens of its own account.
+grafana_admin_token() {
+  local env_file="$MONITOR_DIR/.env" token_file
+  token_file="$MONITOR_DIR/$(env_value_file "$env_file" GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE)"
+  [[ -f "$token_file" ]] || die "No Grafana seed token at $token_file — run: krate monitor realm"
+  GRAFANA_URL="http://127.0.0.1:$(env_value_file "$env_file" GRAFANA_PORT 3000)" \
+  GRAFANA_SERVICE_ACCOUNT_TOKEN="$(cat "$token_file")" \
+    python3 "$MONITOR_DIR/grafana-admin.py" "$@"
+}
+
+# The seed token lives 90 days. Renew it while it is still valid, so alert seeding
+# never stops: the successor is written first and only then is the old id deleted
+# (Grafana keeps expired tokens listed, so the deletion is by id). 30 days of room
+# means a renewal happens at the latest 60 days into a token's life.
+monitor_grafana_seed_renew() {
+  local meta="$MONITOR_DIR/auth/secrets/grafana-seed.meta" expires now old_id account name
+  # Without the record, or with an unreadable one, grafana_admin_token has nothing to
+  # authenticate with: every admin call then fails with an error that does not name the
+  # cause. Say what recreates it instead of returning silently (PR #42 review).
+  if [[ ! -f "$meta" ]]; then
+    warn "No Grafana seed-token record ($meta is missing), so the Grafana admin calls that need it will fail. Recreate it: krate monitor realm"
+    return 0
+  fi
+  expires="$(sed -n 's/^expires=//p' "$meta")"
+  old_id="$(sed -n 's/^id=//p' "$meta")"
+  now="$(date -u +%s)"
+  if [[ ! "$expires" =~ ^[0-9]+$ || ! "$old_id" =~ ^[0-9]+$ ]]; then
+    warn "The Grafana seed-token record is unreadable, so it cannot be renewed and the admin calls that need it will fail. Recreate it: krate monitor realm"
+    return 0
+  fi
+  [[ $((expires - now)) -lt 2592000 ]] || return 0
+  info "Renewing the Grafana seed token (it expires in $(( (expires - now) / 86400 )) days)"
+  # Grafana may be created but not started (idp-wait holds it during an outage), so a
+  # renewal that cannot run is a warning: the current token still has up to 30 days. An
+  # expired or deleted token fails here too, and that case has a different remedy, so the
+  # warning names both causes rather than asserting an outage.
+  if ! account="$(grafana_admin_token service-account --name krate-seed --role Admin \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')"; then
+    warn "Cannot renew the Grafana seed token: Grafana did not answer, or the token it was given has expired or been deleted. The token has $(( (expires - now) / 86400 )) days left. If Grafana is running, recreate the token: krate monitor realm; otherwise a later krate monitor up renews it"
+    return 0
+  fi
+  name="$(grafana_admin_token token-create --account-id "$account" --days 90 | monitor_write_seed_token)" \
+    || die "Grafana refused the successor seed token; the previous one is still in place"
+  # The success line follows the deletion's own result: printing "is deleted" after a failed
+  # delete contradicted the warning above it and left an untracked live credential (PR #42).
+  if grafana_admin_token token-delete --account-id "$account" --token-id "$old_id" >/dev/null; then
+    ok "Grafana seed token $name created; the previous one (id $old_id) is deleted"
+  else
+    warn "The previous Grafana seed token (id $old_id) could not be deleted; delete it in Grafana"
+    ok "Grafana seed token $name created; the previous one (id $old_id) is STILL VALID until it is deleted or expires"
+  fi
+}
+
+# What every `krate monitor up` re-checks while Grafana is on the realm, before
+# Compose decides what to recreate: realm.ini is regenerated (written only when it
+# changed, so an unchanged file does not recreate Grafana), the client is converged,
+# and the seed token is renewed while it is still valid.
+monitor_realm_refresh() {
+  local ini="$MONITOR_DIR/auth/realm.ini" origin
+  origin="$(public_url_origin)"
+  python3 "$(sso_dir)/identity.py" grafana-ini --env-file "$ENV_FILE" --output "$ini.new" >/dev/null \
+    || die "Cannot render monitoring/auth/realm.ini"
+  if [[ -f "$ini" ]] && cmp -s "$ini" "$ini.new"; then
+    rm -f "$ini.new"
+  else
+    mv "$ini.new" "$ini"
+    chmod 644 "$ini"
+    ok "Updated monitoring/auth/realm.ini"
+  fi
+  identity_reconcile_grafana_client "$origin" optional
+  monitor_grafana_seed_renew
+}
+
+# Local Grafana users whose e-mail a realm user also has: after the switch Grafana
+# refuses that sign-in ("User sync failed"), and taking the local user over is not
+# an option (harness/phase4/lab4 Q1: e-mail linking handed the local account the
+# server admin role). So each collision is listed with the command that retires it.
+grafana_list_collisions() {
+  local users emails page parsed rows offset
+  users="$(grafana_admin local-users)" || die "Grafana refused its user list"
+  kcadm_login "$IDENTITY_REALM" client krate-cli "$(env_value KEYCLOAK_CLI_CLIENT_SECRET)" \
+    || die "Keycloak refused the krate-cli client login. Check: krate identity status"
+  # Page through the realm instead of asking for one 1000-row page: past that limit the
+  # check silently compared against a partial realm. And a failed page is fatal rather than
+  # an empty list, because reporting "no collisions" for a realm that was never read is worse
+  # than stopping (PR #42 review).
+  emails=""
+  offset=0
+  while :; do
+    page="$(kcadm -- get users -r "$IDENTITY_REALM" --offset "$offset" --limit 100 \
+      --fields email)" \
+      || { kcadm_logout; die "Keycloak refused its user list, so the collision check cannot say whether a local Grafana user holds a realm e-mail. Check: krate identity status"; }
+    parsed="$(printf '%s' "$page" | python3 -c '
+import json, sys
+try:
+    users = json.load(sys.stdin)
+    if not isinstance(users, list):
+        raise ValueError()
+    emails = []
+    for user in users:
+        if not isinstance(user, dict):
+            raise ValueError()
+        email = user.get("email")
+        if email is not None and not isinstance(email, str):
+            raise ValueError()
+        if email and email.strip():
+            emails.append(email.strip().lower())
+except (ValueError, TypeError):
+    sys.exit("Keycloak user page has an invalid JSON shape")
+print(len(users))
+print("\n".join(emails))
+')" || { kcadm_logout; die "Keycloak returned an invalid user page, so the collision check cannot say whether a local Grafana user holds a realm e-mail. Check: krate identity status"; }
+    rows="${parsed%%$'\n'*}"
+    [[ "$rows" -eq 0 ]] && break
+    if [[ "$parsed" == *$'\n'* ]]; then
+      emails+="${parsed#*$'\n'}"
+      emails+=$'\n'
+    fi
+    [[ "$rows" -lt 100 ]] && break
+    offset=$((offset + 100))
+  done
+  kcadm_logout
+  # Disabled local users count: Grafana still looks a realm user up by e-mail and finds them,
+  # and the sign-in then fails (the live walk reproduced "User sync failed" on exactly that).
+  printf '%s' "$users" | KRATE_REALM_EMAILS="$emails" python3 -c '
+import json, os, sys
+realm = {line.strip() for line in os.environ["KRATE_REALM_EMAILS"].splitlines() if line.strip()}
+for user in json.load(sys.stdin):
+    email = (user.get("email") or "").strip().lower()
+    if email and email in realm:
+        state = "disabled" if user.get("isDisabled") else "enabled"
+        print("%s\t%s\t%s" % (user.get("login"), email, state))' \
+    | while IFS=$'\t' read -r login email state; do
+    warn "Local Grafana user $login ($state) holds the e-mail of realm user $email: that sign-in fails until the local user is retired"
+    echo "         krate monitor grafana-user retire $login"
+  done
+}
+
 # Grafana and Perses addresses and logins.
 monitor_logins() {
   local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
@@ -3216,6 +3741,56 @@ monitor_logins() {
   fi
 }
 
+# Prometheus's own verdict on its last configuration reload, as "<timestamp> <successful>"
+# read over one metrics request inside the container (the host port is loopback-only).
+# Exits non-zero when either metric is missing, which is how a stopped or unreachable
+# Prometheus is told from a rejected configuration.
+monitor_prometheus_reload_state() {
+  monitor_compose exec -T prometheus wget -q -O - http://127.0.0.1:9090/metrics 2>/dev/null | awk '
+    $1 == "prometheus_config_last_reload_success_timestamp_seconds" { timestamp = $2 }
+    $1 == "prometheus_config_last_reload_successful" { successful = $2 }
+    END { if (timestamp == "" || successful == "") exit 1; printf "%s %s\n", timestamp, successful }'
+}
+
+# Reload Prometheus and prove the result. The lifecycle API is off, so the reload is a
+# SIGHUP; a signal always "succeeds", so the answer comes from the reload metrics: a
+# rejected file leaves prometheus_config_last_reload_successful at 0 with the previous
+# configuration still in use (harness/phase4/lab4 Q4).
+monitor_reload_prometheus() {
+  local before state timestamp successful waited=0
+  before="$(monitor_prometheus_reload_state)" \
+    || die "Prometheus did not answer on http://127.0.0.1:9090/metrics — is the stack up? (krate monitor status)"
+  local before_ts="${before%% *}" before_ok="${before##* }"
+  monitor_compose kill -s SIGHUP prometheus
+  while :; do
+    if state="$(monitor_prometheus_reload_state)"; then
+      timestamp="${state%% *}"
+      successful="${state##* }"
+      # The flag describes THIS reload only once the timestamp moved, and a rejection is a
+      # flip of the flag to 0: reading the flag first reported a good file as rejected when
+      # an earlier reload had already left it at 0.
+      if [[ "$timestamp" != "$before_ts" && "${successful%%.*}" == 1 ]]; then
+        ok "Prometheus reloaded its configuration and alert rules."
+        return 0
+      fi
+      if [[ "${successful%%.*}" == 0 && "${before_ok%%.*}" == 1 ]]; then
+        die "Prometheus rejected the configuration and keeps running with the previous one. Fix monitoring/prometheus/prometheus.yml (or alerts.yml), then: krate monitor reload. The error: krate monitor logs prometheus"
+      fi
+    fi
+    sleep 0.5
+    waited=$((waited + 1))
+    if [[ "$waited" -ge 20 ]]; then
+      # A configuration rejected twice in a row never moves the success timestamp, so the
+      # polling budget expires with the flag still 0: report the rejection, not a missing
+      # reload. ${successful:-1} keeps set -u safe when no read ever succeeded.
+      if [[ "${successful:-1}" == 0* ]]; then
+        die "Prometheus rejected the configuration and keeps running with the previous one, and did so before this reload too. Fix monitoring/prometheus/prometheus.yml (or alerts.yml), then: krate monitor reload. The error: krate monitor logs prometheus"
+      fi
+      die "Prometheus reported no reload after 20 polls of its metrics (about 10 s) — is it running and healthy? (krate monitor status, krate monitor logs prometheus)"
+    fi
+  done
+}
+
 cmd_monitor() {
   local sub="${1:-}"; shift || true
   case "$sub" in
@@ -3229,6 +3804,14 @@ cmd_monitor() {
       adopt_legacy_project
       ensure_cert
       monitor_prepare
+      # While Grafana is on the realm, refresh its sign-in inputs and its seed token
+      # first: Compose then recreates Grafana exactly when one of them changed.
+      if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
+        monitor_realm_refresh
+      fi
+      if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]]; then
+        identity_reconcile_perses_clients optional
+      fi
       local conflicts
       conflicts="$(monitor_port_conflicts | xargs)"
       [[ -z "$conflicts" ]] || die "Host ports already in use or configured twice: $conflicts. Choose free, distinct ones, e.g. krate config set GRAFANA_PORT=13000"
@@ -3238,9 +3821,21 @@ cmd_monitor() {
         monitor_compose rm -s -f oauth2-proxy perses-sync >/dev/null
       fi
       monitor_compose up -d
+      if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]]; then
+        local current_issuer
+        current_issuer="$(env_value KEYCLOAK_PUBLIC_URL)"
+        current_issuer="${current_issuer%/}/realms/$IDENTITY_REALM"
+        set_env_file_value "$MONITOR_DIR/.env" PERSES_ISSUER_APPLIED "$current_issuer"
+      fi
       python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
       echo ""
-      ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+      if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
+        # Realm mode: the cluster proxy serves Grafana over TLS at /grafana/, and its
+        # own port is on the loopback interface (use it for the local login rollback).
+        ok "Grafana:    https://$(public_url_authority)/grafana/"
+      else
+        ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+      fi
       # Prometheus (and Loki) answer on PROM_BIND/LOKI_BIND only, 127.0.0.1 by
       # default: the address printed is the one that works.
       local prom_bind prom_host
@@ -3258,25 +3853,106 @@ cmd_monitor() {
     status)  require_compose; monitor_compose ps ;;
     logs)    require_compose; monitor_compose logs --tail 100 "$@" ;;
     reload)
-      # Re-read alert rules without restarting Prometheus.
+      # Re-read the configuration and alert rules without restarting Prometheus
+      # (SIGHUP, then Prometheus's own reload metrics: the lifecycle API is off).
       require_compose
-      if monitor_compose exec -T prometheus wget -q -O /dev/null --post-data='' http://127.0.0.1:9090/-/reload; then
-        ok "Prometheus reloaded its rules."
-      else
-        die "Reload failed — is the stack up?"
+      monitor_reload_prometheus
+      ;;
+    realm)
+      # Prepare the switch while Grafana still signs in locally: only the Basic
+      # admin can read what this checks (harness/phase4/lab6 L5-4). Every later
+      # krate monitor up regenerates realm.ini and reconciles the client.
+      require_compose; require_compose_file; require_env
+      command -v python3 >/dev/null || die "python3 is required for the Grafana realm switch"
+      [[ -f "$MONITOR_DIR/grafana-admin.py" ]] \
+        || die "monitoring/grafana-admin.py is missing: was this package built with the observability stack?"
+      if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" != local.ini ]]; then
+        die "Grafana already signs in with $(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini), and krate monitor realm runs against the local login: it is the only one that can read what this command checks.
+To go back to the local login: krate config set GRAFANA_AUTH_CONFIG=local.ini && krate monitor up"
       fi
+      refuse_loopback_public_url
+      local state origin blocked
+      state="$(identity_state)" || exit 1
+      [[ "${state%% *}" == existing ]] || die "No identity database (state: $state). Run: krate identity up, then krate auth apply"
+      origin="$(public_url_origin)"
+      # Refuse a Grafana whose state realm mode would hide from the API: after the
+      # switch a database SSO setting, a public dashboard and a snapshot answer
+      # 404/403, so an operator would lose sight of them (harness/phase4/lab6 L5-4).
+      blocked="$(grafana_admin reads | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+found = []
+# A degraded read is not a clean one: null with a note means "not readable with these
+# credentials", never "nothing there" (harness/phase4/team/t-grafana-admin.md, section g).
+notes = data.get("notes") or []
+if notes:
+    found.append("Grafana did not answer every read cleanly (%s)" % "; ".join(notes))
+source = data.get("sso_settings_source")
+if source != "system":
+    found.append("the generic_oauth SSO setting is not the ini-derived one (source=%r)" % source)
+for key, label in (("public_dashboards", "public dashboard"), ("snapshots", "snapshot")):
+    count = data.get(key) or 0
+    if count:
+        found.append("%d %s%s" % (count, label, "" if count == 1 else "s"))
+print("; ".join(found))')" \
+        || die "Grafana did not answer with the Basic admin on http://127.0.0.1:$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000) — is the stack up (krate monitor status), and is GRAFANA_PASSWORD the password Grafana's volume holds?"
+      [[ -z "$blocked" ]] || die "Grafana carries state that realm mode hides from its API: $blocked.
+Remove it first — a public dashboard under Dashboards → Share → Public dashboard, a snapshot under Dashboards → Snapshots, a database SSO setting through Grafana's provisioning API — then run: krate monitor realm"
+      if [[ -n "$(fill_secrets "$MONITOR_DIR/.env" 24 GRAFANA_OAUTH_CLIENT_SECRET | xargs)" ]]; then
+        ok "Generated GRAFANA_OAUTH_CLIENT_SECRET in monitoring/.env"
+      fi
+      monitor_grafana_seed_token 90
+      grafana_list_collisions
+      identity_reconcile_grafana_client "$origin"
+      python3 "$(sso_dir)/identity.py" grafana-ini --env-file "$ENV_FILE" --output "$MONITOR_DIR/auth/realm.ini" >/dev/null \
+        || die "Cannot write monitoring/auth/realm.ini"
+      ok "Wrote monitoring/auth/realm.ini"
+      echo ""
+      info "Next: krate config set GRAFANA_AUTH_CONFIG=realm.ini && krate monitor up"
+      ;;
+    grafana-user)
+      local gsub="${1:-}"; shift || true
+      case "$gsub" in
+        retire)
+          [[ $# -eq 1 ]] || die "Usage: krate monitor grafana-user retire <login>"
+          require_compose; require_env
+          # This command speaks to Grafana as the Basic admin. Realm mode turns Basic off
+          # ([auth.basic] enabled = false, and row U2 asserts a Basic call answers 401), and
+          # the seed service account may not administer users either: disabling a user needs
+          # the global-org ActionUsersDisable permission, i.e. a Grafana server admin, while
+          # krate-seed is an org Admin (grafana-v12.2.0 api.go:561-568). Say so and give the
+          # sequence that works, instead of failing with a misleading credential hint.
+          if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
+            die "Grafana is in realm mode, where the Basic admin this command needs is disabled and the seed service account may not administer users. Roll back, retire, and switch again:
+  krate config set GRAFANA_AUTH_CONFIG=local.ini && krate monitor up
+  krate monitor grafana-user retire $1
+  krate config set GRAFANA_AUTH_CONFIG=realm.ini && krate monitor up"
+          fi
+          # Retiring moves the e-mail aside AND disables the account: disabling
+          # alone still fails the realm sign-in with "User sync failed"
+          # (harness/phase4/lab6 L5-5). Folders and dashboards the user owns stay.
+          local retired_email
+          retired_email="$(grafana_admin retire-user --login "$1" \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["email"])')" \
+            || die "Grafana refused to retire $1 — is it running, and is GRAFANA_PASSWORD right?"
+          ok "Retired the local Grafana user $1: disabled, e-mail moved to $retired_email, its folders and dashboards untouched"
+          ;;
+        *) die "Usage: krate monitor grafana-user retire <login>" ;;
+      esac
       ;;
     ui) monitor_logins ;;
     *)
-      echo "Usage: krate monitor {up|down|status|logs|reload|ui}"
+      echo "Usage: krate monitor {up|down|status|logs|reload|ui|realm|grafana-user retire <login>}"
       return 1 ;;
   esac
 }
 
-# Read a key from an arbitrary env file, with a default.
+# Read a key from an arbitrary env file, with a default. Quotes and CR are stripped: a
+# CRLF-edited monitoring/.env must not make identity_realm_ui compare realm.ini\r and
+# report local (Compose itself tolerates CRLF).
 env_value_file() {
   local file="$1" key="$2" default="${3:-}" v=""
-  [[ -f "$file" ]] && v="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"'"')"
+  [[ -f "$file" ]] && v="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
   echo "${v:-$default}"
 }
 
@@ -3287,12 +3963,40 @@ env_value_file() {
 monitor_prepare() {
   local env_file="$MONITOR_DIR/.env"
   prepare_monitor_env
+  for bind_var in PROM_BIND LOKI_BIND; do
+    local bind_val; bind_val="$(env_value_file "$env_file" "$bind_var" 127.0.0.1)"
+    if [[ "$bind_val" != 127.0.0.1 ]]; then
+      warn "$bind_var is '$bind_val' (not loopback 127.0.0.1): this backing service has no authentication of its own and is exposed to the host network"
+    fi
+  done
   # prepare_monitor_env only warns here, because it also runs on cluster start;
   # the monitoring stack itself does not start on the insecure default.
   if [[ "$(env_value_file "$env_file" GRAFANA_PASSWORD)" == changeme ]]; then
     die "GRAFANA_PASSWORD is changeme (insecure) and Grafana's volume exists with it.
 Change it in Grafana (docker exec <grafana container> grafana cli admin reset-admin-password <new>),
 record it with: krate config set GRAFANA_PASSWORD=<new>, then: krate monitor up"
+  fi
+  # A monitoring UI on the realm needs a public name that is not loopback, and Grafana
+  # needs the seed token `krate monitor realm` created. Both are refused here, before
+  # Compose runs, so nothing is created or recreated by a refused run.
+  if [[ "$(env_value_file "$env_file" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
+    refuse_loopback_public_url
+    [[ -f "$MONITOR_DIR/auth/secrets/grafana-seed.meta" ]] || die "GRAFANA_AUTH_CONFIG=realm.ini but monitoring/auth/secrets/grafana-seed.meta is missing: the realm switch was never completed here.
+Run: krate monitor realm     (or go back: krate config set GRAFANA_AUTH_CONFIG=local.ini, then krate monitor up)"
+  fi
+  if [[ "$(env_value_file "$env_file" PERSES_IDP)" == krate ]]; then
+    refuse_loopback_public_url
+    local p_mode
+    p_mode="$(env_value_file "$env_file" PERSES_AUTH_MODE local)"
+    [[ "$p_mode" == native ]] || die "PERSES_IDP=krate requires PERSES_AUTH_MODE=native (got $p_mode)"
+    local current_issuer applied_issuer
+    current_issuer="$(env_value KEYCLOAK_PUBLIC_URL)"
+    current_issuer="${current_issuer%/}/realms/$IDENTITY_REALM"
+    applied_issuer="$(env_value_file "$env_file" PERSES_ISSUER_APPLIED)"
+    if [[ -n "$applied_issuer" && "$applied_issuer" != "$current_issuer" ]]; then
+      set_env_file_value "$env_file" OAUTH2_PROXY_COOKIE_SECRET "$(random_secret 32)"
+      ok "Regenerated OAUTH2_PROXY_COOKIE_SECRET for new issuer"
+    fi
   fi
   mkdir -p "$MONITOR_DIR/auth/perses"
   python3 - "$env_file" <<'PY' || die "monitoring/.env is not ready for the Perses stack (see above)."
@@ -3312,6 +4016,13 @@ if mode in ('native', 'gateway') and not value('OAUTH2_PROXY_CLIENT_SECRET'):
 if mode == 'native' and not value('PERSES_SYNC_CLIENT_SECRET'):
     sys.exit('  Set PERSES_SYNC_CLIENT_SECRET (the access guard client secret) in monitoring/.env.')
 PY
+  # The rendered stack, checked before anything is created or recreated: no monitoring
+  # service on an identity network, Grafana on exactly the two networks it needs, and
+  # in realm mode its port on the loopback interface with the issuer route and the
+  # rendered secret present.
+  monitor_compose config --format json \
+    | python3 "$(sso_dir)/preflight.py" --directory "$SCRIPT_DIR" --mode monitoring \
+    || die "Monitoring preflight failed (see above); nothing was started or recreated."
 }
 
 note_smtp() {
@@ -3989,8 +4700,11 @@ cmd_help() {
   printf "  %-30s %s\n" "identity recover-admin" "Recreate the master admin from .env via a temporary bootstrap admin (Keycloak stopped)"
   printf "  %-30s %s\n" "identity users list"  "Users of the krate realm"
   printf "  %s\n" "identity users add U [--admin|--viewer] [--email A]"
-  printf "  %-30s %s\n" ""                     "Create a user with a one-time temporary password"
-  printf "  %s\n" "identity users {enable|disable|reset-password|groups} U"
+  printf "  %-30s %s\n" ""                     "Create a user with a one-time temporary password (--email required while a realm UI is on)"
+  printf "  %s\n" "identity users {enable|disable|reset-password|groups|logout} U"
+  printf "  %-30s %s\n" ""                     "logout ends every realm session of U (Kafbat ends at once)"
+  printf "  %s\n" "identity users set-email U A"
+  printf "  %-30s %s\n" ""                     "Set U's e-mail address, marked verified (a realm UI needs it)"
   printf "  %-30s %s\n" "identity rotate KEY [--value]" "Rotate a Keycloak password/secret in Keycloak and .env (--value: from stdin; PING_KEYCLOAK_CLIENT_SECRET needs --value)"
   printf "  %-30s %s\n" "identity backup FILE" "Encrypted dump of the identity database (KRATE_BACKUP_PASSPHRASE or prompt)"
   printf "  %-30s %s\n" "identity restore FILE" "Restore that dump with Keycloak stopped, then start and verify it"

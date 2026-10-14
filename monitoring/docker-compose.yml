@@ -35,6 +35,8 @@ volumes:
   alertmanager_rendered:
   oauth2_proxy_rendered:
   perses_sync_rendered:
+  grafana_rendered:
+  perses_migrate_rendered:
 
 services:
   # ── kafka-exporter — cluster/topic/consumer-group metrics as a Kafka client ──
@@ -108,7 +110,10 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=${PROM_RETENTION:-15d}
-      - --web.enable-lifecycle
+      # No --web.enable-lifecycle: with it any peer on the monitoring network — and a
+      # Grafana Viewer through a Prometheus datasource's resources route — could reload
+      # and stop Prometheus (POST /-/reload, POST /-/quit). `krate monitor reload` sends
+      # SIGHUP instead; the entrypoint execs Prometheus, so the signal reaches PID 1.
     networks: [monitoring, perses]
     depends_on: [kafka-exporter]
     healthcheck:
@@ -138,6 +143,30 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+
+  # Read-only gateway in front of Loki: Grafana's Loki datasource queries through it,
+  # so a Grafana Viewer cannot push to, delete from, flush or shut down Loki (Loki has
+  # no authentication of its own). Fluent Bit writes to loki directly; nothing else
+  # reaches Loki through this gateway. Not published on the host at all.
+  loki-gateway:
+    image: ${NGINX_IMAGE:?Merge NGINX_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-loki-gateway
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.3
+    volumes:
+      - ./loki/gateway.conf:/etc/nginx/conf.d/default.conf:ro,z
+    networks: [monitoring]
+    depends_on: [loki]
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3100 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }
 
   # Metadata-only discovery admits selected files before Fluent Bit tails them.
   log-discovery:
@@ -205,15 +234,35 @@ services:
     image: ${GRAFANA_IMAGE}
     container_name: ${MONITOR_PROJECT:-krate-monitoring}-grafana
     restart: unless-stopped
+    # In realm mode users reach Grafana through the cluster proxy at /grafana/ and
+    # its own port has no login left (Basic auth off, login form off), so
+    # `krate monitor up` publishes it on the loopback interface only (GRAFANA_BIND).
+    # Local mode keeps main's behaviour: every interface.
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "${GRAFANA_BIND:-0.0.0.0}:${GRAFANA_PORT:-3000}:3000"
+    # The realm's public host resolves to the Docker host, whose published 443 is
+    # the cluster proxy: Grafana's token, userinfo and logout calls go through it
+    # and verify it with the cluster CA mounted below.
+    extra_hosts:
+      - "${KRATE_IDP_HOST:-krate-idp.invalid}:host-gateway"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro,z
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro,z
       - ./auth:/etc/krate/auth:ro,z
+      # The cluster CA, so realm.ini's tls_client_ca can verify the issuer without
+      # turning off certificate checks.
+      - ${PERSES_CERTS_DIR:-../certs}/server.crt:/etc/krate/ca/server.crt:ro,z
+      # monitoring-init renders the client secret here, owned by Grafana's uid with
+      # mode 0400: realm.ini reads it with $__file{}, so it is never in the
+      # environment, the Compose file or an argument.
+      - grafana_rendered:/etc/krate/grafana:ro
     environment:
       GF_PATHS_CONFIG: /etc/krate/auth/${GRAFANA_AUTH_CONFIG:-local.ini}
+      # Digest of realm.ini, the cluster certificate and the client secret: Compose
+      # recreates Grafana exactly when one of its sign-in inputs changed, and a
+      # change of an unrelated monitoring/.env key leaves it alone.
+      KRATE_GRAFANA_AUTH_SHA: ${KRATE_GRAFANA_AUTH_SHA:-}
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-changeme}
       GF_USERS_ALLOW_SIGN_UP: "false"
@@ -236,8 +285,22 @@ services:
       GF_SMTP_FROM_NAME: ${GF_SMTP_FROM_NAME:-Krate}
       GF_SMTP_SKIP_VERIFY: ${GF_SMTP_SKIP_VERIFY:-false}
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-ops@example.com}
-    networks: [monitoring]
-    depends_on: [prometheus]
+    # kafka-network so the cluster proxy reaches Grafana as krate-grafana and serves
+    # it at /grafana/ over TLS, the same origin as Kafbat. The residual reachability
+    # this adds is measured by the gate and listed in monitoring/README.md table 2.
+    networks:
+      monitoring: {}
+      kafka-network:
+        aliases: [krate-grafana]
+    depends_on:
+      prometheus:
+        condition: service_started
+      # The rendered client secret must exist before Grafana reads realm.ini.
+      monitoring-init:
+        condition: service_completed_successfully
+      # In realm mode Grafana must not start while the realm is unreachable.
+      idp-wait:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
       interval: 15s
@@ -271,9 +334,16 @@ services:
       - perses_sync_rendered:/rendered/perses-sync
       - perses_sync_state:/rendered/state/perses-sync
       - perses_seed_state:/rendered/state/perses-seed
+      - grafana_rendered:/rendered/grafana
+      - perses_migrate_rendered:/rendered/perses-migrate
     environment:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
       PYTHONDONTWRITEBYTECODE: "1"
+      # render.py renders only what is listed here, so these two are what makes the
+      # Grafana client secret reach Grafana. Independent of PERSES_AUTH_MODE: Grafana
+      # on the realm with Perses local must work.
+      GRAFANA_AUTH_CONFIG: ${GRAFANA_AUTH_CONFIG:-local.ini}
+      GRAFANA_OAUTH_CLIENT_SECRET: ${GRAFANA_OAUTH_CLIENT_SECRET:-}
       PERSES_AUTH_MODE: ${PERSES_AUTH_MODE:-local}
       PERSES_PORT: ${PERSES_PORT:-3443}
       PERSES_ADMIN_USER: ${PERSES_ADMIN_USER:-admin}
@@ -292,7 +362,44 @@ services:
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-ops@example.com}
       ALERTMANAGER_EMAIL_ENABLED: ${ALERTMANAGER_EMAIL_ENABLED:-}
       ALERTMANAGER_SMTP_REQUIRE_TLS: ${ALERTMANAGER_SMTP_REQUIRE_TLS:-true}
+      PERSES_IDP: ${PERSES_IDP:-}
+      PERSES_GROUP_PROOF_MINUTES: ${PERSES_GROUP_PROOF_MINUTES:-}
+      KEYCLOAK_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-}
+      KEYCLOAK_VIEWER_GROUP: ${KEYCLOAK_VIEWER_GROUP:-}
+      KEYCLOAK_ADMIN_GROUP: ${KEYCLOAK_ADMIN_GROUP:-}
+      KEYCLOAK_SESSION_IDLE_MINUTES: ${KEYCLOAK_SESSION_IDLE_MINUTES:-}
+      KEYCLOAK_SESSION_MAX_HOURS: ${KEYCLOAK_SESSION_MAX_HOURS:-}
     command: ["python3", "/etc/krate/monitoring/render.py", "/rendered", "/etc/krate/site/perses.json"]
+    logging:
+      driver: "json-file"
+      options: { max-size: "5m", max-file: "2" }
+
+  # Holds the realm's consumers (Grafana, oauth2-proxy, Perses) until the Krate
+  # realm answers, so a Keycloak outage creates them without starting them instead
+  # of restart-looping them, and they start on their own when Keycloak returns.
+  # Exits at once when no monitoring UI is on the realm (IDP_DISCOVERY_URL empty).
+  idp-wait:
+    image: ${LOG_DISCOVERY_IMAGE:?Merge LOG_DISCOVERY_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-idp-wait
+    restart: "no"
+    mem_limit: 64m
+    cpus: 0.1
+    read_only: true
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [monitoring]
+    # The realm's public host resolves to the Docker host, whose published 443 is
+    # the cluster proxy — the same route the consumers use.
+    extra_hosts:
+      - "${KRATE_IDP_HOST:-krate-idp.invalid}:host-gateway"
+    volumes:
+      - ${PERSES_CERTS_DIR:-../certs}/server.crt:/etc/krate/ca/server.crt:ro,z
+      - ./idp:/etc/krate/idp:ro,z
+    environment:
+      IDP_DISCOVERY_URL: ${IDP_DISCOVERY_URL:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: ["python3", "/etc/krate/idp/idp_wait.py"]
     logging:
       driver: "json-file"
       options: { max-size: "5m", max-file: "2" }
@@ -328,7 +435,7 @@ services:
       - --cluster.listen-address=
       - --web.listen-address=:9093
     environment:
-      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+      KRATE_ALERTMANAGER_REVISION: ${KRATE_ALERTMANAGER_REVISION:-}
     volumes:
       - alertmanager_rendered:/etc/alertmanager/rendered:ro
       - alertmanager_data:/alertmanager
@@ -346,6 +453,31 @@ services:
       driver: "json-file"
       options: { max-size: "20m", max-file: "3" }
 
+  # One-shot migration: removes stale users and bindings when the issuer changes.
+  perses-migrate:
+    image: ${LOG_DISCOVERY_IMAGE:?Merge LOG_DISCOVERY_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-perses-migrate
+    restart: "no"
+    user: "65532:65532"
+    mem_limit: 64m
+    cpus: 0.2
+    network_mode: none
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./perses/migrate_issuer.py:/etc/krate/perses/migrate_issuer.py:ro,z
+      - perses_data:/perses
+      - perses_migrate_rendered:/etc/krate/perses-migrate:ro
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    command: ["python3", "/etc/krate/perses/migrate_issuer.py"]
+    depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
+    logging:
+      driver: "json-file"
+      options: { max-size: "5m", max-file: "2" }
+
   # ── Perses — dashboards for Prometheus metrics and VictoriaLogs logs ───────
   # No host port: reachable only through perses-gateway.
   perses:
@@ -356,6 +488,8 @@ services:
     cpus: 1.0
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    extra_hosts:
+      - "${KRATE_IDP_HOST:-krate-idp.invalid}:host-gateway"
     command: ["--config=/etc/krate/perses/rendered/config.yaml", "--log.level=warning"]
     environment:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
@@ -363,9 +497,14 @@ services:
       - perses_data:/perses
       - ./perses/provisioning:/etc/krate/perses/provisioning:ro,z
       - perses_rendered:/etc/krate/perses/rendered:ro
+      - ${PERSES_CERTS_DIR:-../certs}/server.crt:/etc/krate/ca/server.crt:ro,z
     networks: [perses]
     depends_on:
       monitoring-init:
+        condition: service_completed_successfully
+      perses-migrate:
+        condition: service_completed_successfully
+      idp-wait:
         condition: service_completed_successfully
     logging:
       driver: "json-file"
@@ -386,17 +525,21 @@ services:
       - ./perses/seed.py:/etc/krate/perses/seed.py:ro,z
       - ./perses/dashboards:/etc/krate/perses/dashboards:ro,z
       - ./auth/perses:/etc/krate/site:ro,z
+      - perses_sync_rendered:/etc/krate/perses-sync/rendered:ro
       - perses_seed_state:/var/lib/krate-perses-seed
     environment:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
       PYTHONDONTWRITEBYTECODE: "1"
       PERSES_AUTH_MODE: ${PERSES_AUTH_MODE:-local}
+      PERSES_IDP: ${PERSES_IDP:-}
       PERSES_ADMIN_USER: ${PERSES_ADMIN_USER:-admin}
       PERSES_ADMIN_PASSWORD: ${PERSES_ADMIN_PASSWORD:-}
       PERSES_SYNC_CLIENT_SECRET: ${PERSES_SYNC_CLIENT_SECRET:-}
     command: ["python3", "/etc/krate/perses/seed.py"]
     networks: [perses]
     depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
       perses:
         condition: service_started
     logging:
@@ -446,6 +589,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    extra_hosts:
+      - "${KRATE_IDP_HOST:-krate-idp.invalid}:host-gateway"
     command: ["--config=/etc/oauth2-proxy/oauth2-proxy.cfg"]
     environment:
       KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
@@ -453,9 +598,12 @@ services:
       OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET:-}
     volumes:
       - oauth2_proxy_rendered:/etc/oauth2-proxy:ro
+      - ${PERSES_CERTS_DIR:-../certs}/server.crt:/etc/krate/ca/server.crt:ro,z
     networks: [perses]
     depends_on:
       monitoring-init:
+        condition: service_completed_successfully
+      idp-wait:
         condition: service_completed_successfully
     logging:
       driver: "json-file"
@@ -484,6 +632,8 @@ services:
     networks: [perses]
     depends_on:
       monitoring-init:
+        condition: service_completed_successfully
+      perses-migrate:
         condition: service_completed_successfully
       perses:
         condition: service_started

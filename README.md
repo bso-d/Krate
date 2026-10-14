@@ -198,6 +198,8 @@ If Docker is missing and you included its packages, run `./krate docker-install`
 
 `doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images and installs the package into `/opt/krate/kraft` (`/opt/krate/epc` for EPC; set `KRATE_HOME` to choose another directory). There it does the same setup as `start` (settings, generated passwords, certificate), starts the cluster, waits for it to be healthy and prints every login. `credentials` shows them again later.
 
+The default `/opt/krate` and edition directories must be real directories, not symlinks. Installation gives containers access through those directories while leaving passwords and other private files protected. If you choose a different `KRATE_HOME`, make sure its parent directories allow the containers to reach it; the installer does not change permissions on your custom path.
+
 The installation directory holds everything specific to the site: `.env`, `monitoring/.env`, the certificate in `certs/` and the SSO files under `auth/`. The cluster's Docker project is always `krate-kraft` (or `krate-epc`), whatever directory a package was unpacked to, so its data volumes keep the same names.
 
 ### Update to a newer package

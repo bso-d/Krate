@@ -15,5 +15,14 @@ datasources:
     type: loki
     uid: loki
     access: proxy
-    url: http://loki:3100
+    # Through the read-only gateway: Loki has no authentication, and a direct URL
+    # would let any Grafana user who can reach a datasource write to it.
+    url: http://loki-gateway:3100
     editable: false
+    jsonData:
+      # Krate's alert rules are seeded into Grafana against Prometheus
+      # (monitoring/seed-alerting.py); Loki-managed rules are not used. Without this,
+      # Grafana's Alerting list asks Loki for its rules (manageAlerts defaults to true
+      # when jsonData is unset, v12.2.0 datasource.ts:345) and the read-only gateway
+      # answers 403, which the UI reports as a datasource error.
+      manageAlerts: false

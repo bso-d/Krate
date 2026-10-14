@@ -75,7 +75,9 @@ apply_auth() {
     ok "Kafbat UI recreated with the applied authentication"
   fi
   if [[ "$mode" == runtime.yml ]]; then
-    python3 "$sso_dir/probe.py" --directory "$SCRIPT_DIR"
+    local -a probe_args=()
+    [[ -z "${KRATE_PROBE_CONNECT_IP:-}" ]] || probe_args+=(--connect-ip "$KRATE_PROBE_CONNECT_IP")
+    python3 "$sso_dir/probe.py" --directory "$SCRIPT_DIR" "${probe_args[@]}"
   fi
   ok "Authentication applied ($mode). Broker services and stored data were unchanged."
   # The login model now in force, so nobody looks for a form that is not there.

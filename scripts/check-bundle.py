@@ -46,7 +46,7 @@ def main():
             raise SystemExit('Missing licence file: ' + name)
     for name in ('sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh',
                  'sso/preflight.py', 'sso/probe.py', 'sso/identity.py', 'sso/logrotate/krate-identity.conf',
-                 'auth/ui/local.yml', 'docs/dual-login.md', 'docs/identity-foundation.md'):
+                 'auth/ui/local.yml', 'docs/dual-login.md', 'docs/identity-foundation.md', 'docs/grafana-sso.md'):
         if not (root / name).is_file():
             raise SystemExit('Missing authentication package file: ' + name)
     monitor_template = root / 'monitoring/.env.template'
@@ -59,8 +59,15 @@ def main():
                 raise SystemExit('Missing monitoring package file: fluent-bit/' + name)
         if not (root / 'monitoring/README.md').is_file():
             raise SystemExit('Missing monitoring package file: README.md')
+        # Grafana's Loki datasource queries through this gateway, which serves nothing without its config.
+        if not (root / 'monitoring/loki/gateway.conf').is_file():
+            raise SystemExit('Missing monitoring package file: loki/gateway.conf')
+        for name in ('idp/idp_wait.py', 'grafana-admin.py'):
+            if not (root / 'monitoring' / name).is_file():
+                raise SystemExit('Missing monitoring package file: ' + name)
     if monitor_template.is_file() and 'PERSES_IMAGE=' in monitor_template.read_text():
-        for name in ('render.py', 'perses/seed.py', 'perses/sync/perses_sync.py', 'perses/provisioning/krate.json',
+        for name in ('render.py', 'perses/seed.py', 'perses/sync/perses_sync.py', 'perses/migrate_issuer.py',
+                     'perses/provisioning/krate.json',
                      'perses/provisioning/roles.json', 'perses/dashboards/kafka-overview.json',
                      'perses/dashboards/consumer-groups.json', 'perses/dashboards/host-capacity.json',
                      'perses/dashboards/logs.json', 'perses/gateway/krate-ui.js', 'perses/vendor/notices/README.md'):
