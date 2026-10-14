@@ -629,8 +629,11 @@ class Gate(Phase4Gate):
 
     def force_logout(self, user):
         """`identity users logout <user>` — the walk's stale-SSO clear before a row
-        whose Keycloak-session count must be deterministic (u29_job.py preamble)."""
-        rc, _out, _err = self.krate('identity', 'users', 'logout', user, timeout=120)
+        whose Keycloak-session count must be deterministic (u29_job.py preamble).
+        Timed rows run concurrently, so a logout can land while a sibling holds
+        the identity lock: retry lock contention like the other timed rows
+        (Rocky 4a at bfd1158: U9 saw sessions 2->1)."""
+        rc, _out, _err = self.krate_locked('identity', 'users', 'logout', user, timeout=120)
         return rc == 0
 
     # ── the browser batch (U15 `ui`, U7 `explore_panels`): container Chromium ──
@@ -2006,6 +2009,26 @@ class Gate(Phase4Gate):
                                'thread; it was not started (a precondition or --only selection '
                                'skipped the @start entry)')
 
+    def _u9_keep_active(self, d, minutes):
+        """Keep-alive requests on each minute boundary of a minutes-long activity
+        window (walk log 151: 200 each). All six boundaries of the six-minute
+        window are observed: the loop runs the real interval plus a short grace
+        so the +360 s boundary is not skipped by the 5 s sleep cadence (Rocky 4a
+        at bfd1158: only 5/6 keeps fit in `while < start+360`). The required
+        count is unchanged. Returns the number of 200 answers."""
+        start = time.monotonic()
+        end = start + minutes * 60
+        nxt = start + 60
+        keeps = 0
+        while time.monotonic() < end + 15 and keeps < minutes:
+            if time.monotonic() >= nxt and nxt <= end:
+                st, _msg = self.one_request(d)
+                if st == 200:
+                    keeps += 1
+                nxt += 60
+            time.sleep(5)
+        return keeps
+
     def u9_body(self):
         """U9 (walk log 151, scripts/u9_job.py): case (a) immediate and case (b) after
         6 min of activity — the UI logout ends the Keycloak session (1 -> 0 after the
@@ -2013,22 +2036,27 @@ class Gate(Phase4Gate):
         authorize request shows the password form, and the old cookie answers 401."""
         cases = []
         for tag, minutes in (('a-immediate', 0), ('b-after-6min', 6)):
-            self.force_logout('p4both')  # the walk's stale-SSO clear: before==1 deterministically
+            clear_ok = self.force_logout('p4both')  # stale-SSO clear (lock-retrying)
             time.sleep(2)
             signed = self.signin('p4both', 'u9-' + tag, expect='ok')
             d = signed['driver']
             before = self.kc_session_ids('p4both')
-            keeps = 0
+            if len(before) != 1:
+                # A stale session survived the clear (e.g. a refused logout under
+                # lock contention with a concurrent timed row): retry once before
+                # attributing anything to the product.
+                clear_ok = self.force_logout('p4both')
+                time.sleep(2)
+                signed = self.signin('p4both', 'u9-' + tag + '-retry', expect='ok')
+                d = signed['driver']
+                before = self.kc_session_ids('p4both')
+            if len(before) != 1 or not clear_ok:
+                cases.append((tag, 'FAIL',
+                              'stale-clear: %d Keycloak sessions before the logout test '
+                              '(clear ok=%s)' % (len(before), clear_ok)))
+                continue
+            keeps = self._u9_keep_active(d, minutes) if minutes else 0
             if minutes:
-                end = time.monotonic() + minutes * 60
-                nxt = time.monotonic() + 60
-                while time.monotonic() < end:  # keep-active every 60 s (walk: 200 each)
-                    if time.monotonic() >= nxt:
-                        st, _msg = self.one_request(d)
-                        if st == 200:
-                            keeps += 1
-                        nxt += 60
-                    time.sleep(5)
                 if keeps < minutes:
                     cases.append((tag, 'FAIL', 'only %d/%d keep-alive 200s' % (keeps, minutes)))
                     continue
@@ -2082,13 +2110,21 @@ class Gate(Phase4Gate):
         revoked_at = None
         first_refusal = None
         next_poll = t0 + 10
+
+        def _re_enable():
+            # p4dis is owned state for later rows: restore it on every exit,
+            # keeping the caller's primary error alongside the cleanup result.
+            rc, _o, _e = self.krate_locked('identity', 'users', 'enable', 'p4dis', timeout=120)
+            return rc
+
         while True:
             now = time.monotonic()
             if revoked_at is None and now >= t0 + 30:
                 rc1, _o, _e = self.krate_locked('identity', 'users', 'disable', 'p4dis', timeout=120)
                 rc2, _o, _e = self.krate_locked('identity', 'users', 'logout', 'p4dis', timeout=120)
                 if rc1 != 0 or rc2 != 0:
-                    return 'FAIL', 'disable/logout rc %s/%s' % (rc1, rc2)
+                    rc3 = _re_enable()
+                    return 'FAIL', 'disable/logout rc %s/%s; re-enable rc=%s' % (rc1, rc2, rc3)
                 revoked_at = time.monotonic()
             if now >= next_poll:
                 st, msg = self.one_request(d)
@@ -2099,7 +2135,8 @@ class Gate(Phase4Gate):
             if first_refusal and time.monotonic() - first_refusal[0] > 30:
                 break
             if now > t0 + 400:
-                return 'FAIL', 'still 200 at +400 s (the 330 s bound was exceeded)'
+                rc3 = _re_enable()
+                return 'FAIL', 'still 200 at +400 s (the 330 s bound was exceeded); re-enable rc=%s' % rc3
             time.sleep(2)
         if revoked_at is None:
             return 'FAIL', 'refusal (%s %r) before disable+logout ran' % (first_refusal[1], first_refusal[2])

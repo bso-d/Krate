@@ -799,6 +799,26 @@ def check_gate_scripts(checks):
       and 'source="u28-proto-gate"' in u28_labels,
       'u28 push labels must be one selector string; got ' + repr(u28_labels))
 
+    # U9 keep-alive must observe all six minute boundaries: rocky-4a at
+    # bfd1158 got only 5/6 keeps because the loop ran while < start+360.
+    # Runs the shipped scheduler with a fake clock, not a copy.
+    import time as _u9_time
+    u9_gate = g4
+    u9_real_mono, u9_real_sleep = _u9_time.monotonic, _u9_time.sleep
+    u9_now = [1000.0]
+    u9_hits = []
+    _u9_time.monotonic = lambda: u9_now[0]  # noqa: E731
+    _u9_time.sleep = lambda s: u9_now.__setitem__(0, u9_now[0] + s)  # noqa: E731
+    try:
+        u9_probe = types.SimpleNamespace(
+            one_request=lambda driver: (u9_hits.append(1), (200, ''))[1])
+        u9_keeps = u9_gate.Gate._u9_keep_active.__get__(u9_probe, u9_gate.Gate)(None, 6)
+    finally:
+        _u9_time.monotonic, _u9_time.sleep = u9_real_mono, u9_real_sleep
+    e(u9_keeps == 6 and len(u9_hits) == 6 and u9_now[0] - 1000.0 >= 360,
+      'u9 keep-alive must make all 6 boundary requests over the real 6-minute '
+      'interval; got %s keeps in %.0f s' % (u9_keeps, u9_now[0] - 1000.0))
+
 
 def check_phase4_monitor_paths(checks):
     """The Phase IV gate must find monitoring in both source and offline bundle layouts."""
