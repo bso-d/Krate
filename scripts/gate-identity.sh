@@ -497,12 +497,16 @@ run_static() {
   fi
   cap git -C "$TOPLEVEL" diff --check; st=$?; ok_if S2 static S "$st" "git diff --check clean"
   if docker image inspect koalaman/shellcheck:v0.9.0 >/dev/null 2>&1; then
-    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh; st=$?
-    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner and scripts/gate/stub_idp.sh"
+    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh scripts/gate/phase4_w3.sh; st=$?
+    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner, scripts/gate/stub_idp.sh and scripts/gate/phase4_w3.sh"
   else
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
-  cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st=$?; ok_if S4 static S "$st" "check-identity: $(printf '%s' "$CAP" | tail -1 | cut -c1-160)"
+  local st_identity st_w3_py
+  cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
+  cap env PYTHONPYCACHEPREFIX="$STATE/pycache" python3 -m py_compile "$GATE_DIR/phase4_w3.py"; st_w3_py=$?
+  [[ $st_identity -eq 0 && $st_w3_py -eq 0 ]]; st=$?
+  ok_if S4 static S "$st" "check-identity rc=$st_identity; phase4_w3.py compile rc=$st_w3_py"
 }
 
 # ═══════════════════════════ phase 1 ═══════════════════════════
@@ -1615,13 +1619,24 @@ phase4_row_w3() {
     [[ $pos_ok -eq 1 && $refused_count -eq $total_ports ]]; st=$?
     ok_if W3 "$slice" W "$st" "macOS LAN probe: positive control perses-gateway reachable (HTTP $rc_a); loopback ports ($refused_count/$total_ports refused with rc 7/28 via LAN $lan_ip)"
   elif [[ "$(uname -s)" == Linux ]]; then
-    local w1x_script="$TOPLEVEL/harness/phase4/lab8/w1x-row.sh"
-    if [[ -f "$w1x_script" ]]; then
-      local cap_w3 st_w3
-      cap_w3="$(W1X_POSITIVE_PORT="$PERSES_GATE_PORT" W1X_POSITIVE_SCHEME=https W1X_LOOPBACK_PORTS="$PROM_GATE_PORT $LOKI_GATE_PORT" bash "$w1x_script" 2>&1)"; st_w3=$?
-      ok_if W3 "$slice" W "$st_w3" "Linux p4probe netns: $(printf '%s' "$cap_w3" | tail -1 | cut -c1-120)"
+    local w3_script="$GATE_DIR/phase4_w3.sh"
+    if [[ -f "$w3_script" ]]; then
+      local cap_w3 st_w3 result_w3
+      cap_w3="$(W1X_POSITIVE_PORT="$PERSES_GATE_PORT" W1X_POSITIVE_SCHEME=https \
+        W1X_LOOPBACK_PORTS="$PROM_GATE_PORT $LOKI_GATE_PORT $GRAFANA_GATE_PORT" \
+        W3_CLUSTER_PROJECT="$PROJECT" W3_MONITOR_PROJECT="$MON_PROJECT" W3_PUBLIC_HOST="$PUBLIC_HOST" \
+        bash "$w3_script" 2>&1)"; st_w3=$?
+      log "$cap_w3"
+      result_w3="$(printf '%s\n' "$cap_w3" | grep '^RESULT W3 ' | tail -1)"
+      if [[ $st_w3 -eq 0 && "$result_w3" == 'RESULT W3 PASS '* ]]; then
+        record W3 "$slice" W PASS "Linux p4probe netns: ${result_w3#RESULT W3 PASS }"
+      elif [[ $st_w3 -eq 2 && "$result_w3" == 'RESULT W3 NOT_RUN '* ]]; then
+        record W3 "$slice" W NOT_RUN "Linux p4probe netns: ${result_w3#RESULT W3 NOT_RUN }"
+      else
+        record W3 "$slice" W FAIL "Linux p4probe netns: ${result_w3:-script exit $st_w3 without a result}; see run.log"
+      fi
     else
-      record W3 "$slice" W FAIL "missing harness/phase4/lab8/w1x-row.sh"
+      record W3 "$slice" W FAIL "missing tracked scripts/gate/phase4_w3.sh"
     fi
   else
     record W3 "$slice" W NOT_RUN "unsupported platform: $(uname -s)"
@@ -1850,11 +1865,7 @@ teardown() {
   # Phase 4 helper containers carry the krate.gate=phase4 label (the name filter above
   # is the backstop for helpers that name them differently).
   for n in $(docker ps -aq --filter "label=krate.gate=phase4"); do docker rm -f "$n" >/dev/null 2>&1; done
-  # The W3 probe namespace (harness/phase4/lab8/w1x-row.sh names: netns p4probe, veth p4v0/p4v1).
-  if [[ "$(uname -s)" == Linux ]] && command -v ip >/dev/null 2>&1 && { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; }; then
-    as_root ip netns list 2>/dev/null | grep -qw p4probe && as_root ip netns del p4probe >/dev/null 2>&1
-    ip link show p4v0 >/dev/null 2>&1 && as_root ip link del p4v0 >/dev/null 2>&1
-  fi
+  # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$ED/monitoring/.env"
   local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
   log "fixture resources left: $left"
