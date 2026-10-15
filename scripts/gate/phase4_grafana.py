@@ -719,8 +719,16 @@ class Gate(Phase4Gate):
         env = dict(os.environ, UI15_USER=user, UI15_PASSWORD=state['password'],
                    UI15_TOTP=state['totp'], UI15_DASH=dash,
                    PW_MODULES='/usr/lib/node_modules')
+        # The public name resolves through the host gateway twice: Chromium's
+        # --host-resolver-rules (TLS keeps the real name) and the container's
+        # own hosts file. Formal 4a attempts 9-10 failed both probes with
+        # ERR_NAME_NOT_RESOLVED on a same-host request seconds after same-host
+        # success; the second path keeps a MAP-rule glitch from failing the run.
+        hosts = ['--add-host', 'host.docker.internal:host-gateway']
+        if self.origin.hostname and gateway:
+            hosts += ['--add-host', '%s:%s' % (self.origin.hostname, gateway)]
         rc, out, err = p2.docker(
-            'run', '--rm', '--add-host', 'host.docker.internal:host-gateway',
+            'run', '--rm', *hosts,
             '-v', '%s:/out' % outdir, '-v', '%s:/gate:ro' % HERE,
             '-e', 'UI15_USER', '-e', 'UI15_PASSWORD', '-e', 'UI15_TOTP',
             '-e', 'UI15_DASH', '-e', 'PW_MODULES',
