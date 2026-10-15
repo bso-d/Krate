@@ -4127,6 +4127,17 @@ def check_grafana_realm_cli(checks):
         monitor_keys, edition_keys = set(), set()
     e(edition_keys <= RENDER_EDITION_KEYS,
       f'monitoring/render.py reads edition .env keys outside the realm set {sorted(RENDER_EDITION_KEYS)}: {sorted(edition_keys - RENDER_EDITION_KEYS)}')
+    compose_text = (ROOT / 'monitoring/docker-compose.yml').read_text()
+    services_text = compose_text.split('\nservices:', 1)[1]
+    for svc in ('perses', 'perses-gateway'):
+        start = services_text.find('\n  %s:\n' % svc)
+        rest = services_text[start + 1:]
+        nxt = re.search(r'\n  [a-z0-9_-]+:\n', rest)
+        block = rest[:nxt.start()] if nxt else rest
+        e(start >= 0 and 'KRATE_PERSES_REVISION: ${KRATE_PERSES_REVISION:-}' in block
+          and 'KRATE_RENDER_REVISION' not in block,
+          f'monitoring/docker-compose.yml: the {svc} service must carry KRATE_PERSES_REVISION, not the global revision '
+          f'(a realm timing change with an unchanged derived site must not recreate it)')
     for edition in EDITIONS:
         cli = (ROOT / edition / 'krate').read_text()
         e('Usage: krate monitor {up|down|status|logs|reload|ui|realm|grafana-user retire <login>}' in cli,
@@ -4162,6 +4173,30 @@ def check_grafana_realm_cli(checks):
               f'missing {sorted(expected_keys - listed)}, unexpected {sorted(listed - expected_keys)}')
             e(not (listed & GRAFANA_ONLY_RENDER_KEYS),
               f'{edition}/krate: no GRAFANA_* key may enter the render revision (it would recreate Perses, Alertmanager and the gateway)')
+            e('KRATE_PERSES_REVISION="$perses_rev"' in compose,
+              f'{edition}/krate: monitor_compose must export KRATE_PERSES_REVISION')
+            declared_perses = re.search(r'KRATE_PERSES_REVISION_KEYS=\(\n(.*?)\n\)\n', cli, re.S)
+            e(declared_perses is not None, f'{edition}/krate: KRATE_PERSES_REVISION_KEYS is missing')
+            declared_site = re.search(r'KRATE_PERSES_SITE_KEYS=\(\n(.*?)\n\)\n', cli, re.S)
+            e(declared_site is not None, f'{edition}/krate: KRATE_PERSES_SITE_KEYS is missing')
+            if declared_perses is not None and declared is not None and declared_site is not None:
+                listed_perses = set(declared_perses.group(1).split())
+                # The session timings and the other site inputs reach the Perses
+                # outputs only through the derived site digest; the sync/cookie
+                # secrets and the SMTP password belong to other outputs. Anything
+                # else dropped here would miss a needed Perses recreation.
+                site_covered = {'KEYCLOAK_PUBLIC_URL', 'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
+                                'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS',
+                                'PERSES_GROUP_PROOF_MINUTES', 'PERSES_PORT'}
+                other_outputs = {'PERSES_SYNC_CLIENT_SECRET', 'OAUTH2_PROXY_COOKIE_SECRET', 'GF_SMTP_PASSWORD'}
+                e(listed_perses == listed - site_covered - other_outputs,
+                  f'{edition}/krate: KRATE_PERSES_REVISION_KEYS must be the render keys minus the site-derived and other-output keys; '
+                  f'missing {sorted(listed - site_covered - other_outputs - listed_perses)}, '
+                  f'unexpected {sorted(listed_perses - (listed - site_covered - other_outputs))}')
+                e(set(declared_site.group(1).split()) == site_covered,
+                  f'{edition}/krate: KRATE_PERSES_SITE_KEYS must be exactly the realm_site inputs')
+                e('perses_site_digest' in cli and 'local-empty-site' in cli,
+                  f'{edition}/krate: the Perses revision must digest the derived site with a local-mode empty-site rule')
         e('PERSES_IDP' in prepare and 'refuse_loopback_public_url' in prepare, f'{edition}/krate: monitor_prepare must check PERSES_IDP')
         e('PERSES_ISSUER_APPLIED' in prepare, f'{edition}/krate: monitor_prepare must check PERSES_ISSUER_APPLIED')
         e('identity_reconcile_perses_clients' in cli, f'{edition}/krate: must define identity_reconcile_perses_clients')

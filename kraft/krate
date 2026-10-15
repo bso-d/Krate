@@ -3090,6 +3090,87 @@ render_revision() {
   } | cksum | cut -d' ' -f1
 }
 
+# The monitoring/.env keys the Perses and perses-gateway outputs of render.py
+# read directly. The session timings reach those outputs only through the
+# derived site (realm_site: group-proof minutes, session hours), so they are
+# covered by perses_site_digest below instead of as raw keys: 15->16 minutes
+# leaves the derived proof at 5 and must not recreate Perses (formal 4a U23),
+# while 15->18 moves it to 6 and must. The gateway also proxies the realm
+# logout and Alertmanager mail settings, so it shares this revision.
+KRATE_PERSES_REVISION_KEYS=(
+  ALERT_EMAIL_TO ALERTMANAGER_EMAIL_ENABLED ALERTMANAGER_SMTP_REQUIRE_TLS
+  GF_SMTP_ENABLED GF_SMTP_FROM_ADDRESS GF_SMTP_FROM_NAME GF_SMTP_HOST
+  GF_SMTP_SKIP_VERIFY GF_SMTP_USER
+  OAUTH2_PROXY_CLIENT_SECRET
+  PERSES_ADMIN_PASSWORD PERSES_ADMIN_USER PERSES_AUTH_MODE PERSES_ENCRYPTION_KEY
+  PERSES_IDP
+)
+
+# The environment keys realm_site derives the Perses site from.
+KRATE_PERSES_SITE_KEYS=(
+  KEYCLOAK_PUBLIC_URL KEYCLOAK_VIEWER_GROUP KEYCLOAK_ADMIN_GROUP
+  KEYCLOAK_SESSION_IDLE_MINUTES KEYCLOAK_SESSION_MAX_HOURS
+  PERSES_GROUP_PROOF_MINUTES PERSES_PORT
+)
+
+perses_site_digest() {
+  # The derived Perses site as JSON: in local mode render.py uses an empty site,
+  # so the digest is empty too and a realm timing change recreates nothing here.
+  # Without a configured realm (realm_site requires its keys) fall back to the
+  # raw key values: conservative, the same behavior as before for that shape.
+  local env_file="$MONITOR_DIR/.env" key val mode
+  local args=()
+  for key in "${KRATE_PERSES_SITE_KEYS[@]}"; do
+    val="$(env_value_file "$env_file" "$key")"
+    [[ -n "$val" ]] || val="$(env_value "$key")"
+    args+=("$key=$val")
+  done
+  mode="$(env_value_file "$env_file" PERSES_AUTH_MODE local)"
+  if [[ "$mode" == local ]]; then
+    printf 'local-empty-site\n'
+    return 0
+  fi
+  if ! command -v python3 >/dev/null; then
+    printf '%s\n' "${args[@]}"
+    return 0
+  fi
+  local site
+  site="$(python3 - "$MONITOR_DIR" "${args[@]}" <<'PYEOF'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import render
+env = {}
+for item in sys.argv[2:]:
+    key, _, value = item.partition('=')
+    env[key] = value
+try:
+    print(json.dumps(render.realm_site(env), sort_keys=True))
+except render.ConfigError:
+    print('RAW-FALLBACK')
+PYEOF
+)"
+  if [[ "$site" == RAW-FALLBACK ]]; then
+    printf '%s\n' "${args[@]}"
+  else
+    printf '%s\n' "$site"
+  fi
+}
+
+perses_revision() {
+  local env_file="$MONITOR_DIR/.env" key val
+  {
+    for key in "${KRATE_PERSES_REVISION_KEYS[@]}"; do
+      val="$(env_value_file "$env_file" "$key")"
+      [[ -n "$val" ]] || val="$(env_value "$key")"
+      printf '%s=%s\n' "$key" "$val"
+    done
+    perses_site_digest
+    find "$MONITOR_DIR/auth/perses" "$MONITOR_DIR/render.py" "$MONITOR_DIR/perses" \
+      "$CERT_CRT" "$CERT_KEY" -type f ! -path '*/__pycache__/*' 2>/dev/null \
+      | LC_ALL=C sort | xargs cat 2>/dev/null
+  } | cksum | cut -d' ' -f1
+}
+
 # Alertmanager reads only its rendered SMTP/route file. Keep its Compose revision
 # independent of Perses mode, clients and gateway certificates so an SSO switch
 # does not restart alert delivery or the Alertmanager data process.
@@ -3173,9 +3254,10 @@ This bundle was built without the observability stack."
 
   # Recreate the rendered-config consumers whenever their inputs change, including a
   # renewed gateway certificate — but only for the inputs they actually read.
-  local revision alert_revision
+  local revision alert_revision perses_rev
   revision="$(render_revision)"
   alert_revision="$(alertmanager_revision)"
+  perses_rev="$(perses_revision)"
 
   # Which monitoring UIs sign people in through the Krate realm: Grafana with
   # GRAFANA_AUTH_CONFIG=realm.ini, Perses with PERSES_IDP=krate.
@@ -3209,6 +3291,7 @@ This bundle was built without the observability stack."
 
   KRATE_RENDER_REVISION="$revision" \
   KRATE_ALERTMANAGER_REVISION="$alert_revision" \
+  KRATE_PERSES_REVISION="$perses_rev" \
   COMPOSE_PROFILES="$profiles" \
   PERSES_CERTS_DIR="$CERTS_DIR" \
   KAFKA_EXPECTED_BROKERS="${expected:-1}" \
