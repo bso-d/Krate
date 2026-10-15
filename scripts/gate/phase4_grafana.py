@@ -416,7 +416,9 @@ class Gate(Phase4Gate):
                 if svc not in ONE_SHOT_SERVICES}
 
     def cluster_id_map(self):
-        """{service: (container id, StartedAt)} of the cluster project (U23's ledger)."""
+        """{service: (container id, StartedAt, RestartCount)} of the cluster
+        project (U23's ledger: identity is id + RestartCount, since U12's
+        intentional stop/start preserves both while moving StartedAt)."""
         found = {}
         rc, out, _ = p2.docker('ps', '-aq', '--filter',
                                'label=com.docker.compose.project=' + self.project)
@@ -424,10 +426,10 @@ class Gate(Phase4Gate):
             return found
         for cid in out.split():
             rc2, info, _ = p2.docker('inspect', '--format',
-                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
+                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}} {{.RestartCount}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
-                found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+                found[parts[0]] = (parts[1], ' '.join(parts[2:-1]), parts[-1])
         return found
 
     def seed_token(self):
@@ -1629,12 +1631,16 @@ class Gate(Phase4Gate):
                     and os.stat(meta_file).st_mode & 0o777 == 0o600
                     and self.mon_env_value('GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE')
                     == 'auth/secrets/grafana-seed.token')
-        rc, out, err = self.grafana_admin('service-account', '--name', 'krate-seed', '--role', 'Admin')
+        # Realm mode turns Grafana's Basic-admin login off, so both admin calls
+        # authenticate with the seed token — the product's own grafana_admin_token
+        # precedent (it runs service-account --role Admin the same way).
+        token = self.seed_token()
+        rc, out, err = self.grafana_admin('service-account', '--name', 'krate-seed', '--role', 'Admin',
+                                          token=token)
         acct_rc = rc
         acct_note = ' '.join((err or '').split())[-80:]
         account = json.loads(out) if rc == 0 else {}
         account_id = account.get('id')
-        token = self.seed_token()
         rc, out, err = self.grafana_admin('token-list', '--account-id', str(account_id), token=token)
         list_rc = rc
         tokens = json.loads(out) if rc == 0 else []
@@ -1994,8 +2000,9 @@ class Gate(Phase4Gate):
 
         v_bad = refusals(viewer)
         a_bad = refusals(admin)
-        # the 34d6ab6 read location (re-measure 160: detected_field/<name>/values 200)
-        st_det, _h, det_b = admin.req(self.base + proxy + '/detected_field/job/values')
+        # the 34d6ab6 read location (re-measure 160: detected_field/container/values
+        # 200 with body {}; the gate asked for field `job` and Loki answered 400)
+        st_det, _h, det_b = admin.req(self.base + proxy + '/detected_field/container/values')
         # controls (walk 130/160): labels 200, query_range 200, no forged line
         quote = urllib.parse.quote
         st_lab, _h, _b = viewer.req(self.base + proxy + '/labels')
@@ -2646,24 +2653,27 @@ class Gate(Phase4Gate):
                   (v_summary or {}).get('cspViolations', -1), (v_summary or {}).get('pageErrors', -1),
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
-    def _mon_env_subset(self, cid):
-        """Non-secret compose inputs on a monitor container (U22 evidence).
+    def _mon_fingerprint(self, cid):
+        """Compose-level identity of a monitor container (U22 evidence).
 
-        Reads container env but returns only the allowlisted revision/IdP
-        keys — never passwords, secrets or keys."""
+        Image short id, compose config-hash label and sorted env KEY names
+        only — no values anywhere, so no secret can leave through it. When
+        this fingerprint is unchanged yet the container id moved, plain
+        `compose up` had no config reason and the mechanism is elsewhere."""
         if not cid:
             return {}
-        rc, out, _ = p2.docker('inspect', '-f',
-                               '{{range .Config.Env}}{{println .}}{{end}}', cid)
+        rc, out, _ = p2.docker(
+            'inspect', '-f',
+            '{{.Image}}|{{index .Config.Labels "com.docker.compose.config-hash"}}'
+            '|{{range .Config.Env}}{{println .}}{{end}}', cid)
         if rc != 0:
             return {}
-        want = ('KRATE_RENDER_REVISION', 'KRATE_IDP_HOST', 'IDP_DISCOVERY_URL')
-        found = {}
-        for line in out.splitlines():
-            key, sep, value = line.partition('=')
-            if sep and key in want:
-                found[key] = value
-        return found
+        image, _, rest = out.partition('|')
+        config_hash, _, env = rest.partition('|')
+        keys = sorted(line.partition('=')[0] for line in env.splitlines()
+                      if '=' in line)
+        return {'image': image[:12], 'config_hash': config_hash,
+                'env_keys': keys}
 
     def u22(self):
         # walk log 169 (clean cycle at HEAD 5d17495; note log 161 is fbfc872 defect evidence only):
@@ -2676,7 +2686,7 @@ class Gate(Phase4Gate):
         long_before = self.long_running(before_mon)
         if 'grafana' not in long_before:
             not_run('precondition: no grafana container before rollback')
-        perses_before = self._mon_env_subset((before_mon.get('perses') or (None,))[0])
+        perses_before = self._mon_fingerprint((before_mon.get('perses') or (None,))[0])
 
         rc1, out1, err1 = self.krate('config', 'set', 'GRAFANA_AUTH_CONFIG=local.ini', timeout=180)
         if rc1 != 0:
@@ -2690,7 +2700,7 @@ class Gate(Phase4Gate):
         long_mid = self.long_running(mid_mon)
         recreated = [s for s in long_before if s in long_mid and long_before[s][0] != long_mid[s][0]]
         only_grafana = (recreated == ['grafana'])
-        perses_after = self._mon_env_subset((mid_mon.get('perses') or (None,))[0])
+        perses_after = self._mon_fingerprint((mid_mon.get('perses') or (None,))[0])
 
         graf_cid = (mid_mon.get('grafana') or (None,))[0]
         healthy = self._wait_grafana_healthy(graf_cid) if graf_cid else False
@@ -2815,33 +2825,40 @@ class Gate(Phase4Gate):
         # walk logs/137, 139, 162, 169: Container ledger verification:
         # broker, kafka-ui, keycloak, keycloak-db unchanged across slice;
         # cluster proxy recreated once per input change; grafana recreated
-        # on auth config/realm.ini change.
+        # on auth config/realm.ini change. Identity is (id, RestartCount):
+        # U12's intentional stop/start preserves both while moving StartedAt
+        # (proven SAME_ID at 115b300), so only a new id or a daemon restart
+        # counts as changed; in-place restarts are noted, not failed.
         curr_cluster = self.cluster_id_map()
         initial = getattr(self, 'cluster_initial', None) or curr_cluster
 
         # 1. Core cluster containers unchanged
         core_unchanged = True
         diff_core = []
+        restarted = []
+
+        def ledger(svc):
+            old, new = initial[svc], curr_cluster[svc]
+            if (old[0], old[2]) != (new[0], new[2]):
+                diff_core.append('%s: %s id %s->%s rc %s->%s started %s->%s'
+                                 % (svc, 'SAME_ID' if old[0] == new[0] else 'NEW_ID',
+                                    old[0][:12], new[0][:12], old[2], new[2],
+                                    old[1][:19], new[1][:19]))
+                return False
+            if old[1] != new[1]:
+                restarted.append('%s started %s->%s' % (svc, old[1][:19], new[1][:19]))
+            return True
+
         for svc in ('keycloak', 'keycloak-db', 'kafka-ui'):
             if svc in initial and svc in curr_cluster:
-                if initial[svc] != curr_cluster[svc]:
+                if not ledger(svc):
                     core_unchanged = False
-                    same = initial[svc][0] == curr_cluster[svc][0]
-                    diff_core.append('%s: %s id %s->%s started %s->%s'
-                                     % (svc, 'SAME_ID' if same else 'NEW_ID',
-                                        initial[svc][0][:12], curr_cluster[svc][0][:12],
-                                        initial[svc][1][:19], curr_cluster[svc][1][:19]))
 
         # brokers unchanged
         for svc in initial:
             if 'broker' in svc and svc in curr_cluster:
-                if initial[svc] != curr_cluster[svc]:
+                if not ledger(svc):
                     core_unchanged = False
-                    same = initial[svc][0] == curr_cluster[svc][0]
-                    diff_core.append('%s: %s id %s->%s started %s->%s'
-                                     % (svc, 'SAME_ID' if same else 'NEW_ID',
-                                        initial[svc][0][:12], curr_cluster[svc][0][:12],
-                                        initial[svc][1][:19], curr_cluster[svc][1][:19]))
 
         # 2. Realm.ini-content change recreates grafana only (log 162)
         # Change KEYCLOAK_SESSION_IDLE_MINUTES 15 -> 16
@@ -2887,11 +2904,12 @@ class Gate(Phase4Gate):
             ('proxy_untouched_by_monitor', 'PASS' if proxy_untouched else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; core cluster (brokers, kafka-ui, keycloak, keycloak-db) unchanged%s; ' \
+        return status, '%s; core cluster (brokers, kafka-ui, keycloak, keycloak-db) unchanged%s%s; ' \
                        'realm.ini 15m->16m->15m recreated grafana only (rc %d/%d/%d/%d, ' \
                        'mid %s, after %s, ini %s/%s); proxy untouched; ' \
                        'walk: live4a 137,139,162,169' \
                % (tokens, '' if core_unchanged else ' (diffs: %s)' % diff_core,
+                  '' if not restarted else ' (restarted in place: %s)' % restarted,
                   rc1, rc2, rc3, rc4, recreated_16, recreated_15, ini_16, ini_15)
 
     def u24(self):
