@@ -902,28 +902,45 @@ stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR
   set_env_raw PING_KEYCLOAK_CLIENT_SECRET "$(tr -d '\n' < "$STUB_DIR/.client-secret")"; collect_secrets
   log "broker prelude: stand-in up on 127.0.0.1:$STUB_PORT (cluster $cluster); site file $STUB_DIR/site.json"
 }
-start_cluster() { # [--local] [--broker]
-  local arg broker=false
-  local -a cfg_args=()
-  for arg in "$@"; do
-    case "$arg" in
-      --broker) broker=true ;;
-      *) cfg_args+=("$arg") ;;
-    esac
-  done
-  if $broker; then
-    stub_up_for_broker || return 1
-    cfg_args=("$STUB_DIR/site.json")
-  fi
-  cap "$KRATE" auth configure ${cfg_args[@]+"${cfg_args[@]}"}; SC_CONFIGURE=$?
-  SC_CONFIGURE_EV="$(printf '%s' "$CAP" | grep -E 'runtime.yml|Kafbat plan' | head -2 | xargs | cut -c1-120)"
-  "$KRATE" config set KAFKA_UI_AUTH_CONFIG=runtime.yml >/dev/null; SC_SET=$?
-  cap "$KRATE" start; SC_START=$?
+finish_cluster() { # auth apply + monitor up after a paused bring-up (sets SC_APPLY/SC_MONITOR)
   SC_BROKER_BEFORE="$(cid kafka-92)"
   cap "$KRATE" auth apply; SC_APPLY=$?
   SC_BROKER_AFTER="$(cid kafka-92)"
   cap "$KRATE" monitor up; SC_MONITOR=$?
   collect_secrets
+  [[ $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]]
+}
+start_cluster() { # [--local] [--broker] [--pause-before-apply]
+  local arg broker=false pause=false
+  local -a cfg_args=()
+  for arg in "$@"; do
+    case "$arg" in
+      --broker) broker=true ;;
+      --pause-before-apply) pause=true ;;
+      *) cfg_args+=("$arg") ;;
+    esac
+  done
+  SC_CONFIGURE=127; SC_SET=127; SC_START=127; SC_APPLY=127; SC_MONITOR=127
+  SC_CONFIGURE_EV=""; SC_STUB=0
+  if $broker; then
+    stub_up_for_broker || return 1
+    cfg_args=("$STUB_DIR/site.json")
+  fi
+  cap "$KRATE" auth configure ${cfg_args[@]+"${cfg_args[@]}"}; SC_CONFIGURE=$?
+  # Join, never parse: auth-configure output may carry an apostrophe, which
+  # xargs treats as a quote and fails on (emptied evidence, "unmatched single
+  # quote" in the log).
+  SC_CONFIGURE_EV="$(printf '%s' "$CAP" | grep -E 'runtime.yml|Kafbat plan' | head -2 | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//' | cut -c1-120)"
+  "$KRATE" config set KAFKA_UI_AUTH_CONFIG=runtime.yml >/dev/null; SC_SET=$?
+  cap "$KRATE" start; SC_START=$?
+  if $pause; then
+    # Slice 4b enrols realm users here (live4b order 021/022 before 030/031:
+    # the broker plan must not be applied yet); the caller runs
+    # finish_cluster afterwards.
+    [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 ]]
+    return
+  fi
+  finish_cluster || return 1
   [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 && $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]]
 }
 
@@ -1800,6 +1817,20 @@ else:
   [[ $py_rc -eq 0 && "$py_out" == *"CENSUS_OK"* ]]; st=$?
   ok_if W4 "$slice" W "$st" "5-source reachability census matches Table 2 of monitoring/README.md (${py_out##*$'\n'})"
 }
+bringup_failed() { # slice id...: every row FAILs when the fixture never came up
+  local slice="$1"; shift
+  local id crit ev
+  ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR (output in run.log)"
+  log "$ev"
+  for id in "$@"; do
+    crit="${id%%[0-9]*}"
+    case "$id" in
+      Z*) phase4_stub "$id" "$slice" Z "$ev; the leak scan did not run" ;;
+      X*) phase4_stub "$id" "$slice" X "$ev; the screenshot story did not run" ;;
+      *) record "$id" "$slice" "$crit" FAIL "$ev" ;;
+    esac
+  done
+}
 run_phase4() { # slice: 4a|4b|4c
   local slice="$1" id rc ev crit job helper only tsv regex
   local -a inv=() run_inv=() helper_jobs=() only_arg=()
@@ -1833,17 +1864,36 @@ run_phase4() { # slice: 4a|4b|4c
   # (--local, accepted and ignored by the CLI).
   local -a bringup=(--local)
   [[ "$slice" == 4b ]] && bringup=(--broker)
-  if ! start_cluster "${bringup[@]}"; then
-    ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR (output in run.log)"
-    log "$ev"
-    for id in "${run_inv[@]}"; do
-      crit="${id%%[0-9]*}"
-      case "$id" in
-        Z*) phase4_stub "$id" "$slice" Z "$ev; the leak scan did not run" ;;
-        X*) phase4_stub "$id" "$slice" X "$ev; the screenshot story did not run" ;;
-        *) record "$id" "$slice" "$crit" FAIL "$ev" ;;
-      esac
-    done
+  if [[ "$slice" == 4b ]]; then
+    # Live4b order (logs 021/022 before 030/031): enrol realm users after
+    # start but before auth apply, while the browser flow still shows the
+    # login form (the applied broker plan redirects it to the IdP).
+    if ! start_cluster "${bringup[@]}" --pause-before-apply; then
+      bringup_failed "$slice" "${run_inv[@]}"
+      return
+    fi
+    local enrol_tsv="$STATE/phase4-enrol.tsv" enrol_rc
+    python3 -I "$GATE_DIR/phase4_perses.py" run --edition-dir "$ED" --base-url "$BASE" \
+      --monitor-project "$MON_PROJECT" --state "$STATE" --enrol-only > "$enrol_tsv" 2>>"$RAW" & CHILD=$!
+    wait "$CHILD" && enrol_rc=0 || enrol_rc=$?
+    CHILD=""
+    phase4_ingest "$enrol_tsv" "$slice" '^$'
+    if [[ $enrol_rc -ne 0 || "$(awk -F '\t' '$1=="setup" {print $2}' "$enrol_tsv" 2>/dev/null)" != PASS ]]; then
+      if [[ -z "${SEEN[${slice}-setup]:-}" ]]; then
+        record "${slice}-setup" "$slice" setup FAIL "pre-apply enrolment exited $enrol_rc without a PASS setup row"
+      fi
+      for id in "${run_inv[@]}"; do
+        crit="${id%%[0-9]*}"
+        record "$id" "$slice" "$crit" NOT_RUN "pre-apply enrolment failed; see phase4-enrol.tsv"
+      done
+      return
+    fi
+    if ! finish_cluster; then
+      bringup_failed "$slice" "${run_inv[@]}"
+      return
+    fi
+  elif ! start_cluster "${bringup[@]}"; then
+    bringup_failed "$slice" "${run_inv[@]}"
     return
   fi
   # A companion prepares the shared fixture once. Both timed observers then use

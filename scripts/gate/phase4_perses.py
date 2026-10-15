@@ -67,7 +67,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python3 -I does not add the script directory
 import phase2_kafbat as p2  # noqa: E402
 from phase4_common import (Phase4Gate, helper_main, fail, aggregate, log,  # noqa: E402
-                           Outcome, not_run)
+                           Outcome, evidence, not_run)
 
 CASES = ['V%d' % i for i in range(1, 25)]
 RUNNER_OWNED = ('X4', 'Z4b')
@@ -121,6 +121,37 @@ class Gate(Phase4Gate):
         self.drivers = {}
         self.user_state = {}
         self.cluster_initial = {}
+
+    def main(self):
+        """--enrol-only runs the realm-user enrolment between `start` and
+        `auth apply` (live4b order 021/022 before 030/031: the broker
+        redirector must not exist yet) and exits with only a setup TSV row."""
+        if getattr(self.args, 'enrol_only', False):
+            return self.run_enrol_only()
+        return super().main()
+
+    def run_enrol_only(self):
+        """Preflight plus setup_realm_users; the failure contract matches
+        prepare_only (setup FAIL row, exit 1) so the runner treats it the
+        same way."""
+        try:
+            try:
+                problem = self.preflight()
+                if problem is None:
+                    self.setup_realm_users()
+                    problem = None
+            except Exception as error:
+                problem = 'enrolment raised %s: %s' % (type(error).__name__, str(error)[:200])
+            status = 'FAIL' if problem else 'PASS'
+            print('setup\t%s\t%s' % (status, evidence(problem or 'realm users enrolled before auth apply')),
+                  flush=True)
+            return 0 if problem is None else 1
+        finally:
+            self.cleanup()
+            if self.kc:
+                self.kc.close()
+            if self._master:
+                self._master.close()
 
     def driver(self, label):
         if label not in self.drivers:
@@ -324,14 +355,35 @@ class Gate(Phase4Gate):
             return 'setup step failed: %s: %s' % (type(error).__name__, str(error)[:300])
         return None
 
+    USERS_4B = (('p4v', ('--viewer',)), ('p4a', ('--admin',)),
+                ('p4both', ('--admin',)), ('p4nogroup', ()),
+                ('p4dis', ('--viewer',)), ('p4a2', ('--admin',)),
+                ('p4idle', ('--viewer',)), ('p4ctrl', ('--viewer',)))
+
     def setup_realm_users(self):
-        """Live4b logs/021-022: eight users, both-group assignments, enrolment."""
+        """Live4b logs/021-022: eight users, both-group assignments, enrolment.
+
+        The 4b bring-up enrols between `start` and `auth apply` (live4b order:
+        users before the broker plan), so a later full setup() in the same run
+        finds the state files and only re-registers them."""
         state_dir = os.path.join(self.state_dir, 'p4')
         os.makedirs(state_dir, exist_ok=True)
-        users = (('p4v', ('--viewer',)), ('p4a', ('--admin',)),
-                 ('p4both', ('--admin',)), ('p4nogroup', ()),
-                 ('p4dis', ('--viewer',)), ('p4a2', ('--admin',)),
-                 ('p4idle', ('--viewer',)), ('p4ctrl', ('--viewer',)))
+        users = self.USERS_4B
+        states = [os.path.join(state_dir, 'kc-%s.json' % name) for name, _ in users]
+        if states and all(os.path.isfile(state) for state in states):
+            try:
+                for state in states:
+                    with open(state, encoding='utf-8') as handle:
+                        loaded = json.load(handle)
+                    if not loaded.get('password') or not loaded.get('totp'):
+                        raise ValueError('missing password/totp in %s' % os.path.basename(state))
+            except (OSError, ValueError) as error:
+                raise RuntimeError('enrolment state unreadable: %s' % error)
+            for (name, _flags), state in zip(users, states):
+                self.user_state[name] = state
+                self.add_state_file_secrets(state)
+            log('setup: eight live4b realm users already enrolled; state re-registered')
+            return
         temporary = {}
         for name, flags in users:
             rc, out, err = self.krate('identity', 'users', 'add', name, *flags,
@@ -2082,6 +2134,16 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         return plan
 
 
+def perses_options(run_parser):
+    """The stand-in IdP options of V19 plus the pre-apply enrolment step,
+    added to the `run` sub-command."""
+    stub_options(run_parser)
+    run_parser.add_argument('--enrol-only', action='store_true',
+                            help='enrol the eight live4b realm users (setup_realm_users) '
+                                 'and exit with only a setup TSV row (checked before '
+                                 '--prepare-only; --only does not apply to this mode)')
+
+
 def stub_options(run_parser):
     """The stand-in IdP options of V19, added to the `run` sub-command."""
     run_parser.add_argument('--stub-dir', help='directory stub_idp.sh up wrote (V19)')
@@ -2094,7 +2156,7 @@ def stub_options(run_parser):
 
 
 def main(argv=None):
-    return helper_main(Gate, 'phase4_perses.py', argv, doc=__doc__, extra=stub_options)
+    return helper_main(Gate, 'phase4_perses.py', argv, doc=__doc__, extra=perses_options)
 
 
 if __name__ == '__main__':
