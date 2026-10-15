@@ -2071,15 +2071,21 @@ class Gate(Phase4Gate):
         det_note = '' if st_det == 200 else ' body=' + det_b[:120]
         forged_note = ' (query %s)' % st_f
         clean_note = a_summary is not None and self.browser_clean(a_summary)
-        return status, '%s; detected_field read %s%s, tail %s len=%d, forged absent %s%s; ' \
-                       '8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
-                       'labels/query_range 200, fluent-bit fresh %s; browser control (p4lokiui rows %s, panel ' \
-                       'errors %s, explore rows %s, live rows %s, clean=%s)%s; walk: live4a 129-130,148,160 ' \
+        a_bad4xx = [(item.get('s'), str(item.get('url', ''))[-50:])
+                    for item in (a_summary or {}).get('http4xx5xx') or []
+                    if not (item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards'))]
+        return status, '%s; browser control (p4lokiui rows %s, panel errors %s, explore rows %s, live rows %s, ' \
+                       'clean=%s, csp=%s, pageerr=%s, failed=%s, bad4xx=%s); detected_field read %s%s, tail %s ' \
+                       'len=%d, forged absent %s%s; 8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
+                       'labels/query_range 200, fluent-bit fresh %s%s; walk: live4a 129-130,148,160 ' \
                        '(re-measure at c8c9337; dd3a28d log-format-only per lead)' \
-               % (tokens, st_det, det_note, head.split('\r\n')[0][:40], len(head),
-                  forged_absent, forged_note, fresh,
+               % (tokens,
                   dash_step.get('logRows', '-'), dash_step.get('panelErrorIcons', '-'),
                   explore_step.get('logRows', '-'), live_step.get('liveRows', '-'), clean_note,
+                  (a_summary or {}).get('cspViolations', '-'), (a_summary or {}).get('pageErrors', '-'),
+                  (a_summary or {}).get('failedRequests', '-'), a_bad4xx or '-',
+                  st_det, det_note, head.split('\r\n')[0][:40], len(head),
+                  forged_absent, forged_note, fresh,
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
     def u9(self):
@@ -2652,13 +2658,20 @@ class Gate(Phase4Gate):
                   ('ws', 'PASS' if ws_ok else 'FAIL'),
                   ('ui', ui_status)]
         status, tokens = aggregate(probes)
-        return status, '%s; callback GET %s; cookie [%s]; folder POST UI-Origin %s/%s, foreign ' \
-                       'Origin %s "origin not allowed"; live/ws %s; ui: %d CSP violations, %d page ' \
-                       'errors, live/ws frames on every page%s; walk: live4a 124,132,146,147' \
-               % (tokens, signed['callback_get'],
+        v_bad4xx = [(item.get('s'), str(item.get('url', ''))[-50:])
+                    for item in (v_summary or {}).get('http4xx5xx') or []
+                    if not (item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards'))]
+        v_wsframes = [(w.get('url'), w.get('framesIn')) for w in (v_summary or {}).get('websockets') or []]
+        return status, '%s; ui (csp=%s, pageerr=%s, failed=%s, bad4xx=%s, home=%s, dash=%s, wsframes=%s); ' \
+                       'callback GET %s; cookie [%s]; folder POST UI-Origin %s/%s, foreign ' \
+                       'Origin %s "origin not allowed"; live/ws %s%s; walk: live4a 124,132,146,147' \
+               % (tokens,
+                  (v_summary or {}).get('cspViolations', '-'), (v_summary or {}).get('pageErrors', '-'),
+                  (v_summary or {}).get('failedRequests', '-'), v_bad4xx or '-',
+                  'home loaded' in v_steps, 'dashboard loaded' in v_steps, v_wsframes or '-',
+                  signed['callback_get'],
                   re.sub(r'grafana_session=[^;]+', 'grafana_session=<redacted>', cookie)[:90],
                   st1, st2, st3, head.split('\r\n')[0][:30],
-                  (v_summary or {}).get('cspViolations', -1), (v_summary or {}).get('pageErrors', -1),
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
     def _mon_fingerprint(self, cid):
