@@ -83,6 +83,7 @@ import datetime
 import hashlib
 import hmac
 import html as htmlmod
+import ipaddress
 import json
 import os
 import re
@@ -679,12 +680,23 @@ class Gate(Phase4Gate):
         pg = self.env.get('KEYCLOAK_DB_IMAGE')
         if not pg:
             return None
+        # Single quotes around the awk program: double quotes would let the
+        # container shell expand $1 to empty, returning whole getent lines;
+        # that malformed --resolve-to made Chromium ignore the MAP rule and
+        # fail every probe DNS lookup (formal 4a attempts 8-10). The first
+        # whitespace token is the address even if the filter ever degrades.
         rc, out, _err = p2.docker('run', '--rm', '--add-host', 'host.docker.internal:host-gateway',
                                   pg, 'sh', '-c',
-                                  'getent ahostsv4 host.docker.internal | awk "{print $1; exit}"',
+                                  "getent ahostsv4 host.docker.internal | awk '{print $1; exit}'",
                                   timeout=60)
-        value = out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else ''
-        return value or None
+        parts = out.split() if rc == 0 else []
+        if not parts:
+            return None
+        try:
+            ipaddress.IPv4Address(parts[0])
+        except ipaddress.AddressValueError:
+            return None
+        return parts[0]
 
     # Failed-request errors that are container-network noise, never product
     # dirt: formal 4a attempt-9 failed both probes with ERR_NAME_NOT_RESOLVED
