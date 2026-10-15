@@ -4255,6 +4255,45 @@ public_url_origin
               f'public_url_origin of {url} must be {expected} (identity.py checked_origin refuses a path); got {result.stdout.strip()!r}')
 
 
+def check_monitor_idp_host_stable(checks):
+    """Formal 4a U22 at b2f458a: KRATE_IDP_HOST must not depend on the realm flags.
+
+    monitor_compose gated the IdP host mapping on grafana_realm||perses_realm
+    while the 4a fixture runs Perses local, so a Grafana-only auth switch
+    changed perses extra_hosts and Compose recreated it (walk-169: grafana
+    only). The mapping is only a hosts entry, so it is always exported; the
+    discovery URL stays gated so idp-wait still exits at once.
+    """
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        compose = function_body(cli, 'monitor_compose')
+        gate = re.search(r'if \$grafana_realm \|\| \$perses_realm; then\n(.*?)\n  fi\n', compose, re.S)
+        if not e(gate is not None, f'{edition}/krate: monitor_compose must keep the realm-gated discovery block'):
+            continue
+        gated = gate.group(1)
+        e('idp_host=' not in gated,
+          f'{edition}/krate: KRATE_IDP_HOST must be exported outside the realm gate '
+          f'(a Grafana-only switch must not recreate Perses); gated block holds {gated.strip()!r}')
+        e('idp_url=' in gated,
+          f'{edition}/krate: IDP_DISCOVERY_URL must stay realm-gated so idp-wait exits at once with no UI on the realm')
+    try:
+        unset = monitoring_services({'KRATE_IDP_HOST': ''})
+        real = monitoring_services({'KRATE_IDP_HOST': 'krate-gate.test'})
+    except ValueError as exc:
+        e(False, f'monitoring: Compose rendering failed: {exc}')
+        return
+    hosts_unset = (unset.get('perses') or {}).get('extra_hosts')
+    hosts_real = (real.get('perses') or {}).get('extra_hosts')
+    e(any('host-gateway' in str(h) for h in hosts_unset or []),
+      f'monitoring/perses with an empty host must keep the default host-gateway mapping; got {hosts_unset}')
+    e(hosts_real == ['krate-gate.test=host-gateway'],
+      f'monitoring/perses with KRATE_IDP_HOST=krate-gate.test must map exactly that host; got {hosts_real}')
+    e(hosts_unset != hosts_real,
+      'monitoring/perses: extra_hosts must follow KRATE_IDP_HOST '
+      '(this is the recreate-relevant input the CLI must keep stable across a Grafana-only switch)')
+
+
 def check_grafana_collision_paging(checks):
     """A full realm page with absent e-mails must not hide a collision on page two."""
     e = lambda cond, msg: checks.expect(cond, 'grafana collision paging: ' + msg)  # noqa: E731
@@ -4816,7 +4855,7 @@ def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
+                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_phase4_monitor_paths,

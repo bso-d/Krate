@@ -3186,11 +3186,17 @@ This bundle was built without the observability stack."
   # In realm mode the containers resolve the realm's public host to the Docker host,
   # whose published 443 is the cluster proxy; idp-wait holds them until the realm
   # answers; and Grafana's own port, which has no login left, moves to the loopback
-  # interface. With no UI on the realm both are empty and idp-wait exits at once.
+  # interface. With no UI on the realm the discovery URL is empty and idp-wait
+  # exits at once.
   local idp_host="" idp_url="" public grafana_bind="" grafana_sha=""
+  # The IdP host mapping is always exported, even with no UI on the realm: it
+  # only adds a hosts entry, and gating it on the realm flags recreated Perses
+  # (extra_hosts is part of its Compose config) on a Grafana-only auth switch
+  # (formal 4a U22). The discovery URL stays gated so idp-wait still exits at
+  # once with nothing on the realm.
+  public="$(env_value KEYCLOAK_PUBLIC_URL)"; public="${public%/}"
+  idp_host="$(public_url_host)"
   if $grafana_realm || $perses_realm; then
-    public="$(env_value KEYCLOAK_PUBLIC_URL)"; public="${public%/}"
-    idp_host="$(public_url_host)"
     idp_url="$public/realms/$IDENTITY_REALM/.well-known/openid-configuration"
   fi
   if $grafana_realm; then
