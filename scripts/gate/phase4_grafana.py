@@ -686,13 +686,36 @@ class Gate(Phase4Gate):
         value = out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else ''
         return value or None
 
-    def run_browser_probe(self, user, dash, gateway):
-        """One phase4-browser.mjs run in the Playwright container; the user's password
-        and TOTP seed travel in the child environment (-e NAME), never in argv.
-        Returns (summary dict | None, steps list)."""
-        state = self.load_state(user)
-        outdir = os.path.join(self.state_dir, 'browser', user)
-        os.makedirs(outdir, exist_ok=True)
+    # Failed-request errors that are container-network noise, never product
+    # dirt: formal 4a attempt-9 failed both probes with ERR_NAME_NOT_RESOLVED
+    # on a same-host request seconds after same-host requests succeeded, while
+    # identical repros pass. CSP violations, page errors and HTTP >= 400 are
+    # product signals and never qualify for a retry.
+    NET_RETRY_ERRORS = ('ERR_NAME_NOT_RESOLVED', 'ERR_CONNECTION_REFUSED',
+                        'ERR_CONNECTION_RESET', 'ERR_CONNECTION_CLOSED',
+                        'ERR_CONNECTION_TIMED_OUT', 'ERR_TIMED_OUT',
+                        'ERR_NETWORK_CHANGED', 'ERR_INTERNET_DISCONNECTED',
+                        'ERR_ADDRESS_UNREACHABLE')
+
+    @staticmethod
+    def _benign_404(item):
+        """The UI's own public-dashboards 404 (public dashboards are off)."""
+        return item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards')
+
+    def _network_flake(self, summary):
+        """Whether a dirty summary is retryable network-only dirt."""
+        if not summary or summary.get('cspViolations') or summary.get('pageErrors'):
+            return False
+        failed = summary.get('failedRequests') or []
+        if not failed:
+            return False
+        if any(not any(err in (item.get('err') or '') for err in self.NET_RETRY_ERRORS)
+               for item in failed):
+            return False
+        return not [item for item in summary.get('http4xx5xx') or []
+                    if not self._benign_404(item)]
+
+    def _browser_attempt(self, user, dash, gateway, state, outdir):
         env = dict(os.environ, UI15_USER=user, UI15_PASSWORD=state['password'],
                    UI15_TOTP=state['totp'], UI15_DASH=dash,
                    PW_MODULES='/usr/lib/node_modules')
@@ -721,6 +744,24 @@ class Gate(Phase4Gate):
         if rc != 0 and summary is None:
             log('browser probe stderr tail: %s' % (err or '')[-200:])
         return summary, steps
+
+    def run_browser_probe(self, user, dash, gateway):
+        """One phase4-browser.mjs run in the Playwright container; the user's password
+        and TOTP seed travel in the child environment (-e NAME), never in argv.
+        A network-only dirty summary (DNS/connection errors, nothing else) is
+        retried once with a fresh container; the first attempt's failed requests
+        are returned for the receipt. Returns (summary dict | None, steps list,
+        first-attempt failed requests or None)."""
+        state = self.load_state(user)
+        outdir = os.path.join(self.state_dir, 'browser', user)
+        os.makedirs(outdir, exist_ok=True)
+        summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
+        retried = None
+        if self._network_flake(summary):
+            retried = summary.get('failedRequests')
+            log('browser probe %s: network-only dirt %s, retrying once' % (user, retried))
+            summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
+        return summary, steps, retried
 
     def browser_batch(self):
         """Both walked browser runs (Viewer p4v on krate-overview, log 146; Admin
@@ -760,8 +801,8 @@ class Gate(Phase4Gate):
         try:
             for role, user, dash in (('viewer', 'p4v', 'krate-overview'),
                                      ('admin', 'p4both', 'p4lokiui')):
-                summary, steps = self.run_browser_probe(user, dash, gateway)
-                out[role] = {'summary': summary, 'steps': steps}
+                summary, steps, retried = self.run_browser_probe(user, dash, gateway)
+                out[role] = {'summary': summary, 'steps': steps, 'retried': retried}
         finally:
             self.public_api('DELETE', '/grafana/api/dashboards/uid/p4lokiui', token=token)
         return out
@@ -776,8 +817,7 @@ class Gate(Phase4Gate):
         public-dashboards 404 (public dashboards are off; benign)."""
         if not summary:
             return False
-        benign = all(item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards')
-                     for item in summary.get('http4xx5xx') or [])
+        benign = all(self._benign_404(item) for item in summary.get('http4xx5xx') or [])
         return (summary.get('cspViolations') == 0 and summary.get('pageErrors') == 0
                 and not (summary.get('failedRequests') or []) and benign)
 
@@ -2074,8 +2114,9 @@ class Gate(Phase4Gate):
         a_bad4xx = [(item.get('s'), str(item.get('url', ''))[-50:])
                     for item in (a_summary or {}).get('http4xx5xx') or []
                     if not (item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards'))]
+        retried_a = (admin_run.get('retried') or '-')
         return status, '%s; browser control (p4lokiui rows %s, panel errors %s, explore rows %s, live rows %s, ' \
-                       'clean=%s, csp=%s, pageerr=%s, failed=%s, bad4xx=%s); detected_field read %s%s, tail %s ' \
+                       'clean=%s, csp=%s, pageerr=%s, failed=%s, bad4xx=%s, retried=%s); detected_field read %s%s, tail %s ' \
                        'len=%d, forged absent %s%s; 8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
                        'labels/query_range 200, fluent-bit fresh %s%s; walk: live4a 129-130,148,160 ' \
                        '(re-measure at c8c9337; dd3a28d log-format-only per lead)' \
@@ -2083,7 +2124,7 @@ class Gate(Phase4Gate):
                   dash_step.get('logRows', '-'), dash_step.get('panelErrorIcons', '-'),
                   explore_step.get('logRows', '-'), live_step.get('liveRows', '-'), clean_note,
                   (a_summary or {}).get('cspViolations', '-'), (a_summary or {}).get('pageErrors', '-'),
-                  (a_summary or {}).get('failedRequests', '-'), a_bad4xx or '-',
+                  (a_summary or {}).get('failedRequests', '-'), a_bad4xx or '-', retried_a,
                   st_det, det_note, head.split('\r\n')[0][:40], len(head),
                   forged_absent, forged_note, fresh,
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
@@ -2662,13 +2703,14 @@ class Gate(Phase4Gate):
                     for item in (v_summary or {}).get('http4xx5xx') or []
                     if not (item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards'))]
         v_wsframes = [(w.get('url'), w.get('framesIn')) for w in (v_summary or {}).get('websockets') or []]
-        return status, '%s; ui (csp=%s, pageerr=%s, failed=%s, bad4xx=%s, home=%s, dash=%s, wsframes=%s); ' \
+        retried_v = (viewer_run.get('retried') or '-')
+        return status, '%s; ui (csp=%s, pageerr=%s, failed=%s, bad4xx=%s, home=%s, dash=%s, wsframes=%s, retried=%s); ' \
                        'callback GET %s; cookie [%s]; folder POST UI-Origin %s/%s, foreign ' \
                        'Origin %s "origin not allowed"; live/ws %s%s; walk: live4a 124,132,146,147' \
                % (tokens,
                   (v_summary or {}).get('cspViolations', '-'), (v_summary or {}).get('pageErrors', '-'),
                   (v_summary or {}).get('failedRequests', '-'), v_bad4xx or '-',
-                  'home loaded' in v_steps, 'dashboard loaded' in v_steps, v_wsframes or '-',
+                  'home loaded' in v_steps, 'dashboard loaded' in v_steps, v_wsframes or '-', retried_v,
                   signed['callback_get'],
                   re.sub(r'grafana_session=[^;]+', 'grafana_session=<redacted>', cookie)[:90],
                   st1, st2, st3, head.split('\r\n')[0][:30],
