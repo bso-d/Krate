@@ -594,7 +594,12 @@ class Gate(Phase4Gate):
         key = base64.b64encode(os.urandom(16)).decode()
         host = self.origin.hostname
         port = self.origin.port or 443
-        lines = ['GET %s HTTP/1.1' % path, 'Host: %s:%s' % (host, port),
+        # The Host authority omits a default port, the way browsers send it:
+        # the cluster proxy closes any other raw Host with no response (444 on
+        # the $http_host mismatch; formal 4a U7-tail/U15-ws at f161243).
+        default_port = 443 if self.origin.scheme == 'https' else 80
+        authority = host if port == default_port else '%s:%s' % (host, port)
+        lines = ['GET %s HTTP/1.1' % path, 'Host: %s' % authority,
                  'Upgrade: websocket', 'Connection: Upgrade',
                  'Sec-WebSocket-Key: %s' % key, 'Sec-WebSocket-Version: 13']
         if subprotocol:
@@ -2001,8 +2006,11 @@ class Gate(Phase4Gate):
         v_bad = refusals(viewer)
         a_bad = refusals(admin)
         # the 34d6ab6 read location (re-measure 160: detected_field/container/values
-        # 200 with body {}; the gate asked for field `job` and Loki answered 400)
-        st_det, _h, det_b = admin.req(self.base + proxy + '/detected_field/container/values')
+        # 200 with body {}). Loki answers 400 without the query argument (formal 4a
+        # U7 at f161243: parse error, unexpected $end), so the read carries the same
+        # selector as the row's other queries.
+        st_det, _h, det_b = admin.req(self.base + proxy + '/detected_field/container/values?query='
+                                      + urllib.parse.quote('{job="containerlogs"}'))
         # controls (walk 130/160): labels 200, query_range 200, no forged line
         quote = urllib.parse.quote
         st_lab, _h, _b = viewer.req(self.base + proxy + '/labels')
