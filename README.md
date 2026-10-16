@@ -263,17 +263,28 @@ port only redirects to the public origin; open the UI at the
 `KEYCLOAK_PUBLIC_URL` origin (`./krate ui` prints it).
 
 Offline Docker RPMs: `make docker-rpms` downloads the Docker CE packages plus the
-base-OS dependencies a minimal host may lack (`container-selinux`, `nftables`
-and the libraries nftables needs: `libnftnl`, `jansson`, `libmnl`) into
-`optional/`, from the builder image `RHEL_BUILDER_IMAGE` (default: the Rocky
+base-OS dependencies a minimal host may lack into `optional/`: `container-selinux`,
+`nftables` with the libraries it needs (`libnftnl`, `jansson`, `libmnl`), and
+`iptables-nft` with `iptables-libs`, `libnetfilter_conntrack` and `libnfnetlink`
+(docker-ce requires `(iptables-nft or iptables)`: a RHEL server has iptables-nft
+because firewalld requires it, a cloud image may have neither), from the builder
+image `RHEL_BUILDER_IMAGE` (default: the Rocky
 Linux project's maintained `rockylinux/rockylinux:9`, pinned by digest; the
 Docker Official Image `rockylinux:9` is no longer updated). `krate
 docker-install` (and the bundled `docker-offline/install-docker.sh`, which uses
 the same selection) adds only the bundled packages that provide a capability
-`dnf` names as missing on that host, over up to three rounds (an added package
-can name its own missing library), and otherwise tells you which capability to
-take from the OS media. The whole flow was proven offline on a Rocky Linux 9.8 VM
-with SELinux enforcing (see `sso/guides/identity-gate.md`).
+`dnf` names as missing on that host, round by round until no bundled package is
+left to add (an added package can name its own missing library; for a rich
+dependency such as `(iptables-nft or iptables)` the first alternative a bundled
+package provides is taken). When a capability stays unresolved it names that
+capability and tells you to take it from the OS media; the advice about
+`container-selinux` (it must match the host's `selinux-policy` build) appears only
+when `container-selinux` or one of its versioned requirements (the host's
+`selinux-policy`) is the one that stayed unresolved.
+The whole flow was proven offline on Rocky Linux 9.8 VMs with SELinux enforcing that already had iptables-nft
+(a standard RHEL 9 server has it through firewalld; see `sso/guides/identity-gate.md`), and `krate docker-install`
+also on a Rocky Linux 9.8 cloud VM with neither firewalld nor iptables, where it added `iptables-nft`,
+`nftables`, `libnftnl` and `container-selinux` from `optional/`.
 
 `./krate identity up` generates the database TLS material and the realm, starts
 PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the

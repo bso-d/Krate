@@ -2551,7 +2551,10 @@ def rpm_fixture(directory):
                  'docker-ce-cli-29.0.0-1.el9.x86_64.rpm', 'docker-ce-rootless-extras-29.0.0-1.el9.x86_64.rpm'):
         (bundle / name).write_text('rpm\n')
     for name in ('container-selinux-2.229.0-1.el9.noarch.rpm', 'nftables-1.0.9-3.el9.x86_64.rpm', 'libnftnl-1.2.6-4.el9.x86_64.rpm',
-                 'jansson-2.14-1.el9.x86_64.rpm', 'libmnl-1.0.4-16.el9.x86_64.rpm', 'unrelated-tool-1.0-1.el9.x86_64.rpm'):
+                 'jansson-2.14-1.el9.x86_64.rpm', 'libmnl-1.0.4-16.el9.x86_64.rpm', 'unrelated-tool-1.0-1.el9.x86_64.rpm',
+                 'iptables-nft-1.8.10-11.el9_5.x86_64.rpm', 'iptables-libs-1.8.10-11.el9_5.x86_64.rpm',
+                 'libnetfilter_conntrack-1.0.9-1.el9.x86_64.rpm', 'libnfnetlink-1.0.1-23.el9_5.x86_64.rpm',
+                 'iptables-legacy-1.8.4-1.el9.x86_64.rpm'):
         (bundle / 'optional' / name).write_text('rpm\n')
     write_tool(bin_dir, 'sudo', 'exec "$@"\n')
     write_tool(bin_dir, 'systemctl', 'exit 0\n')
@@ -2560,9 +2563,13 @@ def rpm_fixture(directory):
     # dnf fails like dnf 4 on RHEL 9 until every requirement is in the transaction, writing its problem
     # lines only after a pause: the caller must read a complete file, not a file still being written.
     write_tool(bin_dir, 'dnf', r'''echo "dnf $*" >> "$FAKE_LOG"
-names=" ${FAKE_HOST_HAS:-} "
-for a in "$@"; do case "$a" in *.rpm) b="${a##*/}"; names+="${b%%-[0-9]*} " ;; esac; done
+# The host has the iptables-nft closure (as on a RHEL server with firewalld) unless FAKE_NO_IPTABLES is set;
+# FAKE_HOST_HAS lists further packages the host has. "has" is host or transaction, "intx" the transaction only.
+if [[ -n "${FAKE_NO_IPTABLES:-}" ]]; then names=" ${FAKE_HOST_HAS:-} "; else names=" iptables-nft iptables-libs libnetfilter_conntrack libnfnetlink ${FAKE_HOST_HAS:-} "; fi
+txn=" "
+for a in "$@"; do case "$a" in *.rpm) b="${a##*/}"; names+="${b%%-[0-9]*} "; txn+="${b%%-[0-9]*} " ;; esac; done
 has() { [[ "$names" == *" $1 "* ]]; }
+intx() { [[ "$txn" == *" $1 "* ]]; }
 problems=()
 has nftables || problems+=("nothing provides nftables >= 1:1.0.5 needed by docker-ce-3:29.0.0-1.el9.x86_64 from @commandline"
                             "nothing provides /usr/sbin/nft needed by docker-ce-rootless-extras-29.0.0-1.el9.x86_64 from @commandline")
@@ -2571,7 +2578,18 @@ if has nftables; then
   has jansson || problems+=("nothing provides libjansson.so.4()(64bit) needed by nftables-1:1.0.9-3.el9.x86_64 from @commandline")
 fi
 if has libnftnl; then has libmnl || problems+=("nothing provides libmnl.so.0()(64bit) needed by libnftnl-1.2.6-4.el9.x86_64 from @commandline"); fi
-[[ -z "${FAKE_EXTRA:-}" ]] || problems+=("nothing provides $FAKE_EXTRA needed by docker-ce-3:29.0.0-1.el9.x86_64 from @commandline")
+# docker-ce 29 requires the rich dependency (iptables-nft or iptables); iptables-nft requires iptables-libs of its own
+# version, libnftnl and libmnl; iptables-libs requires libnetfilter_conntrack, which requires libnfnetlink.
+has iptables-nft || problems+=("nothing provides (iptables-nft or iptables) needed by docker-ce-3:29.0.0-1.el9.x86_64 from @commandline")
+if intx iptables-nft; then
+  has iptables-libs || problems+=("nothing provides iptables-libs(x86-64) = 1.8.10-11.el9_5 needed by iptables-nft-1.8.10-11.el9_5.x86_64 from @commandline")
+  has libnftnl || problems+=("nothing provides libnftnl.so.11()(64bit) needed by iptables-nft-1.8.10-11.el9_5.x86_64 from @commandline")
+  has libmnl || problems+=("nothing provides libmnl.so.0()(64bit) needed by iptables-nft-1.8.10-11.el9_5.x86_64 from @commandline")
+fi
+if intx iptables-libs; then has libnetfilter_conntrack || problems+=("nothing provides libnetfilter_conntrack.so.3()(64bit) needed by iptables-libs-1.8.10-11.el9_5.x86_64 from @commandline"); fi
+if intx libnetfilter_conntrack; then has libnfnetlink || problems+=("nothing provides libnfnetlink.so.0()(64bit) needed by libnetfilter_conntrack-1.0.9-1.el9.x86_64 from @commandline"); fi
+# FAKE_EXTRA is a capability nothing on the host provides, needed by FAKE_EXTRA_NEEDER, until package FAKE_EXTRA_BY joins the transaction.
+[[ -z "${FAKE_EXTRA:-}" ]] || intx "${FAKE_EXTRA_BY:-never}" || problems+=("nothing provides $FAKE_EXTRA needed by ${FAKE_EXTRA_NEEDER:-docker-ce-3:29.0.0-1.el9.x86_64} from @commandline")
 if (( ${#problems[@]} )); then
   echo "Error: " >&2
   sleep 0.3
@@ -2589,6 +2607,11 @@ echo "Complete!"
          jansson) printf 'libjansson.so.4()(64bit)\njansson = 2.14-1.el9\n' ;;
          libmnl) printf 'libmnl.so.0()(64bit)\nlibmnl = 1.0.4-16.el9\n' ;;
          container-selinux) printf 'container-selinux = 2:2.229.0-1.el9\ndocker-selinux = 2:2.229.0-1.el9\n' ;;
+         iptables-nft) printf 'arptables\narptables-helper\nebtables\niptables\niptables-nft = 1.8.10-11.el9_5\niptables-nft(x86-64) = 1.8.10-11.el9_5\n' ;;
+         iptables-libs) printf 'libxtables.so.12()(64bit)\niptables-libs = 1.8.10-11.el9_5\niptables-libs(x86-64) = 1.8.10-11.el9_5\n' ;;
+         libnetfilter_conntrack) printf 'libnetfilter_conntrack.so.3()(64bit)\nlibnetfilter_conntrack = 1.0.9-1.el9\n' ;;
+         libnfnetlink) printf 'libnfnetlink.so.0()(64bit)\nlibnfnetlink = 1.0.1-23.el9_5\n' ;;
+         iptables-legacy) printf 'iptables\niptables-legacy = 1.8.4-1.el9\n' ;;
          *) echo "$n = 1.0-1.el9" ;;
        esac ;;
   -qpl) case "${2##*/}" in nftables-*) printf '/etc/nftables\n/usr/sbin/nft\n' ;; esac ;;
@@ -2607,6 +2630,66 @@ def makefile_rpm_installer():
     return raw, raw.replace('$$', '$')
 
 
+def check_rpm_capability_parsing(e):
+    """The installers read dnf's "nothing provides" lines: plain capabilities, sonames, file paths and rich dependencies "(A or B)"."""
+    source = bash_functions(ROOT / 'epc/krate', 'rpm_missing_capabilities', 'rpm_capability_alternatives', 'rpm_providers_of', 'rpm_failure_message')
+    dnf_output = """Error:
+ Problem 1: conflicting requests
+  - nothing provides container-selinux >= 2:2.74 needed by docker-ce-3:29.9.0-1.el9.aarch64 from @commandline
+ Problem 2: package docker-ce-rootless-extras-29.9.0-1.el9.aarch64 from @commandline requires docker-ce, but none of the providers can be installed
+  - conflicting requests
+  - nothing provides (iptables-nft or iptables) needed by docker-ce-3:29.9.0-1.el9.aarch64 from @commandline
+  - nothing provides libnftnl.so.11()(64bit) needed by nftables-1.0.9-9.el9_8.aarch64 from @commandline
+  - nothing provides /usr/sbin/nft needed by docker-ce-rootless-extras-29.9.0-1.el9.aarch64 from @commandline
+  - nothing provides selinux-policy-base >= 38.1.75-2.el9_8 needed by container-selinux-4:2.247.0-1.el9_8.noarch from @commandline
+  - nothing provides policycoreutils needed by container-selinux-4:2.247.0-1.el9_8.noarch from @commandline
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = Path(tmp) / 'dnf.log'
+        log.write_text(dnf_output)
+        result = run_bash(BASH_STUBS + source + '\nrpm_missing_capabilities "$1"\n', log)
+        e(result.returncode == 0 and set(result.stdout.splitlines()) == {
+            'container-selinux', '(iptables-nft or iptables)', 'libnftnl.so.11()(64bit)', '/usr/sbin/nft', 'selinux-policy-base', 'policycoreutils'},
+          f'rpm_missing_capabilities must read plain names (version dropped), sonames, file paths and whole rich dependencies; got {result.stdout.splitlines()}')
+        for dependency, alternatives in (('(iptables-nft or iptables)', ['iptables-nft', 'iptables']),
+                                         ('(foo >= 1.0 or bar or baz)', ['foo', 'bar', 'baz']),
+                                         ('(libfoo.so.1()(64bit) or bar)', ['libfoo.so.1()(64bit)', 'bar']),
+                                         ('libnftnl.so.11()(64bit)', ['libnftnl.so.11()(64bit)']),
+                                         ('/usr/sbin/nft', ['/usr/sbin/nft']),
+                                         ('container-selinux', ['container-selinux']),
+                                         ('(foo and bar)', ['(foo and bar)']),
+                                         ('(foo if bar)', ['(foo if bar)']),
+                                         ('(foo or (bar and baz))', ['(foo or (bar and baz))']),
+                                         ('(foo or (bar or baz))', ['(foo or (bar or baz))'])):
+            result = run_bash(BASH_STUBS + source + '\nrpm_capability_alternatives "$1"\n', dependency)
+            e(result.returncode == 0 and result.stdout.splitlines() == alternatives,
+              f'rpm_capability_alternatives {dependency!r}: want {alternatives}; got {result.stdout.splitlines()}')
+        bin_dir, bundle = rpm_fixture(tmp)
+        optional = sorted(str(f) for f in (bundle / 'optional').glob('*.rpm'))
+        for need, wanted in (('(iptables-nft or iptables)', ['iptables-nft-1.8.10']), ('(libabsent or iptables-legacy)', ['iptables-legacy-1.8.4']),
+                             ('(libabsent or libgone)', []), ('/usr/sbin/nft', ['nftables-1.0.9']), ('iptables-libs(x86-64)', ['iptables-libs-1.8.10']),
+                             ('libnftnl.so.11()(64bit)', ['libnftnl-1.2.6'])):
+            result = run_bash(BASH_STUBS + source + '\nrpm_providers_of "$@"\n', need, *optional, path_dir=bin_dir)
+            found = [Path(line).name for line in result.stdout.splitlines()]
+            e(result.returncode == 0 and len(found) == len(wanted) and all(f.startswith(w) for f, w in zip(found, wanted)),
+              f'rpm_providers_of {need!r}: want {wanted}; got {found}')
+        for added, capabilities, selinux, texts in (
+                ('', ['(libfoo or libbar)'], False, ['lacks (libfoo or libbar), and the bundle has no package', 'Install (libfoo or libbar) from your RHEL media']),
+                ('nftables-1.rpm libnftnl-1.rpm', ['(iptables-nft or iptables)'], False,
+                 ['bundled dependencies (nftables-1.rpm libnftnl-1.rpm); the bundle cannot supply (iptables-nft or iptables)', 'Install (iptables-nft or iptables) from your RHEL media']),
+                ('', ['container-selinux'], True, ['lacks container-selinux', 'dnf install container-selinux']),
+                ('container-selinux-1.rpm', ['selinux-policy-base'], True, ['cannot supply selinux-policy-base', 'dnf install container-selinux']),
+                ('container-selinux-1.rpm', ['policycoreutils'], False, ['cannot supply policycoreutils', 'Install policycoreutils from your RHEL media']),
+                ('nftables-1.rpm', ['libfoo.so.1()(64bit)', 'selinux-policy-base'], True,
+                 ['cannot supply libfoo.so.1()(64bit), selinux-policy-base', 'Install libfoo.so.1()(64bit) from your RHEL media', 'dnf install container-selinux']),
+                ('nftables-1.rpm', [], False, ["dnf's output above names the cause"])):
+            result = run_bash(BASH_STUBS + source + '\nrpm_failure_message "$@"\n', Path(tmp) / 'dnf.log', added, *capabilities)
+            e(result.returncode == 0 and all(text in result.stdout for text in texts)
+              and (('container-selinux must match' in result.stdout) == selinux)
+              and (selinux or 'dnf install container-selinux' not in result.stdout),
+              f'rpm_failure_message {added!r} {capabilities}: want {texts} and container-selinux advice {selinux}; got {result.stdout!r}')
+
+
 def check_rpm_install(checks):
     """S3-S6: dnf's errors are read after dnf exits, capabilities map to bundled RPMs over several rounds, both installers agree, the builder is pinned."""
     e = checks.expect
@@ -2615,20 +2698,30 @@ def check_rpm_install(checks):
     e('>(' not in install and '2>"$attempt_log"' in install, 'epc/krate: docker_install_rpm must write dnf stderr to the file synchronously (no process substitution)')
     makefile = (ROOT / 'Makefile').read_text()
     optional = re.search(r'^DOCKER_RPM_OPTIONAL := (.*)$', makefile, re.M)
-    e(optional is not None and {'container-selinux', 'nftables', 'libnftnl', 'jansson', 'libmnl'} <= set(optional.group(1).split()),
-      'Makefile: DOCKER_RPM_OPTIONAL must bundle container-selinux, nftables, libnftnl, jansson and libmnl')
+    e(optional is not None and {'container-selinux', 'nftables', 'libnftnl', 'jansson', 'libmnl',
+                                'iptables-nft', 'iptables-libs', 'libnetfilter_conntrack', 'libnfnetlink'} <= set(optional.group(1).split()),
+      'Makefile: DOCKER_RPM_OPTIONAL must bundle container-selinux, nftables, libnftnl, jansson, libmnl and the iptables-nft closure '
+      '(iptables-nft, iptables-libs, libnetfilter_conntrack, libnfnetlink): docker-ce requires (iptables-nft or iptables)')
+    builder_recipe = makefile[makefile.index('docker-rpms:\n'):makefile.index('INSTALL_RPM\n')]
+    e(re.search(r'dnf install -y -q [^\n]*\b(iptables-nft|nftables)\b', builder_recipe) is None,
+      'Makefile docker-rpms: the builder must not install iptables-nft or nftables as if every RHEL host had them (they are optional/ downloads)')
+    download_lines = [line for line in builder_recipe.splitlines() if 'dnf download' in line and not line.lstrip('>').lstrip().startswith('#')]
+    e(len(download_lines) == 2 and not any(flag in line for line in download_lines for flag in ('--resolve', '--alldeps')),
+      'Makefile docker-rpms: the main set and optional/ are named `dnf download` lists, never --resolve/--alldeps (the main set is exactly the Docker packages)')
     e(re.search(r'^RHEL_BUILDER_IMAGE \?= rockylinux/rockylinux:9@sha256:[0-9a-f]{64}$', makefile, re.M) is not None,
       "Makefile: RHEL_BUILDER_IMAGE must default to Rocky's maintained image rockylinux/rockylinux:9, pinned by digest")
     e('AlmaLinux' not in makefile, 'Makefile: no stale AlmaLinux builder wording')
     raw, standalone = makefile_rpm_installer()
     e(re.search(r'(?<!\$)\$(?!\$)', raw) is None, 'Makefile: every $ in the install-docker.sh heredoc must be escaped as $$')
-    for name in ('rpm_missing_capabilities', 'rpm_providers_of'):
+    for name in ('rpm_missing_capabilities', 'rpm_capability_alternatives', 'rpm_providers_of', 'rpm_failure_message'):
         source = bash_functions(ROOT / 'epc/krate', name)
         e(source in standalone, f'Makefile install-docker.sh: {name} must be identical to its epc/krate copy')
     e('>(' not in standalone and '2>"$attempt_log"' in standalone, 'Makefile install-docker.sh: dnf stderr must be written to the file synchronously')
     if bash_binary() is None:
         return
-    krate_script = BASH_STUBS + bash_functions(ROOT / 'epc/krate', 'rpm_missing_capabilities', 'rpm_providers_of', 'docker_install_rpm') + '\ndocker_install_rpm "$1"\n'
+    krate_script = BASH_STUBS + bash_functions(ROOT / 'epc/krate', 'rpm_missing_capabilities', 'rpm_capability_alternatives', 'rpm_providers_of',
+                                               'rpm_failure_message', 'docker_install_rpm') + '\ndocker_install_rpm "$1"\n'
+    check_rpm_capability_parsing(e)
     wanted = ['nftables-1.0.9-3.el9.x86_64.rpm', 'libnftnl-1.2.6-4.el9.x86_64.rpm', 'jansson-2.14-1.el9.x86_64.rpm', 'libmnl-1.0.4-16.el9.x86_64.rpm']
     for label, run in (('epc/krate docker-install', lambda where, variables, tools: run_bash(krate_script, where, env=variables, path_dir=tools)),
                        ('Makefile install-docker.sh', None)):
@@ -2659,6 +2752,50 @@ def check_rpm_install(checks):
             calls = log.read_text().splitlines() if log.exists() else []
             e(result.returncode == 1 and 'lacks libfoo.so.1()(64bit)' in result.stderr and len(calls) == 1,
               f'{label}: with nothing bundled to add, it stops after the first attempt naming the missing capability; got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-200:]}')
+
+            def scenario(**variables):
+                assert run is not None
+                log.unlink(missing_ok=True)
+                outcome = run(bundle, dict(env, **variables), bin_dir)
+                return outcome, (log.read_text().splitlines() if log.exists() else [])
+
+            cloud = 'iptables-libs libnetfilter_conntrack libnfnetlink jansson libmnl'
+            nft_ready = 'nftables libnftnl jansson libmnl'
+            result, calls = scenario()
+            e(result.returncode == 0 and not any(n in calls[-1] for n in ('iptables-nft', 'iptables-libs', 'libnetfilter_conntrack', 'libnfnetlink', 'iptables-legacy')),
+              f'{label}: a host that has iptables-nft (firewalld) never gets the bundled iptables-nft closure; got {result.returncode}: {calls[-1][-200:] if calls else ""!r}')
+            # Rocky GenericCloud (observed 2026-10-16): no iptables-nft, nftables, libnftnl; iptables-libs, libnetfilter_conntrack, libnfnetlink present.
+            result, calls = scenario(FAKE_NO_IPTABLES='1', FAKE_HOST_HAS=cloud)
+            last = calls[-1] if calls else ''
+            e(result.returncode == 0 and len(calls) == 3,
+              f'{label}: dnf names the rich dependency (iptables-nft or iptables): iptables-nft is added with nftables, then libnftnl; got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-300:]}')
+            e(all(n in last for n in ('nftables-1.0.9', 'iptables-nft-1.8.10', 'libnftnl-1.2.6'))
+              and not any(n in last for n in ('iptables-libs', 'libnetfilter_conntrack', 'libnfnetlink', 'jansson', 'libmnl', 'iptables-legacy', 'container-selinux')),
+              f'{label}: only the iptables-nft, nftables and libnftnl are added there (iptables-legacy also provides iptables but is not the first alternative); got {last[-300:]!r}')
+            # A host without the whole closure: iptables-nft -> iptables-libs -> libnetfilter_conntrack -> libnfnetlink is five attempts.
+            result, calls = scenario(FAKE_NO_IPTABLES='1')
+            last = calls[-1] if calls else ''
+            e(result.returncode == 0 and len(calls) == 5,
+              f'{label}: a host lacking the whole iptables-nft closure needs five dnf attempts, not a fixed three rounds; got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-300:]}')
+            e(all(n in last for n in ('iptables-nft-1.8.10', 'iptables-libs-1.8.10', 'libnetfilter_conntrack-1.0.9', 'libnfnetlink-1.0.1', 'libnftnl-1.2.6', 'libmnl-1.0.4'))
+              and 'iptables-legacy' not in last,
+              f'{label}: the final transaction carries the whole closure; got {last[-400:]!r}')
+            result, calls = scenario(FAKE_EXTRA='(libabsent or iptables-legacy)', FAKE_EXTRA_BY='iptables-legacy', FAKE_HOST_HAS=nft_ready)
+            e(result.returncode == 0 and len(calls) == 2 and 'iptables-legacy' in calls[-1],
+              f'{label}: a rich dependency is satisfied by the first alternative a bundled package provides (here the second); got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-200:]}')
+            result, calls = scenario(FAKE_EXTRA='(libfoo or libbar)', FAKE_HOST_HAS=nft_ready)
+            e(result.returncode == 1 and 'lacks (libfoo or libbar)' in result.stderr and 'container-selinux must match' not in result.stderr,
+              f'{label}: an unresolved rich dependency is named whole, without the container-selinux advice; got {result.returncode}: {result.stderr.strip()[-250:]}')
+            result, calls = scenario(FAKE_EXTRA='libfoo.so.1()(64bit)', FAKE_NO_IPTABLES='1', FAKE_HOST_HAS=cloud)
+            e(result.returncode == 1 and 'bundled dependencies (' in result.stderr and 'cannot supply libfoo.so.1()(64bit)' in result.stderr
+              and 'Install libfoo.so.1()(64bit) from your RHEL media' in result.stderr and 'container-selinux must match' not in result.stderr,
+              f'{label}: after adding bundled packages, the capability that stayed unresolved is named and the container-selinux advice is absent; got {result.returncode}: {result.stderr.strip()[-350:]}')
+            result, calls = scenario(FAKE_EXTRA='container-selinux >= 2:9.9', FAKE_HOST_HAS=nft_ready)
+            e(result.returncode == 1 and len(calls) == 2 and 'cannot supply container-selinux' in result.stderr and 'container-selinux must match this host' in result.stderr,
+              f'{label}: a capability dnf still names after its bundled provider was added (its version constraint is not met) is unresolved, with the container-selinux advice; got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-300:]}')
+            result, calls = scenario(FAKE_EXTRA='selinux-policy-base >= 38.1.75-2.el9_8', FAKE_EXTRA_NEEDER='container-selinux-4:2.247.0-1.el9_8.noarch', FAKE_HOST_HAS=nft_ready)
+            e(result.returncode == 1 and 'selinux-policy-base' in result.stderr and 'container-selinux must match this host' in result.stderr,
+              f'{label}: a capability needed by container-selinux (the host selinux-policy) gets the container-selinux advice; got {result.returncode}: {result.stderr.strip()[-300:]}')
 
 
 def check_gen_cert_ip(checks):

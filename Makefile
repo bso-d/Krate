@@ -14,12 +14,12 @@ RHEL_VERSION ?= 9
 # for a RHEL target.
 TARGET_OS ?= $(UBUNTU_VERSION)
 # Builder for the RHEL-family RPM set. Its distro supplies the optional/ packages
-# (container-selinux, nftables and its libraries). This is the Rocky Linux project's
-# own image (the Docker Official Image rockylinux:9 is no longer updated), pinned by
-# digest like every other build input; its packages resolve from Rocky's current
-# repositories, which follow the RHEL 9 minor releases. For a target whose
-# selinux-policy is older or newer, build with that target's own distro image or let
-# `krate docker-install` name the package to take from the OS media. To move the pin:
+# (container-selinux, nftables, iptables-nft and their libraries). This is the Rocky
+# Linux project's own image (the Docker Official Image rockylinux:9 is no longer
+# updated), pinned by digest like every other build input; its packages resolve from
+# Rocky's current repositories, which follow the RHEL 9 minor releases. For a target
+# whose selinux-policy is older or newer, build with that target's own distro image or
+# let `krate docker-install` name the package to take from the OS media. To move the pin:
 # docker buildx imagetools inspect rockylinux/rockylinux:9 (the index Digest line).
 RHEL_BUILDER_IMAGE ?= rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f
 INCLUDE_DOCKER ?= 0
@@ -45,13 +45,18 @@ DOCKER_RPM_PACKAGES := containerd.io docker-ce docker-ce-cli docker-ce-rootless-
 # Base-OS dependencies a minimal or cloud host may lack go to optional/, never to
 # the main set: containerd.io requires container-selinux (coupled to the host's
 # selinux-policy minor version: a newer build FAILS on an older host that was fine),
-# and docker-ce 29 requires nftables, which requires libnftnl and jansson (libnftnl
-# in turn libmnl). `krate docker-install` and the bundled install-docker.sh add an
-# optional package only when it provides a capability dnf names as missing on that
-# host. Build with the default RHEL_BUILDER_IMAGE (or the target's own distro image)
-# so the optional builds match the target's policy; otherwise install them from the
-# OS media.
-DOCKER_RPM_OPTIONAL := container-selinux nftables libnftnl jansson libmnl
+# docker-ce 29 requires nftables (which requires libnftnl and jansson, and libnftnl
+# in turn libmnl) and the rich dependency "(iptables-nft or iptables)". iptables-nft
+# provides iptables; it requires libmnl, libnftnl and iptables-libs of exactly its own
+# version, iptables-libs requires libnetfilter_conntrack, and that requires
+# libnfnetlink. A standard RHEL server has iptables-nft (firewalld requires it); the
+# Rocky 9.8 GenericCloud image has none of iptables-nft, nftables, libnftnl or
+# firewalld, only iptables-libs, libnetfilter_conntrack and libnfnetlink. `krate
+# docker-install` and the bundled install-docker.sh add an optional package only when
+# it provides a capability dnf names as missing on that host. Build with the default
+# RHEL_BUILDER_IMAGE (or the target's own distro image) so the optional builds match
+# the target's policy; otherwise install them from the OS media.
+DOCKER_RPM_OPTIONAL := container-selinux nftables libnftnl jansson libmnl iptables-nft iptables-libs libnetfilter_conntrack libnfnetlink
 
 .PHONY: help check test validate syntax lint compose-check bundle bundle-zk bundle-kraft bundle-epc docker-debs docker-rpms monitor-up monitor-down monitor-status monitor-logs clean dist-clean
 .SILENT: help
@@ -518,13 +523,16 @@ docker-rpms:
 >    set -euo pipefail
 >    printf "[docker-ce-stable]\nname=Docker CE Stable\nbaseurl=%s\nenabled=1\ngpgcheck=1\ngpgkey=https://download.docker.com/linux/rhel/gpg\n" "$$BASEURL" > /etc/yum.repos.d/docker-ce.repo
 >    dnf install -y -q dnf-plugins-core
->    # Make the builder resemble a real RHEL host before resolving. The builder
->    # image is minimal, so without this dnf treats base OS packages as missing
->    # and downloads the builder distro'"'"'s builds of selinux-policy,
->    # policycoreutils, iptables and friends — which would replace Red Hat'"'"'s own
->    # packages on the target VM, at a different minor version. A RHEL host
->    # already has these.
->    dnf install -y -q policycoreutils selinux-policy-targeted iptables-nft nftables diffutils
+>    # Baseline kept as it was when the bundle was last built: policycoreutils and
+>    # selinux-policy-targeted are what every RHEL host has. It no longer decides what
+>    # is bundled: the main set and optional/ are exact named dnf download lists
+>    # without --resolve (scripts/check-identity.py asserts that), so no base OS
+>    # package built by another distro can enter the bundle and replace Red Hat'"'"'s own
+>    # on the target VM. iptables-nft, nftables and their libraries are not in the
+>    # baseline: a minimal or cloud host may lack them, so they are downloaded into
+>    # optional/ below (dnf download takes a named package whether or not the
+>    # builder has it installed).
+>    dnf install -y -q policycoreutils selinux-policy-targeted diffutils
 >    # No --resolve on the main set: take exactly the named Docker packages, so
 >    # the bundle can never carry a base OS package built by another distro.
 >    dnf download --destdir /output $$PKGS
@@ -605,33 +613,111 @@ docker-rpms:
 ># dnf names what the host lacks ("nothing provides <capability> needed by
 ># <package>"). Only the optional/ packages that provide a named capability are
 ># added, round by round (an added package can name its own missing dependency),
-># so a host that already has them never gets another distro's build. Same
-># selection as `krate docker-install` (epc/krate); the two functions below are
-># kept identical to its copies (scripts/check-identity.py compares them).
+># so a host that already has them never gets another distro's build. A capability
+># can be a rich dependency such as "(iptables-nft or iptables)": the first
+># alternative a bundled package provides is taken. Same selection as
+># `krate docker-install` (epc/krate); the functions below are kept identical to
+># its copies (scripts/check-identity.py compares them).
 >rpm_missing_capabilities() {
->  sed -n 's/.*nothing provides \([^ ]*\).*/\1/p' "$$1" | sort -u
+>  sed -n -e 's/.*nothing provides \((.*)\) needed by .*/\1/p' -e 's/.*nothing provides \([^ (][^ ]*\).*/\1/p' "$$1" | sort -u
+>}
+>
+>rpm_capability_alternatives() {
+>  local dep="$$1" rest operand
+>  local -a operands=()
+>  if [[ "$$dep" != "("*")" ]]; then
+>    printf '%s\n' "$$dep"
+>    return 0
+>  fi
+>  rest="$${dep#(}"
+>  rest="$${rest%)}"
+>  case " $$rest " in
+>    *" and "*|*" if "*|*" unless "*|*" else "*|*" with "*|*" without "*)
+>      printf '%s\n' "$$dep"
+>      return 0 ;;
+>  esac
+>  while [[ "$$rest" == *" or "* ]]; do
+>    operands+=("$${rest%% or *}")
+>    rest="$${rest#* or }"
+>  done
+>  operands+=("$$rest")
+>  for operand in "$${operands[@]}"; do
+>    if [[ -z "$$operand" || "$$operand" == "("* ]]; then
+>      printf '%s\n' "$$dep"
+>      return 0
+>    fi
+>  done
+>  for operand in "$${operands[@]}"; do
+>    printf '%s\n' "$${operand%% *}"
+>  done
 >}
 >
 >rpm_providers_of() {
->  local need="$$1" file listing
+>  local need="$$1" alternative file listing found
 >  shift
->  for file in "$$@"; do
->    if [[ "$$need" == /* ]]; then
->      listing="$$(rpm -qpl "$$file" 2>/dev/null)" || continue
+>  while IFS= read -r alternative; do
+>    found=false
+>    for file in "$$@"; do
+>      if [[ "$$alternative" == /* ]]; then
+>        listing="$$(rpm -qpl "$$file" 2>/dev/null)" || continue
+>      else
+>        listing="$$(rpm -qp --provides "$$file" 2>/dev/null | awk '{print $$1}')" || continue
+>      fi
+>      if [[ $$'\n'"$$listing"$$'\n' == *$$'\n'"$$alternative"$$'\n'* ]]; then
+>        echo "$$file"
+>        found=true
+>      fi
+>    done
+>    if $$found; then break; fi
+>  done < <(rpm_capability_alternatives "$$need")
+>}
+>
+>rpm_failure_message() {
+>  local log="$$1" added="$$2" need line explained list="" others="" selinux=false
+>  shift 2
+>  for need in "$$@"; do
+>    list+="$${list:+, }$$need"
+>    explained=false
+>    if [[ "$$need" == *container-selinux* ]]; then explained=true; fi
+>    while IFS= read -r line; do
+>      if [[ "$$line" == *"nothing provides $$need "*" needed by container-selinux-"* ]]; then explained=true; fi
+>    done < "$$log"
+>    if $$explained; then
+>      selinux=true
 >    else
->      listing="$$(rpm -qp --provides "$$file" 2>/dev/null | awk '{print $$1}')" || continue
+>      others+="$${others:+, }$$need"
 >    fi
->    if [[ $$'\n'"$$listing"$$'\n' == *$$'\n'"$$need"$$'\n'* ]]; then echo "$$file"; fi
 >  done
+>  if [[ -z "$$added" ]]; then
+>    echo "Offline install failed: this host lacks $${list:-a dependency dnf did not name}, and the bundle has no package for it."
+>  else
+>    echo "Offline install failed even with the bundled dependencies ($$added)$${list:+; the bundle cannot supply $$list}."
+>  fi
+>  if [[ -z "$$list" ]]; then
+>    echo "dnf's output above names the cause."
+>  fi
+>  if [[ -n "$$others" ]]; then
+>    echo "Install $$others from your RHEL media or Satellite."
+>  fi
+>  if $$selinux; then
+>    echo "container-selinux must match this host's selinux-policy build; install it from your RHEL media or Satellite (dnf install container-selinux)."
+>  fi
 >}
 >
 >echo "==> Installing Docker CE from $${#pkgs[@]} bundled packages..."
 >attempt_log="$$(mktemp)"
 >wanted=()
+>added=()
 >missing=()
 >unresolved=()
 >installed=0
->for round in 0 1 2 3; do
+># Repeat while a round adds a bundled package that was not added before. It always
+># ends: providers come from optional/ alone, a file already in wanted or added is
+># skipped, so wanted never exceeds the number of optional/ packages and there are at
+># most that many plus one dnf attempts; it also ends when dnf succeeds or names nothing
+># the bundle can supply. A host lacking the whole iptables-nft closure takes five
+># attempts, which a fixed cap of four cannot reach.
+>while true; do
 >  rc=0
 >  # stderr goes to the file and is printed after dnf has exited, so the file is
 >  # complete when it is read.
@@ -641,37 +727,34 @@ docker-rpms:
 >    installed=1
 >    break
 >  fi
->  [[ "$$round" -lt 3 ]] || break
 >  mapfile -t missing < <(rpm_missing_capabilities "$$attempt_log")
 >  added=()
 >  unresolved=()
 >  for need in "$${missing[@]}"; do
 >    mapfile -t providers < <(rpm_providers_of "$$need" "$${optional[@]}")
->    if [[ $${#providers[@]} -eq 0 ]]; then
->      unresolved+=("$$need")
->      continue
->    fi
+>    new=false
 >    for file in "$${providers[@]}"; do
 >      already=false
 >      for known in "$${wanted[@]}" "$${added[@]}"; do [[ "$$known" == "$$file" ]] && already=true; done
->      $$already || added+=("$$file")
+>      if ! $$already; then
+>        added+=("$$file")
+>        new=true
+>      fi
 >    done
+>    $$new || unresolved+=("$$need")
 >  done
 >  [[ $${#added[@]} -gt 0 ]] || break
 >  echo ""
 >  echo "==> Adding the bundled dependencies this host lacks: $${added[*]##*/}"
 >  wanted+=("$${added[@]}")
 >done
->rm -f "$$attempt_log"
 >if [[ "$$installed" -ne 1 ]]; then
->  if [[ $${#wanted[@]} -eq 0 ]]; then
->    echo "Offline install failed: this host lacks $${missing[*]:-a dependency dnf did not name}, and the bundle has no package for it." >&2
->  else
->    echo "Offline install failed even with the bundled dependencies ($${wanted[*]##*/})$${unresolved[*]:+; no bundled package provides $${unresolved[*]}}." >&2
->  fi
->  echo "Install it from your RHEL media or Satellite (container-selinux must match this host's selinux-policy build), then re-run." >&2
+>  rpm_failure_message "$$attempt_log" "$${wanted[*]##*/}" "$${unresolved[@]}" >&2
+>  rm -f "$$attempt_log"
+>  echo "Then re-run." >&2
 >  exit 1
 >fi
+>rm -f "$$attempt_log"
 >
 ># ── Service + group ──────────────────────────────────────────────────────────
 >echo ""
