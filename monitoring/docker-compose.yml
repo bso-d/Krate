@@ -492,7 +492,9 @@ services:
       - "${KRATE_IDP_HOST:-krate-idp.invalid}:host-gateway"
     command: ["--config=/etc/krate/perses/rendered/config.yaml", "--log.level=warning"]
     environment:
-      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+      # Content revision of the Perses outputs only: a realm timing change that
+      # leaves the derived site unchanged must not recreate Perses (U23).
+      KRATE_PERSES_REVISION: ${KRATE_PERSES_REVISION:-}
     volumes:
       - perses_data:/perses
       - ./perses/provisioning:/etc/krate/perses/provisioning:ro,z
@@ -557,7 +559,9 @@ services:
     ports:
       - "${PERSES_PORT:-3443}:3443"
     environment:
-      KRATE_RENDER_REVISION: ${KRATE_RENDER_REVISION:-}
+      # Same content revision as Perses: the gateway renders the realm logout
+      # authority from the same derived site (U23).
+      KRATE_PERSES_REVISION: ${KRATE_PERSES_REVISION:-}
     volumes:
       - gateway_rendered:/etc/nginx/conf.d:ro
       - ./perses/gateway:/etc/krate/perses-gateway:ro,z

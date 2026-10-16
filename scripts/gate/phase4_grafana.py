@@ -83,6 +83,7 @@ import datetime
 import hashlib
 import hmac
 import html as htmlmod
+import ipaddress
 import json
 import os
 import re
@@ -594,7 +595,12 @@ class Gate(Phase4Gate):
         key = base64.b64encode(os.urandom(16)).decode()
         host = self.origin.hostname
         port = self.origin.port or 443
-        lines = ['GET %s HTTP/1.1' % path, 'Host: %s:%s' % (host, port),
+        # The Host authority omits a default port, the way browsers send it:
+        # the cluster proxy closes any other raw Host with no response (444 on
+        # the $http_host mismatch; formal 4a U7-tail/U15-ws at f161243).
+        default_port = 443 if self.origin.scheme == 'https' else 80
+        authority = host if port == default_port else '%s:%s' % (host, port)
+        lines = ['GET %s HTTP/1.1' % path, 'Host: %s' % authority,
                  'Upgrade: websocket', 'Connection: Upgrade',
                  'Sec-WebSocket-Key: %s' % key, 'Sec-WebSocket-Version: 13']
         if subprotocol:
@@ -674,25 +680,67 @@ class Gate(Phase4Gate):
         pg = self.env.get('KEYCLOAK_DB_IMAGE')
         if not pg:
             return None
+        # Single quotes around the awk program: double quotes would let the
+        # container shell expand $1 to empty, returning whole getent lines;
+        # that malformed --resolve-to made Chromium ignore the MAP rule and
+        # fail every probe DNS lookup (formal 4a attempts 8-10). The first
+        # whitespace token is the address even if the filter ever degrades.
         rc, out, _err = p2.docker('run', '--rm', '--add-host', 'host.docker.internal:host-gateway',
                                   pg, 'sh', '-c',
-                                  'getent ahostsv4 host.docker.internal | awk "{print $1; exit}"',
+                                  "getent ahostsv4 host.docker.internal | awk '{print $1; exit}'",
                                   timeout=60)
-        value = out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else ''
-        return value or None
+        parts = out.split() if rc == 0 else []
+        if not parts:
+            return None
+        try:
+            ipaddress.IPv4Address(parts[0])
+        except ipaddress.AddressValueError:
+            return None
+        return parts[0]
 
-    def run_browser_probe(self, user, dash, gateway):
-        """One phase4-browser.mjs run in the Playwright container; the user's password
-        and TOTP seed travel in the child environment (-e NAME), never in argv.
-        Returns (summary dict | None, steps list)."""
-        state = self.load_state(user)
-        outdir = os.path.join(self.state_dir, 'browser', user)
-        os.makedirs(outdir, exist_ok=True)
+    # Failed-request errors that are container-network noise, never product
+    # dirt: formal 4a attempt-9 failed both probes with ERR_NAME_NOT_RESOLVED
+    # on a same-host request seconds after same-host requests succeeded, while
+    # identical repros pass. CSP violations, page errors and HTTP >= 400 are
+    # product signals and never qualify for a retry.
+    NET_RETRY_ERRORS = ('ERR_NAME_NOT_RESOLVED', 'ERR_CONNECTION_REFUSED',
+                        'ERR_CONNECTION_RESET', 'ERR_CONNECTION_CLOSED',
+                        'ERR_CONNECTION_TIMED_OUT', 'ERR_TIMED_OUT',
+                        'ERR_NETWORK_CHANGED', 'ERR_INTERNET_DISCONNECTED',
+                        'ERR_ADDRESS_UNREACHABLE')
+
+    @staticmethod
+    def _benign_404(item):
+        """The UI's own public-dashboards 404 (public dashboards are off)."""
+        return item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards')
+
+    def _network_flake(self, summary):
+        """Whether a dirty summary is retryable network-only dirt."""
+        if not summary or summary.get('cspViolations') or summary.get('pageErrors'):
+            return False
+        failed = summary.get('failedRequests') or []
+        if not failed:
+            return False
+        if any(not any(err in (item.get('err') or '') for err in self.NET_RETRY_ERRORS)
+               for item in failed):
+            return False
+        return not [item for item in summary.get('http4xx5xx') or []
+                    if not self._benign_404(item)]
+
+    def _browser_attempt(self, user, dash, gateway, state, outdir):
         env = dict(os.environ, UI15_USER=user, UI15_PASSWORD=state['password'],
                    UI15_TOTP=state['totp'], UI15_DASH=dash,
                    PW_MODULES='/usr/lib/node_modules')
+        # The public name resolves through the host gateway twice: Chromium's
+        # --host-resolver-rules (TLS keeps the real name) and the container's
+        # own hosts file. Formal 4a attempts 9-10 failed both probes with
+        # ERR_NAME_NOT_RESOLVED on a same-host request seconds after same-host
+        # success; the second path keeps a MAP-rule glitch from failing the run.
+        hosts = ['--add-host', 'host.docker.internal:host-gateway']
+        if self.origin.hostname and gateway:
+            hosts += ['--add-host', '%s:%s' % (self.origin.hostname, gateway)]
         rc, out, err = p2.docker(
-            'run', '--rm', '--add-host', 'host.docker.internal:host-gateway',
+            'run', '--rm', *hosts,
             '-v', '%s:/out' % outdir, '-v', '%s:/gate:ro' % HERE,
             '-e', 'UI15_USER', '-e', 'UI15_PASSWORD', '-e', 'UI15_TOTP',
             '-e', 'UI15_DASH', '-e', 'PW_MODULES',
@@ -716,6 +764,24 @@ class Gate(Phase4Gate):
         if rc != 0 and summary is None:
             log('browser probe stderr tail: %s' % (err or '')[-200:])
         return summary, steps
+
+    def run_browser_probe(self, user, dash, gateway):
+        """One phase4-browser.mjs run in the Playwright container; the user's password
+        and TOTP seed travel in the child environment (-e NAME), never in argv.
+        A network-only dirty summary (DNS/connection errors, nothing else) is
+        retried once with a fresh container; the first attempt's failed requests
+        are returned for the receipt. Returns (summary dict | None, steps list,
+        first-attempt failed requests or None)."""
+        state = self.load_state(user)
+        outdir = os.path.join(self.state_dir, 'browser', user)
+        os.makedirs(outdir, exist_ok=True)
+        summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
+        retried = None
+        if self._network_flake(summary):
+            retried = summary.get('failedRequests')
+            log('browser probe %s: network-only dirt %s, retrying once' % (user, retried))
+            summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
+        return summary, steps, retried
 
     def browser_batch(self):
         """Both walked browser runs (Viewer p4v on krate-overview, log 146; Admin
@@ -755,8 +821,8 @@ class Gate(Phase4Gate):
         try:
             for role, user, dash in (('viewer', 'p4v', 'krate-overview'),
                                      ('admin', 'p4both', 'p4lokiui')):
-                summary, steps = self.run_browser_probe(user, dash, gateway)
-                out[role] = {'summary': summary, 'steps': steps}
+                summary, steps, retried = self.run_browser_probe(user, dash, gateway)
+                out[role] = {'summary': summary, 'steps': steps, 'retried': retried}
         finally:
             self.public_api('DELETE', '/grafana/api/dashboards/uid/p4lokiui', token=token)
         return out
@@ -771,8 +837,7 @@ class Gate(Phase4Gate):
         public-dashboards 404 (public dashboards are off; benign)."""
         if not summary:
             return False
-        benign = all(item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards')
-                     for item in summary.get('http4xx5xx') or [])
+        benign = all(self._benign_404(item) for item in summary.get('http4xx5xx') or [])
         return (summary.get('cspViolations') == 0 and summary.get('pageErrors') == 0
                 and not (summary.get('failedRequests') or []) and benign)
 
@@ -2001,8 +2066,11 @@ class Gate(Phase4Gate):
         v_bad = refusals(viewer)
         a_bad = refusals(admin)
         # the 34d6ab6 read location (re-measure 160: detected_field/container/values
-        # 200 with body {}; the gate asked for field `job` and Loki answered 400)
-        st_det, _h, det_b = admin.req(self.base + proxy + '/detected_field/container/values')
+        # 200 with body {}). Loki answers 400 without the query argument (formal 4a
+        # U7 at f161243: parse error, unexpected $end), so the read carries the same
+        # selector as the row's other queries.
+        st_det, _h, det_b = admin.req(self.base + proxy + '/detected_field/container/values?query='
+                                      + urllib.parse.quote('{job="containerlogs"}'))
         # controls (walk 130/160): labels 200, query_range 200, no forged line
         quote = urllib.parse.quote
         st_lab, _h, _b = viewer.req(self.base + proxy + '/labels')
@@ -2063,15 +2131,22 @@ class Gate(Phase4Gate):
         det_note = '' if st_det == 200 else ' body=' + det_b[:120]
         forged_note = ' (query %s)' % st_f
         clean_note = a_summary is not None and self.browser_clean(a_summary)
-        return status, '%s; detected_field read %s%s, tail %s len=%d, forged absent %s%s; ' \
-                       '8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
-                       'labels/query_range 200, fluent-bit fresh %s; browser control (p4lokiui rows %s, panel ' \
-                       'errors %s, explore rows %s, live rows %s, clean=%s)%s; walk: live4a 129-130,148,160 ' \
+        a_bad4xx = [(item.get('s'), str(item.get('url', ''))[-50:])
+                    for item in (a_summary or {}).get('http4xx5xx') or []
+                    if not (item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards'))]
+        retried_a = (admin_run.get('retried') or '-')
+        return status, '%s; browser control (p4lokiui rows %s, panel errors %s, explore rows %s, live rows %s, ' \
+                       'clean=%s, csp=%s, pageerr=%s, failed=%s, bad4xx=%s, retried=%s); detected_field read %s%s, tail %s ' \
+                       'len=%d, forged absent %s%s; 8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
+                       'labels/query_range 200, fluent-bit fresh %s%s; walk: live4a 129-130,148,160 ' \
                        '(re-measure at c8c9337; dd3a28d log-format-only per lead)' \
-               % (tokens, st_det, det_note, head.split('\r\n')[0][:40], len(head),
-                  forged_absent, forged_note, fresh,
+               % (tokens,
                   dash_step.get('logRows', '-'), dash_step.get('panelErrorIcons', '-'),
                   explore_step.get('logRows', '-'), live_step.get('liveRows', '-'), clean_note,
+                  (a_summary or {}).get('cspViolations', '-'), (a_summary or {}).get('pageErrors', '-'),
+                  (a_summary or {}).get('failedRequests', '-'), a_bad4xx or '-', retried_a,
+                  st_det, det_note, head.split('\r\n')[0][:40], len(head),
+                  forged_absent, forged_note, fresh,
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
     def u9(self):
@@ -2644,13 +2719,21 @@ class Gate(Phase4Gate):
                   ('ws', 'PASS' if ws_ok else 'FAIL'),
                   ('ui', ui_status)]
         status, tokens = aggregate(probes)
-        return status, '%s; callback GET %s; cookie [%s]; folder POST UI-Origin %s/%s, foreign ' \
-                       'Origin %s "origin not allowed"; live/ws %s; ui: %d CSP violations, %d page ' \
-                       'errors, live/ws frames on every page%s; walk: live4a 124,132,146,147' \
-               % (tokens, signed['callback_get'],
+        v_bad4xx = [(item.get('s'), str(item.get('url', ''))[-50:])
+                    for item in (v_summary or {}).get('http4xx5xx') or []
+                    if not (item.get('s') == 404 and str(item.get('url', '')).endswith('/public-dashboards'))]
+        v_wsframes = [(w.get('url'), w.get('framesIn')) for w in (v_summary or {}).get('websockets') or []]
+        retried_v = (viewer_run.get('retried') or '-')
+        return status, '%s; ui (csp=%s, pageerr=%s, failed=%s, bad4xx=%s, home=%s, dash=%s, wsframes=%s, retried=%s); ' \
+                       'callback GET %s; cookie [%s]; folder POST UI-Origin %s/%s, foreign ' \
+                       'Origin %s "origin not allowed"; live/ws %s%s; walk: live4a 124,132,146,147' \
+               % (tokens,
+                  (v_summary or {}).get('cspViolations', '-'), (v_summary or {}).get('pageErrors', '-'),
+                  (v_summary or {}).get('failedRequests', '-'), v_bad4xx or '-',
+                  'home loaded' in v_steps, 'dashboard loaded' in v_steps, v_wsframes or '-', retried_v,
+                  signed['callback_get'],
                   re.sub(r'grafana_session=[^;]+', 'grafana_session=<redacted>', cookie)[:90],
                   st1, st2, st3, head.split('\r\n')[0][:30],
-                  (v_summary or {}).get('cspViolations', -1), (v_summary or {}).get('pageErrors', -1),
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
     def _mon_fingerprint(self, cid):

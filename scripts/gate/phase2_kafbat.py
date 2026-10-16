@@ -78,7 +78,7 @@ KCADM_SERVER = 'http://localhost:8080/identity'
 CASES = ['K%d' % i for i in range(1, 27)] + ['K31', 'K32']
 RUNNER_CASES = ('K1', 'K17')
 SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS', 'TRACE')
-EVIDENCE_MAX = 200
+EVIDENCE_MAX = 800  # the Phase 4a browser decisions (row counts, panel errors, CSP/page/failed/bad-4xx lists) are ~500 chars and must reach the receipt intact; the console display still truncates separately
 POLL_SECONDS = 30
 GATE_LABEL = 'krate.gate=phase2'
 EVIL = 'https://evil.example'

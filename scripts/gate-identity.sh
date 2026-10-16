@@ -876,16 +876,19 @@ run_screenshots() {
 # apply); returns non-zero when any step failed. The monitoring secrets are
 # collected for the leak scans.
 #
-# --broker (slice 4b only, lead decision 2026-10-13): the runner owns the
-# stand-in IdP — stub_idp.sh up (the Phase 3 project/port convention) BEFORE
-# auth configure, which then runs with the stand-in's site.json so the broker
-# plan (commit 0: trustEmail=true) is written and applied by auth apply; V19
-# exercises it. The prelude removes a pre-existing plan and runtime.yml first:
-# since b51fe90 broker_plan REFUSES a stale plan whose trustEmail/storeToken/
-# enabled differ, naming the field. The two preflight prerequisites Phase 3
-# proved (P2) are set the same way: the stand-in's PEM at 644 in the truststore
-# dir, and PING_KEYCLOAK_CLIENT_SECRET through the environment (set_env_raw),
-# never on a command line.
+# --broker (slice 4b only): the runner owns the stand-in IdP — stub_idp.sh up
+# (the Phase 3 project/port convention) BEFORE a plain auth configure, so the
+# stand-in is ready but NO broker plan is written or applied: with the broker
+# applied, the browser flow redirects every login to the IdP (defaultProvider)
+# and no login form remains for enrolment or sign-in. V19 applies the broker
+# plan itself (commit 0: trustEmail=true) from the stand-in's site.json,
+# exercises it, then removes it again (live4b 119). The prelude removes a
+# pre-existing plan and runtime.yml first: since b51fe90 broker_plan REFUSES a
+# stale plan whose trustEmail/storeToken/enabled differ, naming the field. The
+# two preflight prerequisites Phase 3 proved (P2) are set the same way: the
+# stand-in's PEM at 644 in the truststore dir, and
+# PING_KEYCLOAK_CLIENT_SECRET through the environment (set_env_raw), never on
+# a command line.
 SC_CONFIGURE=0; SC_SET=0; SC_START=0; SC_APPLY=0; SC_MONITOR=0; SC_STUB=0; SC_CONFIGURE_EV=""; SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
 stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR/site.json
   local cluster rc f
@@ -911,12 +914,21 @@ start_cluster() { # [--local] [--broker]
       *) cfg_args+=("$arg") ;;
     esac
   done
+  SC_CONFIGURE=127; SC_SET=127; SC_START=127; SC_APPLY=127; SC_MONITOR=127
+  SC_CONFIGURE_EV=""; SC_STUB=0
   if $broker; then
+    # Slice 4b only: the runner owns the stand-in IdP (up, truststore, secret,
+    # site.json) but configures plain: the broker plan is applied by V19
+    # itself and removed right after (live4b 119). A whole-run broker would
+    # redirect every browser login to the IdP (defaultProvider), leaving no
+    # login form for enrolment or sign-in.
     stub_up_for_broker || return 1
-    cfg_args=("$STUB_DIR/site.json")
   fi
   cap "$KRATE" auth configure ${cfg_args[@]+"${cfg_args[@]}"}; SC_CONFIGURE=$?
-  SC_CONFIGURE_EV="$(printf '%s' "$CAP" | grep -E 'runtime.yml|Kafbat plan' | head -2 | xargs | cut -c1-120)"
+  # Join, never parse: auth-configure output may carry an apostrophe, which
+  # xargs treats as a quote and fails on (emptied evidence, "unmatched single
+  # quote" in the log).
+  SC_CONFIGURE_EV="$(printf '%s' "$CAP" | grep -E 'runtime.yml|Kafbat plan' | head -2 | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//' | cut -c1-120)"
   "$KRATE" config set KAFKA_UI_AUTH_CONFIG=runtime.yml >/dev/null; SC_SET=$?
   cap "$KRATE" start; SC_START=$?
   SC_BROKER_BEFORE="$(cid kafka-92)"
@@ -1350,6 +1362,24 @@ phase4_screenshots_x4() {
     record X4 "$slice" X FAIL "cannot resolve the Docker host gateway (host.docker.internal) from a container"
     return
   fi
+  # After V24's daemon restart the guard can still be converging when the V rows
+  # end: the story's first page is then a gateway 500 (auth_request to
+  # perses-sync refused). Wait for the serving chain: an anonymous GET is
+  # challenged (302/401), never a 500.
+  local chain_t0 chain_code
+  chain_t0="$(date +%s)"
+  while true; do
+    chain_code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+      --resolve "${BASE_HOST}:${PERSES_GATE_PORT}:127.0.0.1" \
+      "https://${BASE_HOST}:${PERSES_GATE_PORT}/" 2>/dev/null || true)"
+    [[ "$chain_code" =~ ^[0-9]+$ ]] || chain_code=000
+    if [[ "$chain_code" == 302 || "$chain_code" == 401 ]]; then break; fi
+    if [[ $(($(date +%s) - chain_t0)) -ge 180 ]]; then
+      record X4 "$slice" X FAIL "perses gateway still HTTP $chain_code after 180s (story needs the 302/401 challenge)"
+      return
+    fi
+    sleep 5
+  done
   mkdir -p "$outdir" && chmod 755 "$outdir"
 
   pw_v="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$viewer_json" 2>/dev/null)"
@@ -1800,6 +1830,20 @@ else:
   [[ $py_rc -eq 0 && "$py_out" == *"CENSUS_OK"* ]]; st=$?
   ok_if W4 "$slice" W "$st" "5-source reachability census matches Table 2 of monitoring/README.md (${py_out##*$'\n'})"
 }
+bringup_failed() { # slice id...: every row FAILs when the fixture never came up
+  local slice="$1"; shift
+  local id crit ev
+  ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR (output in run.log)"
+  log "$ev"
+  for id in "$@"; do
+    crit="${id%%[0-9]*}"
+    case "$id" in
+      Z*) phase4_stub "$id" "$slice" Z "$ev; the leak scan did not run" ;;
+      X*) phase4_stub "$id" "$slice" X "$ev; the screenshot story did not run" ;;
+      *) record "$id" "$slice" "$crit" FAIL "$ev" ;;
+    esac
+  done
+}
 run_phase4() { # slice: 4a|4b|4c
   local slice="$1" id rc ev crit job helper only tsv regex
   local -a inv=() run_inv=() helper_jobs=() only_arg=()
@@ -1834,16 +1878,7 @@ run_phase4() { # slice: 4a|4b|4c
   local -a bringup=(--local)
   [[ "$slice" == 4b ]] && bringup=(--broker)
   if ! start_cluster "${bringup[@]}"; then
-    ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR (output in run.log)"
-    log "$ev"
-    for id in "${run_inv[@]}"; do
-      crit="${id%%[0-9]*}"
-      case "$id" in
-        Z*) phase4_stub "$id" "$slice" Z "$ev; the leak scan did not run" ;;
-        X*) phase4_stub "$id" "$slice" X "$ev; the screenshot story did not run" ;;
-        *) record "$id" "$slice" "$crit" FAIL "$ev" ;;
-      esac
-    done
+    bringup_failed "$slice" "${run_inv[@]}"
     return
   fi
   # A companion prepares the shared fixture once. Both timed observers then use

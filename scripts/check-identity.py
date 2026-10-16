@@ -4127,6 +4127,17 @@ def check_grafana_realm_cli(checks):
         monitor_keys, edition_keys = set(), set()
     e(edition_keys <= RENDER_EDITION_KEYS,
       f'monitoring/render.py reads edition .env keys outside the realm set {sorted(RENDER_EDITION_KEYS)}: {sorted(edition_keys - RENDER_EDITION_KEYS)}')
+    compose_text = (ROOT / 'monitoring/docker-compose.yml').read_text()
+    services_text = compose_text.split('\nservices:', 1)[1]
+    for svc in ('perses', 'perses-gateway'):
+        start = services_text.find('\n  %s:\n' % svc)
+        rest = services_text[start + 1:]
+        nxt = re.search(r'\n  [a-z0-9_-]+:\n', rest)
+        block = rest[:nxt.start()] if nxt else rest
+        e(start >= 0 and 'KRATE_PERSES_REVISION: ${KRATE_PERSES_REVISION:-}' in block
+          and 'KRATE_RENDER_REVISION' not in block,
+          f'monitoring/docker-compose.yml: the {svc} service must carry KRATE_PERSES_REVISION, not the global revision '
+          f'(a realm timing change with an unchanged derived site must not recreate it)')
     for edition in EDITIONS:
         cli = (ROOT / edition / 'krate').read_text()
         e('Usage: krate monitor {up|down|status|logs|reload|ui|realm|grafana-user retire <login>}' in cli,
@@ -4162,6 +4173,30 @@ def check_grafana_realm_cli(checks):
               f'missing {sorted(expected_keys - listed)}, unexpected {sorted(listed - expected_keys)}')
             e(not (listed & GRAFANA_ONLY_RENDER_KEYS),
               f'{edition}/krate: no GRAFANA_* key may enter the render revision (it would recreate Perses, Alertmanager and the gateway)')
+            e('KRATE_PERSES_REVISION="$perses_rev"' in compose,
+              f'{edition}/krate: monitor_compose must export KRATE_PERSES_REVISION')
+            declared_perses = re.search(r'KRATE_PERSES_REVISION_KEYS=\(\n(.*?)\n\)\n', cli, re.S)
+            e(declared_perses is not None, f'{edition}/krate: KRATE_PERSES_REVISION_KEYS is missing')
+            declared_site = re.search(r'KRATE_PERSES_SITE_KEYS=\(\n(.*?)\n\)\n', cli, re.S)
+            e(declared_site is not None, f'{edition}/krate: KRATE_PERSES_SITE_KEYS is missing')
+            if declared_perses is not None and declared is not None and declared_site is not None:
+                listed_perses = set(declared_perses.group(1).split())
+                # The session timings and the other site inputs reach the Perses
+                # outputs only through the derived site digest; the sync/cookie
+                # secrets and the SMTP password belong to other outputs. Anything
+                # else dropped here would miss a needed Perses recreation.
+                site_covered = {'KEYCLOAK_PUBLIC_URL', 'KEYCLOAK_VIEWER_GROUP', 'KEYCLOAK_ADMIN_GROUP',
+                                'KEYCLOAK_SESSION_IDLE_MINUTES', 'KEYCLOAK_SESSION_MAX_HOURS',
+                                'PERSES_GROUP_PROOF_MINUTES', 'PERSES_PORT'}
+                other_outputs = {'PERSES_SYNC_CLIENT_SECRET', 'OAUTH2_PROXY_COOKIE_SECRET', 'GF_SMTP_PASSWORD'}
+                e(listed_perses == listed - site_covered - other_outputs,
+                  f'{edition}/krate: KRATE_PERSES_REVISION_KEYS must be the render keys minus the site-derived and other-output keys; '
+                  f'missing {sorted(listed - site_covered - other_outputs - listed_perses)}, '
+                  f'unexpected {sorted(listed_perses - (listed - site_covered - other_outputs))}')
+                e(set(declared_site.group(1).split()) == site_covered,
+                  f'{edition}/krate: KRATE_PERSES_SITE_KEYS must be exactly the realm_site inputs')
+                e('perses_site_digest' in cli and 'local-empty-site' in cli,
+                  f'{edition}/krate: the Perses revision must digest the derived site with a local-mode empty-site rule')
         e('PERSES_IDP' in prepare and 'refuse_loopback_public_url' in prepare, f'{edition}/krate: monitor_prepare must check PERSES_IDP')
         e('PERSES_ISSUER_APPLIED' in prepare, f'{edition}/krate: monitor_prepare must check PERSES_ISSUER_APPLIED')
         e('identity_reconcile_perses_clients' in cli, f'{edition}/krate: must define identity_reconcile_perses_clients')
@@ -4253,6 +4288,45 @@ public_url_origin
             result = run_bash(origin_script, env)
             e(result.stdout.strip() == expected,
               f'public_url_origin of {url} must be {expected} (identity.py checked_origin refuses a path); got {result.stdout.strip()!r}')
+
+
+def check_monitor_idp_host_stable(checks):
+    """Formal 4a U22 at b2f458a: KRATE_IDP_HOST must not depend on the realm flags.
+
+    monitor_compose gated the IdP host mapping on grafana_realm||perses_realm
+    while the 4a fixture runs Perses local, so a Grafana-only auth switch
+    changed perses extra_hosts and Compose recreated it (walk-169: grafana
+    only). The mapping is only a hosts entry, so it is always exported; the
+    discovery URL stays gated so idp-wait still exits at once.
+    """
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        compose = function_body(cli, 'monitor_compose')
+        gate = re.search(r'if \$grafana_realm \|\| \$perses_realm; then\n(.*?)\n  fi\n', compose, re.S)
+        if not e(gate is not None, f'{edition}/krate: monitor_compose must keep the realm-gated discovery block'):
+            continue
+        gated = gate.group(1)
+        e('idp_host=' not in gated,
+          f'{edition}/krate: KRATE_IDP_HOST must be exported outside the realm gate '
+          f'(a Grafana-only switch must not recreate Perses); gated block holds {gated.strip()!r}')
+        e('idp_url=' in gated,
+          f'{edition}/krate: IDP_DISCOVERY_URL must stay realm-gated so idp-wait exits at once with no UI on the realm')
+    try:
+        unset = monitoring_services({'KRATE_IDP_HOST': ''})
+        real = monitoring_services({'KRATE_IDP_HOST': 'krate-gate.test'})
+    except ValueError as exc:
+        e(False, f'monitoring: Compose rendering failed: {exc}')
+        return
+    hosts_unset = (unset.get('perses') or {}).get('extra_hosts')
+    hosts_real = (real.get('perses') or {}).get('extra_hosts')
+    e(any('host-gateway' in str(h) for h in hosts_unset or []),
+      f'monitoring/perses with an empty host must keep the default host-gateway mapping; got {hosts_unset}')
+    e(hosts_real == ['krate-gate.test=host-gateway'],
+      f'monitoring/perses with KRATE_IDP_HOST=krate-gate.test must map exactly that host; got {hosts_real}')
+    e(hosts_unset != hosts_real,
+      'monitoring/perses: extra_hosts must follow KRATE_IDP_HOST '
+      '(this is the recreate-relevant input the CLI must keep stable across a Grafana-only switch)')
 
 
 def check_grafana_collision_paging(checks):
@@ -4816,7 +4890,7 @@ def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
+                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_phase4_monitor_paths,
