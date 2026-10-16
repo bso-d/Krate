@@ -67,7 +67,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python3 -I does not add the script directory
 import phase2_kafbat as p2  # noqa: E402
 from phase4_common import (Phase4Gate, helper_main, fail, aggregate, log,  # noqa: E402
-                           Outcome, not_run)
+                           Outcome, not_run, broker_services)
 
 CASES = ['V%d' % i for i in range(1, 25)]
 RUNNER_OWNED = ('X4', 'Z4b')
@@ -516,6 +516,7 @@ class Gate(Phase4Gate):
                 return 'prepared V23 precondition failed: %s: %s' % (type(error).__name__, str(error)[:200])
             return None
         try:
+            self.cluster_initial = self.cluster_id_map()
             self.setup_realm_users()
             self.setup_grafana_realm()
             self.setup_perses_seed()
@@ -844,7 +845,8 @@ class Gate(Phase4Gate):
     def v4(self):
         # walk log 103: p4nogroup refused at /oauth2/callback (403), no Perses cookies set.
         res = self.signin('p4nogroup', 'v4-nogroup')
-        refused = (res.get('kind') == 'REFUSED')
+        refused = (res.get('kind') == 'REFUSED'
+                   and res.get('reason') == 'callback_refused_403')
         d = self.driver('v4-nogroup')
         jar_cookies = [c.name for c in d.jar]
         perses_cookies_present = any(name in ('_oauth2_proxy', 'jwtPayload', 'jwtSignature', 'jwtRefreshToken')
@@ -2098,28 +2100,46 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
     def v20(self):
         # walk evidence v20-baseline.json: brokers, kafka-ui, keycloak, keycloak-db, cluster proxy unchanged.
         curr_cluster = self.cluster_id_map()
-        initial = getattr(self, 'cluster_initial', None) or curr_cluster
+        initial = getattr(self, 'cluster_initial', None) or {}
 
         unchanged = True
         diffs = []
-        for svc in ('keycloak', 'keycloak-db', 'kafka-ui', 'proxy'):
-            if svc in initial and svc in curr_cluster:
-                if initial[svc] != curr_cluster[svc]:
-                    unchanged = False
-                    diffs.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+        if not initial:
+            unchanged = False
+            diffs.append('cluster baseline was not captured (setup cluster_initial is empty)')
 
-        for svc in initial:
-            if 'broker' in svc and svc in curr_cluster:
-                if initial[svc] != curr_cluster[svc]:
-                    unchanged = False
-                    diffs.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+        def compare(svc):
+            nonlocal unchanged
+            if svc not in initial:
+                unchanged = False
+                diffs.append('%s: missing from initial map' % svc)
+            elif svc not in curr_cluster:
+                unchanged = False
+                diffs.append('%s: missing from current map' % svc)
+            elif initial[svc] != curr_cluster[svc]:
+                unchanged = False
+                diffs.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+
+        for service in ('keycloak', 'keycloak-db', 'kafka-ui', 'proxy'):
+            compare(service)
+        brokers = broker_services(initial)
+        current_brokers = broker_services(curr_cluster)
+        if not brokers:
+            unchanged = False
+            diffs.append('no broker services (kafka-N/broker-N) in cluster map: %s'
+                         % sorted(initial))
+        if brokers != current_brokers:
+            unchanged = False
+            diffs.append('broker set changed: %s -> %s' % (brokers, current_brokers))
+        for service in brokers:
+            compare(service)
 
         probes = [
             ('cluster_ledger_unchanged', 'PASS' if unchanged else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; brokers, kafka-ui, keycloak, keycloak-db, proxy unchanged%s; walk: live4b v20-baseline.json' \
-               % (tokens, '' if unchanged else ' (diffs: %s)' % diffs)
+        return status, '%s; brokers %s, kafka-ui, keycloak, keycloak-db, proxy unchanged%s; walk: live4b v20-baseline.json' \
+               % (tokens, brokers, '' if unchanged else ' (diffs: %s)' % diffs)
 
     def v21(self):
         # walk log 071: monitor up loopback refusals for localhost, 127.0.0.1, [::1] (rc 1, 0 containers changed).

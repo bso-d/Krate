@@ -57,6 +57,15 @@ aggregate = probes.aggregate
 worst = probes.worst
 
 
+def broker_services(id_map):
+    """Compose service names that are Kafka brokers in a cluster id map:
+    kafka-N in every shipped edition (epc/kraft compose), broker-N kept
+    for older layouts. Name-based, never substring-'broker' (that loop
+    never matched kafka-92.. and silently compared nothing)."""
+    return sorted(svc for svc in (id_map or {})
+                  if re.fullmatch(r'(kafka|broker)-\d+', svc))
+
+
 # ─── background threads for the timing rows (section 5) ───────────────────────
 
 class TimedRows:
@@ -289,7 +298,8 @@ class Phase4Gate(p2.Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
-                found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+                if len(parts) >= 3 and parts[0] != '<no':  # label-less: docker prints '<no value>'
+                    found[parts[0]] = (parts[1], ' '.join(parts[2:]))
         return found
 
     def cluster_id_map(self):
@@ -304,7 +314,8 @@ class Phase4Gate(p2.Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
-                found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+                if len(parts) >= 3 and parts[0] != '<no':  # label-less: docker prints '<no value>'
+                    found[parts[0]] = (parts[1], ' '.join(parts[2:]))
         return found
 
     # ── realm users ──

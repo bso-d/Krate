@@ -103,7 +103,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python3 -I does not add the script directory
 import phase2_kafbat as p2  # noqa: E402
 from phase4_common import (Phase4Gate, helper_main, aggregate, log,  # noqa: E402
-                           Outcome, Terminated, not_run, fail)
+                           Outcome, Terminated, not_run, fail, broker_services)
 
 CASES = (['U%d' % i for i in range(1, 21)] + ['U21a', 'U21b']
          + ['U%d' % i for i in range(22, 30)])
@@ -233,15 +233,6 @@ def loki_push_body(labels, line, ts_ns):
 
 # ─── the headless Grafana realm-mode driver (port of the walk's p4driver.py) ──
 
-def broker_services(id_map):
-    """Compose service names that are Kafka brokers in a cluster id map:
-    kafka-N in every shipped edition (epc/kraft compose), broker-N kept
-    for older layouts. Name-based, never substring-'broker' (that loop
-    never matched kafka-92.. and silently compared nothing)."""
-    return sorted(svc for svc in (id_map or {})
-                  if re.fullmatch(r'(kafka|broker)-\d+', svc))
-
-
 def core_ledger_change(svc, old, new):
     """U23 core-cluster ledger decision for one service. old/new are
     (container id, StartedAt, RestartCount). Returns (changed, note):
@@ -257,6 +248,20 @@ def core_ledger_change(svc, old, new):
         note = '%s started %s->%s' % (svc, old[1][:19], new[1][:19])
         return svc != 'keycloak', note
     return False, ''
+
+
+def recreated_services(before, after):
+    """Services whose container id changed between two id maps, plus
+    `missing:<svc>` / `appeared:<svc>` markers for set changes. A service
+    that disappears or appears is therefore never invisible to an
+    exact `== ['grafana']` recreation claim."""
+    before = before or {}
+    after = after or {}
+    changed = [svc for svc in before
+               if svc in after and before[svc][0] != after[svc][0]]
+    changed += ['missing:%s' % svc for svc in sorted(set(before) - set(after))]
+    changed += ['appeared:%s' % svc for svc in sorted(set(after) - set(before))]
+    return changed
 
 
 class GrafanaDriver:
@@ -444,7 +449,7 @@ class Gate(Phase4Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
-                if parts[0] == '<no':  # no compose service label ('<no value>')
+                if len(parts) < 3 or parts[0] == '<no':  # malformed or no service label ('<no value>')
                     continue
                 found[parts[0]] = (parts[1], ' '.join(parts[2:]))
         return found
@@ -471,7 +476,7 @@ class Gate(Phase4Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}} {{.RestartCount}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
-                if parts[0] == '<no':  # no compose service label ('<no value>')
+                if len(parts) < 4 or parts[0] == '<no':  # malformed or no service label ('<no value>')
                     continue
                 found[parts[0]] = (parts[1], ' '.join(parts[2:-1]), parts[-1])
         return found
@@ -1809,7 +1814,7 @@ class Gate(Phase4Gate):
         meta = self.seed_meta()
         meta_match = meta.get('id') == str(old_id)
         creation_ok = creation_ok and meta_match
-        # Read-only role evidence: the search DTO carries the org role, so a
+        # Asserted role evidence: the search DTO carries the org role, so a
         # refusal names the drift without printing any secret value. U20 runs
         # in realm mode, where the realm ini disables Basic auth
         # (sso/identity.py [auth.basic] enabled = false): use the seed token,
@@ -2868,7 +2873,7 @@ class Gate(Phase4Gate):
 
         mid_mon = self.mon_id_map()
         long_mid = self.long_running(mid_mon)
-        recreated = [s for s in long_before if s in long_mid and long_before[s][0] != long_mid[s][0]]
+        recreated = recreated_services(long_before, long_mid)
         only_grafana = (recreated == ['grafana'])
         perses_after = self._mon_fingerprint((mid_mon.get('perses') or (None,))[0])
 
@@ -3002,12 +3007,15 @@ class Gate(Phase4Gate):
         # keycloak; for every other core service a StartedAt move means an
         # unexpected stop/start and fails (core_ledger_change).
         curr_cluster = self.cluster_id_map()
-        initial = getattr(self, 'cluster_initial', None) or curr_cluster
+        initial = getattr(self, 'cluster_initial', None) or {}
 
         # 1. Core cluster containers unchanged
         core_unchanged = True
         diff_core = []
         restarted = []
+        if not initial:
+            core_unchanged = False
+            diff_core.append('cluster baseline was not captured (setup cluster_initial is empty)')
 
         def ledger(svc):
             changed, note = core_ledger_change(svc, initial[svc], curr_cluster[svc])
@@ -3019,25 +3027,34 @@ class Gate(Phase4Gate):
             return True
 
         for svc in ('keycloak', 'keycloak-db', 'kafka-ui'):
-            if svc in initial and svc in curr_cluster:
-                if not ledger(svc):
-                    core_unchanged = False
+            if svc not in initial:
+                core_unchanged = False
+                diff_core.append('%s: missing from initial map' % svc)
+            elif svc not in curr_cluster:
+                core_unchanged = False
+                diff_core.append('%s: missing from current map' % svc)
+            elif not ledger(svc):
+                core_unchanged = False
 
         # Brokers unchanged: kafka-N service names in every shipped
         # edition. Zero brokers found is a FAIL, never a silent pass --
         # the previous substring-'broker' loop matched nothing.
         brokers = broker_services(initial)
+        current_brokers = broker_services(curr_cluster)
         if not brokers:
             core_unchanged = False
             diff_core.append('no broker services (kafka-N/broker-N) in cluster map: %s'
                              % sorted(initial))
+        if brokers != current_brokers:
+            core_unchanged = False
+            diff_core.append('broker set changed: %s -> %s' % (brokers, current_brokers))
         for svc in brokers:
             if svc in curr_cluster:
                 if not ledger(svc):
                     core_unchanged = False
             else:
                 core_unchanged = False
-                diff_core.append('%s: missing after slice' % svc)
+                diff_core.append('%s: missing from current map' % svc)
 
         # 2. Realm.ini-content change recreates grafana only (log 162)
         # Change KEYCLOAK_SESSION_IDLE_MINUTES 15 -> 16
@@ -3047,7 +3064,7 @@ class Gate(Phase4Gate):
         rc2, _, _ = self.krate('monitor', 'up', timeout=600)
         mid_mon = self.mon_id_map()
         long_mid = self.long_running(mid_mon)
-        recreated_16 = [s for s in long_before if s in long_mid and long_before[s][0] != long_mid[s][0]]
+        recreated_16 = recreated_services(long_before, long_mid)
 
         ini_path = os.path.join(self.mon_dir(), 'auth', 'realm.ini')
         ini_16 = False
@@ -3061,7 +3078,7 @@ class Gate(Phase4Gate):
         rc4, _, _ = self.krate('monitor', 'up', timeout=600)
         after_mon = self.mon_id_map()
         long_after = self.long_running(after_mon)
-        recreated_15 = [s for s in long_mid if s in long_after and long_mid[s][0] != long_after[s][0]]
+        recreated_15 = recreated_services(long_mid, long_after)
 
         ini_15 = False
         try:
@@ -3075,7 +3092,8 @@ class Gate(Phase4Gate):
 
         # 3. Cluster proxy: not recreated by monitor changes
         proxy_after = (self.cluster_id_map() or {}).get('proxy')
-        proxy_untouched = (curr_cluster.get('proxy') == proxy_after)
+        proxy_before = curr_cluster.get('proxy')
+        proxy_untouched = proxy_before is not None and proxy_before == proxy_after
 
         probes = [
             ('core_cluster_unchanged', 'PASS' if core_unchanged else 'FAIL'),
