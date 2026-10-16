@@ -295,6 +295,41 @@ class Gate(Phase4Gate):
         sessions = kc.get('users/%s/sessions' % uid)
         return len(sessions) if isinstance(sessions, list) else -1
 
+    @staticmethod
+    def container_log(cid, timeout=30):
+        """Full docker log of one container as one text: the Docker CLI
+        forwards the container's stderr to its own stderr, so a scrape
+        that reads only stdout silently misses stderr loggers
+        (oauth2-proxy logs there; V12 attempt-4). Returns (rc, text)."""
+        rc, out, err = p2.docker('logs', cid, timeout=timeout)
+        return rc, (out or '') + (err or '')
+
+    def load_stub_trust(self):
+        """Trust the stand-in IdP's certificate for the brokered flow, the
+        way Phase 3's broker driver does (phase3_broker.py): the helper
+        TLS context pins only the fixture certificate, so the redirect
+        to https://localhost:STUB_PORT (stand-in self-signed cert) fails
+        CERTIFICATE_VERIFY_FAILED without it (V19 attempts 2-4). Loads
+        into the live context, so it also repairs a context recreated
+        by an earlier row (V18 gen-cert). Returns True when loaded."""
+        stub_dir = getattr(self.args, 'stub_dir', None) if hasattr(self, 'args') else None
+        crt = os.path.join(stub_dir, 'stub.crt') if stub_dir else ''
+        if not crt or not os.path.exists(crt):
+            return False
+        self.tls.load_verify_locations(crt)
+        return True
+
+    def perses_refresh(self, d):
+        """Refresh the Perses access token the way the browser frontend
+        does (POST /api/auth/refresh, Perses v0.54.0 auth.go): Perses
+        access JWTs live 900s (access_token_ttl default 15min) while the
+        refresh cookie lives 24h, so an active session must refresh or
+        /api/v1/* turns 401 at expiry even though the gateway session
+        (oauth2-proxy, separately refreshed) stays alive (V10)."""
+        st, _h, _b = d.req(self.gateway('/api/auth/refresh'), method='POST',
+                           headers={'Accept': 'application/json'})
+        return st
+
     def signin(self, user, label, expect='ok'):
         d = self.driver(label)
         d.jar.clear()
@@ -1138,12 +1173,17 @@ class Gate(Phase4Gate):
             delay = target - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
+            # Perses access JWTs expire after 900s; the browser stays
+            # signed in by refreshing, so an active driver does the same
+            # or projects turns 401 at expiry while role stays 200 (V10).
+            s_fresh = self.perses_refresh(d)
             s_r, _, b_r = d.req(self.gateway('/krate/role'))
             s_p, _, _ = d.req(self.gateway('/api/v1/projects'))
-            if s_r == 200 and b_r.strip() == 'viewer' and s_p == 200:
+            if s_fresh == 200 and s_r == 200 and b_r.strip() == 'viewer' and s_p == 200:
                 poll_count += 1
             else:
-                last_miss = 'poll %d: role %d/%s projects %d' % (i, s_r, b_r.strip()[:20], s_p)
+                last_miss = 'poll %d: refresh %d role %d/%s projects %d' % (
+                    i, s_fresh, s_r, b_r.strip()[:20], s_p)
 
         # 16 minutes idle
         time.sleep(16 * 60)
@@ -1320,7 +1360,7 @@ class Gate(Phase4Gate):
                 cb_status, cb_body = st_auth, b_auth
 
         o2p_cid = self.mon_container('oauth2-proxy')
-        rc_log, o2p_log, _ = p2.docker('logs', o2p_cid, timeout=30) if o2p_cid else (-1, '', '')
+        rc_log, o2p_log = self.container_log(o2p_cid) if o2p_cid else (-1, '')
         log_confirmed = "email in id_token (p4unverified@live4b.test) isn't verified" in o2p_log
         log_tail = ' | '.join(
             line.strip()[-120:] for line in (o2p_log or '').splitlines()
@@ -1490,7 +1530,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         cookie_rotated = bool(cookie_before and cookie_after and cookie_before != cookie_after)
 
         pm_cid = self.mon_container('perses-migrate')
-        rc_log, pm_log, _ = p2.docker('logs', pm_cid) if pm_cid else (-1, '', '')
+        rc_log, pm_log = self.container_log(pm_cid, timeout=300) if pm_cid else (-1, '')
         pm_match = re.findall(r'removed (\d+) stale user\(s\) and (\d+) managed binding\(s\)', pm_log or '')
         pm_users, pm_bindings = (int(pm_match[-1][0]), int(pm_match[-1][1])) if pm_match else (-1, -1)
         pm_want_bindings = managed_before + 2 if managed_before >= 0 else 2
@@ -1877,6 +1917,9 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                                     'and removes it right after; '
                                     'the row\'s evidence must record that V19 exercises commit 0 '
                                     '(trustEmail=true: the brokered user arrives e-mail-verified and signs in)')
+        if not self.load_stub_trust():
+            fail('no stub.crt in stub-dir %s (stand-in TLS would fail verification)'
+                 % self.args.stub_dir)
         site = os.path.join(self.args.stub_dir, 'site.json')
         # The plain bring-up wrote auth/ui/runtime.yml and the dual configure
         # no-clobbers it (the CLI's own message prescribes removing it first);
@@ -2175,6 +2218,13 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         poll_log = []
 
         def poll():
+            # Browser behaviour over a >15min session: refresh the Perses
+            # access JWT (900s TTL) or projects would 401 at token expiry
+            # and masquerade as the Keycloak session-max refusal this row
+            # measures (the proven V10 cause). Perses refresh does not
+            # touch the Keycloak session, so the M-boundary refusal still
+            # surfaces through the dead gateway session.
+            self.perses_refresh(driver)
             api_status, _headers, body = driver.req(
                 self.gateway('/api/v1/projects'), headers={'Accept': 'application/json'})
             at_ms = time.time_ns() // 1_000_000
