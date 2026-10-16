@@ -212,14 +212,24 @@ try {
   await openPersesAtKeycloak(page);
   await keycloakLogin(page, ADMIN, ADMIN_PW, ADMIN_TOTP);
   await persesSignIn(page);
-  // NEEDS-LIVE-VERIFICATION: the exact presence selector of the Admin's "Add Project"
-  // button and of a dashboard edit control (lab7 recorded the Admin-side page text
-  // "Admin Config"; the walk notes must confirm the buttons).
+  // The same selectors as the Viewer's absences in shot 2 must match for the Admin, or those
+  // absences prove nothing. Observed live on the kept fixture: the Admin's project page shows
+  // "Add Dashboard", the rename and delete project buttons and four edit icons, its home page
+  // "Create Project"; the Viewer sees none of them. The "Admin" header link is shown to every
+  // signed-in user, so it is no control.
+  await page.goto(`${PBASE}/projects/krate`, { waitUntil: 'networkidle' });
+  await page.getByRole('heading', { name: 'Krate', exact: true }).waitFor({ state: 'visible', timeout: 30000 });
+  const adminAddDashboard = page.getByRole('button', { name: /add dashboard/i });
+  await adminAddDashboard.first().waitFor({ state: 'visible', timeout: 30000 });
+  assert((await adminAddDashboard.count()) > 0, 'the Admin sees the "Add Dashboard" control the Viewer does not');
+  assert((await page.getByRole('button', { name: /(rename|delete) project/i }).count()) > 0,
+    'the Admin sees the "Rename/Delete project" controls the Viewer does not');
+  assert((await page.locator('[aria-label="Edit"], button:has(svg[data-testid="EditIcon"])').count()) > 0,
+    'the Admin sees edit controls in the project, which the Viewer does not');
   await page.goto(`${PBASE}/projects`, { waitUntil: 'networkidle' });
   const addProject = page.getByRole('button', { name: /(add|create) project/i });
-  const adminMenu = page.getByRole('link', { name: /^Admin$/i }).or(page.getByRole('button', { name: /^Admin$/i }));
-  assert((await addProject.count()) > 0 || (await adminMenu.count()) > 0,
-    'the Admin sees the "Create Project" control or the Admin section (an editor\'s UI)');
+  await addProject.first().waitFor({ state: 'visible', timeout: 30000 });
+  assert((await addProject.count()) > 0, 'the Admin sees the "Create Project" control the Viewer does not');
   await shot(page, 'admin-projects', `Admin ${ADMIN} with the create/edit controls of the realm's admin group`);
 
   // ── shot 4: after logout, the Keycloak password form ──
