@@ -1250,9 +1250,15 @@ class Gate:
                 landing = urllib.parse.urlsplit(urllib.parse.urljoin(self.base + '/', final)).netloc
                 notes.append('post-login Location %s' % final[:40])
                 if result['kind'] != 'ok':
-                    notes.append('login %s' % result['kind'])
+                    bad.append('post-login landing unverified: login %s' % result['kind'])
                 elif landing != self.origin.netloc:
                     bad.append('post-login redirect off-origin: ' + final)
+            else:
+                bad.append('post-login landing unverified: GET //evil.example/ redirected to %s, not OAuth'
+                           % target.location[:80])
+        else:
+            bad.append('post-login landing unverified: GET //evil.example/ answered %s, not an OAuth redirect'
+                       % target.status)
         text = '; '.join(notes)
         if bad:
             fail('; '.join(bad) + ' | ' + text)

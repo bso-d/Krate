@@ -5,13 +5,14 @@
 # the backing services; slices 4a/4b/4c, each with a --session-max-hours companion
 # run) against a disposable fixture. Each acceptance criterion of the owner's
 # handover has numbered tests; every test ends PASS, FAIL or NOT_RUN with
-# evidence, and the receipt binds the results to the candidate (commit or file
-# digests), the dirty files, the tool versions and this runner's own digest. The
+# evidence, and the receipt binds the results to the candidate (the git checkout's
+# commit, or on a bundle host the installed product bytes compared with --repo), the
+# dirty files, the tool versions and this runner's own digest. The
 # verdict is PASS only when every required test passed and the candidate is bound.
 # See sso/guides/identity-gate.md.
 #
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe [--phase 1|2|3|all] [--stub-port N]
-#   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>
+#   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1
 #
@@ -67,7 +68,7 @@ usage() {
   cat <<EOF
 Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
           [--subnet CIDR --proxy-ip IP --ip-range CIDR] [--phase 1|2|3|4a|4b|4c|all] [--out DIR]
-          [--candidate SHA] [--stub-port N] [--public-host NAME] [--session-max-hours N]
+          [--candidate SHA [--repo DIR]] [--stub-port N] [--public-host NAME] [--session-max-hours N]
           [--wipe] [--keep] [--no-screenshots] [--no-static]
   --edition-dir    kraft or epc checkout or fixture installation (default: $REPO/kraft)
   --phase          1, 2, 3, all (= 1-3, the default), or the Phase 4 slices 4a (Grafana),
@@ -88,9 +89,11 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
                    creation only), then REQUIRED_P1 plus U27 (4a) or U27 and V23 (4b) run,
                    and the receipt names N
   --candidate SHA  the commit the edition files come from, when the directory has no git (a bundle install);
-                   the receipt also records the sha256 of the edition files and is INCOMPLETE without a binding
+                   it binds only with --repo, which compares the installed product bytes with it
+                   (without --repo the receipt is bound: false, at best INCOMPLETE)
   --repo DIR       a checkout of the candidate for the static block (S1-S4) when the edition directory is a bundle
-                   install without Makefile or git; its HEAD must be the --candidate commit
+                   install without Makefile or git; its HEAD must be the --candidate commit, and the
+                   installed product is compared with it (scripts/gate/candidate_binding.py)
   --stub-port N    Phase 3: the stand-in IdP's port on 127.0.0.1 (default $STUB_PORT; must be free)
   --wipe           remove an existing .env/auth/certs in that directory first (required when present)
   --keep           leave the fixture running at the end (no teardown)
@@ -123,9 +126,9 @@ while [[ $# -gt 0 ]]; do
     *) usage; exit 2 ;;
   esac
 done
-# ── argument validation: every refusal below happens before the first Docker call
-# (host_conflicts, near the end of this file, is the first command that talks to
-# the daemon), so a refused run starts nothing and leaves nothing behind. ──
+# ── argument validation: every refusal below happens before anything is started (the
+# only Docker calls before host_conflicts are the read-only `docker info` and
+# `docker image inspect` of the product byte binding), so a refused run leaves nothing behind. ──
 [[ "$PHASE" == 1 || "$PHASE" == 2 || "$PHASE" == 3 || "$PHASE" == 4a || "$PHASE" == 4b || "$PHASE" == 4c || "$PHASE" == all ]] \
   || { echo "--phase must be 1, 2, 3, 4a, 4b, 4c or all" >&2; exit 2; }
 [[ "$STUB_PORT" =~ ^[0-9]+$ ]] || { echo "--stub-port must be a number" >&2; exit 2; }
@@ -212,27 +215,58 @@ for monitor_state in "$MON_DIR/auth/realm.ini" "$MON_DIR/auth/secrets" "$MON_DIR
   fi
 done
 
-# ── candidate binding: a commit (git or --candidate) plus the digests of the files under test ──
+# ── candidate binding: a commit (git or --candidate) and, on a bundle host, the installed product bytes compared with it ──
 sha256file() { { shasum -a 256 "$1" 2>/dev/null || sha256sum "$1"; } | cut -c1-16; }
 BOUND=true
 CANDIDATE_DIRTY=false
 CANDIDATE_GIT_HEAD=""
-if git -C "$ED" rev-parse HEAD >/dev/null 2>&1; then
+PRODUCT_BINDING=""
+# Product byte binding on a bundle host (audit D6): every file `make bundle` installed must carry the
+# candidate's bytes in --repo (scripts/gate/candidate_binding.py: the Makefile copy list; the two
+# templates after replaying the bundle's image rewrite from images.lock.tsv). Prints the summary line;
+# returns the helper's status (0 match, 1 mismatch, 2 not comparable), the full output on stderr.
+bind_product() {
+  local out rc
+  out="$(python3 -I "$GATE_DIR/candidate_binding.py" --repo "$REPO_ARG" --candidate "$1" --installed "$ED" --edition "$EDITION" --check-images 2>&1)"; rc=$?
+  printf '%s\n' "${out%%$'\n'*}"
+  (( rc == 0 )) || printf '%s\n' "$out" >&2
+  return "$rc"
+}
+# At the end of a run the installed product must still be the candidate's: an edit during the
+# run, or a product that can no longer be compared, voids the binding (bound: false).
+recheck_product_binding() {
+  local product_end summary
+  product_end="$(bind_product "${CANDIDATE%% *}" 2>>"$RAW")"; local rc=$?
+  summary="${product_end#PRODUCT_BINDING }"
+  PRODUCT_BINDING="$PRODUCT_BINDING; at finish: ${summary:-not comparable}"
+  (( rc == 0 )) && return 0
+  BOUND=false
+  return 1
+}
+# SF-2: a git checkout only when the edition's own files are tracked there; a bundle extracted
+# inside some other work tree is a bundle install and binds through --repo like any other.
+if git -C "$ED" rev-parse HEAD >/dev/null 2>&1 &&
+   git -C "$ED" ls-files --error-unmatch -- krate docker-compose.yml .env.template nginx.conf >/dev/null 2>&1; then
   CANDIDATE="$(git -C "$ED" rev-parse HEAD)"
   CANDIDATE_GIT_HEAD="$CANDIDATE"
   TOPLEVEL="$(git -C "$ED" rev-parse --show-toplevel)"
   DIRTY="$(git -C "$TOPLEVEL" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"
   [[ -z "$DIRTY" ]] || CANDIDATE_DIRTY=true
   [[ -z "$CANDIDATE_ARG" || "$CANDIDATE" == "$CANDIDATE_ARG"* ]] || { echo "--candidate $CANDIDATE_ARG differs from the checkout's HEAD $CANDIDATE" >&2; exit 2; }
+  PRODUCT_BINDING="git checkout: the edition files are the tracked files of $CANDIDATE (dirty tracked files must be empty)"
 elif [[ -n "$CANDIDATE_ARG" ]]; then
-  CANDIDATE="$CANDIDATE_ARG (stated; no git here, bound by the edition file digests)"
+  # A stated commit binds nothing by itself: only --repo (below) compares the installed product with it.
+  CANDIDATE="$CANDIDATE_ARG (stated; no git here; unbound unless --repo compares the product bytes)"
   TOPLEVEL="$(cd "$ED/.." && pwd)"
-  DIRTY="unknown (no git); the file digests bind the candidate"
+  DIRTY="unknown (no git)"
+  BOUND=false
+  PRODUCT_BINDING="not compared (no --repo)"
 else
   CANDIDATE="unbound (no git and no --candidate)"
   TOPLEVEL="$(cd "$ED/.." && pwd)"
   DIRTY="unknown (no git)"
   BOUND=false
+  PRODUCT_BINDING="not compared (no git and no --candidate)"
 fi
 EDITION_DIGESTS=""
 for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/probe.py" "$SSO/configure-dual.py"; do
@@ -240,7 +274,7 @@ for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.con
 done
 if [[ -n "$REPO_ARG" ]]; then
   $STATIC || { echo "--repo runs the static block on that checkout; it cannot be combined with --no-static (drop one)" >&2; exit 2; }
-  $BOUND && [[ "$CANDIDATE" != *"(stated"* ]] && { echo "--repo is for a bundle install without git; $ED is a git checkout, its static block runs there already" >&2; exit 2; }
+  [[ -z "$CANDIDATE_GIT_HEAD" ]] || { echo "--repo is for a bundle install without git; $ED is a git checkout, its static block runs there already" >&2; exit 2; }
   [[ -n "$CANDIDATE_ARG" ]] || { echo "--repo needs --candidate SHA (the edition directory has no git)" >&2; exit 2; }
   [[ -f "$REPO_ARG/Makefile" ]] || { echo "--repo $REPO_ARG has no Makefile" >&2; exit 2; }
   repo_head="$(git -C "$REPO_ARG" rev-parse HEAD 2>/dev/null)" || { echo "--repo $REPO_ARG is not a git checkout" >&2; exit 2; }
@@ -251,7 +285,10 @@ if [[ -n "$REPO_ARG" ]]; then
     || { echo "--candidate $CANDIDATE_ARG is not one commit of --repo $REPO_ARG" >&2; exit 2; }
   [[ "$resolved" == "$repo_head" ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG ($resolved)" >&2; exit 2; }
   TOPLEVEL="$REPO_ARG"
-  CANDIDATE="$resolved (stated as $CANDIDATE_ARG and resolved in --repo; edition files bound by digest; static block on that checkout)"
+  PRODUCT_BINDING="$(bind_product "$resolved")" ||
+    { echo "$ED is not bound to the candidate (${PRODUCT_BINDING:-no result}; the lines above name each difference or the error); reinstall the candidate's bundle, delete the files it does not ship and load its images before this gate" >&2; exit 2; }
+  BOUND=true
+  CANDIDATE="$resolved (stated as $CANDIDATE_ARG and resolved in --repo; product byte binding in its own row; static block on that checkout)"
   CANDIDATE_GIT_HEAD="$resolved"
   DIRTY="edition: unknown (no git); --repo: $(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"
   [[ -z "$(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null)" ]] || CANDIDATE_DIRTY=true
@@ -574,11 +611,17 @@ run_static() {
   else
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
-  local st_identity st_w3_py
+  local st_identity st_py=0 py_failed="" py_count=0 helper
   cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
-  cap env PYTHONPYCACHEPREFIX="$STATE/pycache" python3 -m py_compile "$GATE_DIR/phase4_w3.py"; st_w3_py=$?
-  [[ $st_identity -eq 0 && $st_w3_py -eq 0 ]]; st=$?
-  ok_if S4 static S "$st" "check-identity rc=$st_identity; phase4_w3.py compile rc=$st_w3_py"
+  # Every gate helper must compile under this host's python3 (the guests run 3.9), not one named file.
+  for helper in "$GATE_DIR"/*.py; do
+    [[ -f "$helper" ]] || continue  # an unmatched glob leaves the literal pattern
+    py_count=$((py_count+1))
+    cap env PYTHONPYCACHEPREFIX="$STATE/pycache" python3 -m py_compile "$helper" || { st_py=1; py_failed="$py_failed $(basename "$helper")"; }
+  done
+  (( py_count > 0 )) || st_py=1
+  [[ $st_identity -eq 0 && $st_py -eq 0 ]]; st=$?
+  ok_if S4 static S "$st" "check-identity rc=$st_identity; py_compile of $py_count gate helpers rc=$st_py${py_failed:+ (failed:$py_failed)}"
 }
 
 # ═══════════════════════════ phase 1 ═══════════════════════════
@@ -1228,7 +1271,11 @@ phase4_leak_scan_z4a() {
       cnames+=("$cn")
       docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
       places+=("$STATE/docker-$cn.log")
-    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-" | sort -u)
+    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
+    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
+    done < <({ docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}'
+              docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}'
+              docker ps -a --format '{{.Names}}' | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-"; } 2>/dev/null | sort -u)
   fi
   local mf psd
   for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
@@ -1438,7 +1485,11 @@ phase4_leak_scan_z4b() {
       cnames+=("$cn")
       docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
       places+=("$STATE/docker-$cn.log")
-    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-" | sort -u)
+    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
+    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
+    done < <({ docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}'
+              docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}'
+              docker ps -a --format '{{.Names}}' | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-"; } 2>/dev/null | sort -u)
   fi
   local mf psd
   for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
@@ -1768,67 +1819,27 @@ phase4_row_w4() {
   local slice="$1"
   section "W4: 5-source reachability census equal to Table 2 of monitoring/README.md"
   local readme_file="$MON_DIR/README.md"
+  local w4_script="$GATE_DIR/phase4_w4.py"
   if [[ ! -f "$readme_file" ]]; then
     phase4_stub W4 "$slice" W "precondition: missing monitoring/README.md"
     return
   fi
-
-  local python_scanner='
-import sys, os, json, re
-
-readme_path = sys.argv[1]
-mon_project = sys.argv[2]
-cluster_project = sys.argv[3]
-
-text = open(readme_path, encoding="utf-8").read()
-if "## Table 2 — Accepted residual reachability" not in text:
-    print("MISSING_TABLE2")
-    sys.exit(1)
-
-table2_part = text.split("## Table 2 — Accepted residual reachability")[1].split("## ")[0]
-table2_rows = []
-for line in table2_part.splitlines():
-    line = line.strip()
-    if not line.startswith("|"):
-        continue
-    cells = [c.strip().strip("`") for c in line.strip("|").split("|")]
-    if len(cells) >= 3 and cells[0] not in ("source", "---", ""):
-        table2_rows.append((cells[0], cells[1], cells[2]))
-
-# Filter for the 5 census sources
-census_rows = [r for r in table2_rows if r[0] in ("host", "monitoring", "perses", "kafka-network", "grafana")]
-
-# Finding F1: check union of ExposedPorts and declared listeners for:
-# loki-gateway:3100, oauth2-proxy:4180, perses-sync:9091
-f1_listeners = {
-    ("monitoring", "loki-gateway", "3100"),
-    ("perses", "oauth2-proxy", "4180"),
-    ("perses", "perses-sync", "9091")
-}
-f1_found = f1_listeners.issubset(set(census_rows))
-
-# Finding F2: check perses-network listeners:
-# perses-sync:9091, perses-gateway:80, perses-gateway:3443
-f2_listeners = {
-    ("perses", "perses-sync", "9091"),
-    ("perses", "perses-gateway", "80"),
-    ("perses", "perses-gateway", "3443")
-}
-f2_found = f2_listeners.issubset(set(census_rows))
-
-if len(census_rows) >= 26 and f1_found and f2_found:
-    print(f"CENSUS_OK: {len(census_rows)} rows verified across 5 sources (F1 and F2 listeners present)")
-    sys.exit(0)
-else:
-    print(f"FAIL: count={len(census_rows)} f1={f1_found} f2={f2_found}")
-    sys.exit(1)
-'
-  local py_out py_rc
-  py_out="$(python3 -I -c "$python_scanner" "$readme_file" "$MON_PROJECT" "$PROJECT" 2>&1)"; py_rc=$?
-
-  local st
-  [[ $py_rc -eq 0 && "$py_out" == *"CENSUS_OK"* ]]; st=$?
-  ok_if W4 "$slice" W "$st" "5-source reachability census matches Table 2 of monitoring/README.md (${py_out##*$'\n'})"
+  if [[ ! -f "$w4_script" ]]; then
+    record W4 "$slice" W FAIL "missing tracked scripts/gate/phase4_w4.py"
+    return
+  fi
+  local cap_w4 st_w4 result_w4
+  cap_w4="$(W4_NGINX_IMAGE="$(envv NGINX_IMAGE)" python3 -I "$w4_script" \
+    --readme "$readme_file" --cluster-project "$PROJECT" --monitor-project "$MON_PROJECT" 2>&1)"; st_w4=$?
+  log "$cap_w4"
+  result_w4="$(printf '%s\n' "$cap_w4" | grep '^RESULT W4 ' | tail -1)"
+  if [[ $st_w4 -eq 0 && "$result_w4" == 'RESULT W4 PASS '* ]]; then
+    record W4 "$slice" W PASS "live reachability census: ${result_w4#RESULT W4 PASS }"
+  elif [[ $st_w4 -eq 2 && "$result_w4" == 'RESULT W4 NOT_RUN '* ]]; then
+    record W4 "$slice" W NOT_RUN "live reachability census: ${result_w4#RESULT W4 NOT_RUN }"
+  else
+    record W4 "$slice" W FAIL "live reachability census: ${result_w4:-script exit $st_w4 without a result}; see run.log"
+  fi
 }
 bringup_failed() { # slice id...: every row FAILs when the fixture never came up
   local slice="$1"; shift
@@ -2073,6 +2084,8 @@ teardown() {
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done
   # A helper label alone is not ownership: restrict removal to this fixture's
   # Compose project. The name-filtered removal above covers independent helpers.
+  # W4 probe containers carry no project label; a probe whose start timed out is removed here too.
+  for n in $(docker ps -aq --filter "label=krate.gate=w4-probe"); do docker rm -f "$n" >/dev/null 2>&1; done
   for n in $(docker ps -aq --filter "label=krate.gate=phase4" \
       --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
@@ -2100,6 +2113,10 @@ finish() {
       [[ "$(sha256file "$RUNNER")" != "$RUNNER_SHA_START" ]] ||
       [[ "$(find "$GATE_DIR" -type f \( -name '*.py' -o -name '*.mjs' -o -name '*.sh' \) | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)" != "$RUNNER_GATE_SHA_START" ]]; then
     log "candidate or runner source is dirty or differs from the candidate"
+    [[ "$verdict" == PASS ]] && verdict=INCOMPLETE
+  fi
+  if [[ -n "$REPO_ARG" ]] && ! recheck_product_binding; then
+    log "the installed product changed during the run or could not be compared again: ${PRODUCT_BINDING##*at finish: }"
     [[ "$verdict" == PASS ]] && verdict=INCOMPLETE
   fi
   # Redact and publish: the secret values go to python through the 0600 list, never through a
@@ -2136,6 +2153,7 @@ PYEOF
     echo "| candidate commit | $CANDIDATE |"
     echo "| dirty tracked files at run time | ${DIRTY:-none} |"
     echo "| edition file digests (sha256, 16 hex) |$EDITION_DIGESTS |"
+    echo "| product byte binding | ${PRODUCT_BINDING:-not compared} |"
     echo "| edition / fixture | $EDITION in $ED, Compose project $PROJECT, $BASE, identity $SUBNET (pool $IP_RANGE, proxy $PROXY_IP) |"
     echo "| phases | $PHASE; screenshots: $SCREENSHOTS; static: $STATIC |"
     if [[ -n "$SESSION_MAX_HOURS" ]]; then

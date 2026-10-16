@@ -83,6 +83,7 @@ import datetime
 import hashlib
 import hmac
 import html as htmlmod
+import http.client
 import ipaddress
 import json
 import os
@@ -102,7 +103,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python3 -I does not add the script directory
 import phase2_kafbat as p2  # noqa: E402
 from phase4_common import (Phase4Gate, helper_main, aggregate, log,  # noqa: E402
-                           Outcome, Terminated, not_run, fail)
+                           Outcome, Terminated, not_run, fail, broker_services)
 
 CASES = (['U%d' % i for i in range(1, 21)] + ['U21a', 'U21b']
          + ['U%d' % i for i in range(22, 30)])
@@ -232,6 +233,37 @@ def loki_push_body(labels, line, ts_ns):
 
 # ─── the headless Grafana realm-mode driver (port of the walk's p4driver.py) ──
 
+def core_ledger_change(svc, old, new):
+    """U23 core-cluster ledger decision for one service. old/new are
+    (container id, StartedAt, RestartCount). Returns (changed, note):
+    a new id or restart-count change always counts; a bare StartedAt move
+    counts for every core service EXCEPT keycloak, the one service U12/U13
+    intentionally stop and start (SAME_ID proven at 115b300)."""
+    if (old[0], old[2]) != (new[0], new[2]):
+        return True, '%s: %s id %s->%s rc %s->%s started %s->%s' % (
+            svc, 'SAME_ID' if old[0] == new[0] else 'NEW_ID',
+            old[0][:12], new[0][:12], old[2], new[2],
+            old[1][:19], new[1][:19])
+    if old[1] != new[1]:
+        note = '%s started %s->%s' % (svc, old[1][:19], new[1][:19])
+        return svc != 'keycloak', note
+    return False, ''
+
+
+def recreated_services(before, after):
+    """Services whose container id changed between two id maps, plus
+    `missing:<svc>` / `appeared:<svc>` markers for set changes. A service
+    that disappears or appears is therefore never invisible to an
+    exact `== ['grafana']` recreation claim."""
+    before = before or {}
+    after = after or {}
+    changed = [svc for svc in before
+               if svc in after and before[svc][0] != after[svc][0]]
+    changed += ['missing:%s' % svc for svc in sorted(set(before) - set(after))]
+    changed += ['appeared:%s' % svc for svc in sorted(set(after) - set(before))]
+    return changed
+
+
 class GrafanaDriver:
     """One user agent on the public origin: cookie jar, no automatic redirects,
     pinned TLS (gate.tls), and the Grafana session-token rotation recovery the
@@ -259,6 +291,9 @@ class GrafanaDriver:
             status, hdrs, text = error.code, error.headers, error.read().decode(errors='replace')
         except urllib.error.URLError as error:
             return -1, {}, 'URLError: %s' % error.reason
+        except (TimeoutError, OSError) as error:
+            # A read timeout is not wrapped in URLError; same -1 contract.
+            return -1, {}, '%s: %s' % (type(error).__name__, error)
         if status == 401 and 'session.token.rotate' in text and not url.endswith('/auth-tokens/rotate'):
             rotated = self.raw(self.gate.base + '/grafana/api/user/auth-tokens/rotate', b'', 'POST')
             if rotated[0] == 200:
@@ -276,6 +311,9 @@ class GrafanaDriver:
             return response.status, response.headers, response.read().decode(errors='replace')
         except urllib.error.HTTPError as error:
             return error.code, error.headers, error.read().decode(errors='replace')
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            return -1, {}, '%s: %s' % (type(error).__name__,
+                                       getattr(error, 'reason', error))
 
     @staticmethod
     def set_cookie_headers(headers):
@@ -357,6 +395,10 @@ class Gate(Phase4Gate):
         except urllib.error.URLError as error:
             raise RuntimeError('Grafana at %s did not answer %s %s: %s'
                                % (self.grafana_loopback(), method, path, error.reason))
+        except (TimeoutError, OSError) as error:
+            raise RuntimeError('Grafana at %s did not answer %s %s: %s: %s'
+                               % (self.grafana_loopback(), method, path,
+                                  type(error).__name__, error))
         try:
             return status, (json.loads(payload) if payload else None)
         except ValueError:
@@ -391,6 +433,8 @@ class Gate(Phase4Gate):
             return error.code, error.headers, error.read().decode(errors='replace')
         except urllib.error.URLError as error:
             return -1, {}, 'URLError: %s' % error.reason
+        except (TimeoutError, OSError) as error:
+            return -1, {}, '%s: %s' % (type(error).__name__, error)
 
     def mon_id_map(self):
         """{service: (container id, StartedAt)} of the monitoring project (the walk's
@@ -405,6 +449,8 @@ class Gate(Phase4Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
+                if len(parts) < 3 or parts[0] == '<no':  # malformed or no service label ('<no value>')
+                    continue
                 found[parts[0]] = (parts[1], ' '.join(parts[2:]))
         return found
 
@@ -418,8 +464,8 @@ class Gate(Phase4Gate):
 
     def cluster_id_map(self):
         """{service: (container id, StartedAt, RestartCount)} of the cluster
-        project (U23's ledger: identity is id + RestartCount, since U12's
-        intentional stop/start preserves both while moving StartedAt)."""
+        project (U23's ledger, core_ledger_change: id + RestartCount always,
+        StartedAt too except for keycloak's intentional U12/U13 stop/start)."""
         found = {}
         rc, out, _ = p2.docker('ps', '-aq', '--filter',
                                'label=com.docker.compose.project=' + self.project)
@@ -430,6 +476,8 @@ class Gate(Phase4Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}} {{.RestartCount}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
+                if len(parts) < 4 or parts[0] == '<no':  # malformed or no service label ('<no value>')
+                    continue
                 found[parts[0]] = (parts[1], ' '.join(parts[2:-1]), parts[-1])
         return found
 
@@ -751,9 +799,11 @@ class Gate(Phase4Gate):
         for line in (out or '').splitlines():
             if line.startswith('SUMMARY '):
                 try:
-                    summary = json.loads(line[len('SUMMARY '):])
+                    parsed_summary = json.loads(line[len('SUMMARY '):])
                 except ValueError:
                     summary = None
+                else:
+                    summary = parsed_summary if isinstance(parsed_summary, dict) else None
         steps = []
         try:
             with open(os.path.join(outdir, 'ui15-summary.json'), encoding='utf-8') as handle:
@@ -777,7 +827,7 @@ class Gate(Phase4Gate):
         os.makedirs(outdir, exist_ok=True)
         summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
         retried = None
-        if self._network_flake(summary):
+        if summary is not None and self._network_flake(summary):
             retried = summary.get('failedRequests')
             log('browser probe %s: network-only dirt %s, retrying once' % (user, retried))
             summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
@@ -1639,15 +1689,53 @@ class Gate(Phase4Gate):
         return status, '%s; x509 lines 0 -> 1 (induced) -> 1; sign-in p4v (walk used p4noemail); ' \
                        'walk: live4a 140' % tokens
 
+    def grafana_ready(self, timeout=10.0):
+        """Grafana's own readiness contract: loopback GET /api/health
+        (unauthenticated by design) answering 200 with database == "ok"
+        (Grafana 12.2.0 pkg/api/http_server.go apiHealthHandler: 503 with
+        database "failing" while its SELECT 1 fails; /healthz is liveness
+        only and says nothing about the database). Loopback, not the
+        public /grafana/ route, which in realm mode redirects to login.
+        A poll: any transport or parse failure is simply not ready."""
+        if timeout <= 0:
+            return False
+        request = urllib.request.Request(self.grafana_loopback() + '/api/health',
+                                         headers={'Accept': 'application/json'})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                if response.status != 200:
+                    return False
+                payload = json.loads(response.read().decode())
+        except (urllib.error.URLError, http.client.HTTPException,
+                TimeoutError, OSError, ValueError):
+            return False
+        return isinstance(payload, dict) and payload.get('database') == 'ok'
+
     def _wait_grafana_healthy(self, cid, limit=180):
-        waited = 0
-        while waited < limit:
-            rc, out, _ = p2.docker('inspect', '-f', '{{.State.Health.Status}}', cid)
-            if rc == 0 and out.strip() == 'healthy':
-                return True
-            time.sleep(3)
-            waited += 3
-        return False
+        """Wait until the target Grafana container is running and ready.
+
+        Readiness is decided by Grafana's documented loopback endpoint
+        (grafana_ready), while cid binds that endpoint to the intended
+        container rather than accepting any process on the loopback port.
+        The limit is a wall-clock deadline, and each endpoint poll gets
+        only the time remaining under it.
+        """
+        if not cid:
+            return False
+        deadline = time.monotonic() + limit
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            rc, out, _ = p2.docker('inspect', '-f', '{{.State.Running}}', cid)
+            if rc == 0 and out.strip() == 'true':
+                remaining = deadline - time.monotonic()
+                if remaining > 0 and self.grafana_ready(timeout=min(10.0, remaining)):
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(3, remaining))
 
     def _wait_container_healthy(self, cid, limit=180):
         t0 = time.monotonic()
@@ -1726,11 +1814,14 @@ class Gate(Phase4Gate):
         meta = self.seed_meta()
         meta_match = meta.get('id') == str(old_id)
         creation_ok = creation_ok and meta_match
-        # Read-only role evidence: the search DTO carries the org role, so a
-        # refusal names the drift without printing any secret value.
+        # Asserted role evidence: the search DTO carries the org role, so a
+        # refusal names the drift without printing any secret value. U20 runs
+        # in realm mode, where the realm ini disables Basic auth
+        # (sso/identity.py [auth.basic] enabled = false): use the seed token,
+        # like the service-account calls above.
         sa_role = '?'
         st_sa, sa_body = self.grafana_api('GET', '/grafana/api/serviceaccounts/search?query=krate-seed',
-                                          auth=self.admin_basic())
+                                          token=token)
         if st_sa == 200 and isinstance(sa_body, dict):
             for cand in sa_body.get('serviceAccounts') or []:
                 if isinstance(cand, dict) and cand.get('name') == 'krate-seed':
@@ -1811,6 +1902,7 @@ class Gate(Phase4Gate):
             renewal_ok, successor_ok = renewed, successor_ok
         refusal_status, refusal_text = self.obs.get('U20-refusal', ('NOT_RUN', 'refusal not observed'))
         probes = [('files', 'PASS' if modes_ok else 'FAIL'),
+                  ('sa_role_admin', 'PASS' if sa_role == 'Admin' else 'FAIL'),
                   ('creation', 'PASS' if creation_ok else 'FAIL'),
                   ('seed_alerting', 'PASS' if seeding_ok else 'FAIL'),
                   ('crud', 'PASS' if crud_ok else 'FAIL'),
@@ -2781,7 +2873,7 @@ class Gate(Phase4Gate):
 
         mid_mon = self.mon_id_map()
         long_mid = self.long_running(mid_mon)
-        recreated = [s for s in long_before if s in long_mid and long_before[s][0] != long_mid[s][0]]
+        recreated = recreated_services(long_before, long_mid)
         only_grafana = (recreated == ['grafana'])
         perses_after = self._mon_fingerprint((mid_mon.get('perses') or (None,))[0])
 
@@ -2908,40 +3000,61 @@ class Gate(Phase4Gate):
         # walk logs/137, 139, 162, 169: Container ledger verification:
         # broker, kafka-ui, keycloak, keycloak-db unchanged across slice;
         # cluster proxy recreated once per input change; grafana recreated
-        # on auth config/realm.ini change. Identity is (id, RestartCount):
-        # U12's intentional stop/start preserves both while moving StartedAt
-        # (proven SAME_ID at 115b300), so only a new id or a daemon restart
-        # counts as changed; in-place restarts are noted, not failed.
+        # on auth config/realm.ini change. Identity is (id, RestartCount)
+        # plus StartedAt: U12/U13 intentionally stop/start ONLY keycloak,
+        # preserving id and RestartCount while moving StartedAt (proven
+        # SAME_ID at 115b300), so the StartedAt exemption is scoped to
+        # keycloak; for every other core service a StartedAt move means an
+        # unexpected stop/start and fails (core_ledger_change).
         curr_cluster = self.cluster_id_map()
-        initial = getattr(self, 'cluster_initial', None) or curr_cluster
+        initial = getattr(self, 'cluster_initial', None) or {}
 
         # 1. Core cluster containers unchanged
         core_unchanged = True
         diff_core = []
         restarted = []
+        if not initial:
+            core_unchanged = False
+            diff_core.append('cluster baseline was not captured (setup cluster_initial is empty)')
 
         def ledger(svc):
-            old, new = initial[svc], curr_cluster[svc]
-            if (old[0], old[2]) != (new[0], new[2]):
-                diff_core.append('%s: %s id %s->%s rc %s->%s started %s->%s'
-                                 % (svc, 'SAME_ID' if old[0] == new[0] else 'NEW_ID',
-                                    old[0][:12], new[0][:12], old[2], new[2],
-                                    old[1][:19], new[1][:19]))
+            changed, note = core_ledger_change(svc, initial[svc], curr_cluster[svc])
+            if changed:
+                diff_core.append(note)
                 return False
-            if old[1] != new[1]:
-                restarted.append('%s started %s->%s' % (svc, old[1][:19], new[1][:19]))
+            if note:
+                restarted.append(note)
             return True
 
         for svc in ('keycloak', 'keycloak-db', 'kafka-ui'):
-            if svc in initial and svc in curr_cluster:
-                if not ledger(svc):
-                    core_unchanged = False
+            if svc not in initial:
+                core_unchanged = False
+                diff_core.append('%s: missing from initial map' % svc)
+            elif svc not in curr_cluster:
+                core_unchanged = False
+                diff_core.append('%s: missing from current map' % svc)
+            elif not ledger(svc):
+                core_unchanged = False
 
-        # brokers unchanged
-        for svc in initial:
-            if 'broker' in svc and svc in curr_cluster:
+        # Brokers unchanged: kafka-N service names in every shipped
+        # edition. Zero brokers found is a FAIL, never a silent pass --
+        # the previous substring-'broker' loop matched nothing.
+        brokers = broker_services(initial)
+        current_brokers = broker_services(curr_cluster)
+        if not brokers:
+            core_unchanged = False
+            diff_core.append('no broker services (kafka-N/broker-N) in cluster map: %s'
+                             % sorted(initial))
+        if brokers != current_brokers:
+            core_unchanged = False
+            diff_core.append('broker set changed: %s -> %s' % (brokers, current_brokers))
+        for svc in brokers:
+            if svc in curr_cluster:
                 if not ledger(svc):
                     core_unchanged = False
+            else:
+                core_unchanged = False
+                diff_core.append('%s: missing from current map' % svc)
 
         # 2. Realm.ini-content change recreates grafana only (log 162)
         # Change KEYCLOAK_SESSION_IDLE_MINUTES 15 -> 16
@@ -2951,7 +3064,7 @@ class Gate(Phase4Gate):
         rc2, _, _ = self.krate('monitor', 'up', timeout=600)
         mid_mon = self.mon_id_map()
         long_mid = self.long_running(mid_mon)
-        recreated_16 = [s for s in long_before if s in long_mid and long_before[s][0] != long_mid[s][0]]
+        recreated_16 = recreated_services(long_before, long_mid)
 
         ini_path = os.path.join(self.mon_dir(), 'auth', 'realm.ini')
         ini_16 = False
@@ -2965,7 +3078,7 @@ class Gate(Phase4Gate):
         rc4, _, _ = self.krate('monitor', 'up', timeout=600)
         after_mon = self.mon_id_map()
         long_after = self.long_running(after_mon)
-        recreated_15 = [s for s in long_mid if s in long_after and long_mid[s][0] != long_after[s][0]]
+        recreated_15 = recreated_services(long_mid, long_after)
 
         ini_15 = False
         try:
@@ -2979,7 +3092,8 @@ class Gate(Phase4Gate):
 
         # 3. Cluster proxy: not recreated by monitor changes
         proxy_after = (self.cluster_id_map() or {}).get('proxy')
-        proxy_untouched = (curr_cluster.get('proxy') == proxy_after)
+        proxy_before = curr_cluster.get('proxy')
+        proxy_untouched = proxy_before is not None and proxy_before == proxy_after
 
         probes = [
             ('core_cluster_unchanged', 'PASS' if core_unchanged else 'FAIL'),
@@ -2987,11 +3101,11 @@ class Gate(Phase4Gate):
             ('proxy_untouched_by_monitor', 'PASS' if proxy_untouched else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; core cluster (brokers, kafka-ui, keycloak, keycloak-db) unchanged%s%s; ' \
+        return status, '%s; core cluster (brokers %s, kafka-ui, keycloak, keycloak-db) unchanged%s%s; ' \
                        'realm.ini 15m->16m->15m recreated grafana only (rc %d/%d/%d/%d, ' \
                        'mid %s, after %s, ini %s/%s); proxy untouched; ' \
                        'walk: live4a 137,139,162,169' \
-               % (tokens, '' if core_unchanged else ' (diffs: %s)' % diff_core,
+               % (tokens, brokers, '' if core_unchanged else ' (diffs: %s)' % diff_core,
                   '' if not restarted else ' (restarted in place: %s)' % restarted,
                   rc1, rc2, rc3, rc4, recreated_16, recreated_15, ini_16, ini_15)
 

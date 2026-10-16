@@ -102,7 +102,9 @@ async function shot(page, slug, caption) {
 }
 function writeManifest() {
   const tsv = ['file\tsha256\tbytes\tcaption\turl\tasserted',
-    ...manifest.map((m) => [m.file, m.sha256, m.bytes, m.caption, m.url, m.asserted.join(' | ')].join('\t'))].join('\n');
+    // A field never carries a tab or a line break (a failure caption can hold a multi-line error).
+    ...manifest.map((m) => [m.file, m.sha256, m.bytes, m.caption, m.url, m.asserted.join(' | ')]
+      .map((v) => String(v).replace(/[\t\r\n]+/g, ' ')).join('\t'))].join('\n');
   writeFileSync(`${OUT}/manifest.tsv`, tsv + '\n');
   chmodSync(`${OUT}/manifest.tsv`, 0o644);
   writeFileSync(`${OUT}/manifest.json`, JSON.stringify(manifest, null, 2)); // convenience copy; the runner asserts on manifest.tsv

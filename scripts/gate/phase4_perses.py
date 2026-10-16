@@ -67,10 +67,25 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python3 -I does not add the script directory
 import phase2_kafbat as p2  # noqa: E402
 from phase4_common import (Phase4Gate, helper_main, fail, aggregate, log,  # noqa: E402
-                           Outcome, not_run)
+                           Outcome, not_run, broker_services)
 
 CASES = ['V%d' % i for i in range(1, 25)]
 RUNNER_OWNED = ('X4', 'Z4b')
+
+
+def managed_binding_stems(names, exclude=()):
+    """Stems the issuer migrator would remove from a globalrolebindings
+    listing: *.json files whose stem is krate-(admin|viewer)-<24 hex>
+    (monitoring/perses/migrate_issuer.py remove_managed_bindings), minus
+    `exclude`d filenames (V14's own seeded fixtures)."""
+    out = []
+    for name in names or []:
+        if name in exclude or not name.endswith('.json'):
+            continue
+        stem = name[:-len('.json')]
+        if re.fullmatch(r'krate-(admin|viewer)-[0-9a-f]{24}', stem):
+            out.append(stem)
+    return out
 
 
 class PersesDriver:
@@ -116,6 +131,10 @@ class PersesDriver:
             status, hdrs, text = error.code, error.headers, error.read().decode(errors='replace')
         except urllib.error.URLError as error:
             return -1, {}, 'URLError: %s' % error.reason
+        except (TimeoutError, OSError) as error:
+            # A read timeout is not wrapped in URLError; it must take the
+            # same -1 path or it escapes cleanup-protected callers (V19).
+            return -1, {}, '%s: %s' % (type(error).__name__, error)
 
         for cookie in self.jar:
             if cookie.name in ('_oauth2_proxy', 'jwtPayload', 'jwtSignature', 'jwtRefreshToken'):
@@ -206,21 +225,110 @@ class Gate(Phase4Gate):
         return status, hdrs, body
 
     def volume_file(self, volume, filename):
-        """Read a rendered config file from a compose volume on the docker host.
+        """Read a rendered config file from a compose volume.
 
         The Perses and oauth2-proxy images are distroless (no cat/ls/sh), so
-        `docker exec ... cat` always fails inside them. The volume file holds
-        the same bytes the container sees through its mount. Returns (rc, text).
+        `docker exec ... cat` always fails inside them. The read goes through
+        a throwaway container mounting the volume read-only (the V14 seed
+        pattern): a volume's host mountpoint belongs to the daemon host,
+        which is not this process's filesystem under Docker Desktop or a
+        non-root runner. Returns (rc, text); rc 2 names a confirmed-absent
+        file, rc 1 any other access failure.
         """
-        rc, mount, _ = p2.docker('volume', 'inspect', '-f', '{{.Mountpoint}}', volume)
-        mount = (mount or '').strip()
-        if rc != 0 or not mount:
+        image = self.monitor_env.get('LOG_DISCOVERY_IMAGE')
+        if not image:
             return 1, ''
-        try:
-            with open(os.path.join(mount, filename), encoding='utf-8') as handle:
-                return 0, handle.read()
-        except OSError:
-            return 1, ''
+        script = ('import os, sys\n'
+                  'path = os.path.join("/mnt", sys.argv[1])\n'
+                  'if not os.path.exists(path):\n'
+                  '    sys.exit(2)\n'
+                  'sys.stdout.write(open(path, encoding="utf-8").read())\n')
+        rc, out, _ = p2.docker('run', '--rm', '-v', '%s:/mnt:ro' % volume,
+                               image, 'python3', '-c', script, filename)
+        if rc != 0:
+            return (2 if rc == 2 else 1), ''
+        return 0, out
+
+    def volume_names(self, volume, subdir):
+        """Sorted entry names under subdir of a compose volume, or None on
+        any access failure (an absent directory is an empty list)."""
+        image = self.monitor_env.get('LOG_DISCOVERY_IMAGE')
+        if not image:
+            return None
+        script = ('import os, sys\n'
+                  'path = os.path.join("/mnt", sys.argv[1])\n'
+                  'print("\\n".join(sorted(os.listdir(path)))'
+                  ' if os.path.isdir(path) else "")\n')
+        rc, out, _ = p2.docker('run', '--rm', '-v', '%s:/mnt:ro' % volume,
+                               image, 'python3', '-c', script, subdir)
+        if rc != 0:
+            return None
+        return [n for n in out.splitlines() if n]
+
+    def volume_remove(self, volume, relpath):
+        """Remove one file from a compose volume through a mounted container.
+        Returns 'removed', 'absent' (confirmed), or 'FAILED: ...'."""
+        image = self.monitor_env.get('LOG_DISCOVERY_IMAGE')
+        if not image:
+            return 'FAILED: no LOG_DISCOVERY_IMAGE'
+        script = ('import os, sys\n'
+                  'path = os.path.join("/mnt", sys.argv[1])\n'
+                  'if not os.path.exists(path):\n'
+                  '    print("absent")\n'
+                  'else:\n'
+                  '    os.remove(path)\n'
+                  '    print("removed")\n')
+        rc, out, err = p2.docker('run', '--rm', '-v', '%s:/mnt' % volume,
+                                 image, 'python3', '-c', script, relpath)
+        result = (out or '').strip()
+        if rc == 0 and result in ('removed', 'absent'):
+            return result
+        return 'FAILED: rc=%d %s' % (rc, (err or result).strip()[-80:])
+
+    @staticmethod
+    def kc_session_count(kc, uid):
+        """Live Keycloak sessions for one user, from the parsed kcadm JSON
+        (MasterKcadm.get), never from raw-stdout line counts: a pretty-printed
+        single session spans several lines and '[]' still has one."""
+        if not uid:
+            return -1
+        sessions = kc.get('users/%s/sessions' % uid)
+        return len(sessions) if isinstance(sessions, list) else -1
+
+    @staticmethod
+    def container_log(cid, timeout=30):
+        """Full docker log of one container as one text: the Docker CLI
+        forwards the container's stderr to its own stderr, so a scrape
+        that reads only stdout silently misses stderr loggers
+        (oauth2-proxy logs there; V12 attempt-4). Returns (rc, text)."""
+        rc, out, err = p2.docker('logs', cid, timeout=timeout)
+        return rc, (out or '') + (err or '')
+
+    def load_stub_trust(self):
+        """Trust the stand-in IdP's certificate for the brokered flow, the
+        way Phase 3's broker driver does (phase3_broker.py): the helper
+        TLS context pins only the fixture certificate, so the redirect
+        to https://localhost:STUB_PORT (stand-in self-signed cert) fails
+        CERTIFICATE_VERIFY_FAILED without it (V19 attempts 2-4). Loads
+        into the live context, so it also repairs a context recreated
+        by an earlier row (V18 gen-cert). Returns True when loaded."""
+        stub_dir = getattr(self.args, 'stub_dir', None) if hasattr(self, 'args') else None
+        crt = os.path.join(stub_dir, 'stub.crt') if stub_dir else ''
+        if not crt or not os.path.exists(crt):
+            return False
+        self.tls.load_verify_locations(crt)
+        return True
+
+    def perses_refresh(self, d):
+        """Refresh the Perses access token the way the browser frontend
+        does (POST /api/auth/refresh, Perses v0.54.0 auth.go): Perses
+        access JWTs live 900s (access_token_ttl default 15min) while the
+        refresh cookie lives 24h, so an active session must refresh or
+        /api/v1/* turns 401 at expiry even though the gateway session
+        (oauth2-proxy, separately refreshed) stays alive (V10)."""
+        st, _h, _b = d.req(self.gateway('/api/auth/refresh'), method='POST',
+                           headers={'Accept': 'application/json'})
+        return st
 
     def signin(self, user, label, expect='ok'):
         d = self.driver(label)
@@ -250,7 +358,12 @@ class Gate(Phase4Gate):
                                headers={'Accept': 'text/html'})
         if 'account is disabled' in page4.lower():
             return {'kind': 'REFUSED', 'reason': 'Account is disabled', 'driver': d}
-        chain = ['creds=%d' % st4]
+        chain = ['creds=%d%s' % (st4, ''.join(
+            tag for tag, mark in ((' invalid-login', 'Invalid username or password'),
+                                  (' disabled', 'Account is disabled'),
+                                  (' pwupdate', 'password-new'),
+                                  (' totp', 'totp'))
+            if mark in page4))]
         while st4 in (302, 303) and h4.get('Location', '').startswith(self.base) and len(chain) <= 12:
             st4, h4, page4 = d.req(h4['Location'], headers={'Accept': 'text/html'})
             if st4 in (302, 303):
@@ -324,12 +437,14 @@ class Gate(Phase4Gate):
                     'detail': 'OIDC landing without a role: %s' % b_role.strip()[:80]}
         return {'kind': 'OK', 'driver': d, 'role': role, 'cookies': cookies}
 
-    def signin_retry(self, user, label, role='viewer', deadline_s=180):
+    def signin_retry(self, user, label, role='viewer', deadline_s=180.0):
         """Full signin() retried until it lands (or the deadline passes).
 
         After a recreate/restart the first login can race container convergence
         (idp-wait covers Keycloak, not the proxy chain behind it). The bound is
-        the assertion: every attempt and the landing time are recorded.
+        the assertion: every attempt and the landing time are recorded, and an
+        OK that lands after the deadline (an attempt or sleep straddling it)
+        is returned as FAIL, never as a within-window success.
         Returns (result, attempts, elapsed_s).
         """
         t0 = time.monotonic()
@@ -343,9 +458,14 @@ class Gate(Phase4Gate):
                 raise
             except Exception as error:
                 res = {'kind': 'FAIL', 'detail': '%s: %s' % (type(error).__name__, error)}
+            elapsed = time.monotonic() - t0
             if res.get('kind') == 'OK' and (role is None or res.get('role') == role):
+                if elapsed > deadline_s:
+                    res = {'kind': 'FAIL',
+                           'detail': 'signin OK at +%.1fs, after the %ss deadline'
+                                     % (elapsed, deadline_s)}
                 break
-            if time.monotonic() - t0 >= deadline_s:
+            if elapsed >= deadline_s:
                 break
             time.sleep(10)
         return res, attempts, time.monotonic() - t0
@@ -396,6 +516,7 @@ class Gate(Phase4Gate):
                 return 'prepared V23 precondition failed: %s: %s' % (type(error).__name__, str(error)[:200])
             return None
         try:
+            self.cluster_initial = self.cluster_id_map()
             self.setup_realm_users()
             self.setup_grafana_realm()
             self.setup_perses_seed()
@@ -724,7 +845,8 @@ class Gate(Phase4Gate):
     def v4(self):
         # walk log 103: p4nogroup refused at /oauth2/callback (403), no Perses cookies set.
         res = self.signin('p4nogroup', 'v4-nogroup')
-        refused = (res.get('kind') == 'REFUSED')
+        refused = (res.get('kind') == 'REFUSED'
+                   and res.get('reason') == 'callback_refused_403')
         d = self.driver('v4-nogroup')
         jar_cookies = [c.name for c in d.jar]
         perses_cookies_present = any(name in ('_oauth2_proxy', 'jwtPayload', 'jwtSignature', 'jwtRefreshToken')
@@ -812,8 +934,9 @@ class Gate(Phase4Gate):
             st, _h, _b = self.direct_perses(method, path, headers=cookie_hdr, data=data)
             statuses.append(st)
 
-        # The walk tolerates 403/405 on direct writes (walk log 103).
-        writes_403 = all(s in (403, 405) for s in statuses)
+        # Only 403 is a role refusal (owner row: writes -> 403); a 405
+        # would mean the route never reached authorization (audit L4).
+        writes_403 = all(s == 403 for s in statuses)
 
         s_r1, _h, _b = self.direct_perses('GET', '/api/v1/projects', headers=cookie_hdr)
         s_r2, _h, _b = self.direct_perses('GET', '/api/v1/projects/krate/dashboards', headers=cookie_hdr)
@@ -961,7 +1084,10 @@ class Gate(Phase4Gate):
         # -> / -> /oauth2/start -> login form), cookies cleared, Keycloak sessions 1 -> 0, no confirmation page.
         # The walk's 1 -> 0 needs a single-session premise: shared users accumulate
         # one session per sign-in across rows, so this row owns its user (added and
-        # enrolled exactly like the setup users) and signs in exactly once.
+        # enrolled exactly like the setup users) and signs in exactly once. A
+        # dedicated user alone does not establish the premise: enrolment itself
+        # completes logins whose server-side sessions stay alive, so existing
+        # sessions are revoked before the measured sign-in (the U9 stale-clear).
         rc_add, out_add, err_add = self.krate('identity', 'users', 'add', 'p4logout', '--viewer',
                                               '--email', 'p4logout@live4b.test', timeout=180)
         if rc_add != 0 and 'already exists' not in (out_add + err_add):
@@ -975,14 +1101,22 @@ class Gate(Phase4Gate):
             self.add_runtime_secret(temp_pw)
             self.enrol_user('p4logout', temp_pw, state)
         self.user_state['p4logout'] = state
-        res = self.signin('p4logout', 'v9-logout')
-        if res.get('kind') != 'OK':
-            fail('p4logout signin failed: %s' % res.get('detail', res.get('kind')))
-        d = self.driver('v9-logout')
-
         kc = self.master_kcadm()
         uid = kc.user_id('p4logout')
-        sessions_before = len(kc.call('get', 'realms/%s/users/%s/sessions' % (p2.REALM, uid)).splitlines()) if uid else -1
+        res = {}
+        sessions_before = -1
+        for attempt in ('v9-logout', 'v9-logout-retry'):
+            rc_out, _o, _e = self.krate('identity', 'users', 'logout', 'p4logout', timeout=180)
+            if rc_out != 0:
+                fail('stale-session clear for p4logout failed (rc=%d)' % rc_out)
+            time.sleep(2)
+            res = self.signin('p4logout', attempt)
+            if res.get('kind') != 'OK':
+                fail('p4logout signin failed: %s' % res.get('detail', res.get('kind')))
+            sessions_before = self.kc_session_count(kc, uid)
+            if sessions_before == 1:
+                break
+        d = res.get('driver') or self.driver('v9-logout')
 
         st1, h1, b1 = d.req(self.gateway('/api/auth/logout'), headers={'Accept': 'text/html'})
         loc1 = h1.get('Location', '')
@@ -1005,7 +1139,7 @@ class Gate(Phase4Gate):
             loc = h.get('Location', '')
             curr_url = urllib.parse.urljoin(self.gateway(), loc) if loc else ''
 
-        sessions_after = len(kc.call('get', 'realms/%s/users/%s/sessions' % (p2.REALM, uid)).splitlines()) if uid else -1
+        sessions_after = self.kc_session_count(kc, uid)
         sessions_zero = (sessions_before == 1 and sessions_after == 0)
 
         jar_names = [c.name for c in d.jar if c.value and c.value not in ('', 'deleted')]
@@ -1042,12 +1176,17 @@ class Gate(Phase4Gate):
             delay = target - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
+            # Perses access JWTs expire after 900s; the browser stays
+            # signed in by refreshing, so an active driver does the same
+            # or projects turns 401 at expiry while role stays 200 (V10).
+            s_fresh = self.perses_refresh(d)
             s_r, _, b_r = d.req(self.gateway('/krate/role'))
             s_p, _, _ = d.req(self.gateway('/api/v1/projects'))
-            if s_r == 200 and b_r.strip() == 'viewer' and s_p == 200:
+            if s_fresh == 200 and s_r == 200 and b_r.strip() == 'viewer' and s_p == 200:
                 poll_count += 1
             else:
-                last_miss = 'poll %d: role %d/%s projects %d' % (i, s_r, b_r.strip()[:20], s_p)
+                last_miss = 'poll %d: refresh %d role %d/%s projects %d' % (
+                    i, s_fresh, s_r, b_r.strip()[:20], s_p)
 
         # 16 minutes idle
         time.sleep(16 * 60)
@@ -1224,11 +1363,19 @@ class Gate(Phase4Gate):
                 cb_status, cb_body = st_auth, b_auth
 
         o2p_cid = self.mon_container('oauth2-proxy')
-        rc_log, o2p_log, _ = p2.docker('logs', o2p_cid, timeout=30) if o2p_cid else (-1, '', '')
+        rc_log, o2p_log = self.container_log(o2p_cid) if o2p_cid else (-1, '')
         log_confirmed = "email in id_token (p4unverified@live4b.test) isn't verified" in o2p_log
         log_tail = ' | '.join(
             line.strip()[-120:] for line in (o2p_log or '').splitlines()
             if 'ERROR' in line or 'Error' in line)[-300:]
+        # Request lines name the user: they tell a gateway/proxy 500 (no line
+        # for this user) apart from the redeem refusal (AuthFailure line).
+        user_lines = ' | '.join(
+            line.strip()[-100:] for line in (o2p_log or '').splitlines()
+            if 'p4unverified@live4b.test' in line)[-200:]
+        cb_hint = re.sub(r'\s+', ' ', cb_body or '')[:120]
+        # The 500 page must never carry single-use values into evidence.
+        cb_hint = re.sub(r'(code|state)=[^&\s<>"]{4,}', r'\1=…', cb_hint)
 
         cb_500_ok = (cb_status == 500 and log_confirmed)
 
@@ -1238,8 +1385,9 @@ class Gate(Phase4Gate):
         ]
         status, tokens = aggregate(probes)
         return status, '%s; users add without --email refused rc=%d; emailVerified=false -> ' \
-                       'callback %d log-match=%s o2p-errors=[%s]; walk: live4b 021,112' \
-               % (tokens, rc1, cb_status, log_confirmed, log_tail or 'none')
+                       'callback %d log-match=%s o2p-errors=[%s] user-lines=[%s] cb=[%s]; walk: live4b 021,112' \
+               % (tokens, rc1, cb_status, log_confirmed, log_tail or 'none',
+                  user_lines or 'none', cb_hint or 'none')
 
     def v13(self):
         # walk log 113, test_v13.py: two realm users with equal email local parts (p4dup):
@@ -1291,12 +1439,15 @@ class Gate(Phase4Gate):
 
         # Sign in second user (equal email local part 'p4dup'): the walk
         # refuses it at the Perses OIDC callback (403/500), which signin()
-        # surfaces as REFUSED with the OIDC outcome.
+        # surfaces as REFUSED with the OIDC outcome. Only those OIDC
+        # refusals count -- any other REFUSED (e.g. Account is disabled)
+        # proves a different defect, not the registration conflict.
         st_second_refused = False
         second_ev = ''
         try:
             res2 = self.signin('p4dup2', 'v13-dup2')
-            st_second_refused = (res2.get('kind') == 'REFUSED' or res2.get('status') in (403, 500))
+            st_second_refused = (res2.get('kind') == 'REFUSED'
+                                 and res2.get('reason') in ('oidc_403', 'oidc_500'))
             second_ev = str(res2.get('reason', res2.get('detail', '')))[:80]
         except Exception as error:
             second_ev = '%s: %s' % (type(error).__name__, error)
@@ -1319,18 +1470,11 @@ class Gate(Phase4Gate):
         # The file DB lives under data/ in the volume (the walk removes
         # /data/data/users/p4dup.json through a mount); a leaked native user
         # would poison the next attempt with the same already-registered
-        # conflict this row asserts for the second user.
-        native_cleaned = 'absent'
-        rc_vol, mount_vol, _ = p2.docker('volume', 'inspect', '-f', '{{.Mountpoint}}',
-                                         '%s_perses_data' % self.monitor_project)
-        if rc_vol == 0 and (mount_vol or '').strip():
-            native_path = os.path.join(mount_vol.strip(), 'data', 'users', 'p4dup.json')
-            if os.path.exists(native_path):
-                try:
-                    os.remove(native_path)
-                    native_cleaned = 'removed'
-                except OSError as error:
-                    native_cleaned = 'FAILED: %s' % error
+        # conflict this row asserts for the second user. Removal goes through
+        # a mounted container: from this process's filesystem an unreachable
+        # daemon mountpoint is indistinguishable from absence.
+        native_cleaned = self.volume_remove('%s_perses_data' % self.monitor_project,
+                                              'data/users/p4dup.json')
 
         probes = [
             ('first_user_signin', 'PASS' if (st_first == 200 and whoami_dup) else 'FAIL'),
@@ -1370,20 +1514,18 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         if rc_seed != 0:
             fail('seeding foreign users into perses_data failed')
 
-        # Managed bindings present before this up: the migration removes every
-        # managed binding on an issuer change (migrate_issuer docstring), so the
-        # expected count is this plus the 2 seeded ones -- not exactly 2, because
-        # earlier rows' sign-ins leave guard bindings behind.
-        managed_before = -1
-        rc_vol, mount_vol, _ = p2.docker('volume', 'inspect', '-f', '{{.Mountpoint}}',
-                                         '%s_perses_data' % self.monitor_project)
-        if rc_vol == 0 and (mount_vol or '').strip():
-            try:
-                managed_before = len([
-                    n for n in os.listdir(os.path.join(mount_vol.strip(), 'globalrolebindings'))
-                    if n.startswith(('krate-admin-', 'krate-viewer-'))])
-            except OSError:
-                managed_before = -1
+        # Managed bindings present before this up, excluding the two this row
+        # just seeded: the migration removes every managed binding on an
+        # issuer change (migrate_issuer docstring), so the expected count is
+        # this plus the 2 seeded ones -- not exactly 2, because earlier rows'
+        # sign-ins leave guard bindings behind. Only migrator-pattern files
+        # count; the listing comes through a mounted container.
+        seeded = ('krate-viewer-111111111111111111111111.json',
+                  'krate-admin-222222222222222222222222.json')
+        names = self.volume_names('%s_perses_data' % self.monitor_project,
+                                  'data/globalrolebindings')
+        managed_before = (len(managed_binding_stems(names, exclude=seeded))
+                          if names is not None else -1)
 
         cookie_before = self.mon_env_value('OAUTH2_PROXY_COOKIE_SECRET')
 
@@ -1394,12 +1536,15 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         cookie_rotated = bool(cookie_before and cookie_after and cookie_before != cookie_after)
 
         pm_cid = self.mon_container('perses-migrate')
-        rc_log, pm_log, _ = p2.docker('logs', pm_cid) if pm_cid else (-1, '', '')
+        rc_log, pm_log = self.container_log(pm_cid, timeout=300) if pm_cid else (-1, '')
         pm_match = re.findall(r'removed (\d+) stale user\(s\) and (\d+) managed binding\(s\)', pm_log or '')
         pm_users, pm_bindings = (int(pm_match[-1][0]), int(pm_match[-1][1])) if pm_match else (-1, -1)
-        pm_want_bindings = managed_before + 2 if managed_before >= 0 else 2
-        pm_reported = (pm_users == 2 and (pm_bindings == pm_want_bindings if managed_before >= 0
-                                          else pm_bindings >= 2))
+        # No fallback predicate: without a trustworthy pre-count the
+        # exact removed-bindings claim cannot be proven, so the row
+        # FAILs instead of accepting any count >= 2 (audit D4).
+        pm_want_bindings = managed_before + 2 if managed_before >= 0 else -1
+        pm_reported = (managed_before >= 0 and pm_users == 2
+                       and pm_bindings == pm_want_bindings)
 
         sync_cid = self.mon_container('perses-sync', all_states=False)
         sync_ok = bool(sync_cid and self._wait_container_healthy(sync_cid, limit=180) is not None)
@@ -1415,10 +1560,12 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             ('signin_ok', 'PASS' if signin_ok else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
+        want_ev = ('2/%d exact (%d pre-existing + 2 seeded)' % (pm_want_bindings, managed_before)
+                   if managed_before >= 0 else 'exact count unprovable: bindings pre-count failed')
         return status, '%s; issuer migration: monitor up rc=%d, perses-migrate removed %d user(s)/%d binding(s) ' \
-                       '(want 2/%s from %d pre-existing), ' \
+                       '(want %s), ' \
                        'cookie secret rotated: %s, perses-sync healthy: %s, p4v sign-in %s; walk: live4b 114' \
-               % (tokens, rc_up, pm_users, pm_bindings, pm_want_bindings, managed_before,
+               % (tokens, rc_up, pm_users, pm_bindings, want_ev,
                   cookie_rotated, sync_ok, res.get('kind'))
 
     def v15(self):
@@ -1746,7 +1893,8 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         # (it covers Keycloak, not oauth2-proxy): retry the sign-in within a
         # bounded window instead of grading one possibly-early attempt.
         res, attempts, elapsed = self.signin_retry('p4v', 'v18-signin', deadline_s=180)
-        signin_ok = (res.get('kind') == 'OK' and res.get('role') == 'viewer')
+        signin_ok = (res.get('kind') == 'OK' and res.get('role') == 'viewer'
+                     and elapsed <= 180)
 
         probes = [
             ('oauth2_proxy_recreated', 'PASS' if o2p_recreated else 'FAIL'),
@@ -1778,6 +1926,9 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                                     'and removes it right after; '
                                     'the row\'s evidence must record that V19 exercises commit 0 '
                                     '(trustEmail=true: the brokered user arrives e-mail-verified and signs in)')
+        if not self.load_stub_trust():
+            fail('no stub.crt in stub-dir %s (stand-in TLS would fail verification)'
+                 % self.args.stub_dir)
         site = os.path.join(self.args.stub_dir, 'site.json')
         # The plain bring-up wrote auth/ui/runtime.yml and the dual configure
         # no-clobbers it (the CLI's own message prescribes removing it first);
@@ -1810,7 +1961,30 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             restore = self.v19_remove_broker()
             return 'FAIL', 'broker prologue: auth apply failed (rc %d): %s; removal after failure: %s' % (
                 rc, (err or out).strip()[-160:], restore)
+        # From here the broker is applied: every exit -- discovery wait and
+        # brokered body alike -- must pass through broker removal, or later
+        # rows lose their login form to the stand-in redirect.
         try:
+            # The apply can restart Keycloak for the new trust material while
+            # the brokered body starts immediately (walk 119 had human
+            # pacing): wait for the realm discovery document first.
+            disco = self.base + '/identity/realms/krate/.well-known/openid-configuration'
+            disco_drv = self.driver('v19-disco')
+            disco_ok, disco_tries = False, 0
+            t_disco = time.monotonic()
+            while time.monotonic() - t_disco < 180:
+                disco_tries += 1
+                s_dis, _, _ = disco_drv.req(disco, headers={'Accept': 'application/json'}, timeout=15)
+                if s_dis == 200:
+                    disco_ok = True
+                    break
+                time.sleep(5)
+            disco_elapsed = time.monotonic() - t_disco
+            if not disco_ok:
+                restore = self.v19_remove_broker()
+                return 'FAIL', 'broker prologue: realm discovery not 200 after apply ' \
+                               '(tries=%d +%.1fs); removal after failure: %s' % (
+                                   disco_tries, disco_elapsed, restore)
             status, text = self.v19_brokered()
         except Exception as body_error:
             restore = self.v19_remove_broker()
@@ -1863,6 +2037,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         st2, h2, _ = d.req(urllib.parse.urljoin(self.gateway(), loc1), headers={'Accept': 'text/html'})
         auth_url = h2.get('Location', '')
         st3, h3, page3 = d.req(auth_url, headers={'Accept': 'text/html'})
+        auth_msg = page3[:80] if st3 == -1 else ''
 
         # In broker mode, Keycloak redirects to the stand-in IdP login form
         hops = 0
@@ -1878,6 +2053,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         st_auth, h_auth, page_auth = d.req(action, method='POST',
                                            data={'username': 'ping-viewer', 'password': stub_pw, 'credentialId': ''},
                                            headers={'Accept': 'text/html'})
+        form_msg = page_auth[:80] if st_auth == -1 else ''
         while st_auth in (302, 303) and hops < 15:
             hops += 1
             nxt = urllib.parse.urljoin(action, h_auth.get('Location', ''))
@@ -1916,36 +2092,54 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             ('permissions_read', 'PASS' if perm_ok else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; chain /=<%s> start=<%s> auth=<%s> form=<%s@%s%s> creds=<%s> end=<%s> oidc=<%s>; ' \
+        return status, '%s; chain /=<%s> start=<%s> auth=<%s%s> form=<%s@%s%s%s> creds=<%s> end=<%s> oidc=<%s>; ' \
                        'role %s=%s whoami=%s perm=%s; walk: live4b 119' \
-               % (tokens, st1, st2, st3, st3, form_host, form_marks, st_auth,
+               % (tokens, st1, st2, st3, auth_msg, st3, form_host, form_marks, form_msg, st_auth,
                   auth_end, st_oidc, st_r, b_role.strip()[:20], st_w, st_p)
 
     def v20(self):
         # walk evidence v20-baseline.json: brokers, kafka-ui, keycloak, keycloak-db, cluster proxy unchanged.
         curr_cluster = self.cluster_id_map()
-        initial = getattr(self, 'cluster_initial', None) or curr_cluster
+        initial = getattr(self, 'cluster_initial', None) or {}
 
         unchanged = True
         diffs = []
-        for svc in ('keycloak', 'keycloak-db', 'kafka-ui', 'proxy'):
-            if svc in initial and svc in curr_cluster:
-                if initial[svc] != curr_cluster[svc]:
-                    unchanged = False
-                    diffs.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+        if not initial:
+            unchanged = False
+            diffs.append('cluster baseline was not captured (setup cluster_initial is empty)')
 
-        for svc in initial:
-            if 'broker' in svc and svc in curr_cluster:
-                if initial[svc] != curr_cluster[svc]:
-                    unchanged = False
-                    diffs.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+        def compare(svc):
+            nonlocal unchanged
+            if svc not in initial:
+                unchanged = False
+                diffs.append('%s: missing from initial map' % svc)
+            elif svc not in curr_cluster:
+                unchanged = False
+                diffs.append('%s: missing from current map' % svc)
+            elif initial[svc] != curr_cluster[svc]:
+                unchanged = False
+                diffs.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+
+        for service in ('keycloak', 'keycloak-db', 'kafka-ui', 'proxy'):
+            compare(service)
+        brokers = broker_services(initial)
+        current_brokers = broker_services(curr_cluster)
+        if not brokers:
+            unchanged = False
+            diffs.append('no broker services (kafka-N/broker-N) in cluster map: %s'
+                         % sorted(initial))
+        if brokers != current_brokers:
+            unchanged = False
+            diffs.append('broker set changed: %s -> %s' % (brokers, current_brokers))
+        for service in brokers:
+            compare(service)
 
         probes = [
             ('cluster_ledger_unchanged', 'PASS' if unchanged else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; brokers, kafka-ui, keycloak, keycloak-db, proxy unchanged%s; walk: live4b v20-baseline.json' \
-               % (tokens, '' if unchanged else ' (diffs: %s)' % diffs)
+        return status, '%s; brokers %s, kafka-ui, keycloak, keycloak-db, proxy unchanged%s; walk: live4b v20-baseline.json' \
+               % (tokens, brokers, '' if unchanged else ' (diffs: %s)' % diffs)
 
     def v21(self):
         # walk log 071: monitor up loopback refusals for localhost, 127.0.0.1, [::1] (rc 1, 0 containers changed).
@@ -2051,6 +2245,13 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         poll_log = []
 
         def poll():
+            # Browser behaviour over a >15min session: refresh the Perses
+            # access JWT (900s TTL) or projects would 401 at token expiry
+            # and masquerade as the Keycloak session-max refusal this row
+            # measures (the proven V10 cause). Perses refresh does not
+            # touch the Keycloak session, so the M-boundary refusal still
+            # surfaces through the dead gateway session.
+            self.perses_refresh(driver)
             api_status, _headers, body = driver.req(
                 self.gateway('/api/v1/projects'), headers={'Accept': 'application/json'})
             at_ms = time.time_ns() // 1_000_000
@@ -2302,9 +2503,13 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                         break
                 time.sleep(5)
             ready_seconds = time.monotonic() - healthy_at
+            # The 90 s recovery window starts when Keycloak became healthy:
+            # the serving-chain wait consumes part of it, so the sign-in gets
+            # only what remains (none once the chain itself took >= 90 s).
+            remaining = 90 - ready_seconds
             fresh, attempts, signin_seconds = ((self.signin_retry(
-                'p4v', 'v24-' + label + '-recovered', deadline_s=90)
-                if recovered else ({'kind': 'NOT_RUN'}, 0, 0.0)))
+                'p4v', 'v24-' + label + '-recovered', deadline_s=remaining)
+                if recovered and remaining > 0 else ({'kind': 'NOT_RUN'}, 0, 0.0)))
             viewer_refused = (viewer_status in (401, 403, 500)
                               or (viewer_status == 302
                                   and '/oauth2/start' in viewer_location))
@@ -2319,17 +2524,18 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                 ('signin_within_90s',
                  'PASS' if (fresh.get('kind') == 'OK'
                             and fresh.get('role') == 'viewer'
-                            and signin_seconds <= 90) else 'FAIL'),
+                            and ready_seconds + signin_seconds <= 90) else 'FAIL'),
             ]
             status, tokens = aggregate(probes)
             return status, ('%s: %s; anonymous HTTP %s, existing Viewer HTTP %s; '
                             'restarts perses %d->%d/o2p %d->%d; KC healthy +%.1fs; '
                             'chain ready +%.1fs (probe %s); '
-                            'fresh Viewer %s attempts=%d at +%.1fs') % (
+                            'fresh Viewer %s attempts=%d at +%.1fs of the 90s window') % (
                                 label, tokens, anonymous_status, viewer_status,
                                 before_p, after_p, before_o, after_o, healthy_secs,
                                 ready_seconds, chain_probe,
-                                fresh.get('kind'), attempts, signin_seconds)
+                                fresh.get('kind'), attempts,
+                                ready_seconds + signin_seconds)
 
         direct_status, direct_evidence = outage_case('consumer-restart')
         if direct_status != 'PASS':

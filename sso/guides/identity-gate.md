@@ -29,7 +29,7 @@ scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --pha
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 3 --stub-port 18444   # all three; the stand-in IdP on another port
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test   # Phase 1 + the Grafana slice
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1   # companion run: REQUIRED_P1 + U27 + V23
-scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle
+scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle: smoke run, unbound
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo             # the same with the full inventory (see below)
 ```
 
@@ -40,10 +40,13 @@ PASS); run it when the prerequisites below are not on the host, because
 without the two skip flags the rows stay inside the inventory and the verdict
 can never be PASS: S1 is NOT_RUN without a Makefile and S3 without the
 shellcheck image (INCOMPLETE), S2 (no git metadata), S4 (no `scripts/`) and X1
-(no browser image) FAIL. The full one adds `--repo DIR`:
+(no browser image) FAIL. Without `--repo` nothing compares the installed product with the
+candidate, so the reduced run is `bound: false`: a smoke run, never a sign-off receipt. The
+full one adds `--repo DIR`:
 the static block (S1–S4) runs against a checkout whose HEAD is the
 `--candidate` commit. The bundle's edition directory itself carries no git
-metadata (the receipt binds it by file digests); the full inventory needs, in
+metadata; the runner binds it by comparing every installed product file with the
+candidate in that checkout ("product byte binding" below). The full inventory needs, in
 addition, a `git` executable and that separate checkout (a `git clone -b
 <branch>` of a `git bundle` carried into the air gap), `gmake`, `shellcheck`
 (the `koalaman/shellcheck:v0.9.0` image behind a `shellcheck` wrapper on
@@ -51,16 +54,18 @@ addition, a `git` executable and that separate checkout (a `git clone -b
 check: the pinned `nginx:1.27-alpine@sha256:…` reference does not resolve after
 `docker load` (the registry digest is not preserved), so set
 `KRATE_CHECK_NGINX_IMAGE` to the image the bundle loaded (the `NGINX_IMAGE`
-value of the installed `.env.template`); the check's last line, and so the S4
-evidence, names the image it rendered with. X1 needs the
+value of the installed `.env.template`); the check names the image it rendered with in the
+run log, and the S4 evidence reads `check-identity rc=…; py_compile of N gate helpers rc=…`. X1 needs the
 `krate-harness/playwright:1.60.0` image loaded from a saved archive (3.8 GB on
 disk, 0.94 GB gzipped, arm64), and J7 needs root.
 
 The runner refuses to start when another Krate installation runs on the host or
 when monitoring volumes of the edition's project already exist, because it would
 destroy them. On a bundle host there is no git: `--candidate <sha>` states the
-commit and the receipt records the sha256 of every edition file under test; a
-receipt without either binding is INCOMPLETE.
+commit, and only `--repo` lets the runner compare the installed product bytes with
+it. A stated candidate without `--repo` is `bound: false`, so the reduced run's
+verdict is at best INCOMPLETE; with `--repo`, a product byte mismatch refuses the
+run before anything starts, and the comparison is repeated at the end.
 
 Prerequisites: Docker with Compose ≥ 2.20.2, python3, openssl, curl; the
 candidate's images on the host (`krate/kafka-ui:1.5.0-sso.7` built with `make
@@ -89,10 +94,11 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 
 | field | meaning |
 |---|---|
-| candidate commit | `git rev-parse HEAD` of the fixture checkout, or the `--candidate` sha on a host without git; neither → `bound: false` and the verdict is INCOMPLETE. With `--repo`, the row also names the checkout's HEAD the static block ran on (it must start with the candidate sha) |
-| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh`, `sso/probe.py`, `sso/configure-dual.py` of the fixture: what was actually tested, also when the candidate is only stated. To check a bundle-host receipt against the repository, compare the first 16 hex digits of `git show <sha>:epc/<file> \| shasum -a 256` for edition files and `git show <sha>:sso/<file> \| shasum -a 256` for SSO files; eight of the nine must match. `.env.template` differs by design, because `make bundle` rewrites its five `*_IMAGE` lines to the offline runtime tags (the receipt's `images` row shows them) and nothing else |
+| candidate commit | `git rev-parse HEAD` of the fixture checkout, or, on a bundle host without git, the `--candidate` sha resolved in `--repo` with the installed product bytes compared (product byte binding row); a stated sha without `--repo`, or neither, → `bound: false` and the verdict is INCOMPLETE. With `--repo`, the row also names the checkout's HEAD the static block ran on (it must start with the candidate sha) |
+| edition file digests | sha256 (16 hex) of `krate`, `docker-compose.yml`, `.env.template`, `nginx.conf`, `sso/identity.py`, `sso/preflight.py`, `sso/activate.sh`, `sso/probe.py`, `sso/configure-dual.py` of the fixture: what was tested, for reference; the comparison with the candidate is the next row |
+| product byte binding | Bundle host with `--repo`: `scripts/gate/candidate_binding.py` compares every file `make bundle` installs (the Makefile `build_one` copy list: the edition's `krate`, `docker-compose.yml`, `nginx.conf`, `kafbat.yml` (EPC), `auth/ui/local.yml`, `.env.template`; `sso/`, `docs/`, `LICENSE*`; `monitoring/` with its trees) byte for byte with the candidate commit in `--repo`. The two `.env.template` files are compared after replaying the bundle's `*_IMAGE` rewrite from the installed `images.lock.tsv`, whose source references must be exactly the images the candidate pins, each mapped to a `krate-offline` runtime tag. A mismatch refuses the run before anything starts; the comparison runs again at the end, and a difference then makes the verdict INCOMPLETE and `bound: false`. The helper also requires `krate` to be executable, each runtime tag's image in Docker to carry the lock's image id, and no file the candidate does not ship in the directories the product loads wholesale (`monitoring/` trees and top level, `sso/`) or in the bundled `docs/`; a scanned directory the helper cannot list (other than `__pycache__`) makes the comparison fail. The image id comparison assumes the build host and this host use the same Docker image store. Not compared: other file modes, `.bundle-arch`, `images/*.tar`, `docker-offline/`, the lock columns after `image_id`, operator site files (`.env`, `monitoring/.env` and its `monitoring/.env.*` temporaries, `auth/` beyond `auth/ui/local.yml`, `monitoring/auth/` beyond `local.ini`, `sso/site*.json` directly in `sso/`), `*.pyc` in `__pycache__`, and files outside the scanned directories (such as the edition's top level beyond the files listed). On a git checkout (the edition's `krate`, `docker-compose.yml`, `.env.template` and `nginx.conf` tracked): the tracked files of the commit (dirty tracked files must be empty). Without `--repo` on a bundle host: not compared, `bound: false` |
 | dirty tracked files | `git status --porcelain --untracked-files=no` of the whole fixture repository at run time, unfiltered (must be empty for a sign-off receipt; `unknown` without git; with `--repo`, the checkout's dirty state is listed after `--repo:`) |
-| images | every `*_IMAGE` digest of the edition template |
+| images | every `*_IMAGE` value of the installed edition template: digests on a git checkout, the offline runtime tags on a bundle host (compared through the product byte binding row) |
 | runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py`, `*.mjs` and `*.sh` (file list, sorted; `stub_idp.sh` is bound by this digest and linted by S3 with the runner), plus the commit (and dirty state) of the repository the runner was executed from |
 | host | OS, Docker, Compose, python, openssl versions |
 | verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `REQUIRED_P3` with `--phase 3` or `all`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. For a Phase 4 slice (`--phase 4a\|4b\|4c`) the inventory is `REQUIRED_P1` plus the slice's own list (`REQUIRED_P4A`/`REQUIRED_P4B`/`REQUIRED_P4C` — no Phase 2/3 ids, and `X1` is not part of it); with `--session-max-hours N` it is `REQUIRED_P1` plus U27 (4a) or U27 and V23 (4b) only, and the receipt names N; `X3`/`X4` leave it under `--no-screenshots` like `X1`, and `W3` leaves it on a Linux host without root (or sudo) or without iproute2 (the J7 pattern; the Mac always runs its W3 variant). Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
@@ -118,7 +124,7 @@ Every id is one row of the receipt.
 | S1 | `gmake check` (syntax, shellcheck, digest pinning, Compose rendering of every stack, offline policy, `scripts/check-identity.py`) | exit 0 |
 | S2 | `git diff --check` | clean |
 | S3 | shellcheck 0.9.0 (the CI version) on both CLIs, `sso/activate.sh`, the runner and `scripts/gate/stub_idp.sh` | exit 0 |
-| S4 | `scripts/check-identity.py` alone (templates, realm plan, runtime plan, names, Compose, networks, monitoring binds, logrotate, CLI wiring, parity, zk frozen, writers, renewal incl. CA path and rollback, backup seal tamper, preflight refusals, exposure) | exit 0 |
+| S4 | `scripts/check-identity.py` (templates, realm plan, runtime plan, names, Compose, networks, monitoring binds, logrotate, CLI wiring, parity, zk frozen, writers, renewal incl. CA path and rollback, backup seal tamper, preflight refusals, exposure), and `py_compile` of every `scripts/gate/*.py` under the host's `python3` | exit 0, and every helper compiles |
 
 ### H: "Bootstrap only proven-pristine state using securely generated independent credentials. Missing environment text is not evidence that a stored credential is unused."
 
@@ -426,7 +432,7 @@ password while that session lives.
 | W1 | runner | the published-port census: exactly perses-gateway on all addresses, prometheus/loki on loopback, grafana per U21a, no host port for anything else of the monitoring project |
 | W2 | runner | Prometheus lifecycle 403 from the `monitoring` network; `krate monitor reload` (SIGHUP) succeeds on a valid edit with the same container and increased reload timestamp, and fails on an invalid edit with `prometheus_config_last_reload_successful 0` and Prometheus still answering |
 | W3 | runner | the foreign-source probe: on a VM as root the `p4probe` netns checks (a)–(e) of `harness/phase4/lab8/w1x-row.sh` (firewalld zone mirrored when active); on the Mac (a)+(b) from the LAN address; without root/iproute2 on Linux it leaves the inventory (J7 pattern) and the evidence names the variant that ran |
-| W4 | runner | the five-source reachability census (host process on the VM, probe containers on `monitoring`, `perses` and `kafka-network`, and Grafana itself) over every container and `ExposedPorts` port of both projects, equal to table 2 of `monitoring/README.md` — any reachable pair not listed fails, a listed pair now unreachable is reported; plus one README row per compose service |
+| W4 | runner | the reachability census (`scripts/gate/phase4_w4.py`) over every running container of both projects, label-less ones included, on the union of its TCP listeners (read in its own network namespace, loopback excluded), its `ExposedPorts` and its exact table 2 ports, from five sources: a host process as root and as uid 65534 (VM only; not run on the Mac), probe containers on `monitoring`, `perses` and `kafka-network`, and the Grafana container; equal to table 2 of `monitoring/README.md`. A reachable pair table 2 does not allow fails; an exact table 2 pair of a running service that is not reachable fails (stricter than the plan's "reported": the table is the complete list); a probe without its own result line (a failed `docker exec`, a crashed worker) is inconclusive and fails. Probes use `nc -z` (the plan's Grafana `wget` reports reachable HTTP 403/404 and Kafka listeners as failures). The one-row-per-service rule of the README's table 1 is asserted statically by `scripts/check-identity.py` (S4) |
 
 ### Not covered by this runner, proven elsewhere
 
@@ -437,6 +443,8 @@ password while that session lives.
 | amd64 image builds | CI `broker-ci.yml` matrix; the Kafbat image is built per arch with `make kafbat-ui ARCH=amd64` on the bundling host | CI |
 
 ## Last run
+
+Bundle-host receipts recorded before the product byte binding (audit D6) print edition file digests that were never compared with the candidate; their `bound: true` means only that a commit was named. Git-checkout receipts were bound by their clean checkout.
 
 The first two receipts below belong to the Phase 3 candidate 3983d74
 (2026-10-11, gate runner v6, each run alone on its host, the VM run first): the

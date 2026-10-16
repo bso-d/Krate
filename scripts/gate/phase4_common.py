@@ -57,6 +57,15 @@ aggregate = probes.aggregate
 worst = probes.worst
 
 
+def broker_services(id_map):
+    """Compose service names that are Kafka brokers in a cluster id map:
+    kafka-N in every shipped edition (epc/kraft compose), broker-N kept
+    for older layouts. Name-based, never substring-'broker' (that loop
+    never matched kafka-92.. and silently compared nothing)."""
+    return sorted(svc for svc in (id_map or {})
+                  if re.fullmatch(r'(kafka|broker)-\d+', svc))
+
+
 # ─── background threads for the timing rows (section 5) ───────────────────────
 
 class TimedRows:
@@ -289,7 +298,8 @@ class Phase4Gate(p2.Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
-                found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+                if len(parts) >= 3 and parts[0] != '<no':  # label-less: docker prints '<no value>'
+                    found[parts[0]] = (parts[1], ' '.join(parts[2:]))
         return found
 
     def cluster_id_map(self):
@@ -304,7 +314,8 @@ class Phase4Gate(p2.Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
-                found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+                if len(parts) >= 3 and parts[0] != '<no':  # label-less: docker prints '<no value>'
+                    found[parts[0]] = (parts[1], ' '.join(parts[2:]))
         return found
 
     # ── realm users ──
@@ -334,6 +345,15 @@ class Phase4Gate(p2.Gate):
         The temporary password and the Kafbat client secret travel in the child's
         environment, never in argv; the enrolled password and TOTP seed land in
         the 0600 state file and are added to the runtime secrets here.
+
+        A successful enrol ends on the NEXT TOTP step boundary: enrol's own
+        second login consumes the current step's code (single-use) and its
+        deliberate old-password refusal is the user's last failed login, so
+        an immediate sign-in would replay the consumed step and, landing
+        within Keycloak's 1s quick-login check of that refusal, trip the
+        60s brute-force temporary disable (V9 attempt-4, proven live:
+        LOGIN_ERRORs 78ms apart then user_temporarily_disabled). Waiting
+        here makes every enrol -> sign-in row start on a fresh step.
         """
         env = dict(os.environ,
                    GATE_TEMP_PW=temp_pw,
@@ -349,9 +369,11 @@ class Phase4Gate(p2.Gate):
         if rc != 0:
             raise RuntimeError('enrol %s failed (rc %s): %s' % (user, rc, (err or out).strip()[-200:]))
         try:
-            return json.loads(out.strip().splitlines()[-1])
+            result = json.loads(out.strip().splitlines()[-1])
         except (ValueError, IndexError):
             raise RuntimeError('enrol %s printed no JSON result' % user)
+        time.sleep(30 - time.time() % 30 + 1)  # fresh single-use TOTP step (see docstring)
+        return result
 
     # ── rows ──
     def stub(self, row_id, needs):
