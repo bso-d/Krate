@@ -1271,7 +1271,11 @@ phase4_leak_scan_z4a() {
       cnames+=("$cn")
       docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
       places+=("$STATE/docker-$cn.log")
-    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-" | sort -u)
+    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
+    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
+    done < <({ docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}'
+              docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}'
+              docker ps -a --format '{{.Names}}' | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-"; } 2>/dev/null | sort -u)
   fi
   local mf psd
   for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
@@ -1481,7 +1485,11 @@ phase4_leak_scan_z4b() {
       cnames+=("$cn")
       docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
       places+=("$STATE/docker-$cn.log")
-    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-" | sort -u)
+    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
+    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
+    done < <({ docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}'
+              docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}'
+              docker ps -a --format '{{.Names}}' | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-"; } 2>/dev/null | sort -u)
   fi
   local mf psd
   for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
@@ -2076,6 +2084,8 @@ teardown() {
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done
   # A helper label alone is not ownership: restrict removal to this fixture's
   # Compose project. The name-filtered removal above covers independent helpers.
+  # W4 probe containers carry no project label; a probe whose start timed out is removed here too.
+  for n in $(docker ps -aq --filter "label=krate.gate=w4-probe"); do docker rm -f "$n" >/dev/null 2>&1; done
   for n in $(docker ps -aq --filter "label=krate.gate=phase4" \
       --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.

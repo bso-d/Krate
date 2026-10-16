@@ -190,8 +190,9 @@ port from five sources and fails on any reachable pair that is not here, and row
 measures a Grafana administrator's datasource reach against the same table. A new row needs
 the owner's approval.
 
-`source` is where the probe runs, `target` is a Compose service name and `port` a port that
-target listens on; `*` in either column means "any". Target may carry an HTTP path suffix
+`source` is where the probe runs, `target` is a Compose service name (or a shell-style pattern
+of one: `kafka-[0-9]*` is every broker) and `port` a port that target listens on; `*` in
+either column means "any". Target may carry an HTTP path suffix
 `service:/path` for residuals measured through the cluster proxy (source `anonymous-https`,
 port 443). Table 1 lists, per service, what it publishes and who authenticates it.
 
@@ -216,11 +217,11 @@ port 443). Table 1 lists, per service, what it publishes and who authenticates i
 | `perses` | `prometheus` | 9090 | Perses' metrics datasource (HTTPProxy with allowedEndpoints, krate.json:30-58); network peers get the full unauthenticated query API as on the monitoring side. |
 | `perses` | `victorialogs` | 9428 | Perses' logs datasource (4 POST select endpoints via allowedEndpoints, krate.json:76-99); network peers get unauthenticated insert/select as above. |
 | `kafka-network` | `grafana` | 3000 | Grafana joins the cluster's `kafka-network` so the cluster proxy can serve it at `/grafana/` over TLS. Any peer of that network can reach the port; in realm mode the port has no login left (Basic authentication and the login form are off) and answers only through the realm, and on the host it is published on 127.0.0.1 only. |
-| `kafka-network` | `kafka-*` | `*` | The cluster's own trust model, unchanged by Phase 4: every kafka-network peer reaches the brokers' PLAINTEXT listeners (research-backing §1.3; Kafka client security deferred by the owner). |
+| `kafka-network` | `kafka-[0-9]*` | `*` | The cluster's own trust model, unchanged by Phase 4: every kafka-network peer reaches the brokers' PLAINTEXT listeners (research-backing §1.3; Kafka client security deferred by the owner). |
 | `kafka-network` | `kafka-ui` | 8080 | Kafbat's unauthenticated `/metrics` and `/actuator/` are open on the shared network (the cluster proxy 404s them publicly, K27); unchanged by Phase 4. |
 | `kafka-network` | `proxy` | `*` | The cluster proxy listens on 80/443 for its networks; it answers only the hosts and paths it serves (same wording as the existing `grafana → proxy:*` row). |
 | `kafka-network` | `kafka-exporter` | 9308 | The exporter joins the cluster network to reach brokers by name (compose:41-48); its metrics endpoint is open to that network as it is to `monitoring`. |
-| `grafana` | `kafka-*` | `*` | Grafana is a `kafka-network` peer, so the brokers' listeners are open to it exactly as they are to every other peer of that network (the cluster's own trust model, unchanged). |
+| `grafana` | `kafka-[0-9]*` | `*` | Grafana is a `kafka-network` peer, so the brokers' listeners are open to it exactly as they are to every other peer of that network (the cluster's own trust model, unchanged). |
 | `grafana` | `kafka-ui` | 8080 | As above: Kafbat's unauthenticated `/metrics` and `/actuator/` on the shared network. |
 | `grafana` | `kafka-exporter` | 9308 | A metrics endpoint with no login, on the two networks Grafana needs for its datasources. |
 | `grafana` | `proxy` | `*` | The cluster proxy, reachable from `kafka-network`; it answers only the hosts and paths it serves. |

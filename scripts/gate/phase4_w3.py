@@ -26,7 +26,8 @@ def tcp_probe(host: str, port: str) -> int:
             print(f"TCP_CONNECTED {host}:{port}")
             return 0
     except OSError as exc:
-        if exc.errno in BLOCKED_ERRNOS or isinstance(exc, TimeoutError):
+        # socket.timeout is TimeoutError only from Python 3.10 on; the Rocky guests run 3.9.
+        if exc.errno in BLOCKED_ERRNOS or isinstance(exc, (socket.timeout, TimeoutError)):
             print(f"TCP_BLOCKED {host}:{port} {type(exc).__name__}")
             return 1
         print(f"TCP_ERROR {host}:{port} {type(exc).__name__}: {exc}")

@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Phase 4c W4 live reachability census.
 
-The census probes every running Compose service in the cluster and
-monitoring projects, on the union of its image-declared TCP ports and the
-exact listener ports named for it in Table 2 of monitoring/README.md, from
-five sources: host processes as root and uid 65534 (Linux only), a probe
+The census probes every running container of the cluster and monitoring
+projects on the union of its TCP listeners (read from /proc/net/tcp and
+tcp6 inside its own network namespace, loopback addresses excluded), its
+image-declared TCP ports and the exact ports named for it in Table 2 of
+monitoring/README.md, from five sources: host processes as root and uid 65534 (Linux only), a probe
 container on each of the monitoring, perses and kafka-network Docker
 networks, and the Grafana container itself.  Container probes use
 `nc -z` rather than the plan's originally assumed Grafana `wget`: live
 spot checks showed wget returns failure for reachable TCP listeners
 (HTTP 403/404 and non-HTTP Kafka), while nc classifies the TCP connect
-itself.  Any reachable pair not allowed by Table 2, any exact Table 2
-pair for a running service that is not reachable, and any inconclusive
+itself.  A probe is conclusive only through its own sentinel line
+(`W4RC=<nc status>` for a container probe, `W4HOST <result>` for a host
+probe): a failed `docker exec`, a crashed worker or a missing sentinel is
+inconclusive.  Any reachable pair not allowed by Table 2, any exact Table
+2 pair for a running service that is not reachable, and any inconclusive
 probe fails the row.
 
 Output is one `RESULT W4 PASS|FAIL|NOT_RUN ...` line; detail lines precede
@@ -20,6 +24,7 @@ Python 3.9 compatible.
 """
 import argparse
 import fnmatch
+import ipaddress
 import json
 import os
 import platform
@@ -37,6 +42,11 @@ from phase4_w3 import BLOCKED_ERRNOS  # noqa: E402
 
 SOURCES = ('host', 'monitoring', 'perses', 'kafka-network', 'grafana')
 PROBE_LABEL = 'krate.gate=w4-probe'
+# socket.timeout is TimeoutError only from Python 3.10 on; the Rocky guests run 3.9.
+TIMEOUT_ERRORS = (socket.timeout, TimeoutError)
+# A container probe prints its nc status as a sentinel, so a failed docker exec
+# (exit 1 with no sentinel) is inconclusive instead of "unreachable".
+PROBE_SH = 'nc -w 3 -z "$1" "$2"; echo "W4RC=$?"'
 TableRow = Tuple[str, str, str]
 ServicePort = Tuple[str, int]
 CensusPair = Tuple[str, str, int]
@@ -113,6 +123,8 @@ def validate_table_rows(rows: Sequence[TableRow]) -> List[str]:
             errors.append('empty Table 2 target for source %r' % source)
         if port != '*' and not str(port).isdigit():
             errors.append('invalid Table 2 port %r for %s -> %s' % (port, source, target))
+        if source in SOURCES and ':' in target:
+            errors.append('census source %r cannot carry a path target %r' % (source, target))
     return errors
 
 
@@ -122,12 +134,14 @@ def filter_unreachable_for_platform(unreachable: List[CensusPair], system: str) 
     return list(unreachable)
 
 
-def classify_nc(rc):
-    if rc == 0:
-        return 'reachable'
-    if rc == 1:
-        return 'unreachable'
-    return 'unknown'
+def classify_probe(rc, out):
+    """A container probe's result from its W4RC sentinel; anything else is inconclusive."""
+    if rc != 0:
+        return 'unknown'
+    codes = [line[5:].strip() for line in (out or '').splitlines() if line.startswith('W4RC=')]
+    if len(codes) != 1:
+        return 'unknown'
+    return {'0': 'reachable', '1': 'unreachable'}.get(codes[0], 'unknown')
 
 
 def docker_json(*args):
@@ -137,12 +151,57 @@ def docker_json(*args):
     return json.loads(out)
 
 
-def inventory(cluster_project, monitor_project, rows):
+def _proc_addr(hex_addr):
+    """A /proc/net/tcp{,6} local address (32-bit little-endian words) as an ip address."""
+    raw = bytes.fromhex(hex_addr)
+    if len(raw) == 4:
+        return ipaddress.IPv4Address(raw[::-1])
+    if len(raw) == 16:
+        return ipaddress.IPv6Address(b''.join(raw[i:i + 4][::-1] for i in range(0, 16, 4)))
+    raise ValueError('invalid /proc/net/tcp address %r' % hex_addr)
+
+
+def parse_listeners(text):
+    """TCP ports in LISTEN state on a non-loopback address (any, or a container address)."""
+    ports = set()
+    for line in (text or '').splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[0] == 'sl' or fields[3] != '0A':
+            continue
+        addr_hex, port_hex = fields[1].split(':')
+        addr = _proc_addr(addr_hex)
+        mapped = getattr(addr, 'ipv4_mapped', None)
+        if addr.is_loopback or (mapped is not None and mapped.is_loopback):
+            continue
+        ports.add(int(port_hex, 16))
+    return ports
+
+
+def listening_ports(cid, image):
+    """Non-loopback TCP listeners of one container, read in its own network namespace.
+
+    The probe image shares the target's namespace (`--network container:`), so this
+    also works for distroless targets with no shell or cat of their own.
+    """
+    rc, out, err = p2.docker('run', '--rm', '--pull', 'never', '--label', PROBE_LABEL,
+                             '--network', 'container:' + cid, '--cap-drop', 'ALL', '--read-only',
+                             '--entrypoint', 'sh', image, '-c',
+                             'cat /proc/net/tcp && echo W4TCP4; cat /proc/net/tcp6 2>/dev/null; echo W4END',
+                             timeout=60)
+    if rc != 0 or 'W4TCP4' not in out or 'W4END' not in out:
+        raise RuntimeError('cannot read the TCP listeners of container %s: rc=%s %s'
+                           % (cid[:12], rc, (err or out).strip()[:160:]))
+    return parse_listeners(out)
+
+
+def inventory(cluster_project, monitor_project, rows, image):
     """Every running container in both Compose projects.
 
     Service-labelled containers key by Compose service.  A container with
     no service label keys as `@container:<name>` and is probed by container
-    name, so it is a census target rather than a silent skip.
+    name, so it is a census target rather than a silent skip.  Its ports are
+    the union of its non-loopback TCP listeners, its image-declared TCP ports
+    and its exact Table 2 ports.
     """
     targets = {}
     labelless = []
@@ -175,10 +234,12 @@ def inventory(cluster_project, monitor_project, rows):
             networks = doc.get('NetworkSettings', {}).get('Networks') or {}
             ips = sorted({addr for net in networks.values()
                           for addr in (net.get('IPAddress'), net.get('GlobalIPv6Address')) if addr})
+            listeners = listening_ports(cid, image)
             targets[service] = {
                 'container': name,
                 'probe_name': service_label or name or cid,
-                'ports': target_ports(service, exposed, rows),
+                'ports': sorted(set(target_ports(service, exposed, rows)) | listeners),
+                'listeners': sorted(listeners),
                 'ips': ips,
                 'networks': sorted(networks),
             }
@@ -192,30 +253,36 @@ def _socket_result(ip, port):
         with socket.create_connection((ip, port), timeout=3):
             return 'reachable', 'connected'
     except OSError as error:
-        if error.errno in BLOCKED_ERRNOS or isinstance(error, TimeoutError):
+        if error.errno in BLOCKED_ERRNOS or isinstance(error, TIMEOUT_ERRORS):
             return 'unreachable', type(error).__name__
         return 'unknown', '%s: %s' % (type(error).__name__, error)
 
 
-_NOBODY_CODE = (
-    'import errno,socket,sys\n'
-    'blocked={errno.ECONNREFUSED,errno.ETIMEDOUT,errno.ENETUNREACH,errno.EHOSTUNREACH,errno.EACCES,errno.EPERM}\n'
+_HOST_WORKER = (
+    'import socket,sys\n'
+    'blocked={int(n) for n in sys.argv[3].split(",") if n}\n'
     'try:\n'
     ' socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3).close()\n'
-    ' print("connected")\n'
+    ' print("W4HOST reachable")\n'
     'except OSError as e:\n'
-    ' print(type(e).__name__)\n'
-    ' sys.exit(1 if e.errno in blocked or isinstance(e, TimeoutError) else 2)\n'
+    ' if e.errno in blocked or isinstance(e, (socket.timeout, TimeoutError)):\n'
+    '  print("W4HOST unreachable " + type(e).__name__)\n'
+    '  sys.exit(1)\n'
+    ' print("W4HOST unknown %s: %s" % (type(e).__name__, e))\n'
+    ' sys.exit(2)\n'
 )
+BLOCKED_ARG = ','.join(str(number) for number in sorted(BLOCKED_ERRNOS))
 
 
-def _classify_host_worker(rc, detail):
-    detail = (detail or '').strip()
-    if rc == 0:
-        return 'reachable', detail
-    if rc == 1 and detail and not detail.startswith('sudo:'):
-        return 'unreachable', detail
-    return 'unknown', 'rc=%s %s' % (rc, detail[:160:])
+def _classify_host_worker(rc, output):
+    """A host worker's result from its W4HOST sentinel; a crash or sudo refusal is inconclusive."""
+    lines = [line.strip() for line in (output or '').splitlines() if line.startswith('W4HOST ')]
+    last = lines[-1] if len(lines) == 1 else ''
+    if rc == 0 and last == 'W4HOST reachable':
+        return 'reachable', last
+    if rc == 1 and last.startswith('W4HOST unreachable '):
+        return 'unreachable', last[len('W4HOST unreachable '):]
+    return 'unknown', 'rc=%s %s' % (rc, (output or '').strip()[:160:])
 
 
 def _drop_to_nobody():
@@ -230,13 +297,13 @@ def _host_probe_as(ip, port, uid):
         return _socket_result(ip, port)
     if os.geteuid() == 0 and uid == 65534:
         proc = subprocess.run(
-            [sys.executable, '-I', '-c', _NOBODY_CODE, ip, str(port)],
+            [sys.executable, '-I', '-c', _HOST_WORKER, ip, str(port), BLOCKED_ARG],
             text=True, capture_output=True, timeout=8,
             preexec_fn=_drop_to_nobody)
     else:
         user = 'root' if uid == 0 else 'nobody'
         proc = subprocess.run(
-            ['sudo', '-n', '-u', user, sys.executable, '-I', '-c', _NOBODY_CODE, ip, str(port)],
+            ['sudo', '-n', '-u', user, sys.executable, '-I', '-c', _HOST_WORKER, ip, str(port), BLOCKED_ARG],
             text=True, capture_output=True, timeout=8)
     return _classify_host_worker(proc.returncode, proc.stdout + proc.stderr)
 
@@ -248,7 +315,10 @@ class NotRun(RuntimeError):
 def _host_capability():
     if os.geteuid() == 0:
         return
-    proc = subprocess.run(['sudo', '-n', 'true'], text=True, capture_output=True, timeout=10)
+    try:
+        proc = subprocess.run(['sudo', '-n', 'true'], text=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise NotRun('Linux host census needs root or passwordless sudo (sudo: %s)' % error)
     if proc.returncode != 0:
         raise NotRun('Linux host census needs root or passwordless sudo for uid 0/65534 probes')
 
@@ -314,9 +384,9 @@ def _start_probe(source, network, image):
 
 
 def _container_probe(container, service, port):
-    rc, out, err = p2.docker('exec', container, 'nc', '-w', '3', '-z', service, str(port),
-                             stdin='', timeout=8)
-    return classify_nc(rc), (out + err).strip()[:160:]
+    rc, out, err = p2.docker('exec', container, 'sh', '-c', PROBE_SH, 'w4', service, str(port),
+                             stdin='', timeout=12)
+    return classify_probe(rc, out), (out + err).strip()[:160:]
 
 
 def _kafka_network(targets, cluster_project):
@@ -335,15 +405,22 @@ def census(args):
     table_errors = validate_table_rows(rows)
     if table_errors:
         raise RuntimeError('invalid Table 2 rows: %s' % table_errors[:5:])
-    targets, labelless = inventory(args.cluster_project, args.monitor_project, rows)
+    image = args.nginx_image or os.environ.get('W4_NGINX_IMAGE') or ''
+    if not image:
+        raise RuntimeError('W4 probe image is empty (pass --nginx-image or W4_NGINX_IMAGE)')
+    rc, _out, err = p2.docker('image', 'inspect', image, timeout=30)
+    if rc != 0:
+        raise RuntimeError('W4 probe image is not present locally (--pull never): %s' % err.strip()[:160:])
+    targets, labelless = inventory(args.cluster_project, args.monitor_project, rows, image)
     if 'grafana' not in targets:
         raise RuntimeError('Grafana container is not running; the grafana source cannot be probed')
     total_ports = sum(len(item['ports']) for item in targets.values())
     print('targets=%d service-ports=%d label-less-targets=%s' % (len(targets), total_ports, labelless))
     for service in sorted(targets):
         item = targets[service]
-        print('TARGET %s container=%s ports=%s ips=%s networks=%s'
-              % (service, item['container'], item['ports'], item['ips'], item['networks']))
+        print('TARGET %s container=%s ports=%s listeners=%s ips=%s networks=%s'
+              % (service, item['container'], item['ports'], item['listeners'], item['ips'],
+                 item['networks']))
 
     observed = {source: set() for source in SOURCES}
     unknowns = []
@@ -358,13 +435,6 @@ def census(args):
         print('host source not run on Darwin: the host-process residual is VM-only in the plan')
     else:
         raise NotRun('unsupported platform for W4 host census: ' + system)
-
-    image = args.nginx_image or os.environ.get('W4_NGINX_IMAGE') or ''
-    if not image:
-        raise RuntimeError('W4 probe image is empty (pass --nginx-image or W4_NGINX_IMAGE)')
-    rc, _out, err = p2.docker('image', 'inspect', image, timeout=30)
-    if rc != 0:
-        raise RuntimeError('W4 probe image is not present locally (--pull never): %s' % err.strip()[:160:])
 
     networks = {
         'monitoring': args.monitor_project + '_monitoring',
@@ -396,6 +466,10 @@ def census(args):
             rc, _out, err = p2.docker('rm', '-f', name, timeout=30)
             if rc != 0:
                 cleanup_errors.append('%s: %s' % (name, err.strip()[:120:]))
+        try:
+            _sweep_stale_probes()
+        except RuntimeError as error:
+            cleanup_errors.append(str(error))
     if cleanup_errors:
         unknowns.append(('cleanup', '', '', cleanup_errors))
 
