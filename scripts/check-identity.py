@@ -3906,6 +3906,41 @@ LOKI_GATEWAY_METHODS = {
 }
 
 
+def go_flag_value(args, name):
+    """The value Go's flag package gives `name` for the argument list `args`, or None when it is not set.
+
+    -name=x, --name=x and (for a non-boolean flag) -name x are the same flag; Set runs once per occurrence,
+    in command-line order, so the last occurrence wins; parsing ends before the first non-flag argument
+    ("-" is one) and after "--" (Context7 /websites/pkg_go_dev_go1_25_3, package flag). Any other flag written
+    without "=" may be boolean (-name alone) or take the next argument, which the argument list does not say, so
+    the answer is None (not set) rather than a guess: the caller refuses what it cannot decide.
+    """
+    value = None
+    args = list(args or [])
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg == '-' or arg == '--' or not arg.startswith('-'):
+            break
+        flag = arg[2:] if arg.startswith('--') else arg[1:]
+        flag_name, has_value, flag_value = flag.partition('=')
+        if not flag_name or flag_name.startswith('-'):
+            return None
+        if flag_name != name:
+            if has_value:
+                continue
+            return None
+        if has_value:
+            value = flag_value
+        elif i < len(args):
+            value = args[i]
+            i += 1
+        else:
+            return None
+    return value
+
+
 def check_loki_gateway(checks):
     """Phase 4 commit 3: Grafana reaches Loki only through the read-only gateway; the log write path stays direct."""
     e = checks.expect
@@ -3965,9 +4000,10 @@ def check_loki_gateway(checks):
       f'monitoring/loki-gateway must be on the monitoring network only; got {list(service.get("networks") or {})}')
     e(list(service.get('depends_on') or {}) == ['loki'], f'monitoring/loki-gateway must depend on loki; got {service.get("depends_on")}')
     loki = json.loads(result.stdout)['services'].get('loki') or {}
-    # Go's flag package keeps the last occurrence, so the last -server.grpc-listen-address decides.
-    grpc_listen = [arg for arg in (loki.get('command') or []) if arg.startswith('-server.grpc-listen-address')]
-    e(grpc_listen[-1:] == ['-server.grpc-listen-address=127.0.0.1'],
+    # The effective value is what Go's flag package leaves after the whole command (go_flag_value): the last
+    # occurrence in any spelling decides, so a later --server.grpc-listen-address=0.0.0.0 or a later
+    # two-argument form is seen, not only the single-dash =value form.
+    e(go_flag_value(loki.get('command'), 'server.grpc-listen-address') == '127.0.0.1',
       'monitoring/loki must bind its gRPC listener to 127.0.0.1 (-server.grpc-listen-address=127.0.0.1): it is used '
       f'in-process only, and a peer reaching loki:9096 is a residual Table 2 does not list (W4); got {loki.get("command")}')
     volumes = [(volume.get('source', ''), volume.get('target'), volume.get('read_only')) for volume in service.get('volumes') or []]
