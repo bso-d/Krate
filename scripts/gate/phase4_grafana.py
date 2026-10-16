@@ -232,6 +232,23 @@ def loki_push_body(labels, line, ts_ns):
 
 # ─── the headless Grafana realm-mode driver (port of the walk's p4driver.py) ──
 
+def core_ledger_change(svc, old, new):
+    """U23 core-cluster ledger decision for one service. old/new are
+    (container id, StartedAt, RestartCount). Returns (changed, note):
+    a new id or restart-count change always counts; a bare StartedAt move
+    counts for every core service EXCEPT keycloak, the one service U12/U13
+    intentionally stop and start (SAME_ID proven at 115b300)."""
+    if (old[0], old[2]) != (new[0], new[2]):
+        return True, '%s: %s id %s->%s rc %s->%s started %s->%s' % (
+            svc, 'SAME_ID' if old[0] == new[0] else 'NEW_ID',
+            old[0][:12], new[0][:12], old[2], new[2],
+            old[1][:19], new[1][:19])
+    if old[1] != new[1]:
+        note = '%s started %s->%s' % (svc, old[1][:19], new[1][:19])
+        return svc != 'keycloak', note
+    return False, ''
+
+
 class GrafanaDriver:
     """One user agent on the public origin: cookie jar, no automatic redirects,
     pinned TLS (gate.tls), and the Grafana session-token rotation recovery the
@@ -259,6 +276,9 @@ class GrafanaDriver:
             status, hdrs, text = error.code, error.headers, error.read().decode(errors='replace')
         except urllib.error.URLError as error:
             return -1, {}, 'URLError: %s' % error.reason
+        except (TimeoutError, OSError) as error:
+            # A read timeout is not wrapped in URLError; same -1 contract.
+            return -1, {}, '%s: %s' % (type(error).__name__, error)
         if status == 401 and 'session.token.rotate' in text and not url.endswith('/auth-tokens/rotate'):
             rotated = self.raw(self.gate.base + '/grafana/api/user/auth-tokens/rotate', b'', 'POST')
             if rotated[0] == 200:
@@ -276,6 +296,9 @@ class GrafanaDriver:
             return response.status, response.headers, response.read().decode(errors='replace')
         except urllib.error.HTTPError as error:
             return error.code, error.headers, error.read().decode(errors='replace')
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            return -1, {}, '%s: %s' % (type(error).__name__,
+                                       getattr(error, 'reason', error))
 
     @staticmethod
     def set_cookie_headers(headers):
@@ -357,6 +380,10 @@ class Gate(Phase4Gate):
         except urllib.error.URLError as error:
             raise RuntimeError('Grafana at %s did not answer %s %s: %s'
                                % (self.grafana_loopback(), method, path, error.reason))
+        except (TimeoutError, OSError) as error:
+            raise RuntimeError('Grafana at %s did not answer %s %s: %s: %s'
+                               % (self.grafana_loopback(), method, path,
+                                  type(error).__name__, error))
         try:
             return status, (json.loads(payload) if payload else None)
         except ValueError:
@@ -391,6 +418,8 @@ class Gate(Phase4Gate):
             return error.code, error.headers, error.read().decode(errors='replace')
         except urllib.error.URLError as error:
             return -1, {}, 'URLError: %s' % error.reason
+        except (TimeoutError, OSError) as error:
+            return -1, {}, '%s: %s' % (type(error).__name__, error)
 
     def mon_id_map(self):
         """{service: (container id, StartedAt)} of the monitoring project (the walk's
@@ -418,8 +447,8 @@ class Gate(Phase4Gate):
 
     def cluster_id_map(self):
         """{service: (container id, StartedAt, RestartCount)} of the cluster
-        project (U23's ledger: identity is id + RestartCount, since U12's
-        intentional stop/start preserves both while moving StartedAt)."""
+        project (U23's ledger, core_ledger_change: id + RestartCount always,
+        StartedAt too except for keycloak's intentional U12/U13 stop/start)."""
         found = {}
         rc, out, _ = p2.docker('ps', '-aq', '--filter',
                                'label=com.docker.compose.project=' + self.project)
@@ -1727,10 +1756,13 @@ class Gate(Phase4Gate):
         meta_match = meta.get('id') == str(old_id)
         creation_ok = creation_ok and meta_match
         # Read-only role evidence: the search DTO carries the org role, so a
-        # refusal names the drift without printing any secret value.
+        # refusal names the drift without printing any secret value. U20 runs
+        # in realm mode, where the realm ini disables Basic auth
+        # (sso/identity.py [auth.basic] enabled = false): use the seed token,
+        # like the service-account calls above.
         sa_role = '?'
         st_sa, sa_body = self.grafana_api('GET', '/grafana/api/serviceaccounts/search?query=krate-seed',
-                                          auth=self.admin_basic())
+                                          token=token)
         if st_sa == 200 and isinstance(sa_body, dict):
             for cand in sa_body.get('serviceAccounts') or []:
                 if isinstance(cand, dict) and cand.get('name') == 'krate-seed':
@@ -2908,10 +2940,12 @@ class Gate(Phase4Gate):
         # walk logs/137, 139, 162, 169: Container ledger verification:
         # broker, kafka-ui, keycloak, keycloak-db unchanged across slice;
         # cluster proxy recreated once per input change; grafana recreated
-        # on auth config/realm.ini change. Identity is (id, RestartCount):
-        # U12's intentional stop/start preserves both while moving StartedAt
-        # (proven SAME_ID at 115b300), so only a new id or a daemon restart
-        # counts as changed; in-place restarts are noted, not failed.
+        # on auth config/realm.ini change. Identity is (id, RestartCount)
+        # plus StartedAt: U12/U13 intentionally stop/start ONLY keycloak,
+        # preserving id and RestartCount while moving StartedAt (proven
+        # SAME_ID at 115b300), so the StartedAt exemption is scoped to
+        # keycloak; for every other core service a StartedAt move means an
+        # unexpected stop/start and fails (core_ledger_change).
         curr_cluster = self.cluster_id_map()
         initial = getattr(self, 'cluster_initial', None) or curr_cluster
 
@@ -2921,15 +2955,12 @@ class Gate(Phase4Gate):
         restarted = []
 
         def ledger(svc):
-            old, new = initial[svc], curr_cluster[svc]
-            if (old[0], old[2]) != (new[0], new[2]):
-                diff_core.append('%s: %s id %s->%s rc %s->%s started %s->%s'
-                                 % (svc, 'SAME_ID' if old[0] == new[0] else 'NEW_ID',
-                                    old[0][:12], new[0][:12], old[2], new[2],
-                                    old[1][:19], new[1][:19]))
+            changed, note = core_ledger_change(svc, initial[svc], curr_cluster[svc])
+            if changed:
+                diff_core.append(note)
                 return False
-            if old[1] != new[1]:
-                restarted.append('%s started %s->%s' % (svc, old[1][:19], new[1][:19]))
+            if note:
+                restarted.append(note)
             return True
 
         for svc in ('keycloak', 'keycloak-db', 'kafka-ui'):
