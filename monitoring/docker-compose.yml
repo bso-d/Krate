@@ -135,7 +135,12 @@ services:
     volumes:
       - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro,z
       - loki_data:/loki
-    command: -config.file=/etc/loki/local-config.yaml
+    # Loki's gRPC port (9096) is used only inside this single binary, whose ring
+    # advertises 127.0.0.1 (loki-config.yml common.instance_addr): on the loopback
+    # address it is off the monitoring network, so no peer reaches loki:9096, a
+    # residual Table 2 of README.md does not list (W4). Kept on the command line so a
+    # change recreates the container; a bind-mounted file change would not.
+    command: -config.file=/etc/loki/local-config.yaml -server.grpc-listen-address=127.0.0.1
     networks: [monitoring]
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3100/ready || exit 1"]
