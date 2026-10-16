@@ -490,7 +490,7 @@ All subcommands use `kcadm` with the `krate-cli` client credentials in realm
 | `users disable <username>` / `users enable <username>` | toggles the account |
 | `users reset-password <username>` | new one-time temporary password, printed once, same required actions |
 | `users groups <username>` | shows group membership |
-| `users logout <username>` | ends every session of the user in the realm; Keycloak then posts a back-channel logout token to each client of those sessions that has a reachable URL, so Kafbat ends at once. Pair it with `users disable` to revoke. The realm's "Sign out all active sessions" is not a substitute: it sends no logout token, so a live Kafbat session survives it until its idle limit |
+| `users logout <username>` | ends every session of the user in the realm; Keycloak then posts a back-channel logout token to each client of those sessions that has a reachable URL, so Kafbat ends at once. Pair it with `users disable` to revoke. The realm's "Sign out all active sessions" is not a substitute: it sends no logout token, so a live Kafbat session survives it until its idle limit or the session maximum, whichever comes first |
 | `users set-email <username> <addr>` | sets the user's e-mail address and marks it verified; also the way to verify the address of a user brokered in before the provider trusted it |
 
 Passwords are never accepted on the command line. The user changes the
@@ -668,7 +668,7 @@ The installation path must not contain whitespace, quotes or backslashes
 `./krate auth configure` (no settings file) plans Kafbat's Keycloak login,
 `auth/ui/runtime.yml`, with `sso/identity.py runtime`: the same module that
 plans the realm, so the client, the callback, the `groups` claim, the group
-names and the session idle limit have one source, `.env`. The viewer gets
+names, the session idle limit and the session maximum have one source, `.env`. The viewer gets
 message payloads only when `KAFKA_UI_VIEWER_MESSAGES=true`
 (`auth configure --viewer-messages` sets it). A `runtime.yml` that differs
 from the plan is replaced only with `--force`.

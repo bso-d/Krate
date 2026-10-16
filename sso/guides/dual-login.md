@@ -93,7 +93,8 @@ and applies Kafbat's side.
 — manage users with krate identity users` in this mode and no shared password.
 Repeat `./krate auth configure --force` and `./krate auth apply` after
 changing `KEYCLOAK_PUBLIC_URL`, `KEYCLOAK_SESSION_IDLE_MINUTES`,
-`KAFKA_UI_VIEWER_MESSAGES` or, on EPC, the cluster list in `kafbat.yml`.
+`KEYCLOAK_SESSION_MAX_HOURS`, `KAFKA_UI_VIEWER_MESSAGES` or, on EPC, the cluster
+list in `kafbat.yml`.
 `KEYCLOAK_VIEWER_GROUP` and `KEYCLOAK_ADMIN_GROUP` are read when the realm is
 created and are not renamed afterwards (identity foundation guide, owner
 decision 6); the Kafbat roles must name the groups that exist in the realm.
@@ -193,9 +194,19 @@ request.
 
 - Kafbat's own session is the `SESSION` cookie (`Secure`, `HttpOnly`,
   `SameSite=Lax`). Its idle limit is `KEYCLOAK_SESSION_IDLE_MINUTES`
-  (default 15 minutes), the same value the realm uses for its SSO session, so
-  there is one knob for both. The realm reads it when the realm is created;
-  Kafbat reads it from `runtime.yml` at every `auth apply`.
+  (default 15 minutes) and its absolute lifetime is `KEYCLOAK_SESSION_MAX_HOURS`
+  (default 8 hours): the same two values the realm uses for its SSO session, so
+  there is one knob for each. The realm reads them when the realm is created;
+  Kafbat reads them from `runtime.yml` (`server.reactive.session.timeout` and
+  `auth.oauth2.max-session-lifetime`) at every `auth apply`. The lifetime counts
+  from the first request of the sign-in and applies however busy the session is:
+  the first request after it that needs a sign-in (a click in the UI, an API call)
+  is answered with a redirect (302) to the Keycloak sign-in and nothing it asked
+  for is done; a request to a page that needs no sign-in is answered as anonymous;
+  either way the `SESSION` cookie is expired. A response that is already being
+  sent is not interrupted. The shared Admin login of `local.yml` mode has only
+  Spring's 30-minute idle limit and no maximum: the maximum belongs to the Keycloak
+  sign-in.
 - Back-channel logout: the realm client `krate-ui` registers
   `http://kafka-ui:8080/logout/connect/back-channel/keycloak` (reachable only
   over the private `identity` network: the public proxy answers 404 for
@@ -214,16 +225,19 @@ request.
   **not** a way to end a Kafbat session: Keycloak ends the realm sessions and
   sets the realm's not-before, but sends no back-channel logout token to any
   client (measured at 26.8.0, `harness/phase4/lab1` K-a), so a live Kafbat
-  session survives it until its idle limit.
+  session survives it until its idle limit or the session maximum, whichever
+  comes first.
 - Disabling a user (`./krate identity users disable <name>`) prevents new
   logins but does not end a session that already exists: that session lasts
-  until the idle limit unless `./krate identity users logout <name>` ends it.
+  until the idle limit or the session maximum (8 hours by default, counted from
+  the sign-in however busy the session is), whichever comes first, unless
+  `./krate identity users logout <name>` ends it.
   Revocation is therefore the pair, in this order: `disable` then `logout`
   (gate rows U10, V8). Removing a user from a group has effect at the next
   login, because Kafbat computes the roles once at login; `users logout`
   forces that next login now (gate row U11). The exact times (back-channel
-  propagation, idle expiry after disablement) are measured in the Phase 2
-  fixture and recorded in the pull request.
+  propagation, idle expiry after disablement, the session maximum) are measured
+  in the Phase 2 and Phase 4 fixtures and recorded in the pull request.
 - `./krate identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET` recreates `kafka-ui`
   in this mode, which ends every Kafbat session. `./krate auth apply` itself
   recreates `kafka-ui` only when the applied auth file or the image changed
@@ -448,8 +462,19 @@ changing a `.env` value that `runtime.yml` carries. They preserve broker
 containers and the existing identity database. The realm's session idle limit
 and maximum lifetime come from `KEYCLOAK_SESSION_IDLE_MINUTES` and
 `KEYCLOAK_SESSION_MAX_HOURS` in `.env` when the realm is created (defaults 15
-minutes and 8 hours); Kafbat's session idle limit is the same
-`KEYCLOAK_SESSION_IDLE_MINUTES`, read at every `auth configure`.
+minutes and 8 hours); Kafbat's session idle limit and absolute lifetime are the
+same two values, read at every `auth configure`. Changing them in `.env` later
+does not change the realm (the admin procedure above does), so change the realm
+as well to keep both sides equal.
+
+A release that changes what `runtime.yml` carries (the Kafbat image `1.5.0-sso.8`
+adds `auth.oauth2.max-session-lifetime`) is not applied by `krate install`: site
+files under `auth/` are never replaced, and `./krate start` then refuses with
+`auth/ui/runtime.yml differs from the Krate plan for this .env`. Run
+`./krate auth configure --force` and `./krate auth apply`; with a PingFederate
+site file, remove `auth/ui/runtime.yml` and `auth/keycloak/pingfederate-idp.json`,
+run `./krate auth configure <site.json>`, then `./krate auth apply`. Recreating
+`kafka-ui` ends every Kafbat session.
 
 ## Company SSO through PingFederate (Phase 3)
 
@@ -477,9 +502,9 @@ reach PingFederate on the ports in its approved endpoint URLs.
    PingFederate issuer, client ID and the four endpoints (all `https`), the
    two AD group names and `groups_claim`, and `clusters` to every exact
    Kafbat cluster name this UI shows (including remote clusters). The session
-   idle limit and the viewer message opt-in are not site-file keys: they
-   come from `.env` (`KEYCLOAK_SESSION_IDLE_MINUTES`,
-   `KAFKA_UI_VIEWER_MESSAGES`) so that both flows plan the same
+   idle limit, the session maximum and the viewer message opt-in are not
+   site-file keys: they come from `.env` (`KEYCLOAK_SESSION_IDLE_MINUTES`,
+   `KEYCLOAK_SESSION_MAX_HOURS`, `KAFKA_UI_VIEWER_MESSAGES`) so that both flows plan the same
    `runtime.yml`. The optional key `"idp_truststore"` is `"local"` (default:
    a CA file in `auth/keycloak/truststores/` is required when an endpoint is
    not on the public host and port) or `"system"` (the JVM default truststore
@@ -638,7 +663,7 @@ The realm flows the plan states:
   removing the user from the AD group takes effect at the user's next
   sign-in through Keycloak (Keycloak recomputes the group memberships from
   the claim at every login). An existing Kafbat session lasts until the idle
-  limit or a sign-out (see "Revocation and session behaviour").
+  limit, the session maximum or a sign-out (see "Revocation and session behaviour").
 - Logout (Kafbat's Log out) ends the Keycloak session as in Phase 2; the next
   login goes to PingFederate again, because the realm has no cookie.
 
@@ -689,7 +714,7 @@ running) is reported as `Keycloak recreated (its service definition, image or
 container changed)` with the journal line
 `apply recreated keycloak: service definition changed`. The same mechanism as
 `KRATE_PROXY_CONF_SHA` for the proxy. Recreating Keycloak ends its sessions; Kafbat sessions survive until
-their idle limit.
+their idle limit or session maximum.
 
 ### Back to local sign-in
 

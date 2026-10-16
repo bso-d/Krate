@@ -2078,8 +2078,9 @@ cmd_identity_users() {
       # logout token to each client of those sessions that has a reachable URL, so Kafbat
       # ends at once (harness/phase4/lab1 K-a: 204, tokens within ~25 ms). The realm's
       # "Sign out all active sessions" sends no logout token, so a live Kafbat session
-      # survives it until its idle limit. kcadm rejects the no-merge flag on this
-      # resource (rc 2); krate-cli's manage-users scope is enough
+      # survives it until its idle limit or the session maximum, whichever comes first.
+      # kcadm rejects the no-merge flag on this resource (rc 2); krate-cli's
+      # manage-users scope is enough
       # (harness/phase4/lab6 L5-8).
       kcadm -- create "users/$uid/logout" -r "$IDENTITY_REALM"
       identity_journal "users logout" ok "$user"

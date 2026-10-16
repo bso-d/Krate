@@ -88,7 +88,7 @@ VIEW_RESOURCES = ('applicationconfig', 'clusterconfig', 'topic', 'consumer', 'sc
 VIEWER_RESOURCES = tuple(resource for resource in VIEW_RESOURCES if resource != 'applicationconfig')
 CLUSTERS = ['cluster-a', 'cluster-b.2']
 # Site keys configure-dual.py no longer reads (they moved to .env): the example must not carry them.
-MOVED_SITE_KEYS = ('viewer_messages', 'session_idle_minutes')
+MOVED_SITE_KEYS = ('viewer_messages', 'session_idle_minutes', 'session_max_hours')
 
 # kraft/epc parity: every hunk between the two CLIs must be one of the known edition differences.
 FORBIDDEN_IN_HUNK = re.compile(r'identity|keycloak|kcadm', re.IGNORECASE)
@@ -249,6 +249,8 @@ def check_runtime_contract(checks):
         e(client.get(key) == expected, f'client {key} must be {expected!r}; got {client.get(key)!r}')
     session = data['server']['reactive']['session']
     e(session.get('timeout') == '11m', f'session timeout must be KEYCLOAK_SESSION_IDLE_MINUTES (11m); got {session.get("timeout")!r}')
+    e(oauth.get('max-session-lifetime') == '3h',
+      f'auth.oauth2.max-session-lifetime must be KEYCLOAK_SESSION_MAX_HOURS (3h); got {oauth.get("max-session-lifetime")!r}')
     e(session.get('cookie') == {'name': 'SESSION', 'secure': True, 'http-only': True, 'same-site': 'lax'},
       f'session cookie must be SESSION, secure, http-only, same-site lax; got {session.get("cookie")!r}')
     e('spring' not in data and 'configtree' not in text, 'no spring.config.import (the secret comes from the container environment)')
@@ -574,7 +576,17 @@ def check_exposure(checks):
                         ('handler.setLogoutUri("http://127.0.0.1:"', 'the back-channel handler posts to its own listener'),
                         ('csrfRepository.setCookieCustomizer(cookie -> cookie.secure(true));', 'the XSRF-TOKEN cookie is Secure'),
                         ('csrfRepository.saveToken(webFilterExchange.getExchange(), null)', 'the CSRF token rotates at login'),
-                        ('oidcSessionRegistry.removeSessionInformation(session.getId())', 'a local logout forgets the OIDC session')):
+                        ('oidcSessionRegistry.removeSessionInformation(session.getId())', 'a local logout forgets the OIDC session'),
+                        ('MAX_SESSION_LIFETIME = "auth.oauth2.max-session-lifetime"', 'the fork reads the absolute session lifetime from auth.oauth2.max-session-lifetime'),
+                        ('Duration.between(session.getCreationTime(), Instant.now()).compareTo(maximum) >= 0', 'a session older than the maximum ends however recently it was used'),
+                        ('return session.invalidate();', 'the session that reached the maximum is invalidated'),
+                        ('endAfterMaximum(exchange, maximum).then(chain.filter(exchange))', 'the filter always continues the chain after the check (an empty result would end the exchange with 200)'),
+                        ('builder.addFilterBefore(sessionLifetimeLimit(maxSessionLifetime), SecurityWebFiltersOrder.REACTOR_CONTEXT);', 'the lifetime filter runs before the SecurityContext is read'),
+                        ('ServerWebExchangeMatchers.pathMatchers(HttpMethod.POST, "/logout")', 'a POST /logout is left to the logout filter, whose success handler needs the authentication'),
+                        ('DEFAULT_MAX_SESSION_LIFETIME = Duration.ofHours(8);', 'the built-in maximum is 8 hours (owner decision G4) when the property is absent'),
+                        ('DurationStyle.detectAndParse(configured.strip(), ChronoUnit.SECONDS)', 'a bare number is seconds, like server.reactive.session.timeout'),
+                        ('if (lifetime.isPositive()) {', 'zero and negative values refuse to start'),
+                        ('.flatMap(isLogout -> isLogout\n+            ? chain.filter(exchange)\n+            : endAfterMaximum(exchange, maximum)', 'only a POST /logout skips the check, every other request is checked')):
         e(needle in patch, f'kafbat-ui/native-auth.patch: {why} (missing {needle[:50]!r})')
     # PR #39 review threads: lifecycle lock during bootstrap, temp-admin listing in the parent shell, group before user,
     # rotate --value reuse, passphrase minimum from the environment, restore reconciles the UI client.
@@ -591,7 +603,12 @@ def check_exposure(checks):
         e('identity_reconcile_ui_urls restore' in restore and restore.index('identity_reconcile_ui_urls restore') < restore.index('identity_journal restore ok'),
           f'{edition}/krate: restore must reconcile the krate-ui client with this host before reporting success')
     build = (ROOT / 'kafbat-ui/build.py').read_text()
-    e("IMAGE = 'krate/kafka-ui:1.5.0-sso.7'" in build, 'kafbat-ui/build.py must build sso.7 (the templates pin it)')
+    e("IMAGE = 'krate/kafka-ui:1.5.0-sso.8'" in build, 'kafbat-ui/build.py must build sso.8 (the templates pin it)')
+    e("VITE_TAG='v1.5.0-sso.8'" in build, 'kafbat-ui/build.py must stamp the frontend with the same sso.8 tag')
+    for edition in EDITIONS:
+        pin = identity.read_env(ROOT / edition / '.env.template').get('KAFKA_UI_IMAGE', '')
+        e(re.fullmatch(r'krate/kafka-ui:1\.5\.0-sso\.8@sha256:[a-f0-9]{64}', pin) is not None,
+          f'{edition}/.env.template: KAFKA_UI_IMAGE must pin the sso.8 image that build.py builds; got {pin[:60]!r}')
 
 
 def check_gate_scripts(checks):
@@ -1997,6 +2014,10 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
          lambda d: d['auth']['oauth2']['client']['keycloak'].__setitem__('issuer-uri', 'https://evil.example.test/identity/realms/krate')),
         ('session timeout differs from KEYCLOAK_SESSION_IDLE_MINUTES', 'differs from the Krate plan',
          lambda d: d['server']['reactive']['session'].__setitem__('timeout', '240m')),
+        ('session maximum differs from KEYCLOAK_SESSION_MAX_HOURS', 'differs from the Krate plan',
+         lambda d: d['auth']['oauth2'].__setitem__('max-session-lifetime', '240h')),
+        ('session maximum removed (an active Kafbat session would have no absolute bound)', 'differs from the Krate plan',
+         lambda d: d['auth']['oauth2'].pop('max-session-lifetime')),
         ('user name attribute is not sub', 'user-name-attribute',
          lambda d: d['auth']['oauth2']['client']['keycloak'].__setitem__('user-name-attribute', 'preferred_username')),
     )
