@@ -67,7 +67,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python3 -I does not add the script directory
 import phase2_kafbat as p2  # noqa: E402
 from phase4_common import (Phase4Gate, helper_main, fail, aggregate, log,  # noqa: E402
-                           Outcome, evidence, not_run)
+                           Outcome, not_run)
 
 CASES = ['V%d' % i for i in range(1, 25)]
 RUNNER_OWNED = ('X4', 'Z4b')
@@ -121,37 +121,6 @@ class Gate(Phase4Gate):
         self.drivers = {}
         self.user_state = {}
         self.cluster_initial = {}
-
-    def main(self):
-        """--enrol-only runs the realm-user enrolment between `start` and
-        `auth apply` (live4b order 021/022 before 030/031: the broker
-        redirector must not exist yet) and exits with only a setup TSV row."""
-        if getattr(self.args, 'enrol_only', False):
-            return self.run_enrol_only()
-        return super().main()
-
-    def run_enrol_only(self):
-        """Preflight plus setup_realm_users; the failure contract matches
-        prepare_only (setup FAIL row, exit 1) so the runner treats it the
-        same way."""
-        try:
-            try:
-                problem = self.preflight()
-                if problem is None:
-                    self.setup_realm_users()
-                    problem = None
-            except Exception as error:
-                problem = 'enrolment raised %s: %s' % (type(error).__name__, str(error)[:200])
-            status = 'FAIL' if problem else 'PASS'
-            print('setup\t%s\t%s' % (status, evidence(problem or 'realm users enrolled before auth apply')),
-                  flush=True)
-            return 0 if problem is None else 1
-        finally:
-            self.cleanup()
-            if self.kc:
-                self.kc.close()
-            if self._master:
-                self._master.close()
 
     def driver(self, label):
         if label not in self.drivers:
@@ -355,35 +324,14 @@ class Gate(Phase4Gate):
             return 'setup step failed: %s: %s' % (type(error).__name__, str(error)[:300])
         return None
 
-    USERS_4B = (('p4v', ('--viewer',)), ('p4a', ('--admin',)),
-                ('p4both', ('--admin',)), ('p4nogroup', ()),
-                ('p4dis', ('--viewer',)), ('p4a2', ('--admin',)),
-                ('p4idle', ('--viewer',)), ('p4ctrl', ('--viewer',)))
-
     def setup_realm_users(self):
-        """Live4b logs/021-022: eight users, both-group assignments, enrolment.
-
-        The 4b bring-up enrols between `start` and `auth apply` (live4b order:
-        users before the broker plan), so a later full setup() in the same run
-        finds the state files and only re-registers them."""
+        """Live4b logs/021-022: eight users, both-group assignments, enrolment."""
         state_dir = os.path.join(self.state_dir, 'p4')
         os.makedirs(state_dir, exist_ok=True)
-        users = self.USERS_4B
-        states = [os.path.join(state_dir, 'kc-%s.json' % name) for name, _ in users]
-        if states and all(os.path.isfile(state) for state in states):
-            try:
-                for state in states:
-                    with open(state, encoding='utf-8') as handle:
-                        loaded = json.load(handle)
-                    if not loaded.get('password') or not loaded.get('totp'):
-                        raise ValueError('missing password/totp in %s' % os.path.basename(state))
-            except (OSError, ValueError) as error:
-                raise RuntimeError('enrolment state unreadable: %s' % error)
-            for (name, _flags), state in zip(users, states):
-                self.user_state[name] = state
-                self.add_state_file_secrets(state)
-            log('setup: eight live4b realm users already enrolled; state re-registered')
-            return
+        users = (('p4v', ('--viewer',)), ('p4a', ('--admin',)),
+                 ('p4both', ('--admin',)), ('p4nogroup', ()),
+                 ('p4dis', ('--viewer',)), ('p4a2', ('--admin',)),
+                 ('p4idle', ('--viewer',)), ('p4ctrl', ('--viewer',)))
         temporary = {}
         for name, flags in users:
             rc, out, err = self.krate('identity', 'users', 'add', name, *flags,
@@ -602,8 +550,10 @@ class Gate(Phase4Gate):
         if not perses_cid:
             not_run('precondition: no perses container in ' + self.monitor_project)
 
-        # 1. Rendered config in perses container
-        rc, out, _ = p2.docker('exec', perses_cid, 'cat', '/etc/krate/perses/config.yaml')
+        # 1. Rendered config in perses container (the compose file starts
+        # perses with --config pointing at the rendered volume; the package
+        # default path holds no file).
+        rc, out, _ = p2.docker('exec', perses_cid, 'cat', '/etc/krate/perses/rendered/config.yaml')
         cfg_ok = (rc == 0 and 'enable_auth: true' in out and 'enable_native: false' in out
                   and 'client_id: "krate-perses"' in out)
 
@@ -1625,16 +1575,62 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                % (tokens, o2p_recreated, perses_recreated, idp_exit0, res.get('kind'))
 
     def v19(self):
-        # walk log 119: brokered sign-in of ping-viewer through stand-in IdP landing in Perses as viewer.
-        # Exercises commit 0 (trustEmail=true).
+        # walk log 119: the broker exists only around this row. With the broker
+        # applied, the browser flow redirects every login to the IdP
+        # (defaultProvider), so no other row can sign in: V19 applies the plan
+        # itself, exercises it, then removes it again.
         if not getattr(self.args, 'stub_dir', None) or not os.path.exists(self.args.stub_dir):
             return self.stub('V19', 'the brokered sign-in of a stand-in user (ping-viewer) through '
                                     'phase3_broker.Gate.brokered_login (broker_gate()) landing in '
                                     'Perses as viewer: the runner owns the stand-in (start_cluster '
-                                    '--broker: stub_idp.sh up, auth configure with its site.json, '
-                                    'auth apply) and passes --stub-dir/--stub-port/--stub-script; '
+                                    '--broker: stub_idp.sh up) and passes --stub-dir/--stub-port/--stub-script; '
+                                    'the row applies the broker plan from the stand-in site.json itself '
+                                    'and removes it right after; '
                                     'the row\'s evidence must record that V19 exercises commit 0 '
                                     '(trustEmail=true: the brokered user arrives e-mail-verified and signs in)')
+        site = os.path.join(self.args.stub_dir, 'site.json')
+        rc, out, err = self.krate('auth', 'configure', site, timeout=300)
+        if rc != 0:
+            return 'FAIL', 'broker prologue: auth configure %s failed (rc %d): %s' % (
+                site, rc, (err or out).strip()[-160:])
+        rc, out, err = self.krate('auth', 'apply', timeout=300)
+        if rc != 0 or 'Identity provider pingfederate' not in (out or ''):
+            # A failed apply may still have created the provider: take it back
+            # down so later rows keep their login form.
+            restore = self.v19_remove_broker()
+            return 'FAIL', 'broker prologue: auth apply failed (rc %d): %s; removal after failure: %s' % (
+                rc, (err or out).strip()[-160:], restore)
+        try:
+            status, text = self.v19_brokered()
+        except Exception as body_error:
+            restore = self.v19_remove_broker()
+            if restore.startswith('removed'):
+                raise
+            raise RuntimeError('v19 body %s: %s; broker epilogue also FAILED: %s'
+                               % (type(body_error).__name__, body_error, restore))
+        restore = self.v19_remove_broker()
+        if not restore.startswith('removed'):
+            return 'FAIL', '%s; broker epilogue FAILED: %s' % (text, restore)
+        return status, '%s; broker removed again: %s' % (text, restore)
+
+    def v19_remove_broker(self):
+        """Walk log 119 lines 26-27: plain plan back, provider gone (verified)."""
+        plan = os.path.join(self.edition_dir, 'auth', 'keycloak', 'pingfederate-idp.json')
+        try:
+            os.remove(plan)
+        except OSError as error:
+            return 'plan removal failed: %s' % error
+        rc, out, err = self.krate('auth', 'configure', timeout=300)
+        if rc != 0:
+            return 'plain auth configure failed (rc %d): %s' % (rc, (err or out).strip()[-160:])
+        rc, out, err = self.krate('auth', 'apply', timeout=300)
+        if rc != 0 or 'removed from realm' not in (out or ''):
+            return 'auth apply failed (rc %d): %s' % (rc, (err or out).strip()[-160:])
+        return 'removed from realm, browser flow rebound'
+
+    def v19_brokered(self):
+        # walk log 119: brokered sign-in of ping-viewer through stand-in IdP landing in Perses as viewer.
+        # Exercises commit 0 (trustEmail=true).
 
         pw_path = os.path.join(self.args.stub_dir, '.user-pw')
         if not os.path.exists(pw_path):
@@ -2134,16 +2130,6 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         return plan
 
 
-def perses_options(run_parser):
-    """The stand-in IdP options of V19 plus the pre-apply enrolment step,
-    added to the `run` sub-command."""
-    stub_options(run_parser)
-    run_parser.add_argument('--enrol-only', action='store_true',
-                            help='enrol the eight live4b realm users (setup_realm_users) '
-                                 'and exit with only a setup TSV row (checked before '
-                                 '--prepare-only; --only does not apply to this mode)')
-
-
 def stub_options(run_parser):
     """The stand-in IdP options of V19, added to the `run` sub-command."""
     run_parser.add_argument('--stub-dir', help='directory stub_idp.sh up wrote (V19)')
@@ -2156,7 +2142,7 @@ def stub_options(run_parser):
 
 
 def main(argv=None):
-    return helper_main(Gate, 'phase4_perses.py', argv, doc=__doc__, extra=perses_options)
+    return helper_main(Gate, 'phase4_perses.py', argv, doc=__doc__, extra=stub_options)
 
 
 if __name__ == '__main__':

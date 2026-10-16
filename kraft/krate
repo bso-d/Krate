@@ -1401,7 +1401,7 @@ print(str(value).lower() if isinstance(value, bool) else value)' "$1"
 }
 
 identity_apply_idp() {
-  local command="$1" plan="$SCRIPT_DIR/$IDENTITY_IDP_PLAN" sso provider changes
+  local command="$1" plan="$SCRIPT_DIR/$IDENTITY_IDP_PLAN" sso provider changes idp_err
   sso="$(sso_dir)"
   IDENTITY_IDP_CHANGES=()
   if [[ -f "$plan" ]]; then
@@ -1413,14 +1413,19 @@ identity_apply_idp() {
   fi
   kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
   # The provider's representation (its secret masked by Keycloak) or an absence; any other
-  # failure is fatal. The variable is compared and never printed.
-  if provider="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" 2>&1)"; then
+  # failure is fatal. The variable is compared and never printed. Streams stay
+  # split: the JVM prints warnings (e.g. OpenJDK vector-length notes) on stderr
+  # that would otherwise corrupt the parsed JSON.
+  idp_err="$(mktemp)" || die "Cannot create a temporary file"
+  if provider="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" 2>"$idp_err")"; then
     :
-  elif [[ "$provider" == *"not found"* ]]; then
+  elif grep -q "not found" "$idp_err" || [[ "$provider" == *"not found"* ]]; then
     provider=""
   else
+    rm -f "$idp_err"
     die "Keycloak query failed for identity provider $IDENTITY_IDP_ALIAS"
   fi
+  rm -f "$idp_err"
   if [[ -f "$plan" ]]; then
     identity_apply_idp_plan "$plan" "$sso" "$provider"
     if [[ ${#IDENTITY_IDP_CHANGES[@]} -gt 0 ]]; then
@@ -1641,17 +1646,21 @@ identity_put_idp_provider() {
 # removed: the users' federated-identity links survive. Without a provider, .env alone
 # changes and `auth apply` creates the provider with the new value.
 identity_rotate_ping_secret() {
-  local plan="$SCRIPT_DIR/$IDENTITY_IDP_PLAN" sso provider
+  local plan="$SCRIPT_DIR/$IDENTITY_IDP_PLAN" sso provider idp_err
   sso="$(sso_dir)"
   kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
-  if provider="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" 2>&1)"; then
+  idp_err="$(mktemp)" || die "Cannot create a temporary file"
+  if provider="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" 2>"$idp_err")"; then
+    rm -f "$idp_err"
     [[ -f "$plan" ]] || die "Identity provider $IDENTITY_IDP_ALIAS exists but $IDENTITY_IDP_PLAN is missing; restore the plan (krate auth configure <site.json>) before rotating"
     identity_put_idp_provider "$plan" "$sso" update
     identity_journal rotate PING_KEYCLOAK_CLIENT_SECRET "applied to identity provider $IDENTITY_IDP_ALIAS"
     ok "Identity provider $IDENTITY_IDP_ALIAS: secret updated"
-  elif [[ "$provider" == *"not found"* ]]; then
+  elif grep -q "not found" "$idp_err" || [[ "$provider" == *"not found"* ]]; then
+    rm -f "$idp_err"
     ok "Identity provider $IDENTITY_IDP_ALIAS: not applied yet (krate auth apply)"
   else
+    rm -f "$idp_err"
     die "Keycloak query failed for identity provider $IDENTITY_IDP_ALIAS"
   fi
   kcadm_logout

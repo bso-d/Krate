@@ -876,16 +876,19 @@ run_screenshots() {
 # apply); returns non-zero when any step failed. The monitoring secrets are
 # collected for the leak scans.
 #
-# --broker (slice 4b only, lead decision 2026-10-13): the runner owns the
-# stand-in IdP — stub_idp.sh up (the Phase 3 project/port convention) BEFORE
-# auth configure, which then runs with the stand-in's site.json so the broker
-# plan (commit 0: trustEmail=true) is written and applied by auth apply; V19
-# exercises it. The prelude removes a pre-existing plan and runtime.yml first:
-# since b51fe90 broker_plan REFUSES a stale plan whose trustEmail/storeToken/
-# enabled differ, naming the field. The two preflight prerequisites Phase 3
-# proved (P2) are set the same way: the stand-in's PEM at 644 in the truststore
-# dir, and PING_KEYCLOAK_CLIENT_SECRET through the environment (set_env_raw),
-# never on a command line.
+# --broker (slice 4b only): the runner owns the stand-in IdP — stub_idp.sh up
+# (the Phase 3 project/port convention) BEFORE a plain auth configure, so the
+# stand-in is ready but NO broker plan is written or applied: with the broker
+# applied, the browser flow redirects every login to the IdP (defaultProvider)
+# and no login form remains for enrolment or sign-in. V19 applies the broker
+# plan itself (commit 0: trustEmail=true) from the stand-in's site.json,
+# exercises it, then removes it again (live4b 119). The prelude removes a
+# pre-existing plan and runtime.yml first: since b51fe90 broker_plan REFUSES a
+# stale plan whose trustEmail/storeToken/enabled differ, naming the field. The
+# two preflight prerequisites Phase 3 proved (P2) are set the same way: the
+# stand-in's PEM at 644 in the truststore dir, and
+# PING_KEYCLOAK_CLIENT_SECRET through the environment (set_env_raw), never on
+# a command line.
 SC_CONFIGURE=0; SC_SET=0; SC_START=0; SC_APPLY=0; SC_MONITOR=0; SC_STUB=0; SC_CONFIGURE_EV=""; SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
 stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR/site.json
   local cluster rc f
@@ -902,29 +905,24 @@ stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR
   set_env_raw PING_KEYCLOAK_CLIENT_SECRET "$(tr -d '\n' < "$STUB_DIR/.client-secret")"; collect_secrets
   log "broker prelude: stand-in up on 127.0.0.1:$STUB_PORT (cluster $cluster); site file $STUB_DIR/site.json"
 }
-finish_cluster() { # auth apply + monitor up after a paused bring-up (sets SC_APPLY/SC_MONITOR)
-  SC_BROKER_BEFORE="$(cid kafka-92)"
-  cap "$KRATE" auth apply; SC_APPLY=$?
-  SC_BROKER_AFTER="$(cid kafka-92)"
-  cap "$KRATE" monitor up; SC_MONITOR=$?
-  collect_secrets
-  [[ $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]]
-}
-start_cluster() { # [--local] [--broker] [--pause-before-apply]
-  local arg broker=false pause=false
+start_cluster() { # [--local] [--broker]
+  local arg broker=false
   local -a cfg_args=()
   for arg in "$@"; do
     case "$arg" in
       --broker) broker=true ;;
-      --pause-before-apply) pause=true ;;
       *) cfg_args+=("$arg") ;;
     esac
   done
   SC_CONFIGURE=127; SC_SET=127; SC_START=127; SC_APPLY=127; SC_MONITOR=127
   SC_CONFIGURE_EV=""; SC_STUB=0
   if $broker; then
+    # Slice 4b only: the runner owns the stand-in IdP (up, truststore, secret,
+    # site.json) but configures plain: the broker plan is applied by V19
+    # itself and removed right after (live4b 119). A whole-run broker would
+    # redirect every browser login to the IdP (defaultProvider), leaving no
+    # login form for enrolment or sign-in.
     stub_up_for_broker || return 1
-    cfg_args=("$STUB_DIR/site.json")
   fi
   cap "$KRATE" auth configure ${cfg_args[@]+"${cfg_args[@]}"}; SC_CONFIGURE=$?
   # Join, never parse: auth-configure output may carry an apostrophe, which
@@ -933,14 +931,11 @@ start_cluster() { # [--local] [--broker] [--pause-before-apply]
   SC_CONFIGURE_EV="$(printf '%s' "$CAP" | grep -E 'runtime.yml|Kafbat plan' | head -2 | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//' | cut -c1-120)"
   "$KRATE" config set KAFKA_UI_AUTH_CONFIG=runtime.yml >/dev/null; SC_SET=$?
   cap "$KRATE" start; SC_START=$?
-  if $pause; then
-    # Slice 4b enrols realm users here (live4b order 021/022 before 030/031:
-    # the broker plan must not be applied yet); the caller runs
-    # finish_cluster afterwards.
-    [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 ]]
-    return
-  fi
-  finish_cluster || return 1
+  SC_BROKER_BEFORE="$(cid kafka-92)"
+  cap "$KRATE" auth apply; SC_APPLY=$?
+  SC_BROKER_AFTER="$(cid kafka-92)"
+  cap "$KRATE" monitor up; SC_MONITOR=$?
+  collect_secrets
   [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 && $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]]
 }
 
@@ -1864,35 +1859,7 @@ run_phase4() { # slice: 4a|4b|4c
   # (--local, accepted and ignored by the CLI).
   local -a bringup=(--local)
   [[ "$slice" == 4b ]] && bringup=(--broker)
-  if [[ "$slice" == 4b ]]; then
-    # Live4b order (logs 021/022 before 030/031): enrol realm users after
-    # start but before auth apply, while the browser flow still shows the
-    # login form (the applied broker plan redirects it to the IdP).
-    if ! start_cluster "${bringup[@]}" --pause-before-apply; then
-      bringup_failed "$slice" "${run_inv[@]}"
-      return
-    fi
-    local enrol_tsv="$STATE/phase4-enrol.tsv" enrol_rc
-    python3 -I "$GATE_DIR/phase4_perses.py" run --edition-dir "$ED" --base-url "$BASE" \
-      --monitor-project "$MON_PROJECT" --state "$STATE" --enrol-only > "$enrol_tsv" 2>>"$RAW" & CHILD=$!
-    wait "$CHILD" && enrol_rc=0 || enrol_rc=$?
-    CHILD=""
-    phase4_ingest "$enrol_tsv" "$slice" '^$'
-    if [[ $enrol_rc -ne 0 || "$(awk -F '\t' '$1=="setup" {print $2}' "$enrol_tsv" 2>/dev/null)" != PASS ]]; then
-      if [[ -z "${SEEN[${slice}-setup]:-}" ]]; then
-        record "${slice}-setup" "$slice" setup FAIL "pre-apply enrolment exited $enrol_rc without a PASS setup row"
-      fi
-      for id in "${run_inv[@]}"; do
-        crit="${id%%[0-9]*}"
-        record "$id" "$slice" "$crit" NOT_RUN "pre-apply enrolment failed; see phase4-enrol.tsv"
-      done
-      return
-    fi
-    if ! finish_cluster; then
-      bringup_failed "$slice" "${run_inv[@]}"
-      return
-    fi
-  elif ! start_cluster "${bringup[@]}"; then
+  if ! start_cluster "${bringup[@]}"; then
     bringup_failed "$slice" "${run_inv[@]}"
     return
   fi
