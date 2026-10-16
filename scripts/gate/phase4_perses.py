@@ -250,7 +250,12 @@ class Gate(Phase4Gate):
                                headers={'Accept': 'text/html'})
         if 'account is disabled' in page4.lower():
             return {'kind': 'REFUSED', 'reason': 'Account is disabled', 'driver': d}
-        chain = ['creds=%d' % st4]
+        chain = ['creds=%d%s' % (st4, ''.join(
+            tag for tag, mark in ((' invalid-login', 'Invalid username or password'),
+                                  (' disabled', 'Account is disabled'),
+                                  (' pwupdate', 'password-new'),
+                                  (' totp', 'totp'))
+            if mark in page4))]
         while st4 in (302, 303) and h4.get('Location', '').startswith(self.base) and len(chain) <= 12:
             st4, h4, page4 = d.req(h4['Location'], headers={'Accept': 'text/html'})
             if st4 in (302, 303):
@@ -1229,6 +1234,14 @@ class Gate(Phase4Gate):
         log_tail = ' | '.join(
             line.strip()[-120:] for line in (o2p_log or '').splitlines()
             if 'ERROR' in line or 'Error' in line)[-300:]
+        # Request lines name the user: they tell a gateway/proxy 500 (no line
+        # for this user) apart from the redeem refusal (AuthFailure line).
+        user_lines = ' | '.join(
+            line.strip()[-100:] for line in (o2p_log or '').splitlines()
+            if 'p4unverified@live4b.test' in line)[-200:]
+        cb_hint = re.sub(r'\s+', ' ', cb_body or '')[:120]
+        # The 500 page must never carry single-use values into evidence.
+        cb_hint = re.sub(r'(code|state)=[^&\s<>"]{4,}', r'\1=…', cb_hint)
 
         cb_500_ok = (cb_status == 500 and log_confirmed)
 
@@ -1238,8 +1251,9 @@ class Gate(Phase4Gate):
         ]
         status, tokens = aggregate(probes)
         return status, '%s; users add without --email refused rc=%d; emailVerified=false -> ' \
-                       'callback %d log-match=%s o2p-errors=[%s]; walk: live4b 021,112' \
-               % (tokens, rc1, cb_status, log_confirmed, log_tail or 'none')
+                       'callback %d log-match=%s o2p-errors=[%s] user-lines=[%s] cb=[%s]; walk: live4b 021,112' \
+               % (tokens, rc1, cb_status, log_confirmed, log_tail or 'none',
+                  user_lines or 'none', cb_hint or 'none')
 
     def v13(self):
         # walk log 113, test_v13.py: two realm users with equal email local parts (p4dup):
@@ -1380,7 +1394,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         if rc_vol == 0 and (mount_vol or '').strip():
             try:
                 managed_before = len([
-                    n for n in os.listdir(os.path.join(mount_vol.strip(), 'globalrolebindings'))
+                    n for n in os.listdir(os.path.join(mount_vol.strip(), 'data', 'globalrolebindings'))
                     if n.startswith(('krate-admin-', 'krate-viewer-'))])
             except OSError:
                 managed_before = -1
@@ -1415,10 +1429,12 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             ('signin_ok', 'PASS' if signin_ok else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
+        want_ev = ('2/%d exact (%d pre-existing + 2 seeded)' % (pm_want_bindings, managed_before)
+                   if managed_before >= 0 else '2 users exact, >=2 bindings (pre-count unavailable)')
         return status, '%s; issuer migration: monitor up rc=%d, perses-migrate removed %d user(s)/%d binding(s) ' \
-                       '(want 2/%s from %d pre-existing), ' \
+                       '(want %s), ' \
                        'cookie secret rotated: %s, perses-sync healthy: %s, p4v sign-in %s; walk: live4b 114' \
-               % (tokens, rc_up, pm_users, pm_bindings, pm_want_bindings, managed_before,
+               % (tokens, rc_up, pm_users, pm_bindings, want_ev,
                   cookie_rotated, sync_ok, res.get('kind'))
 
     def v15(self):
@@ -1810,6 +1826,26 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             restore = self.v19_remove_broker()
             return 'FAIL', 'broker prologue: auth apply failed (rc %d): %s; removal after failure: %s' % (
                 rc, (err or out).strip()[-160:], restore)
+        # The apply can restart Keycloak for the new trust material while the
+        # brokered body starts immediately (walk 119 had human pacing): wait
+        # for the realm discovery document through the gateway first.
+        disco = self.base + '/identity/realms/krate/.well-known/openid-configuration'
+        disco_drv = self.driver('v19-disco')
+        disco_ok, disco_tries = False, 0
+        t_disco = time.monotonic()
+        while time.monotonic() - t_disco < 180:
+            disco_tries += 1
+            s_dis, _, _ = disco_drv.req(disco, headers={'Accept': 'application/json'}, timeout=15)
+            if s_dis == 200:
+                disco_ok = True
+                break
+            time.sleep(5)
+        disco_elapsed = time.monotonic() - t_disco
+        if not disco_ok:
+            restore = self.v19_remove_broker()
+            return 'FAIL', 'broker prologue: realm discovery not 200 after apply ' \
+                           '(tries=%d +%.1fs); removal after failure: %s' % (
+                               disco_tries, disco_elapsed, restore)
         try:
             status, text = self.v19_brokered()
         except Exception as body_error:
@@ -1863,6 +1899,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         st2, h2, _ = d.req(urllib.parse.urljoin(self.gateway(), loc1), headers={'Accept': 'text/html'})
         auth_url = h2.get('Location', '')
         st3, h3, page3 = d.req(auth_url, headers={'Accept': 'text/html'})
+        auth_msg = page3[:80] if st3 == -1 else ''
 
         # In broker mode, Keycloak redirects to the stand-in IdP login form
         hops = 0
@@ -1878,6 +1915,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         st_auth, h_auth, page_auth = d.req(action, method='POST',
                                            data={'username': 'ping-viewer', 'password': stub_pw, 'credentialId': ''},
                                            headers={'Accept': 'text/html'})
+        form_msg = page_auth[:80] if st_auth == -1 else ''
         while st_auth in (302, 303) and hops < 15:
             hops += 1
             nxt = urllib.parse.urljoin(action, h_auth.get('Location', ''))
@@ -1916,9 +1954,9 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             ('permissions_read', 'PASS' if perm_ok else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; chain /=<%s> start=<%s> auth=<%s> form=<%s@%s%s> creds=<%s> end=<%s> oidc=<%s>; ' \
+        return status, '%s; chain /=<%s> start=<%s> auth=<%s%s> form=<%s@%s%s%s> creds=<%s> end=<%s> oidc=<%s>; ' \
                        'role %s=%s whoami=%s perm=%s; walk: live4b 119' \
-               % (tokens, st1, st2, st3, st3, form_host, form_marks, st_auth,
+               % (tokens, st1, st2, st3, auth_msg, st3, form_host, form_marks, form_msg, st_auth,
                   auth_end, st_oidc, st_r, b_role.strip()[:20], st_w, st_p)
 
     def v20(self):

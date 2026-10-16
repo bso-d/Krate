@@ -185,6 +185,14 @@ try {
   if (await projectLink.count()) await projectLink.click();
   await page.waitForLoadState('networkidle');
   assert(page.url().includes('/projects/'), `the Viewer reached a project page (${page.url().split(/[?#]/)[0]})`);
+  // Content guard: attempt-4 captured an empty shell here (header only, 19 KB)
+  // because both project assertions below are absences, which an unloaded page
+  // passes trivially. Require a rendered heading first so a blank page fails
+  // loudly instead of becoming evidence.
+  await page.getByRole('heading').first().waitFor({ state: 'visible', timeout: 30000 });
+  const contentScope = (await page.locator('main').count()) > 0 ? 'main' : 'body';
+  assert((((await page.textContent(contentScope)) || '').trim().length) > 0,
+    'the project page rendered content, not an empty shell');
   // NEEDS-LIVE-VERIFICATION: the exact absence selectors for the Viewer (Perses
   // v0.54.0): no "Add Project"/create button, no dashboard edit (pencil) control.
   assert((await page.getByRole('button', { name: /(add|create) project/i }).count()) === 0, 'the Viewer sees no "Create Project" control');
