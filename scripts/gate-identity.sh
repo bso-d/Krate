@@ -286,7 +286,7 @@ if [[ -n "$REPO_ARG" ]]; then
   [[ "$resolved" == "$repo_head" ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG ($resolved)" >&2; exit 2; }
   TOPLEVEL="$REPO_ARG"
   PRODUCT_BINDING="$(bind_product "$resolved")" ||
-    { echo "$ED is not bound to the candidate (${PRODUCT_BINDING:-no result}; the lines above name each difference or the error); reinstall the candidate's bundle, delete the files it does not ship and load its images before this gate" >&2; exit 2; }
+    { echo "$ED is not bound to the candidate (${PRODUCT_BINDING:-no result}; the lines above name each difference or the error); reinstall the candidate's bundle, delete the files it does not ship and load its images before this gate (a NOTE about the Docker image store is not fixed by reinstalling: it names the likely cause, a different image store, not a bad bundle)" >&2; exit 2; }
   BOUND=true
   CANDIDATE="$resolved (stated as $CANDIDATE_ARG and resolved in --repo; product byte binding in its own row; static block on that checkout)"
   CANDIDATE_GIT_HEAD="$resolved"
