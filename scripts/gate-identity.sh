@@ -1768,67 +1768,27 @@ phase4_row_w4() {
   local slice="$1"
   section "W4: 5-source reachability census equal to Table 2 of monitoring/README.md"
   local readme_file="$MON_DIR/README.md"
+  local w4_script="$GATE_DIR/phase4_w4.py"
   if [[ ! -f "$readme_file" ]]; then
     phase4_stub W4 "$slice" W "precondition: missing monitoring/README.md"
     return
   fi
-
-  local python_scanner='
-import sys, os, json, re
-
-readme_path = sys.argv[1]
-mon_project = sys.argv[2]
-cluster_project = sys.argv[3]
-
-text = open(readme_path, encoding="utf-8").read()
-if "## Table 2 — Accepted residual reachability" not in text:
-    print("MISSING_TABLE2")
-    sys.exit(1)
-
-table2_part = text.split("## Table 2 — Accepted residual reachability")[1].split("## ")[0]
-table2_rows = []
-for line in table2_part.splitlines():
-    line = line.strip()
-    if not line.startswith("|"):
-        continue
-    cells = [c.strip().strip("`") for c in line.strip("|").split("|")]
-    if len(cells) >= 3 and cells[0] not in ("source", "---", ""):
-        table2_rows.append((cells[0], cells[1], cells[2]))
-
-# Filter for the 5 census sources
-census_rows = [r for r in table2_rows if r[0] in ("host", "monitoring", "perses", "kafka-network", "grafana")]
-
-# Finding F1: check union of ExposedPorts and declared listeners for:
-# loki-gateway:3100, oauth2-proxy:4180, perses-sync:9091
-f1_listeners = {
-    ("monitoring", "loki-gateway", "3100"),
-    ("perses", "oauth2-proxy", "4180"),
-    ("perses", "perses-sync", "9091")
-}
-f1_found = f1_listeners.issubset(set(census_rows))
-
-# Finding F2: check perses-network listeners:
-# perses-sync:9091, perses-gateway:80, perses-gateway:3443
-f2_listeners = {
-    ("perses", "perses-sync", "9091"),
-    ("perses", "perses-gateway", "80"),
-    ("perses", "perses-gateway", "3443")
-}
-f2_found = f2_listeners.issubset(set(census_rows))
-
-if len(census_rows) >= 26 and f1_found and f2_found:
-    print(f"CENSUS_OK: {len(census_rows)} rows verified across 5 sources (F1 and F2 listeners present)")
-    sys.exit(0)
-else:
-    print(f"FAIL: count={len(census_rows)} f1={f1_found} f2={f2_found}")
-    sys.exit(1)
-'
-  local py_out py_rc
-  py_out="$(python3 -I -c "$python_scanner" "$readme_file" "$MON_PROJECT" "$PROJECT" 2>&1)"; py_rc=$?
-
-  local st
-  [[ $py_rc -eq 0 && "$py_out" == *"CENSUS_OK"* ]]; st=$?
-  ok_if W4 "$slice" W "$st" "5-source reachability census matches Table 2 of monitoring/README.md (${py_out##*$'\n'})"
+  if [[ ! -f "$w4_script" ]]; then
+    record W4 "$slice" W FAIL "missing tracked scripts/gate/phase4_w4.py"
+    return
+  fi
+  local cap_w4 st_w4 result_w4
+  cap_w4="$(W4_NGINX_IMAGE="$(envv NGINX_IMAGE)" python3 -I "$w4_script" \
+    --readme "$readme_file" --cluster-project "$PROJECT" --monitor-project "$MON_PROJECT" 2>&1)"; st_w4=$?
+  log "$cap_w4"
+  result_w4="$(printf '%s\n' "$cap_w4" | grep '^RESULT W4 ' | tail -1)"
+  if [[ $st_w4 -eq 0 && "$result_w4" == 'RESULT W4 PASS '* ]]; then
+    record W4 "$slice" W PASS "live reachability census: ${result_w4#RESULT W4 PASS }"
+  elif [[ $st_w4 -eq 2 && "$result_w4" == 'RESULT W4 NOT_RUN '* ]]; then
+    record W4 "$slice" W NOT_RUN "live reachability census: ${result_w4#RESULT W4 NOT_RUN }"
+  else
+    record W4 "$slice" W FAIL "live reachability census: ${result_w4:-script exit $st_w4 without a result}; see run.log"
+  fi
 }
 bringup_failed() { # slice id...: every row FAILs when the fixture never came up
   local slice="$1"; shift
