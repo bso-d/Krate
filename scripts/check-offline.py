@@ -10,8 +10,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 POLICIES = {
     "zk": {"kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"}},
-    "kraft": {"kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"}},
-    "epc": {"kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"}},
+    "kraft": {
+        "kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"},
+        "keycloak": {"LIQUIBASE_ANALYTICS_ENABLED": "false"},
+    },
+    "epc": {
+        "kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"},
+        "keycloak": {"LIQUIBASE_ANALYTICS_ENABLED": "false"},
+    },
     "monitoring": {
         "grafana": {
             "GF_ANALYTICS_REPORTING_ENABLED": "false",
@@ -25,6 +31,10 @@ POLICIES = {
         }
     },
 }
+
+
+# Services under a Compose profile render only with that profile enabled.
+PROFILES = {"kraft": ("sso",), "epc": ("sso",)}
 
 
 def violations(variant, config):
@@ -78,9 +88,10 @@ def perses_violations():
 def main():
     errors = perses_violations()
     for variant in POLICIES:
+        profiles = [arg for name in PROFILES.get(variant, ()) for arg in ("--profile", name)]
         result = subprocess.run(
             ["docker", "compose", "--env-file", str(ROOT / variant / ".env.template"),
-             "-f", str(ROOT / variant / "docker-compose.yml"), "config", "--format", "json"],
+             "-f", str(ROOT / variant / "docker-compose.yml"), *profiles, "config", "--format", "json"],
             cwd=ROOT, text=True, capture_output=True,
         )
         if result.returncode:
@@ -91,7 +102,7 @@ def main():
     if errors:
         print("Offline policy check failed:\n" + "\n".join(errors), file=sys.stderr)
         return 1
-    print("Offline defaults verified: all Kafbat variants, shared Grafana and Perses.")
+    print("Offline defaults verified: all Kafbat variants, Keycloak, shared Grafana and Perses.")
     return 0
 
 
