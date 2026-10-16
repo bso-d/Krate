@@ -1362,6 +1362,24 @@ phase4_screenshots_x4() {
     record X4 "$slice" X FAIL "cannot resolve the Docker host gateway (host.docker.internal) from a container"
     return
   fi
+  # After V24's daemon restart the guard can still be converging when the V rows
+  # end: the story's first page is then a gateway 500 (auth_request to
+  # perses-sync refused). Wait for the serving chain: an anonymous GET is
+  # challenged (302/401), never a 500.
+  local chain_t0 chain_code
+  chain_t0="$(date +%s)"
+  while true; do
+    chain_code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+      --resolve "${BASE_HOST}:${PERSES_GATE_PORT}:127.0.0.1" \
+      "https://${BASE_HOST}:${PERSES_GATE_PORT}/" 2>/dev/null || true)"
+    [[ "$chain_code" =~ ^[0-9]+$ ]] || chain_code=000
+    if [[ "$chain_code" == 302 || "$chain_code" == 401 ]]; then break; fi
+    if [[ $(($(date +%s) - chain_t0)) -ge 180 ]]; then
+      record X4 "$slice" X FAIL "perses gateway still HTTP $chain_code after 180s (story needs the 302/401 challenge)"
+      return
+    fi
+    sleep 5
+  done
   mkdir -p "$outdir" && chmod 755 "$outdir"
 
   pw_v="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["password"])' "$viewer_json" 2>/dev/null)"
