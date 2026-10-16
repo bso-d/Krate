@@ -250,8 +250,16 @@ class Gate(Phase4Gate):
                                headers={'Accept': 'text/html'})
         if 'account is disabled' in page4.lower():
             return {'kind': 'REFUSED', 'reason': 'Account is disabled', 'driver': d}
-        while st4 in (302, 303) and h4.get('Location', '').startswith(self.base):
+        chain = ['creds=%d' % st4]
+        while st4 in (302, 303) and h4.get('Location', '').startswith(self.base) and len(chain) <= 12:
             st4, h4, page4 = d.req(h4['Location'], headers={'Accept': 'text/html'})
+            if st4 in (302, 303):
+                chain.append('->%d %s' % (st4, h4.get('Location', '').split('?')[0][-40:]))
+            else:
+                chain.append('->%d page(%dB%s%s)' % (
+                    st4, len(page4),
+                    ' otp' if ('totp' in page4 or 'name="otp"' in page4) else '',
+                    ' pwupdate' if 'password-new' in page4 else ''))
 
         if st4 == 200 and ('totp' in page4 or 'name="otp"' in page4):
             if not totp_seed:
@@ -280,7 +288,8 @@ class Gate(Phase4Gate):
             st5, h5, page5 = st4, h4, page4
 
         if st5 != 302:
-            return {'kind': 'FAIL', 'status': st5, 'detail': 'credential submission did not redirect to callback'}
+            return {'kind': 'FAIL', 'status': st5,
+                    'detail': 'credential submission did not redirect to callback: %s' % ' '.join(chain)}
 
         cb_url = h5.get('Location', '')
         st_cb, h_cb, b_cb = d.req(cb_url, headers={'Accept': 'text/html'})
@@ -289,18 +298,30 @@ class Gate(Phase4Gate):
         if st_cb == 500:
             return {'kind': 'REFUSED', 'reason': 'callback_500', 'driver': d, 'body': b_cb}
 
-        # Perses OIDC login
-        st_oidc, h_oidc, _ = d.req(self.gateway('/api/auth/providers/oidc/krate/login?rd=%2F'),
-                                   headers={'Accept': 'text/html'})
+        # Perses OIDC login. A 403/500 here is the provider refusing the user
+        # (walk 113: the second equal-local-part user is already registered
+        # with a different oauth context) — surface it as REFUSED with the
+        # OIDC outcome instead of a hollow OK plus a guard-derived role.
+        st_oidc, h_oidc, b_oidc = d.req(self.gateway('/api/auth/providers/oidc/krate/login?rd=%2F'),
+                                        headers={'Accept': 'text/html'})
         hops = 0
         while st_oidc in (302, 303) and hops < 10:
             hops += 1
             nxt = urllib.parse.urljoin(self.gateway(), h_oidc.get('Location', ''))
-            st_oidc, h_oidc, _ = d.req(nxt, headers={'Accept': 'text/html'})
+            st_oidc, h_oidc, b_oidc = d.req(nxt, headers={'Accept': 'text/html'})
+        if st_oidc in (403, 500):
+            return {'kind': 'REFUSED', 'reason': 'oidc_%d' % st_oidc, 'driver': d,
+                    'body': b_oidc, 'status': st_oidc}
 
         st_role, _hr, b_role = d.req(self.gateway('/krate/role'))
         role = b_role.strip() if st_role == 200 else None
         cookies = {c.name: c.value for c in d.jar}
+        if role is None:
+            # A landing without a role means the OIDC login never minted a
+            # session (ended at /sign-in or a refusal page): report, never a
+            # hollow OK that later rows misread as authenticated.
+            return {'kind': 'FAIL', 'status': st_role,
+                    'detail': 'OIDC landing without a role: %s' % b_role.strip()[:80]}
         return {'kind': 'OK', 'driver': d, 'role': role, 'cookies': cookies}
 
     def signin_retry(self, user, label, role='viewer', deadline_s=180):
@@ -762,23 +783,37 @@ class Gate(Phase4Gate):
         cookie_str = '; '.join('%s=%s' % (k, v) for k, v in cookies_v.items()) if isinstance(cookies_v, dict) else ''
         cookie_hdr = {'Cookie': cookie_str}
 
+        # Bodies are schema-valid (walk log 103): Perses validates the document
+        # before the role check, so minimal bodies draw 400 instead of the
+        # asserted 403.
         write_endpoints = [
-            ('POST', '/api/v1/projects', {'metadata': {'name': 'v6-test'}}),
-            ('POST', '/api/v1/projects/krate/dashboards', {'metadata': {'name': 'v6-db'}}),
-            ('PUT', '/api/v1/projects/krate/dashboards/krate-overview', {'metadata': {'name': 'krate-overview'}}),
+            ('POST', '/api/v1/projects',
+             {'kind': 'Project', 'metadata': {'name': 'v6-test'}}),
+            ('POST', '/api/v1/projects/krate/dashboards',
+             {'kind': 'Dashboard', 'metadata': {'name': 'v6-db', 'project': 'krate'}, 'spec': {'layouts': []}}),
+            ('PUT', '/api/v1/projects/krate/dashboards/krate-overview',
+             {'kind': 'Dashboard', 'metadata': {'name': 'krate-overview', 'project': 'krate'}, 'spec': {'layouts': []}}),
             ('DELETE', '/api/v1/projects/krate/dashboards/krate-overview', None),
-            ('POST', '/api/v1/projects/krate/datasources', {'metadata': {'name': 'v6-ds'}}),
+            ('POST', '/api/v1/projects/krate/datasources',
+             {'kind': 'Datasource', 'metadata': {'name': 'v6-ds', 'project': 'krate'},
+              'spec': {'plugin': {'kind': 'PrometheusDatasource',
+                                  'spec': {'proxy': {'kind': 'HTTPProxy',
+                                                     'spec': {'url': 'http://prometheus:9090'}}}}}}),
             ('GET', '/api/v1/projects/krate/secrets', None),
             ('GET', '/api/v1/users', None),
             ('GET', '/api/v1/globalroles', None),
-            ('POST', '/proxy/unsaved/projects/krate/datasources/flags', {}),
+            ('POST', '/proxy/unsaved/projects/krate/datasources/flags',
+             {'method': 'GET', 'spec': {'kind': 'VictoriaLogsDatasource',
+                                        'spec': {'proxy': {'kind': 'HTTPProxy',
+                                                           'spec': {'url': 'http://victorialogs:9428'}}}}}),
         ]
         statuses = []
         for method, path, data in write_endpoints:
             st, _h, _b = self.direct_perses(method, path, headers=cookie_hdr, data=data)
             statuses.append(st)
 
-        writes_403 = all(s == 403 for s in statuses)
+        # The walk tolerates 403/405 on direct writes (walk log 103).
+        writes_403 = all(s in (403, 405) for s in statuses)
 
         s_r1, _h, _b = self.direct_perses('GET', '/api/v1/projects', headers=cookie_hdr)
         s_r2, _h, _b = self.direct_perses('GET', '/api/v1/projects/krate/dashboards', headers=cookie_hdr)
@@ -790,9 +825,11 @@ class Gate(Phase4Gate):
         cookie_hdr_a = {'Cookie': cookie_str_a}
 
         s_create, _h, _b = self.direct_perses('POST', '/api/v1/projects', headers=cookie_hdr_a,
-                                             data={'metadata': {'name': 'admin-ctrl'}})
+                                             data={'kind': 'Project', 'metadata': {'name': 'admin-ctrl'},
+                                                   'spec': {'display': {'name': 'Admin Ctrl'}}})
         s_delete, _h, _b = self.direct_perses('DELETE', '/api/v1/projects/admin-ctrl', headers=cookie_hdr_a)
-        admin_ok = (s_create == 200 and s_delete == 204)
+        # The walk accepts create 200/201 (walk log 103).
+        admin_ok = (s_create in (200, 201) and s_delete == 204)
 
         probes = [
             ('direct_writes_403', 'PASS' if writes_403 else 'FAIL'),
@@ -1189,6 +1226,9 @@ class Gate(Phase4Gate):
         o2p_cid = self.mon_container('oauth2-proxy')
         rc_log, o2p_log, _ = p2.docker('logs', o2p_cid, timeout=30) if o2p_cid else (-1, '', '')
         log_confirmed = "email in id_token (p4unverified@live4b.test) isn't verified" in o2p_log
+        log_tail = ' | '.join(
+            line.strip()[-120:] for line in (o2p_log or '').splitlines()
+            if 'ERROR' in line or 'Error' in line)[-300:]
 
         cb_500_ok = (cb_status == 500 and log_confirmed)
 
@@ -1198,8 +1238,8 @@ class Gate(Phase4Gate):
         ]
         status, tokens = aggregate(probes)
         return status, '%s; users add without --email refused rc=%d; emailVerified=false -> ' \
-                       'callback %d log-match=%s ("email in id_token isn\'t verified"); walk: live4b 021,112' \
-               % (tokens, rc1, cb_status, log_confirmed)
+                       'callback %d log-match=%s o2p-errors=[%s]; walk: live4b 021,112' \
+               % (tokens, rc1, cb_status, log_confirmed, log_tail or 'none')
 
     def v13(self):
         # walk log 113, test_v13.py: two realm users with equal email local parts (p4dup):
@@ -1239,27 +1279,33 @@ class Gate(Phase4Gate):
         d1 = self.driver('v13-dup1')
         st_first = -1
         whoami_dup = False
+        res1, res2 = {'kind': 'NOT_RUN'}, {'kind': 'NOT_RUN'}
         try:
             res1 = self.signin('p4dup1', 'v13-dup1')
             st_first = 200 if res1.get('kind') == 'OK' else res1.get('status', -1)
             st_who, _h, b_who = d1.req(self.gateway('/api/v1/user/whoami'))
-            whoami_dup = (st_who == 200 and '"name":"p4dup1"' in b_who)
+            # Perses names the native user by the email local part (walk 113).
+            whoami_dup = (st_who == 200 and '"name":"p4dup"' in b_who)
         except Exception:
             whoami_dup = False
 
-        # Sign in second user (equal email local part 'p4dup')
+        # Sign in second user (equal email local part 'p4dup'): the walk
+        # refuses it at the Perses OIDC callback (403/500), which signin()
+        # surfaces as REFUSED with the OIDC outcome.
         st_second_refused = False
+        second_ev = ''
         try:
             res2 = self.signin('p4dup2', 'v13-dup2')
             st_second_refused = (res2.get('kind') == 'REFUSED' or res2.get('status') in (403, 500))
-        except Exception:
-            st_second_refused = True
+            second_ev = str(res2.get('reason', res2.get('detail', '')))[:80]
+        except Exception as error:
+            second_ev = '%s: %s' % (type(error).__name__, error)
 
         # Verify first user still unaffected
         st_p1, _h, _b = d1.req(self.gateway('/api/v1/projects'))
         first_unaffected = (st_p1 == 200)
 
-        # Cleanup test users
+        # Cleanup test users (realm users plus the native user file, as the walk does).
         if uid1:
             try:
                 kc.call('delete', 'users/' + uid1, '-r', p2.REALM)
@@ -1270,6 +1316,21 @@ class Gate(Phase4Gate):
                 kc.call('delete', 'users/' + uid2, '-r', p2.REALM)
             except Exception:
                 pass
+        # The file DB lives under data/ in the volume (the walk removes
+        # /data/data/users/p4dup.json through a mount); a leaked native user
+        # would poison the next attempt with the same already-registered
+        # conflict this row asserts for the second user.
+        native_cleaned = 'absent'
+        rc_vol, mount_vol, _ = p2.docker('volume', 'inspect', '-f', '{{.Mountpoint}}',
+                                         '%s_perses_data' % self.monitor_project)
+        if rc_vol == 0 and (mount_vol or '').strip():
+            native_path = os.path.join(mount_vol.strip(), 'data', 'users', 'p4dup.json')
+            if os.path.exists(native_path):
+                try:
+                    os.remove(native_path)
+                    native_cleaned = 'removed'
+                except OSError as error:
+                    native_cleaned = 'FAILED: %s' % error
 
         probes = [
             ('first_user_signin', 'PASS' if (st_first == 200 and whoami_dup) else 'FAIL'),
@@ -1277,9 +1338,11 @@ class Gate(Phase4Gate):
             ('first_user_unaffected', 'PASS' if first_unaffected else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; first user p4dup1 signin=%s whoami=%s; ' \
-                       'second user p4dup2 refused=%s; first unaffected=%s; walk: live4b 113' \
-               % (tokens, st_first, whoami_dup, st_second_refused, first_unaffected)
+        return status, '%s; first user p4dup1 signin=%s(%s) whoami=%s; ' \
+                       'second user p4dup2 %s refused=%s (%s); first unaffected=%s; native %s; walk: live4b 113' \
+               % (tokens, st_first, res1.get('kind'), whoami_dup,
+                  res2.get('kind'), st_second_refused, second_ev or res2.get('kind'),
+                  first_unaffected, native_cleaned)
 
     def v14(self):
         # walk log 114: seeded Perses users from foreign issuer + PERSES_ISSUER_APPLIED:
@@ -1807,8 +1870,11 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             hops += 1
             nxt = urllib.parse.urljoin(auth_url, h3.get('Location', ''))
             st3, h3, page3 = d.req(nxt, headers={'Accept': 'text/html'})
-
         action = self.form_action(page3)
+        form_host = urllib.parse.urlparse(urllib.parse.urljoin(auth_url, action or '')).netloc
+        form_marks = [k for k in ('kc-form-login', 'name="username"', 'error', 'Identity provider')
+                      if k in page3]
+
         st_auth, h_auth, page_auth = d.req(action, method='POST',
                                            data={'username': 'ping-viewer', 'password': stub_pw, 'credentialId': ''},
                                            headers={'Accept': 'text/html'})
@@ -1816,6 +1882,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             hops += 1
             nxt = urllib.parse.urljoin(action, h_auth.get('Location', ''))
             st_auth, h_auth, page_auth = d.req(nxt, headers={'Accept': 'text/html'})
+        auth_end = 'cb' if '/oauth2/callback' in (h_auth.get('Location', '') or '') else h_auth.get('Location', '')[:40]
 
         # Perses OIDC login
         st_oidc, h_oidc, _ = d.req(self.gateway('/api/auth/providers/oidc/krate/login?rd=%2F'),
@@ -1849,10 +1916,10 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             ('permissions_read', 'PASS' if perm_ok else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; ping-viewer signs in through stand-in IdP: role %s, whoami ping-viewer, ' \
-                       '7 read scopes; exercises commit 0 (trustEmail=true: the brokered user ' \
-                       'arrives e-mail-verified and signs in); walk: live4b 119' \
-               % (tokens, b_role.strip())
+        return status, '%s; chain /=<%s> start=<%s> auth=<%s> form=<%s@%s%s> creds=<%s> end=<%s> oidc=<%s>; ' \
+                       'role %s=%s whoami=%s perm=%s; walk: live4b 119' \
+               % (tokens, st1, st2, st3, st3, form_host, form_marks, st_auth,
+                  auth_end, st_oidc, st_r, b_role.strip()[:20], st_w, st_p)
 
     def v20(self):
         # walk evidence v20-baseline.json: brokers, kafka-ui, keycloak, keycloak-db, cluster proxy unchanged.
