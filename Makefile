@@ -294,6 +294,8 @@ bundle: offline-check
 >    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit monitoring/perses monitoring/idp "$$bundle_dir/monitoring/"
 >    # Local test runs leave Python bytecode beside discovery.py; never ship it.
 >    find "$$bundle_dir/monitoring" -name __pycache__ -type d -prune -exec rm -rf {} +
+>    # Finder metadata from a browsed working copy is not product: the binding check would refuse it.
+>    find "$$bundle_dir/monitoring" -type f \( -name .DS_Store -o -name '._*' \) -delete
 >    # Only the local default is copied: never stage site auth files or secrets.
 >    mkdir -p "$$bundle_dir/monitoring/auth"
 >    cp monitoring/auth/local.ini "$$bundle_dir/monitoring/auth/local.ini"

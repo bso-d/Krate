@@ -3944,7 +3944,9 @@ def check_loki_gateway(checks):
       f'monitoring/loki-gateway must be on the monitoring network only; got {list(service.get("networks") or {})}')
     e(list(service.get('depends_on') or {}) == ['loki'], f'monitoring/loki-gateway must depend on loki; got {service.get("depends_on")}')
     loki = json.loads(result.stdout)['services'].get('loki') or {}
-    e('-server.grpc-listen-address=127.0.0.1' in (loki.get('command') or []),
+    # Go's flag package keeps the last occurrence, so the last -server.grpc-listen-address decides.
+    grpc_listen = [arg for arg in (loki.get('command') or []) if arg.startswith('-server.grpc-listen-address')]
+    e(grpc_listen[-1:] == ['-server.grpc-listen-address=127.0.0.1'],
       'monitoring/loki must bind its gRPC listener to 127.0.0.1 (-server.grpc-listen-address=127.0.0.1): it is used '
       f'in-process only, and a peer reaching loki:9096 is a residual Table 2 does not list (W4); got {loki.get("command")}')
     volumes = [(volume.get('source', ''), volume.get('target'), volume.get('read_only')) for volume in service.get('volumes') or []]
