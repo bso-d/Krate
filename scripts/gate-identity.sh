@@ -552,7 +552,8 @@ hold_lock() { # a live process holds the identity lock until release_lock
 release_lock() { kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; }
 
 fixture_reset() {
-  local n; for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
+  local n; for n in $(docker ps -aq --filter "label=krate.gate=w4-probe"); do docker rm -f "$n" >/dev/null 2>&1; done  # a W4 probe left by a killed run
+  for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
@@ -1264,18 +1265,29 @@ phase4_leak_scan_z4a() {
       add_secret "$v"
     done < "$STATE/phase4-secrets.txt"
   fi
-  local -a cnames=() places=("$JOURNAL" "$RECEIPT")
+  local -a cnames=() places=("$JOURNAL" "$RECEIPT") unread=()
+  local listing="" out cn ps_failed=0
   if command -v docker >/dev/null 2>&1; then
+    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
+    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
+    # A listing or a log that cannot be read fails the row: a scan over nothing is not a clean scan.
+    out="$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$out"$'\n'
+    out="$(docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$out"$'\n'
+    out="$(docker ps -a --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$(printf '%s\n' "$out" | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-")"$'\n'
     while IFS= read -r cn; do
       [[ -n "$cn" ]] || continue
       cnames+=("$cn")
-      docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
-      places+=("$STATE/docker-$cn.log")
-    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
-    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
-    done < <({ docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}'
-              docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}'
-              docker ps -a --format '{{.Names}}' | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-"; } 2>/dev/null | sort -u)
+      if docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1; then
+        places+=("$STATE/docker-$cn.log")
+      else
+        unread+=("$cn")
+      fi
+    done < <(printf '%s' "$listing" | sort -u)
+  else
+    ps_failed=1
   fi
   local mf psd
   for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
@@ -1307,8 +1319,8 @@ phase4_leak_scan_z4a() {
   done
 
   local scan_err="$STATE/leak-scan.$$.err"
-  local hits
-  hits=$(python3 -I -c '
+  local hits unreadable_n scan_out
+  scan_out=$(python3 -I -c '
 import sys, os
 
 all_secrets = [line.strip() for line in open(sys.argv[1], encoding="utf-8", errors="replace") if len(line.strip()) >= 6]
@@ -1318,6 +1330,7 @@ raw_file = sys.argv[4]
 raw_no_disp = sys.argv[5]
 
 hits = 0
+unreadable = []
 
 for p in places:
     if not os.path.isfile(p):
@@ -1325,6 +1338,8 @@ for p in places:
     try:
         content = open(p, "rb").read().decode("utf-8", "replace")
     except OSError:
+        unreadable.append(os.path.basename(p))
+        print(f"UNREADABLE: {os.path.basename(p)}", file=sys.stderr)
         continue
     for s in all_secrets:
         c = content.count(s)
@@ -1370,7 +1385,7 @@ if os.path.isdir(ed_auth):
             except OSError:
                 pass
 
-print(hits)
+print(hits, len(unreadable))
 ' "$secrets_all" "$secrets_temp" "$files_list" "$RAW" "$raw_without_display" "$ED/auth/keycloak" 2>"$scan_err")
   if [[ -f "$scan_err" ]]; then
     cat "$scan_err" >> "$RAW"
@@ -1378,9 +1393,14 @@ print(hits)
   fi
 
   rm -f "$secrets_all" "$secrets_temp" "$files_list" "$raw_without_display"
-  local st
-  [[ "$hits" == "0" ]]; st=$?
-  ok_if Z4a "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): $hits hits; walk: live4a 901"
+  read -r hits unreadable_n <<<"${scan_out:-}"
+  local st gaps=""
+  (( ps_failed )) && gaps+="; the container listing failed"
+  (( ${#cnames[@]} )) || gaps+="; no container listed"
+  (( ${#unread[@]} )) && gaps+="; logs not read: ${unread[*]}"
+  [[ "${unreadable_n:-}" == "0" ]] || gaps+="; unreadable scan inputs: ${unreadable_n:-the scan did not finish}"
+  [[ "${hits:-}" == "0" && -z "$gaps" ]]; st=$?
+  ok_if Z4a "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): ${hits:-?} hits$gaps; walk: live4a 901"
 }
 phase4_screenshots_x4() {
   local slice="$1" viewer_json="$STATE/p4/kc-p4v.json" admin_json="$STATE/p4/kc-p4both.json"
@@ -1478,18 +1498,29 @@ phase4_leak_scan_z4b() {
       add_secret "$v"
     done < "$STATE/phase4-secrets.txt"
   fi
-  local -a cnames=() places=("$JOURNAL" "$RECEIPT")
+  local -a cnames=() places=("$JOURNAL" "$RECEIPT") unread=()
+  local listing="" out cn ps_failed=0
   if command -v docker >/dev/null 2>&1; then
+    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
+    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
+    # A listing or a log that cannot be read fails the row: a scan over nothing is not a clean scan.
+    out="$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$out"$'\n'
+    out="$(docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$out"$'\n'
+    out="$(docker ps -a --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$(printf '%s\n' "$out" | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-")"$'\n'
     while IFS= read -r cn; do
       [[ -n "$cn" ]] || continue
       cnames+=("$cn")
-      docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
-      places+=("$STATE/docker-$cn.log")
-    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
-    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
-    done < <({ docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}'
-              docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}'
-              docker ps -a --format '{{.Names}}' | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-"; } 2>/dev/null | sort -u)
+      if docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1; then
+        places+=("$STATE/docker-$cn.log")
+      else
+        unread+=("$cn")
+      fi
+    done < <(printf '%s' "$listing" | sort -u)
+  else
+    ps_failed=1
   fi
   local mf psd
   for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
@@ -1521,8 +1552,8 @@ phase4_leak_scan_z4b() {
   done
 
   local scan_err="$STATE/leak-scan-z4b.$$.err"
-  local hits
-  hits=$(python3 -I -c '
+  local hits unreadable_n scan_out
+  scan_out=$(python3 -I -c '
 import sys, os
 
 all_secrets = [line.strip() for line in open(sys.argv[1], encoding="utf-8", errors="replace") if len(line.strip()) >= 6]
@@ -1537,6 +1568,7 @@ banned_patterns = [
 ]
 
 hits = 0
+unreadable = []
 
 for p in places:
     if not os.path.isfile(p):
@@ -1544,6 +1576,8 @@ for p in places:
     try:
         content = open(p, "rb").read().decode("utf-8", "replace")
     except OSError:
+        unreadable.append(os.path.basename(p))
+        print(f"UNREADABLE: {os.path.basename(p)}", file=sys.stderr)
         continue
     for s in all_secrets:
         c = content.count(s)
@@ -1595,7 +1629,7 @@ if os.path.isdir(ed_auth):
             except OSError:
                 pass
 
-print(hits)
+print(hits, len(unreadable))
 ' "$secrets_all" "$secrets_temp" "$files_list" "$RAW" "$raw_without_display" "$ED/auth/keycloak" 2>"$scan_err")
   if [[ -f "$scan_err" ]]; then
     cat "$scan_err" >> "$RAW"
@@ -1603,9 +1637,14 @@ print(hits)
   fi
 
   rm -f "$secrets_all" "$secrets_temp" "$files_list" "$raw_without_display"
-  local st
-  [[ "$hits" == "0" ]]; st=$?
-  ok_if Z4b "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): $hits hits"
+  read -r hits unreadable_n <<<"${scan_out:-}"
+  local st gaps=""
+  (( ps_failed )) && gaps+="; the container listing failed"
+  (( ${#cnames[@]} )) || gaps+="; no container listed"
+  (( ${#unread[@]} )) && gaps+="; logs not read: ${unread[*]}"
+  [[ "${unreadable_n:-}" == "0" ]] || gaps+="; unreadable scan inputs: ${unreadable_n:-the scan did not finish}"
+  [[ "${hits:-}" == "0" && -z "$gaps" ]]; st=$?
+  ok_if Z4b "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): ${hits:-?} hits$gaps"
 }
 phase4_row_w1() {
   local slice="$1"
