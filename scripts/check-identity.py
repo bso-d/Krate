@@ -84,7 +84,7 @@ UI_ATTRIBUTE_KEYS = {'pkce.code.challenge.method', 'post.logout.redirect.uris', 
                      'backchannel.logout.session.required', 'backchannel.logout.revoke.offline.tokens'}
 # Kafbat RBAC resources a viewer may only `view`; topics add analysis_view (and messages_read on opt-in); ksql never.
 VIEW_RESOURCES = ('applicationconfig', 'clusterconfig', 'topic', 'consumer', 'schema', 'connect', 'connector', 'acl', 'audit', 'client_quotas')
-# The viewer never sees applicationconfig: its view renders the running configuration, client secret included.
+# The viewer never sees applicationconfig: with dynamic configuration on, its view returns the running configuration, client secret included.
 VIEWER_RESOURCES = tuple(resource for resource in VIEW_RESOURCES if resource != 'applicationconfig')
 CLUSTERS = ['cluster-a', 'cluster-b.2']
 # Site keys configure-dual.py no longer reads (they moved to .env): the example must not carry them.

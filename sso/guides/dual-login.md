@@ -138,9 +138,13 @@ decision 6); the Kafbat roles must name the groups that exist in the realm.
 
 ## What a viewer can do
 
-The `viewer` role has `view` on every Kafbat resource and `analysis_view` on
-topics. Message payloads are not included: `messages_read` is granted only
-when the site opts in with `KAFKA_UI_VIEWER_MESSAGES=true` in `.env` (or
+The `viewer` role has `view` on every Kafbat resource except `applicationconfig`
+and `ksql`, and `analysis_view` on topics. The `applicationconfig` view returns
+the running Kafbat configuration, client secret included, when Kafbat's
+dynamic configuration is enabled, so the viewer never holds that permission.
+Message payloads are not included:
+`messages_read` is granted only when the site opts in with
+`KAFKA_UI_VIEWER_MESSAGES=true` in `.env` (or
 `./krate auth configure --viewer-messages`), followed by
 `./krate auth configure --force` and `./krate auth apply`. The
 `administrator` role has every action on every resource, including KSQL.
@@ -154,12 +158,28 @@ redirected (302) to the Keycloak login, also for API calls.
 | Topics | list topics, topic details, configs, active producers, consumer groups of a topic, topic analysis results | create, clone, recreate, update, delete a topic; add partitions; change the replication factor; start or cancel an analysis |
 | Messages | nothing, unless `KAFKA_UI_VIEWER_MESSAGES=true`: read messages and register smart filters | read messages (default), produce messages, delete messages |
 | Consumer groups | list groups, group details, lag | delete a group, reset offsets, delete offsets of a topic |
-| Schema registry | list and read schemas and compatibility levels | create or delete schemas, change compatibility |
-| Kafka Connect | list connects, connectors, tasks, plugins | create, delete, configure, restart connectors or tasks, reset offsets, validate a plugin config |
-| ACLs and quotas | list ACLs (also as CSV), list client quotas | create, delete or sync ACLs, change quotas |
+| Schema registry (not deployed) | list and read schemas and compatibility levels | create or delete schemas, change compatibility |
+| Kafka Connect (not deployed) | list connects, connectors, tasks, plugins | create, delete, configure, restart connectors or tasks, reset offsets, validate a plugin config |
+| ACLs and quotas | list client quotas | create, delete or sync ACLs, change quotas |
 | KSQL | nothing | execute statements, list streams or tables |
-| Application config | read the current Kafbat configuration (`GET /api/config`) | restart with a new configuration, upload related files, validate a configuration |
+| Application config | nothing: the role has no `applicationconfig` permission | read the current Kafbat configuration (`GET /api/config`), restart with a new configuration, upload related files, validate a configuration |
 | Audit | read the audit configuration | - |
+
+Krate's brokers run without an ACL authorizer, and Krate deploys no Schema
+Registry, Kafka Connect or KSQL server. Asked for ACLs, a broker answers "No
+Authorizer is configured on the broker". These requests failed with 500 or 400,
+not with a role refusal: the viewer's ACL list (500), its four connector
+requests (500) and two of its three schema requests (400), and the
+administrator's ACL create (500), connector (500) and schema (400) requests
+(gate cases K2, K3, K5, KRaft edition). The viewer's ACL create, delete and sync
+requests were refused with 403 (K3).
+
+The gate saw the viewer read clusters, brokers, topics, topic configurations,
+active producers, consumer groups and lag with 200 (K2). It saw every entry in
+the "cannot" column refused with 403 (K2 to K4) except Kafka Connect, the schema
+create and delete requests and the related-files upload, which no case saw
+refused. The "can" entries for topic analysis results, schemas, connectors,
+client quotas and audit rest on the role configuration alone.
 
 Two endpoints have no role check in Kafbat v1.5.0 and are reachable by every
 signed-in user, including a viewer; they are accepted as viewer-reachable:
@@ -272,10 +292,13 @@ request.
   and `/logout/connect` paths (prefixes: the base paths and everything below
   them; `/actuator` alone is Spring's endpoint discovery page); metrics per cluster are read through the
   signed-in API (`/api/clusters/<name>/metrics`, viewer permission).
-- The viewer role has no `applicationconfig` permission: that view renders
-  the running Kafbat configuration, client secret included. Viewers see
-  clusters, brokers, topics, consumers, schemas, connectors, ACLs, audit and
-  quotas read-only.
+- The viewer role has no `applicationconfig` permission: with dynamic
+  configuration enabled, that view returns the running Kafbat configuration,
+  client secret included. Viewers see clusters, brokers, topics, consumer
+  groups, client quotas and audit read-only. The role also carries read access
+  to schemas, connectors and ACLs, but Krate deploys no Schema Registry or Kafka
+  Connect and its brokers have no ACL authorizer (see the note under "What a
+  viewer can do").
 - `./krate auth configure --no-viewer-messages` withdraws the message-payload
   opt-in (`KAFKA_UI_VIEWER_MESSAGES=false`); re-run `./krate auth configure
   --force` and `./krate auth apply` so `runtime.yml` and the UI follow.

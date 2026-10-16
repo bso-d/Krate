@@ -94,12 +94,13 @@ changes go through `./krate` or `kcadm` from the host, with a backup first.
 ### Support visibility
 
 **PROPOSED (owner to confirm):** a support engineer who is not a host operator
-may see `./krate identity status`, the identity journal, and
-`./krate identity users list`. They do not get `.env`, `./krate credentials`,
-or the backups. In Kafbat (Phase 2) a viewer sees metrics, consumer lag and
-topic metadata, and does not see message payloads unless the site opts in with
-`KAFKA_UI_VIEWER_MESSAGES=true` (the table of what a viewer can and cannot do
-is in [dual-login.md](dual-login.md)).
+gets no shell, Docker, filesystem or `./krate` access. A host operator may share
+the output of `./krate identity status`, the identity journal, and
+`./krate identity users list` with that engineer. The operator does not share
+`.env`, `./krate credentials`, or the backups. In Kafbat (Phase 2) a viewer sees
+metrics, consumer lag and topic metadata, and does not see message payloads
+unless the site opts in with `KAFKA_UI_VIEWER_MESSAGES=true` (the table of what a
+viewer can and cannot do is in [dual-login.md](dual-login.md)).
 
 ### Claim-to-permission contract
 
@@ -924,14 +925,17 @@ covers the required user lifecycle; the master realm stays off the proxy
 ### 3. Support visibility (confirm)
 
 Implemented for Phase 1: `identity status`, the journal and `users list`; no
-`.env`, no `credentials`, no backups. Implemented for Phase 2 (Kafbat side):
-viewer = `view` on every resource plus `analysis_view` on topics,
-`messages_read` only when the site sets `KAFKA_UI_VIEWER_MESSAGES=true` in
-`.env`; never `create`, `edit`, `delete`, `messages_produce`,
-`messages_delete`, `reset_offsets`, and never `ksql` (the Kafbat action names
-are from its RBAC reference [S12]). The preflight refuses a `runtime.yml`
-whose viewer reads messages without that opt-in. Source: the handover
-("Default support visibility should be metrics, lag and approved metadata").
+`.env`, no `credentials`, no backups. The handover adds that support credentials
+give no shell, Docker, filesystem or operational CLI access. Implemented for
+Phase 2 (Kafbat side):
+viewer = `view` on every resource except `applicationconfig` plus
+`analysis_view` on topics, `messages_read` only when the site sets
+`KAFKA_UI_VIEWER_MESSAGES=true` in `.env`; never `create`, `edit`, `delete`,
+`messages_produce`, `messages_delete`, `reset_offsets`, and never `ksql` (the
+Kafbat action names are from its RBAC reference [S12]). The preflight refuses a
+`runtime.yml` whose viewer reads messages without that opt-in. Source: the
+handover ("Default support visibility should be metrics, lag and approved
+metadata").
 
 ### 4. MFA and session defaults (confirm)
 

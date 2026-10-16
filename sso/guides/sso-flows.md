@@ -9,11 +9,11 @@ sequenceDiagram
     participant KC as Keycloak
     participant PF as PingFederate
     participant AD as Active Directory
-    alt Shared Admin login
+    alt Shared Admin login (SSO off: no Keycloak)
         User->>UI: Enter shared username and password
         UI->>UI: Check app credential and grant Admin
-    else SSO login
-        User->>UI: Click Sign in with SSO
+    else SSO login (Kafbat has no form login)
+        User->>UI: Click Log in with Keycloak
         UI-->>User: Redirect to Keycloak
         User->>KC: Start OIDC sign-in
         KC-->>User: Redirect to PingFederate
@@ -21,7 +21,7 @@ sequenceDiagram
         PF->>AD: Apply identity and group policy
         PF-->>KC: Return identity and group claims
         KC-->>UI: Return signed OIDC identity and groups
-        UI->>UI: Map Viewer or Admin; deny unmapped users
+        UI->>UI: Map Viewer or Admin, deny unmapped users
     end
     UI-->>User: Start app session
 ```
@@ -29,7 +29,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     A[Existing AD user] --> B[IAM grants app access and Viewer or Admin group]
-    B --> C[User selects SSO]
+    B --> C[User presses Log in with Keycloak]
     C --> D[PingFederate authenticates user]
     D --> E[Keycloak maps AD group]
     E --> F{Kafbat group mapping}

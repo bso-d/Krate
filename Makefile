@@ -72,7 +72,7 @@ help:
 >  make sso-config VARIANT=epc SSO_SETTINGS=sso/site.json
 >                                                Generate opt-in SSO config (no activation)
 >  make kafbat-ui ARCH=amd64                     Build native Kafbat login + SSO image (online build host)
->  make dual-config SSO_SETTINGS=sso/site.json     Generate shared Admin + SSO configuration
+>  make dual-config SSO_SETTINGS=sso/site.json     Generate Kafbat runtime.yml and the PingFederate plan (no shared form login)
 >  make test                                      Alias for make check
 >  make validate                                  Alias for make check
 >  make bundle VERSION=v2 ARCH=amd64              Build Krate and EPC bundles

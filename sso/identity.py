@@ -444,8 +444,9 @@ def summary(data, path, outcome):
 def kafbat_role(name, group, clusters, admin=False, viewer_messages=False):
     """One Kafbat RBAC role whose only subject is a realm group carried in the `groups` claim.
 
-    The viewer gets `view` on every resource except `applicationconfig` (its view
-    renders the running configuration, client secret included) and `analysis_view`
+    The viewer gets `view` on every resource except `applicationconfig` (its view can
+    return the running configuration, client secret included, when Kafbat's dynamic
+    configuration is on) and `analysis_view`
     on topics; `messages_read` only when the site opted in. KSQL has `execute`
     only, which also permits mutations, so only the administrator gets it.
     """

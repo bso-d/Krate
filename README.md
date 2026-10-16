@@ -362,7 +362,7 @@ epc/         Two-broker RHEL setup and krate command script
 monitoring/  Shared KRaft/EPC dashboards, alerts, and log collection
 docker/      Broker image definitions: release and debug versions
 sso/         SSO activation helpers and operator guides
-kafbat-ui/   Customized Kafbat UI build for shared login and SSO
+kafbat-ui/   Customized Kafbat UI build: shared login without SSO, or Keycloak SSO
 Makefile     Package builds and source checks
 ```
 
@@ -413,7 +413,7 @@ Krate uses the projects below. Credit belongs to their owners, maintainers, and 
 | [Confluent container images](https://github.com/confluentinc/cp-docker-images) | Confluent and contributors | Kafka and ZooKeeper images in the legacy edition |
 | [Docker Engine](https://www.docker.com/), [Compose](https://github.com/docker/compose), and [Buildx](https://github.com/docker/buildx) | Docker and project contributors | Running containers and building broker images |
 | [containerd](https://containerd.io/) | containerd maintainers and contributors; a CNCF project | Container runtime included with the Docker packages |
-| [Kafbat UI](https://github.com/kafbat/kafka-ui) | Kafbat and contributors | Browser interface for Kafka. KRaft and EPC ship a modified v1.5.0 build that adds the SSO button; the image contains the upstream license, notice, and patches. See the [build notes](kafbat-ui/README.md). |
+| [Kafbat UI](https://github.com/kafbat/kafka-ui) | Kafbat and contributors | Browser interface for Kafka. KRaft and EPC ship a modified v1.5.0 build with a native login page and Keycloak-only sign-in when SSO is on; the image contains the upstream license, notice, and patches. See the [build notes](kafbat-ui/README.md). |
 | [Eclipse Temurin](https://adoptium.net/) | Eclipse Adoptium Working Group and OpenJDK contributors | Java runtime of the KRaft and EPC Kafbat UI image |
 | [Keycloak](https://github.com/keycloak/keycloak) | Keycloak project and contributors; a CNCF project | SSO connection between Kafbat and the company identity provider |
 | [PostgreSQL](https://www.postgresql.org/) | PostgreSQL Global Development Group | Keycloak data storage |

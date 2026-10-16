@@ -3,7 +3,8 @@
 This guide applies to EPC and regular Krate. Kafbat sends an SSO user to the
 Keycloak service in the same installation. Keycloak sends the user to
 PingFederate. PingFederate authenticates the person and returns AD groups.
-The shared Kafbat Admin account does not use these services.
+The shared Kafbat Admin account does not use these services, and Kafbat does
+not accept it while SSO is active.
 
 ## 1. Agree the registration
 
@@ -29,11 +30,11 @@ this callback in PingFederate. Do not use a wildcard redirect URI.
 
 ## 2. Decide the sign-in policy
 
-The Kafbat SSO button starts OIDC with Keycloak. Keycloak's browser flow sends
-that request to PingFederate. The text entered in Kafbat's username/email field
-is an optional `login_hint`; it does not authenticate the user. PingFederate
-can reuse an enterprise session. It can also require a password or MFA under
-IAM policy. The user must never type AD credentials into the shared Kafbat form.
+Kafbat's login page has one button, "Log in with Keycloak". It starts OIDC with
+Keycloak, and Keycloak's browser flow sends that request to PingFederate. Kafbat
+shows no username or password field in this mode. PingFederate can reuse an
+enterprise session. It can also require a password or MFA under IAM policy. The
+user enters AD credentials only on the PingFederate page.
 
 Ask IAM to provide the two application group values in the same claim for every
 user. Keep the claim limited to the groups needed by this application. Keycloak
@@ -42,16 +43,17 @@ rules to the configured cluster names.
 
 | AD group membership | Kafbat result |
 |---|---|
-| Viewer | See all configured clusters and read messages; no write actions |
-| Admin | Full UI access to configured clusters |
+| Viewer | See all configured clusters read-only, with consumer lag; message payloads only if the site opted in; no write actions |
+| Admin | Every Kafbat permission on the configured clusters |
 | Both | Admin access |
 | Neither or missing claim | SSO access denied |
-| Shared Kafbat account | Admin access, independent of AD |
+| Shared Kafbat account | Admin access only when SSO is off (`KAFKA_UI_AUTH_CONFIG=local.yml`); not accepted while SSO is active, because Kafbat then has no form login |
 
 KSQL has no safe read-only execute right in this setup, so Viewer cannot run
 KSQL. Kafbat UI roles do not secure direct Kafka producer or consumer access.
 An AD group change applies at the next app sign-in. End active Kafbat sessions
-for urgent revocation. Rotate the shared Admin password separately.
+for urgent revocation. Rotate the shared Admin password separately if the
+installation ever runs without SSO.
 
 ## 3. Approve the network path
 
@@ -86,10 +88,14 @@ any Grafana subpath included. It does not use the Kafbat callback.
   follows IAM password and MFA policy.
 - The redirect reaches the PingFederate Keycloak callback above. No Keycloak
   password form appears in the normal SSO path.
-- Viewer can read a message but cannot create, edit, delete, produce, or reset
-  offsets. Admin can make an approved test change.
+- Viewer sees topics and consumer lag but is refused message payloads unless
+  the site opted in (`KAFKA_UI_VIEWER_MESSAGES=true`), and cannot create, edit,
+  delete, produce, or reset offsets. Admin can make an approved test change.
 - Users in both groups get Admin. A user in neither group is denied.
-- Shared Admin login still works when PingFederate is unavailable.
+- While SSO is active, Kafbat refuses the shared Admin username and password.
+  The recovery path is a break-glass local user ([setup guide](dual-login.md),
+  "Break-glass: local users"). Test it with PingFederate unreachable before you
+  rely on it.
 - TLS validation, signing-key rollover, logout, group removal, and urgent
   revocation work under the site's policy.
 
