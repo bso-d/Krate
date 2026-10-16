@@ -83,6 +83,7 @@ import datetime
 import hashlib
 import hmac
 import html as htmlmod
+import http.client
 import ipaddress
 import json
 import os
@@ -780,9 +781,11 @@ class Gate(Phase4Gate):
         for line in (out or '').splitlines():
             if line.startswith('SUMMARY '):
                 try:
-                    summary = json.loads(line[len('SUMMARY '):])
+                    parsed_summary = json.loads(line[len('SUMMARY '):])
                 except ValueError:
                     summary = None
+                else:
+                    summary = parsed_summary if isinstance(parsed_summary, dict) else None
         steps = []
         try:
             with open(os.path.join(outdir, 'ui15-summary.json'), encoding='utf-8') as handle:
@@ -806,7 +809,7 @@ class Gate(Phase4Gate):
         os.makedirs(outdir, exist_ok=True)
         summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
         retried = None
-        if self._network_flake(summary):
+        if summary is not None and self._network_flake(summary):
             retried = summary.get('failedRequests')
             log('browser probe %s: network-only dirt %s, retrying once' % (user, retried))
             summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
@@ -1668,15 +1671,53 @@ class Gate(Phase4Gate):
         return status, '%s; x509 lines 0 -> 1 (induced) -> 1; sign-in p4v (walk used p4noemail); ' \
                        'walk: live4a 140' % tokens
 
+    def grafana_ready(self, timeout=10.0):
+        """Grafana's own readiness contract: loopback GET /api/health
+        (unauthenticated by design) answering 200 with database == "ok"
+        (Grafana 12.2.0 pkg/api/http_server.go apiHealthHandler: 503 with
+        database "failing" while its SELECT 1 fails; /healthz is liveness
+        only and says nothing about the database). Loopback, not the
+        public /grafana/ route, which in realm mode redirects to login.
+        A poll: any transport or parse failure is simply not ready."""
+        if timeout <= 0:
+            return False
+        request = urllib.request.Request(self.grafana_loopback() + '/api/health',
+                                         headers={'Accept': 'application/json'})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                if response.status != 200:
+                    return False
+                payload = json.loads(response.read().decode())
+        except (urllib.error.URLError, http.client.HTTPException,
+                TimeoutError, OSError, ValueError):
+            return False
+        return isinstance(payload, dict) and payload.get('database') == 'ok'
+
     def _wait_grafana_healthy(self, cid, limit=180):
-        waited = 0
-        while waited < limit:
-            rc, out, _ = p2.docker('inspect', '-f', '{{.State.Health.Status}}', cid)
-            if rc == 0 and out.strip() == 'healthy':
-                return True
-            time.sleep(3)
-            waited += 3
-        return False
+        """Wait until the target Grafana container is running and ready.
+
+        Readiness is decided by Grafana's documented loopback endpoint
+        (grafana_ready), while cid binds that endpoint to the intended
+        container rather than accepting any process on the loopback port.
+        The limit is a wall-clock deadline, and each endpoint poll gets
+        only the time remaining under it.
+        """
+        if not cid:
+            return False
+        deadline = time.monotonic() + limit
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            rc, out, _ = p2.docker('inspect', '-f', '{{.State.Running}}', cid)
+            if rc == 0 and out.strip() == 'true':
+                remaining = deadline - time.monotonic()
+                if remaining > 0 and self.grafana_ready(timeout=min(10.0, remaining)):
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(3, remaining))
 
     def _wait_container_healthy(self, cid, limit=180):
         t0 = time.monotonic()
