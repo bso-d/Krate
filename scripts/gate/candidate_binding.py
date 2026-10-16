@@ -20,7 +20,9 @@ directories wholesale (Grafana provisioning and dashboards, the Perses dashboard
 Python modules beside the sso scripts).  A regular file or symlink in those directories
 that the candidate does not ship is therefore a mismatch too; `docs/`, which the bundle
 ships, is scanned the same way.  A scanned directory the running user cannot list makes
-the comparison fail (exit 2), except a `__pycache__` directory.
+the comparison fail (exit 2), except a `__pycache__` directory: run it as root (the runner on a
+VM does), because a skipped `__pycache__` and the bytecode in it are not compared, and Python can
+load an unchecked hash-based `.pyc` without comparing it with its source.
 
 Not compared: file modes other than `krate`'s executable bit, `.bundle-arch`, the image
 archives under `images/`, `docker-offline/`, the lock columns after `image_id`
@@ -237,6 +239,7 @@ def image_problems(rows: Dict[str, Tuple[str, str]]) -> List[str]:
     if info.returncode != 0:
         raise RuntimeError('the Docker daemon cannot be reached (docker info rc %d)' % info.returncode)
     problems = []
+    held_ids = differing = 0
     for image in sorted(rows):
         runtime, image_id = rows[image]
         if not IMAGE_ID.match(image_id) or runtime != RUNTIME_PREFIX + image_id[len('sha256:'):]:
@@ -246,8 +249,17 @@ def image_problems(rows: Dict[str, Tuple[str, str]]) -> List[str]:
         held = proc.stdout.decode('utf-8', 'replace').strip()
         if proc.returncode != 0:
             problems.append('%s: no image under %s' % (image, runtime))
-        elif held != image_id:
+            continue
+        if held != image_id:
             problems.append('%s: %s holds %s, the lock says %s' % (image, runtime, held, image_id))
+        if IMAGE_ID.match(held):  # only a well-formed id can point at the store; an empty answer cannot
+            held_ids += 1
+            differing += int(held != image_id)
+    if held_ids > 1 and differing == held_ids:
+        # A containerd image store reports the manifest digest as the image id, the classic store the
+        # config digest: when every id differs, the likely cause is not the bundle but the store.
+        problems.append('every image id differs from the lock: the likely cause is a different Docker image store '
+                        'on the build host and on this host (containerd versus classic); reinstalling cannot help')
     return problems
 
 
