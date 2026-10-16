@@ -195,6 +195,30 @@ def _snappy_literal(data):
     return bytes([(59 + len(extra)) << 2]) + extra + data
 
 
+def _loki_range_url(proxy_base, selector, start, end):
+    """Range-query URL for a Loki selector over [start, end] (epoch seconds).
+    Instant /query without a time selects nothing reliably on the guest Loki
+    (rocky-4a: U7 forged + U28 stored FAIL while query_range controls pass);
+    the walk's stored readback used a ranged query (log 134)."""
+    return proxy_base + '/query_range?query=%s&start=%d&end=%d&limit=50' % (
+        urllib.parse.quote(selector), start, end)
+
+
+def _empty_result(body):
+    """True when a Loki query body holds zero streams (probe-tested)."""
+    try:
+        return json.loads(body)['data']['result'] == []
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+def _dict_diff(before, after):
+    """Changed keys as {key: (old, new)}; a missing side reads as None."""
+    keys = sorted(set(before) | set(after))
+    return {k: (before.get(k), after.get(k)) for k in keys
+            if before.get(k) != after.get(k)}
+
+
 def loki_push_body(labels, line, ts_ns):
     """snappy(protobuf WriteRequest{streams:[{labels, values:[{time, line}]}]})."""
     seconds, nanos = ts_ns // 10 ** 9, ts_ns % 10 ** 9
@@ -392,7 +416,9 @@ class Gate(Phase4Gate):
                 if svc not in ONE_SHOT_SERVICES}
 
     def cluster_id_map(self):
-        """{service: (container id, StartedAt)} of the cluster project (U23's ledger)."""
+        """{service: (container id, StartedAt, RestartCount)} of the cluster
+        project (U23's ledger: identity is id + RestartCount, since U12's
+        intentional stop/start preserves both while moving StartedAt)."""
         found = {}
         rc, out, _ = p2.docker('ps', '-aq', '--filter',
                                'label=com.docker.compose.project=' + self.project)
@@ -400,10 +426,10 @@ class Gate(Phase4Gate):
             return found
         for cid in out.split():
             rc2, info, _ = p2.docker('inspect', '--format',
-                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
+                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}} {{.RestartCount}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
-                found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+                found[parts[0]] = (parts[1], ' '.join(parts[2:-1]), parts[-1])
         return found
 
     def seed_token(self):
@@ -1605,24 +1631,47 @@ class Gate(Phase4Gate):
                     and os.stat(meta_file).st_mode & 0o777 == 0o600
                     and self.mon_env_value('GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE')
                     == 'auth/secrets/grafana-seed.token')
-        rc, out, err = self.grafana_admin('service-account', '--name', 'krate-seed', '--role', 'Admin')
+        # Realm mode turns Grafana's Basic-admin login off, so both admin calls
+        # authenticate with the seed token — the product's own grafana_admin_token
+        # precedent (it runs service-account --role Admin the same way).
+        token = self.seed_token()
+        rc, out, err = self.grafana_admin('service-account', '--name', 'krate-seed', '--role', 'Admin',
+                                          token=token)
+        acct_rc = rc
+        acct_note = ' '.join((err or '').split())[-80:]
         account = json.loads(out) if rc == 0 else {}
         account_id = account.get('id')
-        token = self.seed_token()
         rc, out, err = self.grafana_admin('token-list', '--account-id', str(account_id), token=token)
+        list_rc = rc
         tokens = json.loads(out) if rc == 0 else []
         creation_ok = False
         old_id = None
+        list_n = len(tokens) if isinstance(tokens, list) else -1
+        name_ok = ttl_delta = None
         if isinstance(tokens, list) and len(tokens) == 1 and isinstance(tokens[0], dict):
             entry = tokens[0]
             old_id = entry.get('id')
             match = re.fullmatch(r'krate-seed-(\d{8}T\d{6})', entry.get('name') or '')
+            name_ok = bool(match)
             if match and entry.get('expiration'):
                 created = calendar.timegm(time.strptime(match.group(1), '%Y%m%dT%H%M%S'))
                 expires = calendar.timegm(time.strptime(entry['expiration'], '%Y-%m-%dT%H:%M:%SZ'))
-                creation_ok = expires - created == 7776000
+                ttl_delta = expires - created
+                creation_ok = ttl_delta == 7776000
         meta = self.seed_meta()
-        creation_ok = creation_ok and meta.get('id') == str(old_id)
+        meta_match = meta.get('id') == str(old_id)
+        creation_ok = creation_ok and meta_match
+        # Read-only role evidence: the search DTO carries the org role, so a
+        # refusal names the drift without printing any secret value.
+        sa_role = '?'
+        st_sa, sa_body = self.grafana_api('GET', '/grafana/api/serviceaccounts/search?query=krate-seed',
+                                          auth=self.admin_basic())
+        if st_sa == 200 and isinstance(sa_body, dict):
+            for cand in sa_body.get('serviceAccounts') or []:
+                if isinstance(cand, dict) and cand.get('name') == 'krate-seed':
+                    sa_role = cand.get('role', '?')
+        else:
+            sa_role = 'search-%d' % st_sa
         rc, out, err = p2.run([sys.executable, os.path.join(self.mon_dir(), 'seed-alerting.py'),
                                os.path.join(self.mon_dir(), '.env')], timeout=300)
         seeding_ok = rc == 0 and 'Grafana alerting ready' in (out + err)
@@ -1704,8 +1753,11 @@ class Gate(Phase4Gate):
                   ('successor', 'PASS' if successor_ok else 'FAIL'),
                   ('refusal', refusal_status)]
         status, tokens = aggregate(probes)
-        return status, '%s; 90-day ttl exact, CRUD %s, renewal %s/successor %s; %s; walk: live4a ' \
-                       '101-102,135-139,161' % (tokens, crud, renewal_ok, successor_ok, refusal_text[:60])
+        return status, '%s; creation (acct rc %d role %s err %r, list rc %d n %d, ' \
+                       'name %s, ttl %s, meta %s), CRUD %s, renewal %s/successor %s; %s; walk: live4a ' \
+                       '101-102,135-139,161' % (tokens, acct_rc, sa_role, acct_note, list_rc,
+                                                list_n, name_ok, ttl_delta, meta_match, crud,
+                                                renewal_ok, successor_ok, refusal_text[:60])
 
     def u21a(self):
         # walk logs/111,122: loopback-only port, the anonymous surfaces, no data.
@@ -1860,12 +1912,26 @@ class Gate(Phase4Gate):
         st2, _h2, _b2 = d.req(self.base + res + '/loki/api/v1/push', data=payload, method='POST',
                               headers={'Content-Type': 'application/x-protobuf'})
         stored = 'NOT_RUN'
+        rq_note = ''
         if st2 == 204:
             time.sleep(3)
-            query = urllib.parse.quote('{job="p4-u28-reach"}')
-            st3, _h3, body3 = d.req(self.base + '/grafana/api/datasources/uid/loki/resources'
-                                    + '/loki/api/v1/query?query=' + query)
+            # Walk results.md U28: the line is STORED by the push above and a
+            # gateway query returns it; U7's controls prove this proxy path
+            # 200s. The uid/.../resources query route answered 403 (rocky-4a
+            # at 8036910), so the readback uses the walk's gateway query.
+            loki_api = (self.base + '/grafana/api/datasources/proxy/uid/loki'
+                        + '/loki/api/v1')
+            now_q = int(time.time())
+            st3, _h3, body3 = d.req(_loki_range_url(loki_api, '{job="p4-u28-reach"}',
+                                                   now_q - 300, now_q))
+            if not (st3 == 200 and runid in body3):
+                time.sleep(10)  # single bounded retry: index lag, not encoding
+                now_q = int(time.time())
+                st3, _h3, body3 = d.req(_loki_range_url(loki_api, '{job="p4-u28-reach"}',
+                                                       now_q - 300, now_q))
             stored = 'PASS' if (st3 == 200 and runid in body3) else 'FAIL'
+            if stored == 'FAIL':
+                rq_note = ' (rq %s %s)' % (st3, body3[:100])
         # reach 2: Kafbat's unauthenticated metrics through the repointed datasource.
         st4, body4 = self.api_json(d, 'PUT', '/grafana/api/datasources/uid/' + uid,
                                    {'name': 'p4-reach', 'type': 'prometheus', 'url': 'http://kafka-ui:8080',
@@ -1897,9 +1963,9 @@ class Gate(Phase4Gate):
                   ('table2_match', 'PASS' if table_ok else 'FAIL'),
                   ('viewer_ds_403', 'PASS' if st8 == 403 else 'FAIL')]
         status, tokens = aggregate(probes)
-        return status, '%s; loki push %s (Loki-generated), proto push %s stored=%s, kafka-ui ' \
+        return status, '%s; loki push %s (Loki-generated), proto push %s stored=%s%s, kafka-ui ' \
                        'metrics %s, deleted %s, table2 %s vs reached %s; viewer POST ds %s; ' \
-                       'walk: live4a 133-134' % (tokens, st1, st2, stored, st5, deleted,
+                       'walk: live4a 133-134' % (tokens, st1, st2, stored, rq_note, st5, deleted,
                                                  sorted(listed), sorted(reached), st8)
 
     # ── stub rows (bodies await their walk observations; rule 11) ──
@@ -1934,8 +2000,9 @@ class Gate(Phase4Gate):
 
         v_bad = refusals(viewer)
         a_bad = refusals(admin)
-        # the 34d6ab6 read location (re-measure 160: detected_field/<name>/values 200)
-        st_det, _h, _b = admin.req(self.base + proxy + '/detected_field/job/values')
+        # the 34d6ab6 read location (re-measure 160: detected_field/container/values
+        # 200 with body {}; the gate asked for field `job` and Loki answered 400)
+        st_det, _h, det_b = admin.req(self.base + proxy + '/detected_field/container/values')
         # controls (walk 130/160): labels 200, query_range 200, no forged line
         quote = urllib.parse.quote
         st_lab, _h, _b = viewer.req(self.base + proxy + '/labels')
@@ -1953,8 +2020,9 @@ class Gate(Phase4Gate):
 
         now = int(time.time())
         st_q1, _h, b_q1 = query_range(now - 300, now)
-        st_f, _h, b_f = viewer.req(self.base + proxy + '/query?query=%s' % quote('{job="p4-u7-forged"}'))
-        forged_absent = st_f == 200 and '"result":[]' in b_f.replace(' ', '')
+        st_f, _h, b_f = viewer.req(_loki_range_url(self.base + proxy, '{job="p4-u7-forged"}',
+                                                  now - 300, now))
+        forged_absent = st_f == 200 and _empty_result(b_f)
         time.sleep(35)  # the walk's two samples 35 s apart: fluent-bit keeps shipping
         now2 = int(time.time())
         st_q2, _h, b_q2 = query_range(now2 - 60, now2)
@@ -1992,14 +2060,18 @@ class Gate(Phase4Gate):
                   ('tail_101', 'PASS' if tail_ok else 'FAIL'),
                   ('explore_panels', explore_status)]
         status, tokens = aggregate(probes)
-        return status, '%s; 8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
-                       'labels/query_range 200, detected_field read %s, forged absent %s, ' \
-                       'fluent-bit fresh %s, tail %s; browser control (p4lokiui rows %s, panel ' \
-                       'errors %s, explore rows %s, live rows %s)%s; walk: live4a 129-130,148,160 ' \
+        det_note = '' if st_det == 200 else ' body=' + det_b[:120]
+        forged_note = ' (query %s)' % st_f
+        clean_note = a_summary is not None and self.browser_clean(a_summary)
+        return status, '%s; detected_field read %s%s, tail %s len=%d, forged absent %s%s; ' \
+                       '8 write/lifecycle paths 403-from-nginx for Viewer and Admin, ' \
+                       'labels/query_range 200, fluent-bit fresh %s; browser control (p4lokiui rows %s, panel ' \
+                       'errors %s, explore rows %s, live rows %s, clean=%s)%s; walk: live4a 129-130,148,160 ' \
                        '(re-measure at c8c9337; dd3a28d log-format-only per lead)' \
-               % (tokens, st_det, forged_absent, fresh, head.split('\r\n')[0][:40],
+               % (tokens, st_det, det_note, head.split('\r\n')[0][:40], len(head),
+                  forged_absent, forged_note, fresh,
                   dash_step.get('logRows', '-'), dash_step.get('panelErrorIcons', '-'),
-                  explore_step.get('logRows', '-'), live_step.get('liveRows', '-'),
+                  explore_step.get('logRows', '-'), live_step.get('liveRows', '-'), clean_note,
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
     def u9(self):
@@ -2581,6 +2653,28 @@ class Gate(Phase4Gate):
                   (v_summary or {}).get('cspViolations', -1), (v_summary or {}).get('pageErrors', -1),
                   (' — %s' % batch['problem']) if batch.get('problem') else '')
 
+    def _mon_fingerprint(self, cid):
+        """Compose-level identity of a monitor container (U22 evidence).
+
+        Image short id, compose config-hash label and sorted env KEY names
+        only — no values anywhere, so no secret can leave through it. When
+        this fingerprint is unchanged yet the container id moved, plain
+        `compose up` had no config reason and the mechanism is elsewhere."""
+        if not cid:
+            return {}
+        rc, out, _ = p2.docker(
+            'inspect', '-f',
+            '{{.Image}}|{{index .Config.Labels "com.docker.compose.config-hash"}}'
+            '|{{range .Config.Env}}{{println .}}{{end}}', cid)
+        if rc != 0:
+            return {}
+        image, _, rest = out.partition('|')
+        config_hash, _, env = rest.partition('|')
+        keys = sorted(line.partition('=')[0] for line in env.splitlines()
+                      if '=' in line)
+        return {'image': image[:12], 'config_hash': config_hash,
+                'env_keys': keys}
+
     def u22(self):
         # walk log 169 (clean cycle at HEAD 5d17495; note log 161 is fbfc872 defect evidence only):
         # Rollback probes: `config set GRAFANA_AUTH_CONFIG=local.ini` + `monitor up`: only grafana
@@ -2592,6 +2686,7 @@ class Gate(Phase4Gate):
         long_before = self.long_running(before_mon)
         if 'grafana' not in long_before:
             not_run('precondition: no grafana container before rollback')
+        perses_before = self._mon_fingerprint((before_mon.get('perses') or (None,))[0])
 
         rc1, out1, err1 = self.krate('config', 'set', 'GRAFANA_AUTH_CONFIG=local.ini', timeout=180)
         if rc1 != 0:
@@ -2605,6 +2700,7 @@ class Gate(Phase4Gate):
         long_mid = self.long_running(mid_mon)
         recreated = [s for s in long_before if s in long_mid and long_before[s][0] != long_mid[s][0]]
         only_grafana = (recreated == ['grafana'])
+        perses_after = self._mon_fingerprint((mid_mon.get('perses') or (None,))[0])
 
         graf_cid = (mid_mon.get('grafana') or (None,))[0]
         healthy = self._wait_grafana_healthy(graf_cid) if graf_cid else False
@@ -2718,34 +2814,51 @@ class Gate(Phase4Gate):
             ('forward_signin', 'PASS' if (rc3 == 0 and rc4 == 0 and signin_ok) else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; rollback: only grafana recreated (%s), local admin 200, 6 paths ' \
+        return status, '%s; rollback: only grafana recreated (%s), perses changed %s, ' \
+                       'local admin 200, 6 paths ' \
                        '(5x 302 + /grafana 301 carrying port), U18 hashes equal; forward: ' \
                        'realm.ini + monitor up rc 0/0, p4v sign-in %s; walk: live4a 169' \
-               % (tokens, 'grafana only' if only_grafana else str(recreated), fwd_signin['kind'])
+               % (tokens, 'grafana only' if only_grafana else str(recreated),
+                  _dict_diff(perses_before, perses_after), fwd_signin['kind'])
 
     def u23(self):
         # walk logs/137, 139, 162, 169: Container ledger verification:
         # broker, kafka-ui, keycloak, keycloak-db unchanged across slice;
         # cluster proxy recreated once per input change; grafana recreated
-        # on auth config/realm.ini change.
+        # on auth config/realm.ini change. Identity is (id, RestartCount):
+        # U12's intentional stop/start preserves both while moving StartedAt
+        # (proven SAME_ID at 115b300), so only a new id or a daemon restart
+        # counts as changed; in-place restarts are noted, not failed.
         curr_cluster = self.cluster_id_map()
         initial = getattr(self, 'cluster_initial', None) or curr_cluster
 
         # 1. Core cluster containers unchanged
         core_unchanged = True
         diff_core = []
+        restarted = []
+
+        def ledger(svc):
+            old, new = initial[svc], curr_cluster[svc]
+            if (old[0], old[2]) != (new[0], new[2]):
+                diff_core.append('%s: %s id %s->%s rc %s->%s started %s->%s'
+                                 % (svc, 'SAME_ID' if old[0] == new[0] else 'NEW_ID',
+                                    old[0][:12], new[0][:12], old[2], new[2],
+                                    old[1][:19], new[1][:19]))
+                return False
+            if old[1] != new[1]:
+                restarted.append('%s started %s->%s' % (svc, old[1][:19], new[1][:19]))
+            return True
+
         for svc in ('keycloak', 'keycloak-db', 'kafka-ui'):
             if svc in initial and svc in curr_cluster:
-                if initial[svc] != curr_cluster[svc]:
+                if not ledger(svc):
                     core_unchanged = False
-                    diff_core.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
 
         # brokers unchanged
         for svc in initial:
             if 'broker' in svc and svc in curr_cluster:
-                if initial[svc] != curr_cluster[svc]:
+                if not ledger(svc):
                     core_unchanged = False
-                    diff_core.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
 
         # 2. Realm.ini-content change recreates grafana only (log 162)
         # Change KEYCLOAK_SESSION_IDLE_MINUTES 15 -> 16
@@ -2791,10 +2904,13 @@ class Gate(Phase4Gate):
             ('proxy_untouched_by_monitor', 'PASS' if proxy_untouched else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; core cluster (brokers, kafka-ui, keycloak, keycloak-db) unchanged%s; ' \
-                       'realm.ini 15m->16m->15m recreated grafana only; proxy untouched; ' \
+        return status, '%s; core cluster (brokers, kafka-ui, keycloak, keycloak-db) unchanged%s%s; ' \
+                       'realm.ini 15m->16m->15m recreated grafana only (rc %d/%d/%d/%d, ' \
+                       'mid %s, after %s, ini %s/%s); proxy untouched; ' \
                        'walk: live4a 137,139,162,169' \
-               % (tokens, '' if core_unchanged else ' (diffs: %s)' % diff_core)
+               % (tokens, '' if core_unchanged else ' (diffs: %s)' % diff_core,
+                  '' if not restarted else ' (restarted in place: %s)' % restarted,
+                  rc1, rc2, rc3, rc4, recreated_16, recreated_15, ini_16, ini_15)
 
     def u24(self):
         # The plan's two-command form (gen-cert → monitor up) was MEASURED AND FAILED
