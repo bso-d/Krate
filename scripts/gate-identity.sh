@@ -585,7 +585,8 @@ fixture_env() {
 }
 host_conflicts() { # other krate installations on this Docker host block a run (one installation per host by design)
   local other mon
-  other="$(docker ps -a --format '{{.Names}} {{.Label "com.docker.compose.project"}}' | awk -v p="$PROJECT" '$1 ~ /^(krate|epc)-/ && $2 != p {print $1" ("$2")"}' | tr '\n' ' ')"
+  # A W4 probe (label krate.gate=w4-probe, no Compose project) is a gate artifact of a killed run, not another installation: fixture_reset removes it.
+  other="$(docker ps -a --format '{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Label "krate.gate"}}' | awk -F'|' -v p="$PROJECT" '$1 ~ /^(krate|epc)-/ && $2 != p && $3 != "w4-probe" {print $1" ("$2")"}' | tr '\n' ' ')"
   [[ -z "$other" ]] || { echo "Another Krate installation is running on this host: $other. Stop it first (one Keycloak deployment per host)." >&2; exit 2; }
   mon="$(docker volume ls -q | grep -c "^${MON_PROJECT}_" || true)"
   [[ "$mon" == 0 ]] || { echo "Monitoring volumes of project $MON_PROJECT already exist ($mon); this runner would destroy them. Remove them or use another host." >&2; exit 2; }
@@ -1319,7 +1320,7 @@ phase4_leak_scan_z4a() {
   done
 
   local scan_err="$STATE/leak-scan.$$.err"
-  local hits unreadable_n scan_out
+  local hits unreadable_n unreadable_names scan_out
   scan_out=$(python3 -I -c '
 import sys, os
 
@@ -1332,14 +1333,19 @@ raw_no_disp = sys.argv[5]
 hits = 0
 unreadable = []
 
+
+def mark_unreadable(name):
+    unreadable.append(name)
+    print(f"UNREADABLE: {name}", file=sys.stderr)
+
+
 for p in places:
     if not os.path.isfile(p):
         continue
     try:
         content = open(p, "rb").read().decode("utf-8", "replace")
     except OSError:
-        unreadable.append(os.path.basename(p))
-        print(f"UNREADABLE: {os.path.basename(p)}", file=sys.stderr)
+        mark_unreadable(os.path.basename(p))
         continue
     for s in all_secrets:
         c = content.count(s)
@@ -1357,7 +1363,9 @@ if os.path.isfile(raw_file):
                     hits += c
                     print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
     except OSError:
-        pass
+        mark_unreadable("raw log")
+else:
+    mark_unreadable("raw log")
 
 if os.path.isfile(raw_no_disp):
     try:
@@ -1368,11 +1376,24 @@ if os.path.isfile(raw_no_disp):
                 hits += c
                 print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
     except OSError:
-        pass
+        mark_unreadable("raw log (no display)")
+else:
+    mark_unreadable("raw log (no display)")
 
 ed_auth = sys.argv[6]
+
+
+def auth_label(path):
+    rel = os.path.relpath(path, ed_auth) if path else "."
+    return "auth/keycloak" if rel == "." else "auth/keycloak/" + rel
+
+
+def walk_error(err):
+    mark_unreadable(auth_label(err.filename))
+
+
 if os.path.isdir(ed_auth):
-    for root, _dirs, files in os.walk(ed_auth):
+    for root, _dirs, files in os.walk(ed_auth, onerror=walk_error):
         for fn in files:
             fp = os.path.join(root, fn)
             try:
@@ -1383,9 +1404,10 @@ if os.path.isdir(ed_auth):
                         hits += c
                         print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
             except OSError:
-                pass
+                mark_unreadable(auth_label(fp))
 
-print(hits, len(unreadable))
+names = sorted(set(unreadable))
+print(hits, len(unreadable), ", ".join(names[:10]) + (f" (+{len(names) - 10} more)" if len(names) > 10 else ""))
 ' "$secrets_all" "$secrets_temp" "$files_list" "$RAW" "$raw_without_display" "$ED/auth/keycloak" 2>"$scan_err")
   if [[ -f "$scan_err" ]]; then
     cat "$scan_err" >> "$RAW"
@@ -1393,12 +1415,13 @@ print(hits, len(unreadable))
   fi
 
   rm -f "$secrets_all" "$secrets_temp" "$files_list" "$raw_without_display"
-  read -r hits unreadable_n <<<"${scan_out:-}"
+  read -r hits unreadable_n unreadable_names <<<"${scan_out:-}"
   local st gaps=""
   (( ps_failed )) && gaps+="; the container listing failed"
   (( ${#cnames[@]} )) || gaps+="; no container listed"
   (( ${#unread[@]} )) && gaps+="; logs not read: ${unread[*]}"
-  [[ "${unreadable_n:-}" == "0" ]] || gaps+="; unreadable scan inputs: ${unreadable_n:-the scan did not finish}"
+  [[ "${unreadable_n:-}" == "0" ]] || gaps+="; unreadable scan inputs: ${unreadable_n:-the scan did not finish}${unreadable_names:+ ($unreadable_names)}"
+  (( ${#SECRETS[@]} )) || gaps+="; no secret values to search"
   [[ "${hits:-}" == "0" && -z "$gaps" ]]; st=$?
   ok_if Z4a "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): ${hits:-?} hits$gaps; walk: live4a 901"
 }
@@ -1552,7 +1575,7 @@ phase4_leak_scan_z4b() {
   done
 
   local scan_err="$STATE/leak-scan-z4b.$$.err"
-  local hits unreadable_n scan_out
+  local hits unreadable_n unreadable_names scan_out
   scan_out=$(python3 -I -c '
 import sys, os
 
@@ -1570,14 +1593,19 @@ banned_patterns = [
 hits = 0
 unreadable = []
 
+
+def mark_unreadable(name):
+    unreadable.append(name)
+    print(f"UNREADABLE: {name}", file=sys.stderr)
+
+
 for p in places:
     if not os.path.isfile(p):
         continue
     try:
         content = open(p, "rb").read().decode("utf-8", "replace")
     except OSError:
-        unreadable.append(os.path.basename(p))
-        print(f"UNREADABLE: {os.path.basename(p)}", file=sys.stderr)
+        mark_unreadable(os.path.basename(p))
         continue
     for s in all_secrets:
         c = content.count(s)
@@ -1601,7 +1629,9 @@ if os.path.isfile(raw_file):
                     hits += c
                     print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
     except OSError:
-        pass
+        mark_unreadable("raw log")
+else:
+    mark_unreadable("raw log")
 
 if os.path.isfile(raw_no_disp):
     try:
@@ -1612,11 +1642,24 @@ if os.path.isfile(raw_no_disp):
                 hits += c
                 print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
     except OSError:
-        pass
+        mark_unreadable("raw log (no display)")
+else:
+    mark_unreadable("raw log (no display)")
 
 ed_auth = sys.argv[6]
+
+
+def auth_label(path):
+    rel = os.path.relpath(path, ed_auth) if path else "."
+    return "auth/keycloak" if rel == "." else "auth/keycloak/" + rel
+
+
+def walk_error(err):
+    mark_unreadable(auth_label(err.filename))
+
+
 if os.path.isdir(ed_auth):
-    for root, _dirs, files in os.walk(ed_auth):
+    for root, _dirs, files in os.walk(ed_auth, onerror=walk_error):
         for fn in files:
             fp = os.path.join(root, fn)
             try:
@@ -1627,9 +1670,10 @@ if os.path.isdir(ed_auth):
                         hits += c
                         print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
             except OSError:
-                pass
+                mark_unreadable(auth_label(fp))
 
-print(hits, len(unreadable))
+names = sorted(set(unreadable))
+print(hits, len(unreadable), ", ".join(names[:10]) + (f" (+{len(names) - 10} more)" if len(names) > 10 else ""))
 ' "$secrets_all" "$secrets_temp" "$files_list" "$RAW" "$raw_without_display" "$ED/auth/keycloak" 2>"$scan_err")
   if [[ -f "$scan_err" ]]; then
     cat "$scan_err" >> "$RAW"
@@ -1637,12 +1681,13 @@ print(hits, len(unreadable))
   fi
 
   rm -f "$secrets_all" "$secrets_temp" "$files_list" "$raw_without_display"
-  read -r hits unreadable_n <<<"${scan_out:-}"
+  read -r hits unreadable_n unreadable_names <<<"${scan_out:-}"
   local st gaps=""
   (( ps_failed )) && gaps+="; the container listing failed"
   (( ${#cnames[@]} )) || gaps+="; no container listed"
   (( ${#unread[@]} )) && gaps+="; logs not read: ${unread[*]}"
-  [[ "${unreadable_n:-}" == "0" ]] || gaps+="; unreadable scan inputs: ${unreadable_n:-the scan did not finish}"
+  [[ "${unreadable_n:-}" == "0" ]] || gaps+="; unreadable scan inputs: ${unreadable_n:-the scan did not finish}${unreadable_names:+ ($unreadable_names)}"
+  (( ${#SECRETS[@]} )) || gaps+="; no secret values to search"
   [[ "${hits:-}" == "0" && -z "$gaps" ]]; st=$?
   ok_if Z4b "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): ${hits:-?} hits$gaps"
 }
