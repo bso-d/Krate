@@ -26,7 +26,8 @@
 // with no preceding assertion):
 //   1 the Keycloak password form reached from the Perses URL
 //   2 the Viewer in a project without create/edit controls
-//   3 the Admin with "Add Project"/edit controls
+//   3 the Admin in the same project, with its Add Dashboard, rename/delete and edit controls
+//     ("Create Project" exists on the home page only: both roles are asserted there, not in a shot)
 //   4 after logout, the Keycloak password form
 //   5 the disabled user: Keycloak's "Account is disabled"
 //   6 the no-group user: the refusal page at /oauth2/callback
@@ -186,10 +187,14 @@ try {
   // attempt-4 X4 shot, byte-identical); the heading "Krate", the tabs and the four "Krate — …"
   // dashboard links render within 3 s. Wait for that content, assert it, then the absences
   // (live: 0 matches each for the Viewer; the hidden "Add Dashboard"/"Rename project" items are not
-  // in the accessibility tree).
+  // in the accessibility tree). "Create Project" exists on the home page only (Perses
+  // HomeViewHeroSection; the project page shows it to nobody, Admin included), so its absence is
+  // asserted on the home page, paired with the Admin's presence on the same page below.
   await page.goto(`${PBASE}/projects`, { waitUntil: 'networkidle' });
   const projectLink = page.getByRole('link', { name: /krate/i }).first();
   assert((await projectLink.count()) === 1, "the Viewer's home page lists the krate project");
+  assert((await page.getByRole('button', { name: /(add|create) project/i }).count()) === 0,
+    'the Viewer\'s home page (/projects) offers no "Create Project" control');
   await projectLink.click();
   await page.waitForURL((u) => u.pathname === '/projects/krate', { timeout: 30000 });
   await page.getByRole('heading', { name: 'Krate', exact: true }).waitFor({ state: 'visible', timeout: 30000 });
@@ -199,7 +204,6 @@ try {
   assert(tabs.some((t) => t.startsWith('Dashboards')), `the krate project page shows its Dashboards tab (${tabs.join(', ')})`);
   const dashboards = await dashboardLinks.count();
   assert(dashboards >= 1, `the Viewer sees the project's dashboards (${dashboards} listed)`);
-  assert((await page.getByRole('button', { name: /(add|create) project/i }).count()) === 0, 'the Viewer sees no "Create Project" control');
   assert((await page.getByRole('button', { name: /add dashboard/i }).count()) === 0, 'the Viewer sees no "Add Dashboard" control');
   assert((await page.getByRole('button', { name: /(rename|delete) project/i }).count()) === 0, 'the Viewer sees no "Rename/Delete project" control');
   assert((await page.locator('[aria-label="Edit"], button:has(svg[data-testid="EditIcon"])').count()) === 0, 'the Viewer sees no edit control in the project');
@@ -207,7 +211,7 @@ try {
   await ctx.clearCookies();
   await page.close();
 
-  // ── shot 3: the Admin with "Add Project"/edit controls ──
+  // ── shot 3: the Admin in the same project, with the create/edit controls the Viewer does not have ──
   page = await ctx.newPage();
   await openPersesAtKeycloak(page);
   await keycloakLogin(page, ADMIN, ADMIN_PW, ADMIN_TOTP);
@@ -216,7 +220,14 @@ try {
   // absences prove nothing. Observed live on the kept fixture: the Admin's project page shows
   // "Add Dashboard", the rename and delete project buttons and four edit icons, its home page
   // "Create Project"; the Viewer sees none of them. The "Admin" header link is shown to every
-  // signed-in user, so it is no control.
+  // signed-in user, so it is no control. "Create Project" is asserted on the home page first
+  // (the Viewer's absence is asserted on that same page); the shot is then taken in the project,
+  // like shot 2, so that the controls on screen are the ones the manifest lists for it.
+  await page.goto(`${PBASE}/projects`, { waitUntil: 'networkidle' });
+  const addProject = page.getByRole('button', { name: /(add|create) project/i });
+  await addProject.first().waitFor({ state: 'visible', timeout: 30000 });
+  assert((await addProject.count()) > 0,
+    'the Admin\'s home page (/projects) offers the "Create Project" control the Viewer\'s does not (asserted before the capture; the capture is the project page)');
   await page.goto(`${PBASE}/projects/krate`, { waitUntil: 'networkidle' });
   await page.getByRole('heading', { name: 'Krate', exact: true }).waitFor({ state: 'visible', timeout: 30000 });
   const adminAddDashboard = page.getByRole('button', { name: /add dashboard/i });
@@ -224,19 +235,20 @@ try {
   assert((await adminAddDashboard.count()) > 0, 'the Admin sees the "Add Dashboard" control the Viewer does not');
   assert((await page.getByRole('button', { name: /(rename|delete) project/i }).count()) > 0,
     'the Admin sees the "Rename/Delete project" controls the Viewer does not');
+  // The edit icons are per-row actions of the dashboard list, which renders after the lists load,
+  // whereas "Add Dashboard" renders at once: wait for the rows (as the Viewer's wait does) before counting them.
+  await page.getByRole('link', { name: /^Krate — / }).first().waitFor({ state: 'visible', timeout: 30000 });
   assert((await page.locator('[aria-label="Edit"], button:has(svg[data-testid="EditIcon"])').count()) > 0,
     'the Admin sees edit controls in the project, which the Viewer does not');
-  await page.goto(`${PBASE}/projects`, { waitUntil: 'networkidle' });
-  const addProject = page.getByRole('button', { name: /(add|create) project/i });
-  await addProject.first().waitFor({ state: 'visible', timeout: 30000 });
-  assert((await addProject.count()) > 0, 'the Admin sees the "Create Project" control the Viewer does not');
-  await shot(page, 'admin-projects', `Admin ${ADMIN} with the create/edit controls of the realm's admin group`);
+  await shot(page, 'admin-project', `Admin ${ADMIN} in the krate project: Add Dashboard, rename and delete project, edit icons (Create Project is on the home page, asserted before this capture)`);
 
   // ── shot 4: after logout, the Keycloak password form ──
   // lab7 (082): the account menu holds a plain anchor <A href="/api/auth/logout">;
   // clicking it runs the hop chain to the Keycloak login form with no confirmation page.
   // NEEDS-LIVE-VERIFICATION: the account-menu trigger selector (lab7 logged its
   // presence, not its selector).
+  // The live walks ran this step from the home page: return there (shot 3 is taken in the project).
+  await page.goto(`${PBASE}/projects`, { waitUntil: 'networkidle' });
   const accountMenu = page.locator('header button:has(svg), header [aria-haspopup="menu"], header .MuiAvatar-root, header [data-testid="AccountCircleIcon"]').last();
   await accountMenu.click();
   const logout = page.locator('a[href="/api/auth/logout"]');
