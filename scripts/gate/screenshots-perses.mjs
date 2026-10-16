@@ -118,7 +118,9 @@ async function shot(page, slug, caption) {
 }
 function writeManifest() {
   const tsv = ['file\tsha256\tbytes\tcaption\turl\tasserted',
-    ...manifest.map((m) => [m.file, m.sha256, m.bytes, m.caption, m.url, m.asserted.join(' | ')].join('\t'))].join('\n');
+    // A field never carries a tab or a line break (a failure caption can hold a multi-line error).
+    ...manifest.map((m) => [m.file, m.sha256, m.bytes, m.caption, m.url, m.asserted.join(' | ')]
+      .map((v) => String(v).replace(/[\t\r\n]+/g, ' ')).join('\t'))].join('\n');
   writeFileSync(`${OUT}/manifest.tsv`, tsv + '\n');
   chmodSync(`${OUT}/manifest.tsv`, 0o644);
   writeFileSync(`${OUT}/manifest.json`, JSON.stringify(manifest, null, 2)); // convenience copy; the runner asserts on manifest.tsv
@@ -178,26 +180,30 @@ try {
   // ── shot 2: the Viewer in a project without create/edit controls ──
   await keycloakLogin(page, VIEWER, VIEWER_PW, VIEWER_TOTP);
   await persesSignIn(page);
-  // NEEDS-LIVE-VERIFICATION: the navigation into the project (lab7's home page listed
-  // the project card; the walk notes must confirm the click path and the URL).
+  // Live-verified 2026-10-16 on the Rocky fixture (harness/x4-diag/): /projects lands on the home
+  // page, whose project card link opens /projects/krate in the page. networkidle returns at once on
+  // that client-side navigation, so a capture right after the click is the empty Perses shell (the
+  // attempt-4 X4 shot, byte-identical); the heading "Krate", the tabs and the four "Krate — …"
+  // dashboard links render within 3 s. Wait for that content, assert it, then the absences
+  // (live: 0 matches each for the Viewer; the hidden "Add Dashboard"/"Rename project" items are not
+  // in the accessibility tree).
   await page.goto(`${PBASE}/projects`, { waitUntil: 'networkidle' });
   const projectLink = page.getByRole('link', { name: /krate/i }).first();
-  if (await projectLink.count()) await projectLink.click();
-  await page.waitForLoadState('networkidle');
-  assert(page.url().includes('/projects/'), `the Viewer reached a project page (${page.url().split(/[?#]/)[0]})`);
-  // Content guard: attempt-4 captured an empty shell here (header only, 19 KB)
-  // because both project assertions below are absences, which an unloaded page
-  // passes trivially. Require a rendered heading first so a blank page fails
-  // loudly instead of becoming evidence.
-  await page.getByRole('heading').first().waitFor({ state: 'visible', timeout: 30000 });
-  const contentScope = (await page.locator('main').count()) > 0 ? 'main' : 'body';
-  assert((((await page.textContent(contentScope)) || '').trim().length) > 0,
-    'the project page rendered content, not an empty shell');
-  // NEEDS-LIVE-VERIFICATION: the exact absence selectors for the Viewer (Perses
-  // v0.54.0): no "Add Project"/create button, no dashboard edit (pencil) control.
+  assert((await projectLink.count()) === 1, "the Viewer's home page lists the krate project");
+  await projectLink.click();
+  await page.waitForURL((u) => u.pathname === '/projects/krate', { timeout: 30000 });
+  await page.getByRole('heading', { name: 'Krate', exact: true }).waitFor({ state: 'visible', timeout: 30000 });
+  const dashboardLinks = page.getByRole('link', { name: /^Krate — / });
+  await dashboardLinks.first().waitFor({ state: 'visible', timeout: 30000 });
+  const tabs = (await page.getByRole('tab').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
+  assert(tabs.some((t) => t.startsWith('Dashboards')), `the krate project page shows its Dashboards tab (${tabs.join(', ')})`);
+  const dashboards = await dashboardLinks.count();
+  assert(dashboards >= 1, `the Viewer sees the project's dashboards (${dashboards} listed)`);
   assert((await page.getByRole('button', { name: /(add|create) project/i }).count()) === 0, 'the Viewer sees no "Create Project" control');
+  assert((await page.getByRole('button', { name: /add dashboard/i }).count()) === 0, 'the Viewer sees no "Add Dashboard" control');
+  assert((await page.getByRole('button', { name: /(rename|delete) project/i }).count()) === 0, 'the Viewer sees no "Rename/Delete project" control');
   assert((await page.locator('[aria-label="Edit"], button:has(svg[data-testid="EditIcon"])').count()) === 0, 'the Viewer sees no edit control in the project');
-  await shot(page, 'viewer-project', `Viewer ${VIEWER} in a project: read-only, no create/edit controls`);
+  await shot(page, 'viewer-project', `Viewer ${VIEWER} in the krate project: its dashboards, no create, edit, rename or delete controls`);
   await ctx.clearCookies();
   await page.close();
 
