@@ -12,6 +12,11 @@ harness/phase4/PHASE4-INSTRUCTIONS-v3.md):
                    enrolment wrapper and the `stub()` marker used by every row
                    body that awaits the live walk notes (rule 11: only rows
                    seen working by hand are encoded).
+  * TotpSteps    - per-user single-use TOTP step tracking: a sign-in waits for
+                   a fresh step only when that user already submitted the current
+                   step's code (or the step is about to end), never unconditionally.
+  * --replay     - DIAGNOSIS ONLY: run --only rows on a kept fixture without
+                   setup(); the output says so and is never a formal result.
   * TimedRows    - the section 5 timing-row design: long rows (V10 36 min,
                    U29 17 min, U10/U11 <= 330 s, V7/V8/V15 <= 420 s, and
                    U27/V23 in the --session-max-hours runs) run in background
@@ -34,6 +39,8 @@ Python 3.9 compatible; secrets travel through the environment and 0600 files,
 never through argv.
 """
 import argparse
+import contextlib
+import glob
 import json
 import os
 import re
@@ -64,6 +71,100 @@ def broker_services(id_map):
     never matched kafka-92.. and silently compared nothing)."""
     return sorted(svc for svc in (id_map or {})
                   if re.fullmatch(r'(kafka|broker)-\d+', svc))
+
+
+# ─── per-user TOTP step tracking ──────────────────────────────────────────────
+
+TOTP_PERIOD = 30
+# A code is not generated in the last seconds of its step: the same margin as phase2_kafbat.User.code().
+TOTP_STEP_GUARD = 3.0
+
+
+def totp_code(secret_b32, counter):
+    """The six-digit HMAC-SHA1 TOTP of a base32 seed for one 30-second counter
+    (the realm's policy: otpPolicyAlgorithm HmacSHA1, digits 6, period 30; sso/identity.py)."""
+    return p2.totp(secret_b32.replace(' ', '').upper(), counter)
+
+
+class TotpSteps:
+    """Which 30-second steps each user has already submitted the code of.
+
+    Keycloak refuses a code it accepted once for the same credential
+    (OTPCredentialProvider.isValid: singleUseStore.putIfAbsent(credentialId + "." + code,
+    period * (2 * lookAround + 1)); the OTP policy's "reusable code" is off by default), so
+    two sign-ins by one user inside one step cannot both succeed. Different users are
+    independent. code() hands out the current step's code unless this user already used it
+    (or under TOTP_STEP_GUARD seconds remain) and only then waits for the next step: the
+    decision phase2_kafbat.User.code() makes, with the used steps shared by every sign-in of
+    the helper process. lookahead > 0 lets the code of up to that many following steps be
+    used at once (the realm's look-around window accepts them); sign-ins use 0.
+
+    A use by another process is told to the ledger: the enrolment subprocess with mark(), a
+    browser container that signs a user in on its own clock with guard_external_signin();
+    one the ledger cannot know about surfaces as Keycloak's "Invalid authenticator code" and
+    is handled by the caller. The default clock and sleep are bound when this module is
+    imported; a test passes its own.
+    """
+
+    def __init__(self, clock=time.time, sleep=time.sleep):
+        self._clock = clock
+        self._sleep = sleep
+        self._guard = threading.Lock()
+        self._steps = {}
+        self._locks = {}
+
+    def lock_for(self, user):
+        with self._guard:
+            return self._locks.setdefault(user, threading.Lock())
+
+    def used_set(self, user):
+        """The live set of used steps of one user (phase2_kafbat.User.used can share it)."""
+        with self._guard:
+            return self._steps.setdefault(user, set())
+
+    def used(self, user):
+        with self._guard:
+            return frozenset(self._steps.get(user, ()))
+
+    def mark(self, user, *steps):
+        with self.lock_for(user):
+            self.used_set(user).update(int(step) for step in steps)
+
+    @contextlib.contextmanager
+    def guard_external_signin(self, user):
+        """Around a sign-in another process makes with this user's seed on its own clock (the
+        Playwright container of U7/U15 reads Date.now() and knows no ledger).
+
+        The user's lock is held for the whole run, so no helper sign-in of this user (a timed row's
+        thread) can send the step the process takes; the run starts in a step nobody has used, so the
+        code the process takes is not one an earlier helper sign-in already submitted; and every step the
+        run spans counts as used on exit, even when it raised.
+        """
+        with self.lock_for(user):
+            used = self.used_set(user)
+            while int(self._clock() // TOTP_PERIOD) in used:
+                self._sleep(TOTP_PERIOD - self._clock() % TOTP_PERIOD + 0.5)
+            started = self._clock()
+            try:
+                yield
+            finally:
+                used.update(range(int(started // TOTP_PERIOD), int(self._clock() // TOTP_PERIOD) + 1))
+
+    def code(self, user, secret_b32, lookahead=0):
+        """(code, step, seconds waited) for the user's next sign-in; marks the step used."""
+        with self.lock_for(user):
+            used = self.used_set(user)
+            started = self._clock()
+            while True:
+                now = self._clock()
+                current = int(now // TOTP_PERIOD)
+                remaining = TOTP_PERIOD - now % TOTP_PERIOD
+                for step in range(current, current + lookahead + 1):
+                    if step in used or (step == current and remaining <= TOTP_STEP_GUARD):
+                        continue
+                    used.add(step)
+                    return totp_code(secret_b32, step), step, now - started
+                self._sleep(remaining + 0.5)
 
 
 # ─── background threads for the timing rows (section 5) ───────────────────────
@@ -192,6 +293,7 @@ class Phase4Gate(p2.Gate):
     SLICE = ''            # '4a' or '4b', set by the subclass
     CASES = []            # the row ids this helper prints, in receipt order
     RUNNER_OWNED = []     # ids of the slice the runner records (X3/X4, Z4a/Z4b)
+    REPLAY_NEEDS_SETUP = {}   # row id -> the observation only setup() records (--replay reports NOT_RUN)
 
     def __init__(self, args):
         # The cluster project is KRATE_PROJECT in the edition .env unless given:
@@ -206,10 +308,18 @@ class Phase4Gate(p2.Gate):
         self.monitor_project = args.monitor_project
         self.state_dir = os.path.abspath(args.state)
         self.secrets_path = os.path.join(self.state_dir, 'phase4-secrets.txt')
+        self.formal_secrets_path = self.secrets_path
+        self.scratch_dir = self.state_dir   # where a row writes its own scratch output (the browser probe)
+        if getattr(args, 'replay', False):
+            # A replay adds nothing to the formal run's secrets file or browser output: its own live under <state>/replay.
+            self.scratch_dir = os.path.join(self.state_dir, 'replay')
+            self.secrets_path = os.path.join(self.scratch_dir, 'phase4-secrets.txt')
         self.monitor_env = {}
         self.perses_origin = None
         self.grafana_origin = self.base + '/grafana'
         self.timed = TimedRows()
+        self.totp_steps = TotpSteps()
+        self.user_state = {}       # realm user -> enrolment state file (the slice setup or --replay fills it)
         self.setup_result = None   # (status, text) of the `setup` line
         self.terminated = False
         self.obs = {}              # row id -> (status, evidence) observed during setup
@@ -218,6 +328,7 @@ class Phase4Gate(p2.Gate):
     # ── runtime secrets ──
     def open_runtime_secrets(self):
         """Open the append-only secret list with private permissions, even if reused."""
+        os.makedirs(os.path.dirname(self.secrets_path), mode=0o700, exist_ok=True)
         fd = os.open(self.secrets_path,
                      os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         try:
@@ -346,14 +457,16 @@ class Phase4Gate(p2.Gate):
         environment, never in argv; the enrolled password and TOTP seed land in
         the 0600 state file and are added to the runtime secrets here.
 
-        A successful enrol ends on the NEXT TOTP step boundary: enrol's own
-        second login consumes the current step's code (single-use) and its
-        deliberate old-password refusal is the user's last failed login, so
-        an immediate sign-in would replay the consumed step and, landing
-        within Keycloak's 1s quick-login check of that refusal, trip the
-        60s brute-force temporary disable (V9 attempt-4, proven live:
-        LOGIN_ERRORs 78ms apart then user_temporarily_disabled). Waiting
-        here makes every enrol -> sign-in row start on a fresh step.
+        The enrolment submits two codes: CONFIGURE_TOTP's (Keycloak counts it as
+        used) and the second login's, which with --no-step-wait is the NEXT
+        step's code, accepted at once through the realm's look-around window of 1
+        instead of after a wait for the step boundary. The child reports the steps
+        it consumed (otp_steps) and they are recorded in the per-user ledger, so
+        the user's first sign-in waits for a fresh step only when it follows the
+        enrolment within those steps, and never replays a consumed code (V9
+        attempt-4, proven live: a sign-in that replayed the enrolment's code
+        landed within Keycloak's 1 s quick-login check of the old-password
+        refusal and tripped the 60 s brute-force temporary disable).
         """
         env = dict(os.environ,
                    GATE_TEMP_PW=temp_pw,
@@ -363,7 +476,7 @@ class Phase4Gate(p2.Gate):
                'enrol', '--base', self.base, '--user', user,
                '--password-env', 'GATE_TEMP_PW',
                '--client-secret-env', 'KEYCLOAK_KAFBAT_CLIENT_SECRET',
-               '--state', state_file]
+               '--state', state_file, '--no-step-wait']
         rc, out, err = p2.run(cmd, env=env, timeout=900)
         self.add_state_file_secrets(state_file)
         if rc != 0:
@@ -372,8 +485,29 @@ class Phase4Gate(p2.Gate):
             result = json.loads(out.strip().splitlines()[-1])
         except (ValueError, IndexError):
             raise RuntimeError('enrol %s printed no JSON result' % user)
-        time.sleep(30 - time.time() % 30 + 1)  # fresh single-use TOTP step (see docstring)
+        steps = result.get('otp_steps')
+        if not isinstance(steps, list) or not steps or not all(isinstance(step, int) for step in steps):
+            raise RuntimeError('enrol %s reported no otp_steps: its consumed TOTP steps are unknown' % user)
+        self.totp_steps.mark(user, *steps)
         return result
+
+    def load_state(self, user):
+        """The user's enrolment state (password, TOTP seed, consumed otp_steps); each slice helper implements it."""
+        raise NotImplementedError('load_state is implemented by the slice helper')
+
+    def note_enrolment_steps(self, user):
+        """Tell the ledger which TOTP steps the user's enrolment consumed, read from its state file, for a
+        process that did not run the enrolment itself (a prepared companion worker, a replay)."""
+        steps = self.load_state(user).get('otp_steps')
+        if isinstance(steps, list):
+            self.totp_steps.mark(user, *[step for step in steps if isinstance(step, int)])
+
+    def next_totp(self, user, secret_b32, lookahead=0):
+        """The user's next sign-in code from the per-user ledger; the wait, if any, is logged."""
+        code, step, waited = self.totp_steps.code(user, secret_b32, lookahead)
+        if waited >= 0.5:
+            log('TOTP %s: step already used or ending, waited %.1f s for step %d' % (user, waited, step))
+        return code, step, waited
 
     # ── rows ──
     def stub(self, row_id, needs):
@@ -403,6 +537,11 @@ class Phase4Gate(p2.Gate):
                     self.record(row_id, 'FAIL', 'thread start failed: %s: %s'
                                 % (type(error).__name__, error))
             return
+        if self.replaying and row_id in self.REPLAY_NEEDS_SETUP:
+            if self.wanted(row_id) and row_id not in self.results:
+                self.record(row_id, 'NOT_RUN', 'replay cannot run this row: it reads %s, which only the formal '
+                                               'setup() records' % self.REPLAY_NEEDS_SETUP[row_id])
+            return
         super().case(name, func)
 
     def start_timed(self, name, func):
@@ -419,6 +558,47 @@ class Phase4Gate(p2.Gate):
             return
         status, text = self.timed.join(name, timeout)
         self.record(name, status, text)
+
+    # ── --replay: diagnosis on a kept fixture ──
+    @property
+    def replaying(self):
+        return bool(getattr(self.args, 'replay', False))
+
+    def load_runtime_secrets(self):
+        """The earlier run's runtime secrets (JWTs, cookies, enrolled passwords) join the redactor."""
+        try:
+            with open(self.formal_secrets_path, encoding='utf-8') as handle:
+                for line in handle:
+                    p2.REDACT.add(line.strip())
+        except OSError:
+            pass
+
+    def replay_restore(self):
+        """What a replay does instead of setup(): read the state a formal setup left on the kept
+        fixture (the enrolment state files under <state>/p4, with the TOTP steps they consumed)
+        and rebuild nothing. Returns None, or the problem text when there is nothing to restore.
+        Rows that read an observation only setup() records are reported NOT_RUN (REPLAY_NEEDS_SETUP)."""
+        pattern = os.path.join(self.state_dir, 'p4', 'kc-*.json')
+        paths = sorted(glob.glob(pattern))
+        if not paths:
+            return ('replay needs the kept fixture\'s enrolment state files (%s) and found none: '
+                    'pass the --state of the run that built the fixture' % pattern)
+        self.load_runtime_secrets()
+        for path in paths:
+            name = os.path.basename(path)[len('kc-'):-len('.json')]
+            try:
+                with open(path, encoding='utf-8') as handle:
+                    state = json.load(handle)
+            except (OSError, ValueError) as error:
+                return 'replay cannot read the state file of %s: %s' % (name, error)
+            for key in ('password', 'totp'):
+                p2.REDACT.add(state.get(key) or '')
+            steps = state.get('otp_steps')
+            if isinstance(steps, list):
+                self.totp_steps.mark(name, *[step for step in steps if isinstance(step, int)])
+            self.user_state[name] = path
+        log('replay: restored %d enrolment state files from %s' % (len(paths), os.path.dirname(pattern)))
+        return None
 
     # ── preflight and setup ──
     def preflight(self):
@@ -448,7 +628,7 @@ class Phase4Gate(p2.Gate):
         self.perses_origin = 'https://%s:%s' % (self.origin.hostname or '', perses_port)
         self.allowed_origins.add(self.perses_origin)
         try:
-            os.makedirs(self.state_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(self.secrets_path), mode=0o700, exist_ok=True)  # private from the start (B5-REVIEW N7)
             with self.open_runtime_secrets():
                 pass
         except OSError as error:
@@ -505,7 +685,14 @@ class Phase4Gate(p2.Gate):
                 for case in self.CASES:
                     self.results.setdefault(case, ('NOT_RUN', evidence('precondition: ' + problem)))
                 return self.finish()
-            setup_problem = self.setup()
+            if self.replaying:
+                log('REPLAY: DIAGNOSIS ONLY, never acceptance. Rows %s run on a kept fixture without setup(); '
+                    'the result is not a gate result and no receipt is written. Its own files are under %s; '
+                    'keep its stdout out of the formal run\'s receipt folder.'
+                    % (','.join(sorted(self.only or [])), self.scratch_dir))
+                setup_problem = self.replay_restore()
+            else:
+                setup_problem = self.setup()
             if setup_problem is not None:
                 log('setup: ' + setup_problem)
                 # Section 5: the setup line says FAIL and every row becomes NOT_RUN;
@@ -515,7 +702,8 @@ class Phase4Gate(p2.Gate):
                 for case in self.CASES:
                     self.results.setdefault(case, ('NOT_RUN', evidence('setup: ' + setup_problem)))
                 return self.finish()
-            self.setup_result = ('PASS', 'preconditions ran')
+            self.setup_result = (('SKIPPED', 'setup() skipped on a kept fixture (replay)') if self.replaying
+                                 else ('PASS', 'preconditions ran'))
             try:
                 for name, func in self.plan():
                     self.case(name, func)
@@ -540,8 +728,13 @@ class Phase4Gate(p2.Gate):
         encoded from the walk notes."""
 
     def finish(self):
+        # A replay is diagnosis: its statuses are REPLAY_PASS / REPLAY_FAIL / REPLAY_NOT_RUN, which the
+        # runner's record() turns into a FAIL ("invalid row result"), so they can never become a
+        # formal PASS if the output is ever fed to it. The helper writes no receipt in either mode.
+        tag = 'REPLAY_' if self.replaying else ''
+        note = 'REPLAY, diagnosis only, not acceptance; ' if self.replaying else ''
         if self.setup_result is not None:
-            print('setup\t%s\t%s' % (self.setup_result[0], evidence(self.setup_result[1])), flush=True)
+            print('setup\t%s%s\t%s' % (tag, self.setup_result[0], evidence(note + self.setup_result[1])), flush=True)
         first = True
         for case in self.CASES:
             if case not in self.results:
@@ -553,7 +746,9 @@ class Phase4Gate(p2.Gate):
                 # The TLS mode of the whole run is part of the evidence, not only of the log.
                 text = 'TLS %s; %s' % (self.tls_mode, text)
                 first = False
-            print('%s\t%s\t%s' % (case, status, evidence(text)), flush=True)
+            print('%s\t%s%s\t%s' % (case, tag, status, evidence(note + text)), flush=True)
+        if self.replaying:
+            log('REPLAY finished: DIAGNOSIS ONLY, never acceptance; no receipt was written')
         return 1 if any(status == 'FAIL' for status, _ in self.results.values()) else 0
 
 
@@ -578,6 +773,10 @@ def build_parser(prog, doc, extra=None):
     run.add_argument('--project', default='',
                      help='cluster Compose project (default: KRATE_PROJECT from the edition .env)')
     run.add_argument('--only', type=only_list, help='comma-separated row ids, e.g. U1,U2 (others print NOT_RUN)')
+    run.add_argument('--replay', action='store_true',
+                     help='DIAGNOSIS ONLY, never acceptance: run the --only rows on a kept fixture without '
+                          'setup() (the enrolment state of the formal run is read, nothing is rebuilt); rows '
+                          'print REPLAY_PASS/REPLAY_FAIL/REPLAY_NOT_RUN and no receipt is written')
     run.add_argument('--prepare-only', action='store_true',
                      help='prepare the shared companion fixture without running rows')
     run.add_argument('--prepared', action='store_true',
@@ -594,6 +793,10 @@ def check_run_args(parser, args, cases):
         parser.error('--base-url must be an https origin without a path')
     if args.only and any(case not in cases for case in args.only):
         parser.error('--only accepts ' + ', '.join(cases))
+    if args.replay and (not args.only or args.prepare_only or args.prepared
+                        or args.session_max_minutes is not None):
+        parser.error('--replay needs --only and cannot be combined with --prepare-only, --prepared or '
+                     '--session-max-minutes')
     if args.prepare_only and (args.prepared or args.only or args.session_max_minutes is not None):
         parser.error('--prepare-only cannot be combined with --prepared, --only or --session-max-minutes')
     if args.prepared and (not args.only or args.session_max_minutes is None):

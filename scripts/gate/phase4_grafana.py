@@ -340,6 +340,13 @@ class Gate(Phase4Gate):
     SLICE = '4a'
     CASES = CASES
     RUNNER_OWNED = RUNNER_OWNED
+    # --replay: rows that read what only setup() records (obs[...], state_before, cluster_initial).
+    REPLAY_NEEDS_SETUP = {
+        'U17': "obs['U17'] (setup_u17)", 'U18': "obs['U18'] (setup_after)",
+        'U19': "obs['U19-collisions'], obs['U19-retire'] and the seeded p4-collide state",
+        'U20': "obs['U20-refusal'] (setup_switch)", 'U22': 'state_before (the pre-switch state hash)',
+        'U23': 'cluster_initial (the id and start-time ledger taken before the rows)',
+        'U26': "obs['U26-realm'] (setup_switch)"}
 
     def __init__(self, args):
         super().__init__(args)
@@ -536,8 +543,11 @@ class Gate(Phase4Gate):
 
     def signin(self, user, label, expect='ok'):
         """Full realm sign-in to Grafana (walk method p4driver.py cmd_signin, logs/123-128):
-        authstart -> Keycloak password + OTP (next 30 s step, codes are single-use) ->
-        callback GET -> session cookie. Returns {'kind': OK|REFUSED|FAIL, 'error', 'driver',
+        authstart -> Keycloak password + OTP (the current 30 s step's code, which Keycloak
+        accepts once per user: a step this user already used, or one about to end, is
+        waited out through the per-user ledger; a refusal the ledger could not foresee is
+        retried once on a fresh step) -> callback GET -> session cookie.
+        Returns {'kind': OK|REFUSED|FAIL, 'error', 'driver',
         'chain', 'set_cookie', 'callback_get'}; the last three feed U15's flow/cookie probes."""
         state = self.load_state(user)
         d = self.driver(label)
@@ -569,10 +579,16 @@ class Gate(Phase4Gate):
                                     'credentialId': ''})
         chain.append(('POST', 'realm:password', status))
         if status == 200 and 'name="otp"' in page:
-            time.sleep(30 - time.time() % 30 + 1)  # a TOTP code is single-use: next step
-            status, hdrs, page = d.req(GrafanaDriver.form_action(page),
-                                       {'otp': GrafanaDriver.totp(state['totp'])})
+            code, _step, _waited = self.next_totp(user, state['totp'])
+            status, hdrs, page = d.req(GrafanaDriver.form_action(page), {'otp': code})
             chain.append(('POST', 'realm:otp', status))
+            if status == 200 and 'Invalid authenticator code' in page:
+                # A use of this step the ledger cannot see (another process): the next ledger
+                # code is on a fresh step; one retry, as the 4b helper does.
+                log('TOTP %s: Keycloak refused the code as already used; retrying on a fresh step' % user)
+                code, _step, _waited = self.next_totp(user, state['totp'])
+                status, hdrs, page = d.req(GrafanaDriver.form_action(page), {'otp': code})
+                chain.append(('POST', 'realm:otp-retry', status))
         login_error = ''
         for _ in range(6):  # follow back to Grafana's callback
             if status in (302, 303) and hdrs.get('Location'):
@@ -787,14 +803,17 @@ class Gate(Phase4Gate):
         hosts = ['--add-host', 'host.docker.internal:host-gateway']
         if self.origin.hostname and gateway:
             hosts += ['--add-host', '%s:%s' % (self.origin.hostname, gateway)]
-        rc, out, err = p2.docker(
-            'run', '--rm', *hosts,
-            '-v', '%s:/out' % outdir, '-v', '%s:/gate:ro' % HERE,
-            '-e', 'UI15_USER', '-e', 'UI15_PASSWORD', '-e', 'UI15_TOTP',
-            '-e', 'UI15_DASH', '-e', 'PW_MODULES',
-            self.BROWSER_IMAGE, 'node', '/gate/phase4-browser.mjs',
-            '--base', self.base, '--host', self.origin.hostname or '',
-            '--resolve-to', gateway, '--out', '/out', env=env, timeout=600)
+        # The container signs the user in on its own clock (phase4-browser.mjs reads Date.now()), with no
+        # ledger: the ledger holds this user's lock for the run and starts it in a step nobody used.
+        with self.totp_steps.guard_external_signin(user):
+            rc, out, err = p2.docker(
+                'run', '--rm', *hosts,
+                '-v', '%s:/out' % outdir, '-v', '%s:/gate:ro' % HERE,
+                '-e', 'UI15_USER', '-e', 'UI15_PASSWORD', '-e', 'UI15_TOTP',
+                '-e', 'UI15_DASH', '-e', 'PW_MODULES',
+                self.BROWSER_IMAGE, 'node', '/gate/phase4-browser.mjs',
+                '--base', self.base, '--host', self.origin.hostname or '',
+                '--resolve-to', gateway, '--out', '/out', env=env, timeout=600)
         summary = None
         for line in (out or '').splitlines():
             if line.startswith('SUMMARY '):
@@ -823,7 +842,7 @@ class Gate(Phase4Gate):
         are returned for the receipt. Returns (summary dict | None, steps list,
         first-attempt failed requests or None)."""
         state = self.load_state(user)
-        outdir = os.path.join(self.state_dir, 'browser', user)
+        outdir = os.path.join(self.scratch_dir, 'browser', user)
         os.makedirs(outdir, exist_ok=True)
         summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
         retried = None
@@ -990,6 +1009,7 @@ class Gate(Phase4Gate):
             if enrolled.get('user') != 'p4v' or not enrolled.get('password') or not enrolled.get('totp'):
                 raise RuntimeError('p4v enrolment state is incomplete')
             self.add_state_file_secrets(state)
+            self.note_enrolment_steps('p4v')
             kc = self.master_kcadm()
             uid = kc.user_id('p4v')
             if not uid:
@@ -2558,7 +2578,7 @@ class Gate(Phase4Gate):
                   recov_result['kind'], t_recov_elapsed)
 
     def u13(self):
-        # walk logs/154,164: Keycloak stopped >120s with grafana removed (`docker rm`):
+        # walk logs/154,164: Keycloak stopped for the whole of idp-wait's 120 s budget, grafana removed (`docker rm`):
         # `monitor up` exits rc=1 with grafana created-not-started (restarts=0), compose
         # output names `idp-wait` exit 1 and CLI warning lines from 6645087 ("Keycloak is
         # not running: the krate-grafana client is not reconciled now"); recovery `monitor up`
@@ -2568,7 +2588,6 @@ class Gate(Phase4Gate):
         if not kc_cid or not graf_cid:
             not_run('precondition: missing keycloak or grafana container')
 
-        t_down = time.monotonic()
         rc_stop, _, _ = p2.docker('stop', '-t', '5', kc_cid)
         if rc_stop != 0:
             fail('docker stop keycloak failed (rc=%d)' % rc_stop)
@@ -2577,10 +2596,9 @@ class Gate(Phase4Gate):
         if rc_rm != 0:
             fail('docker rm -f grafana failed (rc=%d)' % rc_rm)
 
-        elapsed = time.monotonic() - t_down
-        if elapsed < 125:
-            time.sleep(125 - elapsed)
-
+        # No pad before this `monitor up`: Keycloak stays stopped for the whole of idp-wait's own
+        # 120 s budget (monitoring/idp/idp_wait.py BUDGET_SECONDS, measured from its start), which
+        # is what makes it exit 1; the first `monitor up` itself lasts that long.
         rc_up1, out_up1, err_up1 = self.krate('monitor', 'up', timeout=600)
         text_up1 = out_up1 + err_up1
 
@@ -3164,6 +3182,10 @@ class Gate(Phase4Gate):
         user = p2.User('p4dis', ['viewer'])
         user.password = state['password']
         user.secret = state['totp']
+        # p2.User.code() records the steps it uses in user.used under user.lock: sharing the ledger's
+        # set and lock keeps U25's Kafbat sign-in and the helper's p4dis sign-ins (U10) off each other's steps.
+        user.used = self.totp_steps.used_set('p4dis')
+        user.lock = self.totp_steps.lock_for('p4dis')
         result = self.kafbat_login(user, 'u25-kafbat')
         if result.get('kind') != 'ok' or not result.get('session'):
             fail('p4dis Kafbat sign-in: %s %s' % (result.get('kind'),

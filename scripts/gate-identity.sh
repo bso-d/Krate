@@ -729,7 +729,11 @@ run_phase1() {
   uid="$(kcadm_master get users -r krate -q username=gateb -q exact=true --fields id --format csv --noquotes | grep -o -E '[0-9a-f-]{36}' | head -1)"
   ev="$(kcadm_master get "attack-detection/brute-force/users/$uid" -r krate | tr -d ' \n')"
   [[ "$ev" == *'"disabled":true'* && "$ev" =~ \"numFailures\":[2-9] ]]; st=$?; ok_if B5 1 B "$st" "after 5 rapid wrong passwords the account is temporarily locked (Keycloak's quick-login check locks after two rapid failures, later attempts are not counted): $ev"
-  sleep 61  # a code is single-use: let the step gatea's B1 login consumed expire before using "the previous step"
+  # a code is single-use: B7 sends the code of the previous step, which must not be one gatea's enrolment consumed.
+  # Wait only until the previous step is newer than the newest step the enrolment recorded in its state file
+  # (otp_steps), at most the 61 s this row always waited; a state file without otp_steps keeps the full 61 s.
+  pause="$(python3 -I -c 'import json,sys,time; s=json.load(open(sys.argv[1])).get("otp_steps") or []; w=61.0 if not s else min(61.0, max(0.0, (max(int(x) for x in s)+2)*30+1-time.time())); time.sleep(w); print("%.0f" % w)' "$STATE/gatea.json" 2>/dev/null || sleep 61)"
+  log "B7: waited ${pause:-61}s until the previous TOTP step is newer than gatea's enrolment steps"
   cap flow login --base "$BASE" --state "$STATE/gatea.json" --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect ok --totp-offset -1; st=$?; ok_if B7 1 B "$st" "a one-time code from the previous 30-second step is accepted (realm look-ahead window 1): $(printf '%s' "$CAP" | tail -1 | cut -c1-60)"
   cap "$KRATE" identity users reset-password gatev; rc=$?; TEMP_PW="$(temp_password "$CAP")"; add_secret "$TEMP_PW" temp
   [[ $rc -eq 0 && -n "$TEMP_PW" ]]; st=$?; ok_if B6 1 B "$st" "reset-password sets a new temporary password (exit $rc; shown once)"

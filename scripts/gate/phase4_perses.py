@@ -146,6 +146,10 @@ class Gate(Phase4Gate):
     SLICE = '4b'
     CASES = CASES
     RUNNER_OWNED = RUNNER_OWNED
+    # --replay: rows that read what only setup() records (obs['V17-baseline'], cluster_initial).
+    REPLAY_NEEDS_SETUP = {
+        'V17': "obs['V17-baseline'] (the Perses local seed hash taken in setup_perses_seed)",
+        'V20': 'cluster_initial (the id and start-time ledger taken before the rows)'}
 
     def __init__(self, args):
         super().__init__(args)
@@ -377,25 +381,21 @@ class Gate(Phase4Gate):
         if st4 == 200 and ('totp' in page4 or 'name="otp"' in page4):
             if not totp_seed:
                 return {'kind': 'FAIL', 'detail': 'OTP prompted but no totp seed'}
-            code = self.totp(totp_seed)
+            # The per-user ledger hands out the current step's code, or waits for a fresh step
+            # when this user already used it (a back-to-back sign-in) or the step is about to end.
+            code, _step, _waited = self.next_totp(user, totp_seed)
             action_otp = self.form_action(page4)
             st5, h5, page5 = d.req(action_otp, method='POST',
                                    data={'otp': code, 'login': 'Sign In'},
                                    headers={'Accept': 'text/html'})
             if st5 == 200 and 'Invalid authenticator code' in page5:
+                # A use of this step the ledger cannot see (another process): one retry on the
+                # next step, which the ledger waits for.
                 retry_action = self.form_action(page5)
                 if retry_action:
-                    now = time.time()
-                    current_step = int(now // 30)
-                    delay = (current_step + 1) * 30 - now + 0.05
-                    if not 0 < delay <= 30.05:
-                        return {'kind': 'FAIL', 'detail': 'invalid TOTP replay wait'}
-                    time.sleep(delay)
-                    if int(time.time() // 30) <= current_step:
-                        return {'kind': 'FAIL', 'detail': 'TOTP step did not advance'}
+                    code, _step, _waited = self.next_totp(user, totp_seed)
                     st5, h5, page5 = d.req(retry_action, method='POST',
-                                           data={'otp': self.totp(totp_seed),
-                                                 'login': 'Sign In'},
+                                           data={'otp': code, 'login': 'Sign In'},
                                            headers={'Accept': 'text/html'})
         else:
             st5, h5, page5 = st4, h4, page4
@@ -499,6 +499,7 @@ class Gate(Phase4Gate):
                     raise RuntimeError('Perses is not in native krate realm mode')
                 self.wait_perses_ready('native')
                 self.load_state('p4ctrl')
+                self.note_enrolment_steps('p4ctrl')
                 kc = self.master_kcadm()
                 uid = kc.user_id('p4ctrl')
                 if not uid:
@@ -1648,7 +1649,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
 
     def v16(self):
         # walk log 116: monitor up with Keycloak stopped:
-        # Case (b): Keycloak stopped > 120 s: monitor up exits 1 naming idp-wait,
+        # Case (b): Keycloak stopped for the whole of idp-wait's 120 s budget: monitor up exits 1 naming idp-wait,
         # consumers created-not-started (0 restarts), started by next monitor up when healthy.
         kc_cid = self.cluster_container('keycloak')
         perses_cid = self.mon_container('perses')
@@ -1656,7 +1657,6 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         if not kc_cid:
             not_run('precondition: missing keycloak container')
 
-        t_down = time.monotonic()
         p2.docker('stop', '-t', '5', kc_cid)
 
         if perses_cid:
@@ -1664,10 +1664,9 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         if o2p_cid:
             p2.docker('rm', '-f', o2p_cid)
 
-        elapsed = time.monotonic() - t_down
-        if elapsed < 125:
-            time.sleep(125 - elapsed)
-
+        # No pad before this `monitor up`: Keycloak stays stopped for the whole of idp-wait's own
+        # 120 s budget (monitoring/idp/idp_wait.py BUDGET_SECONDS, measured from its start), which
+        # is what makes it exit 1; the first `monitor up` itself lasts that long.
         rc_up1, out_up1, err_up1 = self.krate('monitor', 'up', timeout=600)
         text_up1 = out_up1 + err_up1
         names_idp = ('idp-wait' in text_up1 and ('didn\'t complete successfully' in text_up1 or 'exit 1' in text_up1))
