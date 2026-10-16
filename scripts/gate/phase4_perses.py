@@ -932,8 +932,9 @@ class Gate(Phase4Gate):
             st, _h, _b = self.direct_perses(method, path, headers=cookie_hdr, data=data)
             statuses.append(st)
 
-        # The walk tolerates 403/405 on direct writes (walk log 103).
-        writes_403 = all(s in (403, 405) for s in statuses)
+        # Only 403 is a role refusal (owner row: writes -> 403); a 405
+        # would mean the route never reached authorization (audit L4).
+        writes_403 = all(s == 403 for s in statuses)
 
         s_r1, _h, _b = self.direct_perses('GET', '/api/v1/projects', headers=cookie_hdr)
         s_r2, _h, _b = self.direct_perses('GET', '/api/v1/projects/krate/dashboards', headers=cookie_hdr)
@@ -1436,12 +1437,15 @@ class Gate(Phase4Gate):
 
         # Sign in second user (equal email local part 'p4dup'): the walk
         # refuses it at the Perses OIDC callback (403/500), which signin()
-        # surfaces as REFUSED with the OIDC outcome.
+        # surfaces as REFUSED with the OIDC outcome. Only those OIDC
+        # refusals count -- any other REFUSED (e.g. Account is disabled)
+        # proves a different defect, not the registration conflict.
         st_second_refused = False
         second_ev = ''
         try:
             res2 = self.signin('p4dup2', 'v13-dup2')
-            st_second_refused = (res2.get('kind') == 'REFUSED' or res2.get('status') in (403, 500))
+            st_second_refused = (res2.get('kind') == 'REFUSED'
+                                 and res2.get('reason') in ('oidc_403', 'oidc_500'))
             second_ev = str(res2.get('reason', res2.get('detail', '')))[:80]
         except Exception as error:
             second_ev = '%s: %s' % (type(error).__name__, error)
@@ -1533,9 +1537,12 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         rc_log, pm_log = self.container_log(pm_cid, timeout=300) if pm_cid else (-1, '')
         pm_match = re.findall(r'removed (\d+) stale user\(s\) and (\d+) managed binding\(s\)', pm_log or '')
         pm_users, pm_bindings = (int(pm_match[-1][0]), int(pm_match[-1][1])) if pm_match else (-1, -1)
-        pm_want_bindings = managed_before + 2 if managed_before >= 0 else 2
-        pm_reported = (pm_users == 2 and (pm_bindings == pm_want_bindings if managed_before >= 0
-                                          else pm_bindings >= 2))
+        # No fallback predicate: without a trustworthy pre-count the
+        # exact removed-bindings claim cannot be proven, so the row
+        # FAILs instead of accepting any count >= 2 (audit D4).
+        pm_want_bindings = managed_before + 2 if managed_before >= 0 else -1
+        pm_reported = (managed_before >= 0 and pm_users == 2
+                       and pm_bindings == pm_want_bindings)
 
         sync_cid = self.mon_container('perses-sync', all_states=False)
         sync_ok = bool(sync_cid and self._wait_container_healthy(sync_cid, limit=180) is not None)
@@ -1552,7 +1559,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         ]
         status, tokens = aggregate(probes)
         want_ev = ('2/%d exact (%d pre-existing + 2 seeded)' % (pm_want_bindings, managed_before)
-                   if managed_before >= 0 else '2 users exact, >=2 bindings (pre-count unavailable)')
+                   if managed_before >= 0 else 'exact count unprovable: bindings pre-count failed')
         return status, '%s; issuer migration: monitor up rc=%d, perses-migrate removed %d user(s)/%d binding(s) ' \
                        '(want %s), ' \
                        'cookie secret rotated: %s, perses-sync healthy: %s, p4v sign-in %s; walk: live4b 114' \

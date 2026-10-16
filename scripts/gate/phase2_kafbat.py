@@ -1250,7 +1250,7 @@ class Gate:
                 landing = urllib.parse.urlsplit(urllib.parse.urljoin(self.base + '/', final)).netloc
                 notes.append('post-login Location %s' % final[:40])
                 if result['kind'] != 'ok':
-                    notes.append('login %s' % result['kind'])
+                    bad.append('post-login landing unverified: login %s' % result['kind'])
                 elif landing != self.origin.netloc:
                     bad.append('post-login redirect off-origin: ' + final)
         text = '; '.join(notes)

@@ -233,6 +233,15 @@ def loki_push_body(labels, line, ts_ns):
 
 # ─── the headless Grafana realm-mode driver (port of the walk's p4driver.py) ──
 
+def broker_services(id_map):
+    """Compose service names that are Kafka brokers in a cluster id map:
+    kafka-N in every shipped edition (epc/kraft compose), broker-N kept
+    for older layouts. Name-based, never substring-'broker' (that loop
+    never matched kafka-92.. and silently compared nothing)."""
+    return sorted(svc for svc in (id_map or {})
+                  if re.fullmatch(r'(kafka|broker)-\d+', svc))
+
+
 def core_ledger_change(svc, old, new):
     """U23 core-cluster ledger decision for one service. old/new are
     (container id, StartedAt, RestartCount). Returns (changed, note):
@@ -435,6 +444,8 @@ class Gate(Phase4Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
+                if parts[0] == '<no':  # no compose service label ('<no value>')
+                    continue
                 found[parts[0]] = (parts[1], ' '.join(parts[2:]))
         return found
 
@@ -460,6 +471,8 @@ class Gate(Phase4Gate):
                                      '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}} {{.RestartCount}}', cid)
             if rc2 == 0 and info.split():
                 parts = info.split()
+                if parts[0] == '<no':  # no compose service label ('<no value>')
+                    continue
                 found[parts[0]] = (parts[1], ' '.join(parts[2:-1]), parts[-1])
         return found
 
@@ -1884,6 +1897,7 @@ class Gate(Phase4Gate):
             renewal_ok, successor_ok = renewed, successor_ok
         refusal_status, refusal_text = self.obs.get('U20-refusal', ('NOT_RUN', 'refusal not observed'))
         probes = [('files', 'PASS' if modes_ok else 'FAIL'),
+                  ('sa_role_admin', 'PASS' if sa_role == 'Admin' else 'FAIL'),
                   ('creation', 'PASS' if creation_ok else 'FAIL'),
                   ('seed_alerting', 'PASS' if seeding_ok else 'FAIL'),
                   ('crud', 'PASS' if crud_ok else 'FAIL'),
@@ -3009,11 +3023,21 @@ class Gate(Phase4Gate):
                 if not ledger(svc):
                     core_unchanged = False
 
-        # brokers unchanged
-        for svc in initial:
-            if 'broker' in svc and svc in curr_cluster:
+        # Brokers unchanged: kafka-N service names in every shipped
+        # edition. Zero brokers found is a FAIL, never a silent pass --
+        # the previous substring-'broker' loop matched nothing.
+        brokers = broker_services(initial)
+        if not brokers:
+            core_unchanged = False
+            diff_core.append('no broker services (kafka-N/broker-N) in cluster map: %s'
+                             % sorted(initial))
+        for svc in brokers:
+            if svc in curr_cluster:
                 if not ledger(svc):
                     core_unchanged = False
+            else:
+                core_unchanged = False
+                diff_core.append('%s: missing after slice' % svc)
 
         # 2. Realm.ini-content change recreates grafana only (log 162)
         # Change KEYCLOAK_SESSION_IDLE_MINUTES 15 -> 16
@@ -3059,11 +3083,11 @@ class Gate(Phase4Gate):
             ('proxy_untouched_by_monitor', 'PASS' if proxy_untouched else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; core cluster (brokers, kafka-ui, keycloak, keycloak-db) unchanged%s%s; ' \
+        return status, '%s; core cluster (brokers %s, kafka-ui, keycloak, keycloak-db) unchanged%s%s; ' \
                        'realm.ini 15m->16m->15m recreated grafana only (rc %d/%d/%d/%d, ' \
                        'mid %s, after %s, ini %s/%s); proxy untouched; ' \
                        'walk: live4a 137,139,162,169' \
-               % (tokens, '' if core_unchanged else ' (diffs: %s)' % diff_core,
+               % (tokens, brokers, '' if core_unchanged else ' (diffs: %s)' % diff_core,
                   '' if not restarted else ' (restarted in place: %s)' % restarted,
                   rc1, rc2, rc3, rc4, recreated_16, recreated_15, ini_16, ini_15)
 
