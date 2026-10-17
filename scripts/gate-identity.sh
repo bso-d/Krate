@@ -2114,13 +2114,14 @@ phase4_row_w5() {
   fi
   rc_eval=0
   evidence="$(W5_EXPECTED="$expected_csv" W5_DOCKER="$docker_csv" W5_VM_G6="${VM_G6:-}" python3 -I - "$result_file" "$fw_state" "$STATE/w5-agent-response.json" <<'PYW5' 2>>"$RAW"
-import json, os, re, sys
+import hashlib, json, os, re, sys
 
 result_file, fw_state, response_file = sys.argv[1], sys.argv[2], sys.argv[3]
 bad = []
 note = []
 try:
-    r = json.load(open(result_file, "r", encoding="utf-8"))
+    result_bytes = open(result_file, "rb").read()   # one read: the bytes that are hashed are the bytes that are evaluated
+    r = json.loads(result_bytes.decode("utf-8"))
 except (OSError, ValueError) as exc:
     sys.stderr.write("the W5 result file is not readable/JSON: %s\n" % exc)
     sys.exit(1)
@@ -2128,6 +2129,19 @@ try:
     envelope = json.load(open(response_file, "r", encoding="utf-8"))
 except (OSError, ValueError) as exc:
     sys.stderr.write("the saved W5 agent response is not readable/JSON: %s\n" % exc)
+    sys.exit(1)
+# Review R1: the result file on the guest must be the one THIS response delivered. The agent lists every file it delivered with its
+# sha256 (files[]) in the nonce-bound response; a file under the delivery folder that is not that listed one (an earlier run's result
+# that scp -r left in place, a foreign file) decides nothing: the row fails closed before any value of the file is evaluated.
+result_sha = hashlib.sha256(result_bytes).hexdigest()
+listed = [f for f in (envelope.get("files") or []) if isinstance(f, dict) and f.get("name") == "w5-result.json"]
+if len(listed) != 1 or listed[0].get("sha256") != result_sha:
+    if len(listed) != 1:
+        why = "the agent response lists %d w5-result.json entries in files[] (exactly one is required), so the delivered file cannot be tied to this run" % len(listed)
+    else:
+        why = "the delivered w5-result.json (sha256 %s) is not the file this agent response lists (sha256 %s): a stale or foreign result is not evaluated" % (result_sha[:12], str(listed[0].get("sha256"))[:12])
+    print("breaches=1")
+    print("BREACH %s" % why)
     sys.exit(1)
 if not (r.get("swept") or {}).get("tcpOnly"):
     bad.append("the sweep is not TCP-only as the row states")

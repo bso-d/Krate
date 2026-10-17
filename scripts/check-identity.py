@@ -2,6 +2,7 @@
 """Static checks for the Krate identity foundation (templates, realm plan, Compose, CLI parity)."""
 import configparser
 import contextlib
+import hashlib
 import importlib.util
 from typing import Callable
 import io
@@ -1130,7 +1131,7 @@ def check_topofix2(checks):
         w5_python = pyw5.group(1)
         w5_docker = '80,443,3443,9092,9093'
 
-        def w5_case(v6_ports, vm_g6, with_v6=True, envelope_leak='ok', result_leak=None):
+        def w5_case(v6_ports, vm_g6, with_v6=True, envelope_leak='ok', result_leak=None, listing='match'):
             report = {'swept': {'tcpOnly': True}, 'counts': {'open': 6}, 'open': [22, 80, 443, 3443, 9092, 9093],
                       'spot': [{'port': 111, 'outcome': 'refused'}],
                       'cert': {'authorized': True, 'protocol': 'TLSv1.3', 'sha256': 'ab12'}}
@@ -1147,6 +1148,19 @@ def check_topofix2(checks):
             with tempfile.TemporaryDirectory() as w5_tmp:
                 result_path = Path(w5_tmp) / 'w5-result.json'
                 result_path.write_text(json.dumps(report))
+                # R1: the agent's response lists what it delivered (files[]: name, sha256, bytes); the runner binds the result file to that entry
+                entry = {'name': 'w5-result.json', 'sha256': hashlib.sha256(result_path.read_bytes()).hexdigest(), 'bytes': result_path.stat().st_size}
+                sibling = {'name': 'w5-result.sha256', 'sha256': hashlib.sha256(b'sibling').hexdigest(), 'bytes': 79}
+                if listing == 'match':
+                    envelope['files'] = [sibling, entry]
+                elif listing == 'stale':   # the file under the delivery folder is not the one the agent delivered (scp -r nested the fresh folder)
+                    envelope['files'] = [sibling, dict(entry, sha256=hashlib.sha256(b'an earlier run').hexdigest())]
+                elif listing == 'unlisted':
+                    envelope['files'] = [sibling]
+                elif listing == 'twice':
+                    envelope['files'] = [entry, entry]
+                elif listing == 'no-files-key':
+                    envelope.pop('files', None)
                 response_path = Path(w5_tmp) / 'w5-agent-response.json'
                 response_path.write_text(json.dumps(envelope))
                 env = dict(os.environ, W5_EXPECTED='22,' + w5_docker, W5_DOCKER=w5_docker, W5_VM_G6=vm_g6)
@@ -1180,6 +1194,15 @@ def check_topofix2(checks):
         rc_i, out_i = w5_case([(22, 'open'), (80, 'refused'), (443, 'no-route-or-scope')] + m4_shape[3:], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
         e(rc_i == 1 and 'IPv6 probe of port 443 was inconclusive (no-route-or-scope)' in out_i,
           f'W5 rejects an inconclusive IPv6 probe outcome; got rc {rc_i}: {out_i[-200:]!r} (T03)')
+        # R1: the result file the runner reads must be the one the agent's response lists in files[] (sha256), whatever else sits in the folder
+        for listing, reason in (('stale', 'is not the file this agent response lists'), ('unlisted', 'lists 0 w5-result.json entries'),
+                                ('twice', 'lists 2 w5-result.json entries'), ('no-files-key', 'lists 0 w5-result.json entries')):
+            rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing=listing)
+            e(rc_r1 == 1 and 'breaches=1' in out_r1 and 'BREACH the ' in out_r1 and reason in out_r1
+              and 'observed open set' not in out_r1 and 'open=[' not in out_r1,
+              f'W5 fails closed, evaluating nothing, when the delivered result file is not tied to the agent response ({listing}); got rc {rc_r1}: {out_r1[-240:]!r} (R1)')
+        rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing='match')
+        e(rc_r1 == 0 and 'breaches=0' in out_r1, f'W5 passes when the result file is the one the response lists; got rc {rc_r1}: {out_r1[-200:]!r} (R1)')
 
     # PRE-4: the W7 Ubuntu branch decides on the first line of `ufw status`, never on the ufw.service state (a oneshot that reads
     # `active (exited)` while ufw is inactive). The runner's own lines run against fake sudo/ufw commands.
@@ -1689,6 +1712,73 @@ def check_topofix2(checks):
         e(head_case(candidate_sha, candidate_sha) == '0' and head_case(candidate_sha, candidate_sha[:9]) == '0'
           and head_case('', candidate_sha) == '1' and head_case('f' + candidate_sha[1:], candidate_sha) == '1' and head_case(candidate_sha, 'f' + candidate_sha[1:]) == '1',
           'guest_head_is_candidate accepts the candidate (full or abbreviated) and refuses an unreadable or different HEAD (T13)')
+
+        # R1 (launcher half): the delivery folder starts every run empty. `limactl copy -r DIR VM:agent-out/w5` nests DIR inside an
+        # existing agent-out/w5, so a stale w5-result.json from an earlier run would stay where the runner reads it. The launcher's own two
+        # guest lines (the rm and the mkdir) run behind a fake limactl that permits only rm and mkdir under the temp guest root and never
+        # anything else; the delivery itself is stood in for by `cp -R DIR agent-out/w5`, which nests into an existing destination as scp -r
+        # does (observed with scp in harness/phase4-completion/raw/TOPOFIX2-REVIEW/scp-sem). The CONTROL (mkdir line only) must show the
+        # stale file surviving, or this harness would prove nothing.
+        launcher_all = launcher_path.read_text().splitlines()
+        rm_line = next((ln for ln in launcher_all if ln.startswith('limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out" ')), '')
+        mkdir_line = next((ln for ln in launcher_all if ln.startswith('limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" ')), '')
+        e(bool(rm_line) and bool(mkdir_line), 'the launcher keeps its guest rm -rf and mkdir lines for agent-out (R1 test anchor)')
+        if rm_line and mkdir_line:
+            def delivery_after(prelude_lines):
+                with tempfile.TemporaryDirectory() as r1_tmp:
+                    base = Path(r1_tmp)
+                    guest = base / 'guest'
+                    (guest / 'agent-out/w5').mkdir(parents=True)
+                    (guest / 'agent-out/w5/w5-result.json').write_text('STALE')
+                    (guest / 'rdv').mkdir()
+                    (guest / 'rdv/agent-hello.json').write_text('hello')
+                    (guest / 'keep.txt').write_text('keep')
+                    (base / 'bin').mkdir()
+                    (base / 'bin/limactl').write_text(
+                        '#!/bin/sh\n[ "$1" = shell ] || exit 9\nshift; shift; [ "$1" = -- ] && shift\n'
+                        'cmd="$1"; shift\n'
+                        'case "$cmd" in rm|mkdir) ;; *) echo "fake limactl: refused $cmd" >&2; exit 9 ;; esac\n'
+                        'for a in "$@"; do case "$a" in -*) ;; "$FAKE_GUEST"/*) ;; *) echo "fake limactl: refused path $a" >&2; exit 9 ;; esac; done\n'
+                        'exec "$cmd" "$@"\n')
+                    (base / 'bin/limactl').chmod(0o755)
+                    script = 'set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"\n' + '\n'.join(prelude_lines) + '\n'
+                    run = subprocess.run([bash_t, '-c', script, 'bash', str(guest)], env=dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}', FAKE_GUEST=str(guest)),
+                                         text=True, capture_output=True, timeout=30)
+                    fresh = base / 'fresh/1-sweep'
+                    fresh.mkdir(parents=True)
+                    (fresh / 'w5-result.json').write_text('FRESH')
+                    subprocess.run(['cp', '-R', str(fresh), str(guest / 'agent-out/w5')], check=True)
+                    top = guest / 'agent-out/w5/w5-result.json'
+                    return {'rc': run.returncode, 'stderr': run.stderr.strip(), 'top': top.read_text() if top.exists() else None,
+                            'nested': (guest / 'agent-out/w5/1-sweep').exists(), 'keep': (guest / 'keep.txt').exists(), 'hello': (guest / 'rdv/agent-hello.json').exists()}
+            control = delivery_after([mkdir_line])
+            e(control['rc'] == 0 and control['top'] == 'STALE' and control['nested'], f'R1 harness control: with only the mkdir line the stale w5-result.json survives and the fresh folder nests; got {control!r}')
+            fixed = delivery_after([rm_line, mkdir_line])
+            e(fixed == {'rc': 0, 'stderr': '', 'top': 'FRESH', 'nested': False, 'keep': True, 'hello': True},
+              f'the launcher empties the guest agent-out before the run: after its rm and mkdir lines the delivered w5-result.json is the fresh one, nothing nests, and files outside agent-out stay; got {fixed!r} (R1)')
+            rm_at = [i for i, ln in enumerate(launcher_lines) if ln.startswith('limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out"')]
+            mkdir_at = [i for i, ln in enumerate(launcher_lines) if ln == 'limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null']
+            agent_at = [i for i, ln in enumerate(launcher_lines) if ln == 'AGENT_PID=$!']
+            e(len(rm_at) == 1 and len(mkdir_at) == 1 and len(agent_at) == 1 and rm_at[0] < mkdir_at[0] < agent_at[0],
+              'the launcher empties agent-out before it creates it and before the agent starts (R1)')
+        e(any(ln.startswith('limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out" 2>/dev/null || { echo "run-vm-gate: could not empty ') and ln.endswith('exit 2; }') for ln in launcher_lines),
+          'the launcher exits 2 with a reason when it cannot empty the guest agent-out (R1: a stale delivery must not be read as this run\'s)')
+        # the launcher checks --guest-root with the shape agent.mjs's guestPath accepts before it runs `rm -rf` on a path built from it
+        guest_path_funcs = bash_function_source(launcher_path, 'guest_path_ok')
+
+        def guest_path_case(path):
+            return subprocess.run([bash_t, '-c', guest_path_funcs + 'guest_path_ok "$1"; echo $?', 'bash', path], text=True, capture_output=True).stdout.strip()
+
+        e(all(guest_path_case(good) == '0' for good in ('/home/u/gate', '/opt/g.1/x_y-z', '/a')),
+          'guest_path_ok accepts normalized absolute guest paths of plain characters (R1)')
+        bad_paths = ('', '/', 'gate', 'rel/gate', '/a/../b', '/a/./b', '/a//b', '/a/b/', '/..', '/.', '/a b', "/a'b", '/a$b', '/a`b', '/a;b', '/a\\b', '/a\nb', '/a*', '/a"b', '/é')
+        e(all(guest_path_case(bad) == '1' for bad in bad_paths),
+          f'guest_path_ok refuses relative, empty, non-normalized and non-plain guest paths before a guest rm -rf is built from them; accepted: {[b for b in bad_paths if guest_path_case(b) != "1"]!r} (R1)')
+        e(any(ln.startswith('guest_path_ok "$GUEST_ROOT" || { echo "run-vm-gate: --guest-root must be a normalized absolute guest path') and ln.endswith('exit 2; }') for ln in launcher_lines),
+          'the launcher refuses a --guest-root that is not a plain normalized guest path with exit 2, before any guest command (R1)')
+    e("The launcher empties the guest's `agent-out` folder before every run" in guide_flat
+      and "W5 evaluates its result file only when that file's sha256 equals the `w5-result.json` entry in the `files[]` of the agent's response" in guide_flat,
+      'the guide says the launcher empties the guest agent-out and W5 binds its result file to the response files[] sha256 (R1)')
     # the guide says what the review fixes made true (T16, T03, T02, T05, T17, T14, T13)
     guide_flat = ' '.join((ROOT / 'sso/guides/identity-gate.md').read_text().split())
     for sentence in ("read from the saved agent response, where the scan lives, and required to be present and valid",

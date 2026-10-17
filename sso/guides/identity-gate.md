@@ -424,7 +424,11 @@ lists, claims (`mv` to `<name>.claimed-<pid>`), reads and removes through one
 validated guest paths (`^/[A-Za-z0-9._/-]+$`, normalized, the rendezvous under
 `--guest-root`) and request ids from 1 to 9999 reach those commands; the
 runner's preflight requires a fresh hello (≤ 60 s, nonce-bound, skew ≤ 10 s, a
-`mac_src_ip` inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16, and gate-file digests equal to its own copies). W5–W7 run
+`mac_src_ip` inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16, and gate-file digests equal to its own copies). The launcher
+empties the guest's `agent-out` folder before every run (`scp -r` into a folder that already exists nests the new folder inside it,
+which would leave an earlier run's `w5-result.json` where the runner reads it), and W5 evaluates its result file only when that
+file's sha256 equals the `w5-result.json` entry in the `files[]` of the agent's response; a different file, a missing entry or a
+duplicate entry fails the row before any value is read. W5–W7 run
 only under this vantage and leave the inventory otherwise (the J7/W3 pattern;
 decided by the VM receipt). The container vantage keeps the walked behaviour
 unchanged. X1 is never driven through the agent: `--browser agent` is refused

@@ -28,6 +28,14 @@ usage: run-vm-gate.sh --vm NAME --phase 4a|4b|4c --public-host NAME --guest-root
 agent's isolation holds.
 EOF
 exit 2; }
+# Review R1: the guest tree is cleaned with `rm -rf` below, so the launcher checks --guest-root with the shape agent.mjs's guestPath accepts
+# (absolute, plain characters, already normalized) before it builds any guest command from it. LC_ALL=C keeps the character ranges ASCII.
+guest_path_ok() { # path: returns 0 for a normalized absolute guest path matching ^/[A-Za-z0-9._/-]+$ (no '..', '.', '//' or trailing '/')
+  local LC_ALL=C
+  [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
+  case "$1/" in */./* | */../* | *//*) return 1 ;; esac
+  return 0
+}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --vm) VM="$2"; shift 2 ;;
@@ -42,6 +50,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$VM" && -n "$PHASE" && -n "$HOST" && -n "$GUEST_ROOT" ]] || usage
+guest_path_ok "$GUEST_ROOT" || { echo "run-vm-gate: --guest-root must be a normalized absolute guest path matching ^/[A-Za-z0-9._/-]+\$ (no '..', '.', '//' or trailing '/'): $GUEST_ROOT" >&2; exit 2; }
 MAC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$MAC_DIR/../../.." && pwd)"
 SHA="$(git -C "$REPO" rev-parse HEAD)"
@@ -143,6 +152,9 @@ guest_head_is_candidate "$GUEST_HEAD" "$CANDIDATE" \
   || { echo "run-vm-gate: the guest checkout $GUEST_ROOT/repo is at '${GUEST_HEAD:-unreadable}', not the candidate $CANDIDATE" >&2; exit 2; }
 NONCE="$(openssl rand -hex 16)"
 RDV="$GUEST_ROOT/rdv"
+# Review R1: the delivery folder starts every run EMPTY. `limactl copy --backend=scp -r DIR VM:agent-out/w5` puts DIR INSIDE an existing
+# agent-out/w5 (scp -r into an existing directory nests), so an earlier run's w5-result.json would stay where the runner reads it.
+limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out" 2>/dev/null || { echo "run-vm-gate: could not empty $GUEST_ROOT/agent-out in the guest; an earlier run's delivery would be read as this run's" >&2; exit 2; }
 limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null   # agent-out: limactl copy -r cannot create a missing parent (PRE-3)
 limactl shell "$VM" -- rm -f "$RDV/runner.rc" "$RDV/runner.pid" 2>/dev/null   # a previous run's exit status must not be read as this run's (T14)
 TMPDIR="$OUT/agent-tmp" PW_MODULES="$PW_MODULES" node "$WT/scripts/gate/mac/agent.mjs" \
