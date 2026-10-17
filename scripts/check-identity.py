@@ -9345,11 +9345,611 @@ def check_airgap_rows(checks):
     e('AG1 AG2 AG3 AG4 AG5' in '\n'.join(runner), 'required_ids must hold AG1-AG5 for a bundle host')
 
 
+def check_grafana_sessions_cli(checks):
+    """Deterministic shipped session decisions; installed logout/browser proof is separate."""
+    import os
+    import signal
+
+    bash = bash_binary()
+    if not checks.expect(bash is not None, 'Grafana sessions regressions require Bash 4.4 or newer on PATH'):
+        return
+    # Exact reviewed adapter, self-contained at runtime; no ignored harness import.
+    program = (
+        '"""Focused shipped Grafana session helpers, with no Docker/network/VM calls.\n'
+        '\n'
+        'The controller runs one bounded worker. The worker imports the supplied complete\n'
+        'admin module and extracts complete functions from each supplied CLI. Stand-ins\n'
+        'supply API and Docker/Compose boundaries, not replacement decision algorithms.\n'
+        'Run only after per-file static prerequisites and root admission.\n'
+        '"""\n'
+        'import argparse\n'
+        'import contextlib\n'
+        'import copy\n'
+        'import hashlib\n'
+        'import importlib.util\n'
+        'import io\n'
+        'import json\n'
+        'import os\n'
+        'from pathlib import Path\n'
+        'import re\n'
+        'import subprocess\n'
+        'import sys\n'
+        'import tempfile\n'
+        'import time\n'
+        'from types import SimpleNamespace\n'
+        'from typing import Any, Optional\n'
+        '\n'
+        'PURPOSE = Path(__file__).resolve().parent\n'
+        "CLI_NAMES = ('env_value', 'env_value_file', 'replace_env_file', 'set_env_file_value',\n"
+        "             'monitor_grafana_auth_running', 'monitor_grafana_class',\n"
+        "             'monitor_grafana_holders', 'monitor_grafana_session_plan',\n"
+        "             'monitor_grafana_record_holders', 'monitor_grafana_end_sessions', 'cmd_monitor')\n"
+        "OWN_ID = 'a' * 64\n"
+        "OTHER_ID = 'b' * 64\n"
+        "STUBS = r'''\n"
+        'set -euo pipefail\n'
+        'MONITOR_DIR="$1/monitoring"; ENV_FILE="$1/.env"; KRATE_VARIANT="$2"; IDENTITY_REALM=krate\n'
+        'STATE="$1/grafana.state"; LOG="$1/calls.log"; ADAPTER_ERROR="$1/adapter.error"\n'
+        'export LOG\n'
+        'info() { printf \'info %s\\n\' "$*"; }\n'
+        'ok() { printf \'ok %s\\n\' "$*"; }\n'
+        'warn() { printf \'%s\\n\' "$*" >&2; }\n'
+        'die() { printf \'%s\\n\' "$*" >&2; exit 1; }\n'
+        'require_compose() { :; }; require_compose_file() { :; }; require_env() { :; }\n'
+        'adopt_legacy_project() { echo prepare >> "$LOG"; }\n'
+        'ensure_cert() { :; }; monitor_prepare() { :; }; monitor_realm_refresh() { :; }\n'
+        'identity_reconcile_perses_clients() { :; }; monitor_port_conflicts() { :; }; note_smtp() { :; }\n'
+        'grafana_address() { echo http://grafana.example.test/; }; perses_address() { echo https://perses.example.test/; }\n'
+        'monitor_network() { [[ "$FAKE_CLUSTER" == up ]] && echo owned_net; }\n'
+        'mktemp() {\n'
+        '  echo record-temp >> "$LOG"\n'
+        '  [[ "$FAKE_RECORD" != fail ]] || return 7\n'
+        '  if [[ "$FAKE_RECORD" == second && "$(grep -c \'^record-temp$\' "$LOG")" == 2 ]]; then return 7; fi\n'
+        '  command mktemp "$@"\n'
+        '}\n'
+        'adapter_fault() { printf \'%s\\n\' UNEXPECTED_ADAPTER_COMMAND >> "$ADAPTER_ERROR"; return 97; }\n'
+        'monitor_compose() {\n'
+        '  printf \'compose %s\\n\' "$*" >> "$LOG"\n'
+        '  case "$1" in\n'
+        '    rm) [[ "$FAKE_COMPOSE" != rm-fail ]] || return 7 ;;\n'
+        '    up)\n'
+        '      [[ "$FAKE_COMPOSE" != fail-before ]] || return 7\n'
+        '      env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini > "$STATE"\n'
+        '      [[ "$FAKE_COMPOSE" != fail-after ]] || return 7 ;;\n'
+        '    down)\n'
+        '      [[ "$FAKE_COMPOSE" != down-fail ]] || return 7\n'
+        '      echo absent > "$STATE" ;;\n'
+        '    *) adapter_fault; return 97 ;;\n'
+        '  esac\n'
+        '}\n'
+        'grafana_admin() {\n'
+        '  printf \'admin %s\\n\' "$*" >> "$LOG"\n'
+        '  [[ "$(cat "$STATE")" != absent && "$(cat "$STATE")" != realm.ini && "$FAKE_BASIC" != fail ]] \\\n'
+        "    || { echo 'grafana-admin: end-sessions: HTTP 401 for GET /api/user' >&2; return 1; }\n"
+        '  [[ "$FAKE_BASIC" != malformed ]] || { echo \'{}\'; return 0; }\n'
+        '  echo \'{"scope":"synthetic","users_in_scope":4,"users_ended":3,"sessions_ended":5}\'\n'
+        '}\n'
+        'docker() {\n'
+        '  # Command responses model selected manual outputs; the decision remains in the shipped function.\n'
+        '  if [[ "$1 $2" == \'container ls\' ]]; then\n'
+        '    printf \'inventory %s\\n\' "$*" >> "$LOG"\n'
+        '    [[ "$*" == *\'--all --no-trunc --filter name=krate-\'* && "$*" == *"--format {{.ID}} {{.Names}}" ]] || { adapter_fault; return 97; }\n'
+        '    case "$FAKE_INVENTORY" in\n'
+        '      fail) printf \'%s %s\\n\' "$OWN_ID" "krate-${KRATE_VARIANT}-monitoring-grafana"; return 7 ;;\n'
+        '      malformed) echo invalid-row ;;\n'
+        '      short-id) echo "abc krate-${KRATE_VARIANT}-monitoring-grafana" ;;\n'
+        '      duplicate) printf \'%s %s\\n\' "$OWN_ID" "krate-${KRATE_VARIANT}-monitoring-grafana" "$OTHER_ID" "krate-${KRATE_VARIANT}-monitoring-grafana" ;;\n'
+        '      neighbour) printf \'%s %s\\n\' "$OTHER_ID" "krate-${KRATE_VARIANT}-monitoring-grafana-old" ;;\n'
+        '      normal)\n'
+        '        if [[ "$(cat "$STATE")" != absent ]]; then\n'
+        '          printf \'%s %s\\n\' "$OTHER_ID" "krate-${KRATE_VARIANT}-monitoring-grafana-old" "$OWN_ID" "krate-${KRATE_VARIANT}-monitoring-grafana"\n'
+        '        fi ;;\n'
+        '      *) adapter_fault; return 97 ;;\n'
+        '    esac\n'
+        '    return 0\n'
+        '  fi\n'
+        '  [[ "$1 $2" == \'container inspect\' && "$3" == -f ]] || { adapter_fault; return 97; }\n'
+        '  local template="$4" selected="${5:-}" running\n'
+        '  printf \'inspect %s\\n\' "$selected" >> "$LOG"\n'
+        '  running="$(cat "$STATE")"\n'
+        '  if [[ "$template" == *\'.State.Status\'* ]]; then\n'
+        '    [[ "$selected" == "$OWN_ID" ]] || { adapter_fault; return 97; }\n'
+        '    if [[ -n "$FAKE_SELECTED" ]]; then printf \'%s\\n\' "$FAKE_SELECTED"\n'
+        '    else printf \'%s\\nGF_PATHS_CONFIG=/etc/krate/auth/%s\\n\' "$FAKE_STATE" "$running"; fi\n'
+        '    [[ "$FAKE_INSPECT" == ok ]] || return 7\n'
+        '    return 0\n'
+        '  fi\n'
+        '  # Historical cd50 uses name + path-only inspect. Keep its real old contract reachable.\n'
+        '  [[ "$selected" == "krate-${KRATE_VARIANT}-monitoring-grafana" ]] || { adapter_fault; return 97; }\n'
+        '  [[ "$running" != absent && "$FAKE_INSPECT" == ok ]] || return 7\n'
+        '  printf \'/etc/krate/auth/%s\\n\' "$running"\n'
+        '}\n'
+        "'''\n"
+        '\n'
+        '\n'
+        'def digest(raw):\n'
+        '    return hashlib.sha256(raw).hexdigest()\n'
+        '\n'
+        '\n'
+        'def complete_function(text, name):\n'
+        "    found = list(re.finditer(r'^' + re.escape(name) + r'\\(\\) \\{\\n.*?^\\}\\n', text, re.M | re.S))\n"
+        '    if len(found) != 1:\n'
+        "        raise ValueError('expected exactly one complete ' + name)\n"
+        "    return found[0].group(), text[:found[0].start()].count('\\n') + 1\n"
+        '\n'
+        '\n'
+        'def result_row(label, source, raw, assertions, **observed):\n'
+        '    return dict(condition=label, source=str(source), source_sha256=digest(raw),\n'
+        "                assertions=[{'assertion': name, 'passed': bool(ok)} for name, ok in assertions],\n"
+        '                failed_assertions=sum(not ok for _, ok in assertions), **observed)\n'
+        '\n'
+        '\n'
+        'def json_document(text):\n'
+        '    try:\n'
+        '        return json.loads(text)\n'
+        '    except ValueError:\n'
+        '        return None\n'
+        '\n'
+        '\n'
+        'def population():\n'
+        "    users = [{'id': 1, 'login': 'synthetic-admin', 'authLabels': []},\n"
+        "             {'id': 2, 'login': 'synthetic-local', 'authLabels': []},\n"
+        "             {'id': 3, 'login': 'synthetic-external', 'authLabels': ['OAuth']},\n"
+        "             {'id': 4, 'login': 'synthetic-service', 'isServiceAccount': True},\n"
+        "             {'id': 5, 'login': 'synthetic-unused', 'authLabels': []},\n"
+        "             {'id': 6, 'login': 'synthetic-disabled-external', 'authLabels': ['OAuth'], 'isDisabled': True},\n"
+        "             {'id': 7, 'login': 'synthetic-no-sessions', 'authLabels': []}]\n"
+        '    tokens = {1: [11, 12], 2: [21], 3: [31, 32], 4: [41], 6: [61]}\n'
+        '    return users, tokens\n'
+        '\n'
+        '\n'
+        'def admin_rows(path, raw):\n'
+        "    spec = importlib.util.spec_from_file_location('focused_grafana_admin', str(path))\n"
+        '    if spec is None or spec.loader is None:\n'
+        "        raise ValueError('admin module loader unavailable')\n"
+        '    admin = importlib.util.module_from_spec(spec)\n'
+        '    spec.loader.exec_module(admin)\n'
+        '    rows = []\n'
+        '\n'
+        '    class SessionApi:\n'
+        '        def __init__(self, users=None, tokens=None, own_id=1, keep=False, gone=(), health=0, fail_path=None):\n'
+        '            defaults, default_tokens = population()\n'
+        '            self.users = copy.deepcopy(defaults if users is None else users)\n'
+        '            self.tokens = copy.deepcopy(default_tokens if tokens is None else tokens)\n'
+        '            self.own_id, self.keep, self.gone = own_id, keep, set(gone)\n'
+        '            self.health, self.fail_path, self.calls = health, fail_path, []\n'
+        '\n'
+        '        def request(self, method, endpoint, body=None):\n'
+        '            self.calls.append((method, endpoint, body))\n'
+        '            if endpoint == self.fail_path:\n'
+        "                raise admin.HttpFailure(403, method, endpoint, 'synthetic-private-response')\n"
+        "            if (method, endpoint) == ('GET', '/api/health'):\n"
+        '                if self.health:\n'
+        '                    self.health -= 1\n'
+        '                    if self.health % 2:\n'
+        "                        raise admin.HttpFailure(503, method, endpoint, 'synthetic-starting')\n"
+        "                    raise admin.OperationError('synthetic-connection-refused')\n"
+        "                return 200, {'database': 'ok'}\n"
+        "            if (method, endpoint) == ('GET', '/api/user'):\n"
+        "                return 200, {'id': self.own_id}\n"
+        "            match = re.fullmatch(r'/api/users\\?perpage=(\\d+)&page=(\\d+)', endpoint)\n"
+        "            if method == 'GET' and match:\n"
+        '                size, page = map(int, match.groups())\n'
+        '                return 200, self.users[(page - 1) * size:page * size]\n'
+        "            match = re.fullmatch(r'/api/users/(\\d+)', endpoint)\n"
+        "            if method == 'GET' and match:\n"
+        "                user = next(item for item in self.users if item['id'] == int(match.group(1)))\n"
+        "                return 200, user.get('profile', {'id': user['id'], 'isExternal': bool(user.get('authLabels'))})\n"
+        "            match = re.fullmatch(r'/api/admin/users/(\\d+)/(auth-tokens|logout|revoke-auth-token)', endpoint)\n"
+        '            if match:\n'
+        '                uid, action = int(match.group(1)), match.group(2)\n'
+        "                if method == 'GET' and action == 'auth-tokens':\n"
+        "                    return 200, [{'id': item} for item in self.tokens.get(uid, [])]\n"
+        "                if method == 'POST' and action == 'logout':\n"
+        '                    if uid == self.own_id:\n'
+        "                        raise admin.HttpFailure(400, method, endpoint, 'synthetic-self-logout-refused')\n"
+        '                    if not self.keep:\n'
+        '                        self.tokens[uid] = []\n'
+        "                    return 200, {'message': 'User logged out'}\n"
+        "                if method == 'POST' and action == 'revoke-auth-token':\n"
+        "                    if not isinstance(body, dict) or body.get('authTokenId') not in self.tokens.get(uid, []):\n"
+        "                        raise ValueError('adapter received an invalid revoke request')\n"
+        "                    token = body['authTokenId']\n"
+        '                    self.tokens[uid].remove(token)\n'
+        '                    if token in self.gone:\n'
+        "                        raise admin.HttpFailure(404, method, endpoint, 'synthetic-already-gone')\n"
+        "                    return 200, {'message': 'User auth token revoked'}\n"
+        "            raise ValueError('adapter received an unexpected API request')\n"
+        '\n'
+        "    def invoke(label: str, api: SessionApi, scope='all', wait=0, expected_error: Optional[str] = None,\n"
+        '               verify: Any = None, via_main=False):\n'
+        '        output, error_output = io.StringIO(), io.StringIO()\n'
+        '        domain_error, exit_code = None, 0\n'
+        '        saved_config, saved_api = admin.resolve_config, admin.Api\n'
+        '        try:\n'
+        '            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error_output):\n'
+        '                if via_main:\n'
+        "                    setattr(admin, 'resolve_config', lambda operation: ('http://synthetic.example.test', 'synthetic', None))\n"
+        "                    setattr(admin, 'Api', lambda *unused: api)\n"
+        '                    try:\n'
+        "                        exit_code = admin.main(['end-sessions', '--scope', scope, '--wait-seconds', str(wait)])\n"
+        '                    except SystemExit as exc:\n'
+        '                        exit_code = exc.code if isinstance(exc.code, int) else 2\n'
+        '                else:\n'
+        '                    try:\n'
+        '                        admin.cmd_end_sessions(api, scope, wait)\n'
+        '                    except (admin.OperationError, admin.HttpFailure) as exc:\n'
+        '                        domain_error = type(exc).__name__\n'
+        '        finally:\n'
+        "            setattr(admin, 'resolve_config', saved_config)\n"
+        "            setattr(admin, 'Api', saved_api)\n"
+        "        checks = [('expected domain refusal', domain_error == expected_error)]\n"
+        '        if expected_error:\n'
+        "            checks.append(('refusal emits no success document', output.getvalue() == ''))\n"
+        '        if verify:\n'
+        '            checks.extend(verify(api, output.getvalue(), error_output.getvalue(), exit_code))\n'
+        '        rows.append(result_row(label, path, raw, checks, stdout=output.getvalue(), stderr=error_output.getvalue(),\n'
+        '                               domain_error=domain_error, exit_code=exit_code, calls=api.calls, remaining_tokens=api.tokens))\n'
+        '\n'
+        '    def all_verify(api: SessionApi, out: str, _err: str, _rc: int):\n'
+        '        payload = json_document(out)\n'
+        "        posts = [(endpoint, body) for method, endpoint, body in api.calls if method == 'POST']\n"
+        "        expected = [('/api/admin/users/1/revoke-auth-token', {'authTokenId': 11}),\n"
+        "                    ('/api/admin/users/1/revoke-auth-token', {'authTokenId': 12}),\n"
+        "                    ('/api/admin/users/2/logout', None), ('/api/admin/users/3/logout', None),\n"
+        "                    ('/api/admin/users/6/logout', None)]\n"
+        "        return [('all humans counted', payload == {'scope': 'all', 'users_in_scope': 6, 'users_ended': 4, 'sessions_ended': 6}),\n"
+        "                ('self admin individually revoked; others logged out', sorted(posts, key=str) == sorted(expected, key=str)),\n"
+        "                ('service account never read or changed', not any('/users/4/' in c[1] for c in api.calls) and api.tokens[4] == [41]),\n"
+        "                ('all scope has no profile dependency', not any(re.fullmatch(r'/api/users/\\d+', c[1]) for c in api.calls)),\n"
+        "                ('all human sessions empty', all(not ids for uid, ids in api.tokens.items() if uid != 4)),\n"
+        "                ('no user names in output', 'synthetic-' not in out)]\n"
+        '\n'
+        "    invoke('all-humans-admin-and-service-account', SessionApi(), verify=all_verify)\n"
+        "    invoke('self-token-already-gone-404', SessionApi(gone=[11]), verify=all_verify)\n"
+        "    invoke('external-users-including-disabled-preserve-local', SessionApi(), scope='external', verify=lambda api, out, _err, _rc: [\n"
+        "        ('external counts', json_document(out) == {'scope': 'external', 'users_in_scope': 2, 'users_ended': 2, 'sessions_ended': 3}),\n"
+        "        ('only external users logged out', [c[1] for c in api.calls if c[0] == 'POST'] == ['/api/admin/users/3/logout', '/api/admin/users/6/logout']),\n"
+        "        ('local and service sessions preserved', api.tokens[1] == [11, 12] and api.tokens[2] == [21] and api.tokens[4] == [41]),\n"
+        "        ('external sessions empty', api.tokens[3] == [] and api.tokens[6] == [])])\n"
+        "    invoke('no-user-identity-uses-logout', SessionApi(own_id=0), verify=lambda api, _out, _err, _rc: [\n"
+        "        ('all users use logout when caller is no user', ('POST', '/api/admin/users/1/logout', None) in api.calls\n"
+        "         and not any('revoke-auth-token' in c[1] for c in api.calls))])\n"
+        "    invoke('revocation-postcheck-refuses-retained-session', SessionApi(keep=True), expected_error='OperationError', verify=lambda api, _out, _err, _rc: [\n"
+        "        ('positive retained session discriminates postcheck', api.tokens[2] == [21])])\n"
+        '    for label, labels, profile in [\n'
+        "        ('missing-labels', 'MISSING', {'isExternal': True}),\n"
+        "        ('null-labels', None, {'isExternal': True}),\n"
+        "        ('string-labels', 'OAuth', {'isExternal': True}),\n"
+        "        ('nonstring-label', [1], {'isExternal': True}),\n"
+        "        ('blank-label', [' '], {'isExternal': True}),\n"
+        "        ('missing-profile-flag', ['OAuth'], {}),\n"
+        "        ('nonboolean-profile-flag', ['OAuth'], {'isExternal': 'true'}),\n"
+        "        ('profile-not-object', ['OAuth'], []),\n"
+        "        ('external-labels-false-profile', ['OAuth'], {'isExternal': False}),\n"
+        "        ('empty-labels-true-profile', [], {'isExternal': True}),\n"
+        '    ]:\n'
+        "        user = {'id': 2, 'login': 'synthetic-metadata-user', 'profile': profile}\n"
+        "        if labels != 'MISSING':\n"
+        "            user['authLabels'] = labels\n"
+        "        invoke('metadata-' + label, SessionApi([user], {2: [21]}), scope='external', expected_error='OperationError',\n"
+        "               verify=lambda api, _out, _err, _rc: [('unknown metadata never revokes or silently skips',\n"
+        "                   api.tokens[2] == [21] and not any(c[0] == 'POST' for c in api.calls))])\n"
+        '    clock = [0.0]\n'
+        '    original_time = admin.time\n'
+        "    setattr(admin, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))\n"
+        '    try:\n'
+        "        invoke('health-startup-polls-then-revokes', SessionApi(health=2), wait=30, verify=lambda api, _out, _err, _rc: [\n"
+        "            ('health precedes user access', [c[1] for c in api.calls[:4]] == ['/api/health'] * 3 + ['/api/user'])])\n"
+        "        invoke('health-timeout-never-mutates', SessionApi(health=100), wait=6, expected_error='OperationError', verify=lambda api, _out, _err, _rc: [\n"
+        "            ('timeout before all user reads and writes', all(c[1] == '/api/health' for c in api.calls))])\n"
+        '    finally:\n'
+        "        setattr(admin, 'time', original_time)\n"
+        "    invoke('actual-cli-main-success', SessionApi(), via_main=True, verify=lambda api, out, err, rc: all_verify(api, out, err, rc) + [('CLI success exit', rc == 0 and err == '')])\n"
+        "    invoke('actual-cli-main-refused-user-list', SessionApi(fail_path='/api/users?perpage=1000&page=1'), via_main=True,\n"
+        "           verify=lambda _api, out, err, rc: [('CLI sanitized failure', rc == 1 and out == '' and err == 'grafana-admin: end-sessions: HTTP 403 for GET /api/users?perpage=1000&page=1\\n')])\n"
+        "    for argv in [['end-sessions', '--scope', 'nobody'], ['end-sessions', '--scope', 'all', '--wait-seconds', '-1']]:\n"
+        '        stderr = io.StringIO()\n'
+        '        code = None\n'
+        '        with contextlib.redirect_stderr(stderr):\n'
+        '            try:\n'
+        '                admin.build_parser().parse_args(argv)\n'
+        '            except SystemExit as exc:\n'
+        '                code = exc.code\n'
+        "        rows.append(result_row('parser-' + argv[-1], path, raw, [('invalid arguments refused before API', code == 2)], exit_code=code))\n"
+        '    return rows\n'
+        '\n'
+        '\n'
+        'def cli_rows(path, raw):\n'
+        '    text = raw.decode()\n'
+        '    functions = [complete_function(text, name)[0] for name in CLI_NAMES]\n'
+        "    program = '\\n'.join(functions) + '\\n' + STUBS\n"
+        '    rows = []\n'
+        "    edition = 'epc' if 'epc' in str(path) else 'kraft'\n"
+        '\n'
+        "    def run_context_case(label, target='realm.ini', record='local', running='local.ini', steps=None, direct=None, context='conditional', **faults):\n"
+        "        with tempfile.TemporaryDirectory(prefix='focused-sessions-', dir=PURPOSE) as tmp:\n"
+        '            site = Path(tmp)\n'
+        "            (site / 'monitoring').mkdir()\n"
+        "            (site / '.env').write_text('KEYCLOAK_PUBLIC_URL=https://synthetic.example.test/identity\\n')\n"
+        "            (site / 'monitoring' / '.env').write_text('GRAFANA_AUTH_CONFIG=' + target + '\\nGRAFANA_AUTH_APPLIED=' + record + '\\nPERSES_AUTH_MODE=local\\n')\n"
+        '            (site / \'monitoring\' / \'seed-alerting.py\').write_text(\'import os\\nwith open(os.environ["LOG"], "a") as handle: handle.write("seed\\\\n")\\n\')\n'
+        "            state = site / 'grafana.state'\n"
+        "            state.write_text(running + '\\n')\n"
+        "            log = site / 'calls.log'\n"
+        '            for number, step in enumerate(steps or [{}], 1):\n'
+        "                log.write_text('')\n"
+        "                env = dict(PATH=str(Path(sys.executable).parent) + os.pathsep + os.defpath, LANG='C', LC_ALL='C',\n"
+        "                           FAKE_INVENTORY='normal', FAKE_INSPECT='ok', FAKE_STATE='running', FAKE_SELECTED='',\n"
+        "                           FAKE_COMPOSE='ok', FAKE_BASIC='ok', FAKE_CLUSTER='up', FAKE_RECORD='ok', OWN_ID=OWN_ID, OTHER_ID=OTHER_ID)\n"
+        '                env.update({key: str(value) for key, value in faults.items()})\n'
+        "                env.update({key: str(value) for key, value in step.get('faults', {}).items()})\n"
+        "                if 'target' in step:\n"
+        "                    content = (site / 'monitoring' / '.env').read_text()\n"
+        "                    content = re.sub(r'^GRAFANA_AUTH_CONFIG=.*$', 'GRAFANA_AUTH_CONFIG=' + step['target'], content, flags=re.M)\n"
+        "                    (site / 'monitoring' / '.env').write_text(content)\n"
+        "                call = direct or ('cmd_monitor ' + step.get('verb', 'up'))\n"
+        '                # Compare the normal CLI context with conditional-errexit suppression.\n'
+        '                tail = (\'\\nif \' + call + \'; then outcome=0; else outcome=$?; fi\\nexit "$outcome"\\n\'\n'
+        "                        if context == 'conditional' else '\\n' + call + '\\n')\n"
+        '                started = time.monotonic()\n'
+        "                child = subprocess.run(['/bin/bash', '-c', program + tail, 'focused-sessions', str(site), edition],\n"
+        '                                       text=True, capture_output=True, env=env, timeout=5, check=False)\n'
+        "                if (site / 'adapter.error').exists() or child.returncode in (2, 97, 126, 127) or child.returncode < 0 or re.search(\n"
+        "                        r'command not found|unbound variable|syntax error|bad substitution', child.stderr):\n"
+        "                    raise ValueError('adapter shell/protocol failure')\n"
+        '                calls = log.read_text().splitlines()\n'
+        "                recorded = next((line.partition('=')[2] for line in (site / 'monitoring' / '.env').read_text().splitlines()\n"
+        "                                 if line.startswith('GRAFANA_AUTH_APPLIED=')), '')\n"
+        "                checks = [('exact expected product exit', child.returncode == step.get('rc', 0))]\n"
+        '                if direct:\n'
+        "                    checks.append(('exact discovery stdout', child.stdout == step.get('stdout', 'realm.ini\\n')))\n"
+        "                    if step.get('no_inspect'):\n"
+        "                        checks.append(('absence does not inspect', not any(c.startswith('inspect ') for c in calls)))\n"
+        '                else:\n'
+        "                    ended = [c for c in calls if c.startswith('admin ')]\n"
+        "                    expected_scope = step.get('ended')\n"
+        "                    expected_ended = [] if expected_scope is None else ['admin end-sessions --scope %s --wait-seconds %s' %\n"
+        "                                      (expected_scope, 30 if expected_scope == 'all' else 120)]\n"
+        "                    checks.extend([('exact revocation scope/count', ended == expected_ended),\n"
+        "                                   ('Compose up attempted as expected', ('compose up -d' in calls) == step.get('up', True)),\n"
+        "                                   ('owed record retained/narrowed as expected', recorded == step.get('record', 'realm'))])\n"
+        "                    if 'state' in step:\n"
+        "                        checks.append(('container sign-in state as expected', state.read_text().strip() == step['state']))\n"
+        "                    if 'seed' in step:\n"
+        "                        checks.append(('seed only after completed transition', ('seed' in calls) == step['seed']))\n"
+        "                    if 'rm' in step:\n"
+        "                        checks.append(('removal attempted as expected', any(c.startswith('compose rm ') for c in calls) == step['rm']))\n"
+        "                    if step.get('no_prepare'):\n"
+        "                        checks.append(('UNKNOWN before preparation and mutation', not any(c == 'prepare' or c.startswith(('compose ', 'admin ')) for c in calls)))\n"
+        "                    if expected_scope and ended and 'compose up -d' in calls:\n"
+        "                        checks.append(('revocation before/after startup', (calls.index(ended[0]) < calls.index('compose up -d')) == (expected_scope == 'all')))\n"
+        "                    if not step.get('no_prepare') and child.returncode == 0:\n"
+        "                        checks.append(('one discovery snapshot per command', sum(c.startswith('inventory ') for c in calls) == 1))\n"
+        "                checks.append(('no synthetic credential output', 'synthetic-secret' not in child.stdout + child.stderr))\n"
+        "                rows.append(result_row(label + '/' + context + '/run-' + str(number), path, raw, checks, exit_code=child.returncode,\n"
+        '                                       stdout=child.stdout, stderr=child.stderr, calls=calls, record=recorded,\n'
+        '                                       container_config=state.read_text().strip(), elapsed_seconds=time.monotonic() - started))\n'
+        '\n'
+        '    def run_case(label, **options):\n'
+        "        for context in ('ordinary', 'conditional'):\n"
+        '            run_context_case(label, context=context, **options)\n'
+        '\n'
+        "    run_case('forward-and-no-change', steps=[{'ended': 'all', 'state': 'realm.ini', 'seed': True}, {'ended': None, 'seed': True}])\n"
+        "    run_case('reverse-and-no-change', target='local.ini', record='realm', running='realm.ini', steps=[\n"
+        "        {'ended': 'external', 'record': 'local', 'state': 'local.ini', 'seed': True}, {'ended': None, 'record': 'local'}])\n"
+        "    run_case('forward-refused-retried', steps=[{'faults': {'FAKE_BASIC': 'fail'}, 'rc': 1, 'ended': 'all', 'up': False, 'record': 'local', 'state': 'local.ini', 'seed': False}, {'ended': 'all', 'seed': True}])\n"
+        "    run_case('reverse-refused-retried', target='local.ini', record='', running='realm.ini', steps=[\n"
+        "        {'faults': {'FAKE_BASIC': 'fail'}, 'rc': 1, 'ended': 'external', 'record': 'local,realm', 'state': 'local.ini', 'seed': False},\n"
+        "        {'ended': 'external', 'record': 'local', 'seed': True}, {'ended': None, 'record': 'local'}])\n"
+        "    for target, record, running in [('realm.ini', '', 'local.ini'), ('realm.ini', '', 'site.ini'), ('site.ini', 'realm', 'realm.ini')]:\n"
+        "        forward = target == 'realm.ini'\n"
+        "        run_case('pre-record-or-site-' + target + '-' + running, target=target, record=record, running=running,\n"
+        "                 steps=[{'ended': 'all' if forward else 'external', 'record': 'realm' if forward else 'local'}])\n"
+        "    for target in ['local.ini', 'realm.ini']:\n"
+        "        cls = 'realm' if target == 'realm.ini' else 'local'\n"
+        "        run_case('first-start-' + cls, target=target, record='', running='absent', steps=[{'record': cls, 'state': target}])\n"
+        "        run_case('unchanged-' + cls, target=target, record='', running=target, steps=[{'record': cls}])\n"
+        "    run_case('stopped-cluster-forward', FAKE_CLUSTER='down', steps=[{'rc': 1, 'ended': None, 'up': False, 'record': 'local', 'state': 'local.ini', 'rm': False}])\n"
+        "    run_case('malformed-revocation-count-refuses-before-start', FAKE_BASIC='malformed', steps=[\n"
+        "        {'rc': 1, 'ended': 'all', 'up': False, 'record': 'local', 'state': 'local.ini', 'seed': False}])\n"
+        "    run_case('forward-record-write-refuses-before-start', FAKE_RECORD='fail', steps=[\n"
+        "        {'rc': 1, 'ended': 'all', 'up': False, 'record': 'local', 'seed': False}])\n"
+        "    run_case('reverse-widen-write-refuses-before-start', target='local.ini', record='realm', running='realm.ini', FAKE_RECORD='fail', steps=[\n"
+        "        {'rc': 1, 'ended': None, 'up': False, 'record': 'realm', 'seed': False}])\n"
+        "    run_case('down-record-write-refuses-before-removal', target='local.ini', record='local', running='realm.ini', FAKE_RECORD='fail', steps=[\n"
+        "        {'verb': 'down', 'rc': 1, 'ended': None, 'up': False, 'record': 'local', 'state': 'realm.ini'}])\n"
+        "    run_case('reverse-narrow-write-fails-retains-debt-and-retries', target='local.ini', record='realm', running='realm.ini', steps=[\n"
+        "        {'faults': {'FAKE_RECORD': 'second'}, 'rc': 1, 'ended': 'external', 'record': 'local,realm', 'state': 'local.ini', 'seed': False},\n"
+        "        {'ended': 'external', 'record': 'local', 'seed': True}])\n"
+        "    for mode in ['rm-fail', 'fail-before', 'fail-after']:\n"
+        "        run_case('reverse-compose-' + mode + '-retry', target='local.ini', record='realm', running='realm.ini', steps=[\n"
+        "            {'faults': {'FAKE_COMPOSE': mode}, 'rc': 1, 'ended': None, 'up': mode != 'rm-fail', 'record': 'local,realm', 'seed': False,\n"
+        "             'state': 'local.ini' if mode == 'fail-after' else 'realm.ini'},\n"
+        "            {'ended': 'external', 'record': 'local', 'seed': True}])\n"
+        "    for mode in ['fail-before', 'fail-after']:\n"
+        "        run_case('forward-compose-' + mode + '-retry', steps=[\n"
+        "            {'faults': {'FAKE_COMPOSE': mode}, 'rc': 1, 'ended': 'all', 'record': 'realm', 'seed': False},\n"
+        "            {'ended': 'all' if mode == 'fail-before' else None, 'record': 'realm', 'seed': True}])\n"
+        "    run_case('down-retains-realm-debt', target='realm.ini', record='realm', running='realm.ini', steps=[\n"
+        "        {'verb': 'down', 'ended': None, 'up': False, 'record': 'realm', 'state': 'absent'},\n"
+        "        {'target': 'local.ini', 'ended': 'external', 'record': 'local', 'state': 'local.ini'}])\n"
+        "    run_case('down-retains-widened-debt', target='local.ini', record='local,realm', running='local.ini', steps=[\n"
+        "        {'verb': 'down', 'ended': None, 'up': False, 'record': 'local,realm', 'state': 'absent'},\n"
+        "        {'ended': 'external', 'record': 'local'}])\n"
+        "    run_case('down-compose-refused-preserves-debt', target='local.ini', record='local', running='realm.ini', steps=[\n"
+        "        {'verb': 'down', 'faults': {'FAKE_COMPOSE': 'down-fail'}, 'rc': 7, 'ended': None, 'up': False, 'record': 'local,realm', 'state': 'realm.ini'}])\n"
+        "    for mode in ['fail', 'malformed', 'short-id', 'duplicate']:\n"
+        "        for verb in ['up', 'down']:\n"
+        "            run_case('UNKNOWN-inventory-' + mode + '-' + verb, target='local.ini', record='realm', running='realm.ini', FAKE_INVENTORY=mode,\n"
+        "                     steps=[{'verb': verb, 'rc': 1, 'ended': None, 'up': False, 'record': 'realm', 'no_prepare': True, 'rm': False}])\n"
+        "    for verb in ['up', 'down']:\n"
+        "        run_case('UNKNOWN-inspect-' + verb, target='local.ini', record='realm', running='realm.ini', FAKE_INSPECT='fail',\n"
+        "                 steps=[{'verb': verb, 'rc': 1, 'ended': None, 'up': False, 'record': 'realm', 'no_prepare': True}])\n"
+        "    for status in ['created', 'running', 'paused', 'restarting', 'removing', 'exited', 'dead']:\n"
+        "        run_case('discover-known-state-' + status, running='realm.ini', direct='monitor_grafana_auth_running', FAKE_STATE=status)\n"
+        "    run_case('discover-exact-neighbour-not-owned', running='realm.ini', direct='monitor_grafana_auth_running', FAKE_INVENTORY='neighbour',\n"
+        "             steps=[{'stdout': '', 'no_inspect': True}])\n"
+        "    run_case('discover-confirmed-absence', running='absent', direct='monitor_grafana_auth_running', steps=[{'stdout': '', 'no_inspect': True}])\n"
+        "    selected_cases = [('missing-key', 'running\\n'), ('duplicate-key', 'running\\nGF_PATHS_CONFIG=/etc/krate/auth/realm.ini\\nGF_PATHS_CONFIG=/etc/krate/auth/local.ini'),\n"
+        "                      ('wrong-root', 'running\\nGF_PATHS_CONFIG=/other/realm.ini'), ('extra-equals', 'running\\nINVALID_SELECTED_ENV_SHAPE'),\n"
+        "                      ('dot', 'running\\nGF_PATHS_CONFIG=/etc/krate/auth/.'), ('dotdot', 'running\\nGF_PATHS_CONFIG=/etc/krate/auth/..'),\n"
+        "                      ('invalid-state', 'unknown\\nGF_PATHS_CONFIG=/etc/krate/auth/realm.ini')]\n"
+        '    for label, selected in selected_cases:\n'
+        "        run_case('discover-UNKNOWN-' + label, running='realm.ini', direct='monitor_grafana_auth_running', FAKE_SELECTED=selected,\n"
+        "                 steps=[{'rc': 1, 'stdout': ''}])\n"
+        '    return rows\n'
+        '\n'
+        '\n'
+        'def worker(args):\n'
+        "    result = {'rows': [], 'harness_errors': [], 'source_unchanged': True}\n"
+        '    sources = [args.admin, *args.cli]\n'
+        '    before = {str(path): path.read_bytes() for path in sources}\n'
+        '    for path in sources:\n'
+        '        raw = before[str(path)]\n'
+        '        try:\n'
+        "            result['rows'].extend(admin_rows(path, raw) if path == args.admin else cli_rows(path, raw))\n"
+        '        except Exception as exc:\n'
+        "            result['harness_errors'].append({'source': str(path), 'kind': type(exc).__name__})\n"
+        "    result['source_unchanged'] = all(path.read_bytes() == before[str(path)] for path in sources)\n"
+        "    result['failed_assertions'] = sum(row['failed_assertions'] for row in result['rows'])\n"
+        "    result['assertion_count'] = sum(len(row['assertions']) for row in result['rows'])\n"
+        "    result['source_hashes'] = {key: digest(raw) for key, raw in before.items()}\n"
+        "    result['status'] = 'HARNESS_ERROR' if result['harness_errors'] or not result['source_unchanged'] else ('FAIL' if result['failed_assertions'] else 'PASS')\n"
+        '    print(json.dumps(result, indent=2))\n'
+        "    return 2 if result['status'] == 'HARNESS_ERROR' else (1 if result['status'] == 'FAIL' else 0)\n"
+        '\n'
+        '\n'
+        'def main():\n'
+        '    parser = argparse.ArgumentParser(description=__doc__)\n'
+        "    parser.add_argument('--admin', type=Path, required=True)\n"
+        "    parser.add_argument('--cli', type=Path, action='append', required=True)\n"
+        "    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)\n"
+        '    args = parser.parse_args()\n'
+        '    if args.worker:\n'
+        '        return worker(args)\n'
+        "    command = [sys.executable, '-I', '-B', str(Path(__file__).resolve()), '--worker', '--admin', str(args.admin.resolve())]\n"
+        '    for path in args.cli:\n'
+        "        command.extend(['--cli', str(path.resolve())])\n"
+        '    try:\n'
+        '        completed = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)\n'
+        '        sys.stdout.write(completed.stdout)\n'
+        '        if completed.stderr:\n'
+        '            sys.stderr.write(completed.stderr)\n'
+        '            return 2\n'
+        '        return completed.returncode\n'
+        '    except subprocess.TimeoutExpired:\n'
+        "        print(json.dumps({'status': 'HARNESS_ERROR', 'harness_errors': [{'kind': 'ControllerTimeout'}]}))\n"
+        '        return 2\n'
+        '\n'
+        '\n'
+        "if __name__ == '__main__':\n"
+        '    sys.exit(main())\n'
+    )
+    old_command = "['/bin/bash', '-c', program + tail"
+    if not checks.expect(program.count(old_command) == 1, 'Grafana sessions adapter has one Bash invocation boundary'):
+        return
+    # Only the shell executable changes; no source decisions or fixture predicates change.
+    program = program.replace(old_command, '[' + repr(bash) + ", '-c', program + tail", 1)
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='grafana-sessions-', dir=fixture_base) as directory:
+        fixture = Path(directory)
+        runner = fixture / 'focused-sessions.py'
+        runner.write_text(program)
+        source_paths = [ROOT / 'monitoring/grafana-admin.py', *(ROOT / edition / 'krate' for edition in EDITIONS)]
+        before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
+        command = [sys.executable, '-I', '-B', str(runner), '--admin', str(source_paths[0])]
+        for path in source_paths[1:]:
+            command.extend(['--cli', str(path)])
+        try:
+            child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, start_new_session=True)
+        except OSError:
+            checks.expect(False, 'Grafana sessions adapter could not start its owned process group')
+            return
+        timed_out = False
+        cleanup_ok = True
+        stdout = stderr = ''
+        try:
+            stdout, stderr = child.communicate(timeout=70)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            # Retire only this new session's process group, including any Bash left by
+            # the inner controller's timeout or HARNESS_ERROR; never target a global PID.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                cleanup_ok = False
+            try:
+                # Reap the direct child and drain its pipes after group retirement.
+                # A failed cleanup is a check failure, never a successful receipt.
+                stdout, stderr = child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                cleanup_ok = False
+                child.kill()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    cleanup_ok = False
+        if not checks.expect(cleanup_ok, 'Grafana sessions owned process group cleanup did not finish'):
+            return
+        if not checks.expect(not timed_out, 'Grafana sessions adapter exceeded its70-second bound'):
+            return
+        if not checks.expect(stderr == '', 'Grafana sessions adapter produced unexpected controller stderr'):
+            return
+        try:
+            report = json.loads(stdout)
+        except ValueError:
+            checks.expect(False, 'Grafana sessions adapter did not return a JSON receipt')
+            return
+        if not checks.expect(isinstance(report, dict) and not report.get('harness_errors')
+                             and report.get('status') in ('PASS', 'FAIL') and child.returncode in (0, 1),
+                             'Grafana sessions adapter failed before a semantic result'):
+            return
+        checks.expect(report.get('source_unchanged') is True and report.get('source_hashes') == before,
+                      'Grafana sessions adapter must bind unchanged complete current sources')
+        checks.expect(before == {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths},
+                      'Grafana sessions sources changed during the check')
+        rows = report.get('rows', [])
+        if not checks.expect(isinstance(rows, list) and len(rows) == 277
+                             and all(isinstance(row, dict) for row in rows),
+                             'Grafana sessions adapter must retain all277 planned rows'):
+            return
+        expected_counts = {str(source_paths[0]): 21, str(source_paths[1]): 128, str(source_paths[2]): 128}
+        actual_counts = {path: sum(row.get('source') == path for row in rows) for path in before}
+        checks.expect(actual_counts == expected_counts, 'Grafana sessions admin and both edition case counts must be retained')
+        checks.expect(len({(row.get('source'), row.get('condition')) for row in rows}) == 277,
+                      'Grafana sessions condition/source receipt keys must be unique')
+        failure_count = 0
+        for row in rows:
+            checks.expect(row.get('source_sha256') == before.get(row.get('source')),
+                          'Grafana sessions row must bind the exact current source')
+            assertions = row.get('assertions', [])
+            if not checks.expect(isinstance(assertions, list) and assertions
+                                 and all(isinstance(item, dict) and type(item.get('passed')) is bool for item in assertions),
+                                 'Grafana sessions row must retain explicit boolean assertions'):
+                continue
+            failures = sum(not item['passed'] for item in assertions)
+            failure_count += failures
+            checks.expect(row.get('failed_assertions') == failures, 'Grafana sessions row failure accounting must agree')
+            for item in assertions:
+                checks.expect(item['passed'], 'Grafana sessions: %s: %s: %s' %
+                              (Path(row['source']).parent.name, row.get('condition'), item.get('assertion')))
+        checks.expect(report.get('failed_assertions') == failure_count,
+                      'Grafana sessions aggregate failure count must agree with actual assertions')
+        checks.expect((child.returncode, report.get('status')) == (0, 'PASS') and failure_count == 0,
+                      'Grafana sessions decisions require actual semantic PASS')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
+                  check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
