@@ -2312,8 +2312,11 @@ phase4_row_w7() {
   elif [[ "$os_family" == rhel ]]; then
     local fwcmd def zone_lima0 zone_bridge docker_target bridge svc_rt svc_perm ports_rt ports_perm proto_rt proto_perm
     local icmp_rt icmp_perm rich fwd policies doctor
-    fwcmd=(sudo -n firewall-cmd)
-    sudo -n true 2>/dev/null || fwcmd=(firewall-cmd)
+    # Review T06/R3: every firewall command whose output W7 reads runs under LC_ALL=C (ufw's status line is gettext-translated, so a
+    # guest with a translated catalogue would otherwise fail a correct fixture as "unreadable"); `env` inside sudo keeps it whatever
+    # sudo's env_reset does with the caller's locale.
+    fwcmd=(sudo -n env LC_ALL=C firewall-cmd)
+    sudo -n true 2>/dev/null || fwcmd=(env LC_ALL=C firewall-cmd)
     def="$("${fwcmd[@]}" --get-default-zone 2>>"$RAW")"
     zone_lima0="$("${fwcmd[@]}" --get-zone-of-interface=lima0 2>>"$RAW")"
     bridge=""
@@ -2351,9 +2354,9 @@ phase4_row_w7() {
   else
     local ufw_state ufw_first ufw_reason="" ufw_status input_head doctor
     ufw_state="$(systemctl is-active ufw 2>/dev/null || true)"   # evidence text only: ufw.service is a oneshot that reads `active` (exited) while `ufw status` says inactive (TOPOFIX2 PRE-4)
-    ufw_first="$( { sudo -n ufw status 2>/dev/null || ufw status 2>/dev/null; } | head -1 || true)"
-    ufw_status="$( { sudo -n ufw status verbose 2>/dev/null || ufw status verbose 2>/dev/null; } | head -4 | tr '\n' ' ' || true)"
-    input_head="$(sudo -n iptables -S INPUT 2>/dev/null | head -1 || true)"
+    ufw_first="$( { sudo -n env LC_ALL=C ufw status 2>/dev/null || LC_ALL=C ufw status 2>/dev/null; } | head -1 || true)"   # fixed locale: the case below matches ufw's English status line (T06)
+    ufw_status="$( { sudo -n env LC_ALL=C ufw status verbose 2>/dev/null || LC_ALL=C ufw status verbose 2>/dev/null; } | head -4 | tr '\n' ' ' || true)"
+    input_head="$(sudo -n env LC_ALL=C iptables -S INPUT 2>/dev/null | head -1 || true)"
     doctor="$("$KRATE" doctor 2>>"$RAW" | grep -i firewall | head -2 | tr '\n' ' ' || true)"
     case "$ufw_first" in
       "Status: inactive"*) ;;

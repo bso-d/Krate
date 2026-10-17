@@ -1208,21 +1208,26 @@ def check_topofix2(checks):
     # `active (exited)` while ufw is inactive). The runner's own lines run against fake sudo/ufw commands.
     ufw_first_line = next((ln for ln in topo_runner_lines if ln.startswith('ufw_first="$(')), '')
     case_match = re.search(r'^ {4}case "\$ufw_first" in\n(?: {6}.*\n)+? {4}esac$', topo_runner_text, re.M)
-    e(ufw_first_line == 'ufw_first="$( { sudo -n ufw status 2>/dev/null || ufw status 2>/dev/null; } | head -1 || true)"'
+    e(ufw_first_line == 'ufw_first="$( { sudo -n env LC_ALL=C ufw status 2>/dev/null || LC_ALL=C ufw status 2>/dev/null; } | head -1 || true)"'
       and case_match is not None and 'ufw_state' not in (case_match.group(0) if case_match else 'ufw_state')
       and '[[ "$ufw_state" == active ]]' not in topo_runner_text,
-      'W7 (Ubuntu) reads the first line of `ufw status` (sudo -n, then plain) and decides on it in a case block that never looks at the ufw.service state (PRE-4)')
+      'W7 (Ubuntu) reads the first line of `ufw status` (sudo -n, then plain; both under LC_ALL=C, T06) and decides on it in a case block that never looks at the ufw.service state (PRE-4)')
     if case_match is not None and ufw_first_line:
-        def w7_ubuntu(sudo_body, ufw_body):
+        def w7_ubuntu(sudo_body, ufw_body, caller_locale=None, first_line=None):
             with tempfile.TemporaryDirectory() as w7_tmp:
                 fake_bin = Path(w7_tmp)
                 for name, body in (('sudo', sudo_body), ('ufw', ufw_body)):
                     (fake_bin / name).write_text('#!/bin/sh\n' + body + '\n')
                     (fake_bin / name).chmod(0o755)
-                script = 'st=0; ufw_reason=""\n' + ufw_first_line + '\n' + case_match.group(0) + '\nprintf "%s|%s|%s\\n" "$st" "$ufw_first" "$ufw_reason"\n'
-                run = subprocess.run(['bash', '-c', script], env=dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}'), text=True, capture_output=True)
+                script = 'st=0; ufw_reason=""\n' + (first_line or ufw_first_line) + '\n' + case_match.group(0) + '\nprintf "%s|%s|%s\\n" "$st" "$ufw_first" "$ufw_reason"\n'
+                env = dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}')
+                if caller_locale:
+                    env['LC_ALL'] = caller_locale
+                run = subprocess.run(['bash', '-c', script], env=env, text=True, capture_output=True)
             return run.stdout.strip()
-        pass_sudo = 'exec "$@"'
+        # a sudo that takes `-n` the way the runner calls it (a fake `exec "$@"` would try to run a command named -n, fail, and send every
+        # test down the plain fallback arm, leaving the sudo arm of the runner's lines unexercised)
+        pass_sudo = '[ "$1" = -n ] && shift\nexec "$@"'
         e(w7_ubuntu(pass_sudo, 'echo "Status: inactive"') == '0|Status: inactive|',
           'W7 (Ubuntu) passes on `Status: inactive` (PRE-4)')
         e(w7_ubuntu(pass_sudo, 'echo "Status: active"; echo "To  Action  From"') == '1|Status: active|',
@@ -1231,6 +1236,19 @@ def check_topofix2(checks):
           'W7 (Ubuntu) fails with the unreadable reason when ufw status cannot be read without root (PRE-4)')
         e(w7_ubuntu(pass_sudo, 'echo "Status: unknown"') == '1|Status: unknown|ufw status unreadable (needs root or passwordless sudo)',
           'W7 (Ubuntu) fails on any first line that is neither Status: active nor Status: inactive (PRE-4)')
+        # T06 / R3: ufw's status line is gettext-translated, so the runner reads it under LC_ALL=C. The fake ufw answers in English only when
+        # it sees LC_ALL=C; the caller's locale is German; the fake sudo either passes the environment on or resets it like sudo's env_reset.
+        localized_ufw = 'if [ "$LC_ALL" = C ]; then echo "Status: inactive"; else echo "Estado: inactivo"; fi'
+        resetting_sudo = '[ "$1" = -n ] && shift\nexec env -i PATH="$PATH" "$@"'
+        e(w7_ubuntu(resetting_sudo, localized_ufw, caller_locale='de_DE.UTF-8') == '0|Status: inactive|',
+          'W7 (Ubuntu) reads ufw status under LC_ALL=C through sudo even when sudo resets the caller environment (T06, R3)')
+        e(w7_ubuntu(pass_sudo, localized_ufw, caller_locale='de_DE.UTF-8') == '0|Status: inactive|',
+          'W7 (Ubuntu) reads ufw status under LC_ALL=C when the caller runs in another locale (T06, R3)')
+        e(w7_ubuntu('exit 1', localized_ufw, caller_locale='de_DE.UTF-8') == '0|Status: inactive|',
+          'W7 (Ubuntu) reads ufw status under LC_ALL=C on the plain (no sudo) fallback too (T06, R3)')
+        unfixed_line = 'ufw_first="$( { sudo -n ufw status 2>/dev/null || ufw status 2>/dev/null; } | head -1 || true)"'
+        e(w7_ubuntu(pass_sudo, localized_ufw, caller_locale='de_DE.UTF-8', first_line=unfixed_line) == '1|Estado: inactivo|ufw status unreadable (needs root or passwordless sudo)',
+          'harness control: the old line, without the fixed locale, reads the translated status and fails a correct fixture as unreadable (T06, R3)')
 
     # F2: --browser knows container and agent only (`local` selected nothing and was only recorded in the receipt row), and the
     # guide says what the code does: a 4c agent run needs neither image; the 4a/4b stories keep the guest's container vantage.
@@ -1493,16 +1511,16 @@ def check_topofix2(checks):
             'arch': 'ID=arch\n',
         }
 
-        def w7_case(os_name, firewalld='active', with_firewall_cmd=True, docker_target='ACCEPT', ufw_status='Status: inactive'):
+        def w7_case(os_name, firewalld='active', with_firewall_cmd=True, docker_target='ACCEPT', ufw_status='Status: inactive', caller_locale=''):
             with tempfile.TemporaryDirectory() as t05_tmp:
                 base = Path(t05_tmp)
                 fake_bin = base / 'bin'
                 fake_bin.mkdir()
                 (base / 'os-release').write_text(os_releases[os_name])
                 scripts_text = {
-                    'sudo': 'exec "$@"',
+                    'sudo': '[ "$1" = -n ] && shift\nexec "$@"',
                     'systemctl': 'case "$*" in "is-active firewalld") echo "${FAKE_FIREWALLD:-inactive}" ;; "is-active ufw") echo active ;; esac',
-                    'ufw': 'echo "$FAKE_UFW_STATUS"',
+                    'ufw': 'if [ -n "$FAKE_LOCALIZED" ] && [ "$LC_ALL" != C ]; then echo "Estado: inactivo"; else echo "$FAKE_UFW_STATUS"; fi',
                     'iptables': 'echo "-P INPUT ACCEPT"',
                 }
                 if with_firewall_cmd:
@@ -1513,7 +1531,8 @@ def check_topofix2(checks):
                         '  *--get-zone-of-interface=*) echo docker ;;\n'
                         '  *--list-services*) echo "cockpit dhcpv6-client ssh" ;;\n'
                         '  *--get-policies*) echo "allow-host-ipv6 docker-forwarding docker-to-host" ;;\n'
-                        '  *--info-zone=docker*) printf "docker (active)\\n  target: %s\\n  icmp-block-inversion: no\\n" "$FAKE_DOCKER_TARGET" ;;\n'
+                        '  *--info-zone=docker*) key=target; if [ -n "$FAKE_LOCALIZED" ] && [ "$LC_ALL" != C ]; then key=objetivo; fi\n'
+                        '    printf "docker (active)\\n  %s: %s\\n  icmp-block-inversion: no\\n" "$key" "$FAKE_DOCKER_TARGET" ;;\n'
                         'esac')
                 for name, body in scripts_text.items():
                     (fake_bin / name).write_text('#!/bin/sh\n' + body + '\n')
@@ -1525,7 +1544,9 @@ def check_topofix2(checks):
                           + bash_function_source(runner_path, 'w7_os_family') + bash_function_source(runner_path, 'phase4_row_w7')
                           + 'phase4_row_w7 4c\n')
                 env = dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}', FAKE_FIREWALLD=firewalld, FAKE_DOCKER_TARGET=docker_target, FAKE_UFW_STATUS=ufw_status,
-                           FAKE_FWCMD_PATH=str(fake_bin / 'firewall-cmd') if with_firewall_cmd else '')
+                           FAKE_FWCMD_PATH=str(fake_bin / 'firewall-cmd') if with_firewall_cmd else '', FAKE_LOCALIZED='1' if caller_locale else '')
+                if caller_locale:
+                    env['LC_ALL'] = caller_locale
                 run = subprocess.run([bash_t, '-c', script, 'bash', str(base / 'krate'), str(base / 'os-release')], env=env, text=True, capture_output=True)
             return (run.stdout + run.stderr).strip()
 
@@ -1553,6 +1574,19 @@ def check_topofix2(checks):
         e(w7_case('debian', firewalld='inactive', with_firewall_cmd=False, ufw_status='Status: active').startswith('RECORD FAIL|'), 'W7 fails a Debian-family fixture whose ufw is active (T05)')
         out_unknown = w7_case('arch', firewalld='inactive', with_firewall_cmd=False)
         e(out_unknown.startswith('RECORD FAIL|') and 'unsupported fixture OS' in out_unknown, f'W7 FAILs an unsupported OS (T05); got {out_unknown[:200]!r}')
+        # T06 / R3 on the whole row: a caller in another locale, a fake firewall-cmd and ufw that answer in a translated form unless LC_ALL=C
+        out_loc_rhel = w7_case('rocky', caller_locale='de_DE.UTF-8')
+        e(out_loc_rhel.startswith('RECORD PASS|') and 'docker zone target [ACCEPT]' in out_loc_rhel,
+          f'W7 on a RHEL-family fixture reads the firewall-cmd output under LC_ALL=C whatever the caller locale is; got {out_loc_rhel[:240]!r} (R3)')
+        out_loc_ubuntu = w7_case('ubuntu', firewalld='inactive', with_firewall_cmd=False, caller_locale='de_DE.UTF-8')
+        e(out_loc_ubuntu.startswith('RECORD PASS|') and 'ufw status first line [Status: inactive]' in out_loc_ubuntu,
+          f'W7 on an Ubuntu fixture reads ufw status under LC_ALL=C whatever the caller locale is; got {out_loc_ubuntu[:240]!r} (T06, R3)')
+        for locale_line in ('fwcmd=(sudo -n env LC_ALL=C firewall-cmd)', 'sudo -n true 2>/dev/null || fwcmd=(env LC_ALL=C firewall-cmd)',
+                            'ufw_status="$( { sudo -n env LC_ALL=C ufw status verbose 2>/dev/null || LC_ALL=C ufw status verbose 2>/dev/null; } | head -4 | tr \'\\n\' \' \' || true)"',
+                            'input_head="$(sudo -n env LC_ALL=C iptables -S INPUT 2>/dev/null | head -1 || true)"'):
+            e(locale_line in topo_runner_lines, f'W7 carries the code line {locale_line!r}: every firewall command whose output it prints or parses runs under LC_ALL=C (T06, R3)')
+        e('every firewall command the row reads runs under `LC_ALL=C`, so a translated ufw or firewalld catalogue cannot change what it parses' in ' '.join(guide_text.split()),
+          'the guide says W7 reads its firewall commands under LC_ALL=C (T06, R3)')
     e('local os_family fw_active=false' in topo_runner_text and 'elif [[ "$os_family" == rhel ]] && ! $fw_active; then' in topo_runner_text
       and "docker_target=\"$(\"${fwcmd[@]}\" --info-zone=docker" in topo_runner_text and '[[ "$docker_target" == ACCEPT ]] || st=1' in topo_runner_text,
       'W7 selects its branch from the OS and checks the docker zone target (T05, T17)')
