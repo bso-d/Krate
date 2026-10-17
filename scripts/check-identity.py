@@ -4996,8 +4996,9 @@ def check_build_certificate_hint(checks):
             start = text.find("log(f'{args.edition}: {manifest[\"totals\"]}')")
             tail = text[start:text.find('def certificate_summary')] if start >= 0 else ''
             printed, returned = tail.find('print(hint, file=sys.stderr'), tail.find('return 2')
-            e('hint = certificate_summary(comps)' in tail and 0 <= printed < returned,
-              f'{rel}: the summary prints certificate_summary() on stderr, before the exit code')
+            e('hint = certificate_summary(comps)\n    if hint:\n        print(hint, file=sys.stderr' in tail
+              and 0 <= printed < returned,
+              f'{rel}: the summary prints certificate_summary() on stderr when there is one, before the exit code')
         else:
             e(run_guard(lambda: None) == ('returned', None), f'{rel}: a successful build returns normally')
 
