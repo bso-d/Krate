@@ -136,18 +136,20 @@ CAFF_PID=$!
 trap 'kill "$CAFF_PID" 2>/dev/null || true; [[ -n "${AGENT_PID:-}" ]] && kill "$AGENT_PID" 2>/dev/null || true' EXIT
 
 # ── guest address (M1/M2 call shapes) ──
-VM_IP="$(limactl shell "$VM" -- ip -4 -o addr show 2>/dev/null | awk '/lima0/ {split($4, a, "/"); print a[1]; exit}')"
+# Review R2: the launcher runs under `set -euo pipefail`, so a read that FAILS (limactl, route, a missing guest file) would end the script
+# silently before the message written for it; every such read below ends in `|| true` and its value is judged by the code after it.
+VM_IP="$(limactl shell "$VM" -- ip -4 -o addr show 2>/dev/null | awk '/lima0/ {split($4, a, "/"); print a[1]; exit}' || true)"
 if [[ -z "$VM_IP" ]]; then
   echo "run-vm-gate: no IPv4 address on the guest lima0 (is $VM a vzNAT VM and up?): $(limactl shell "$VM" -- ip -4 -o addr show 2>/dev/null | head -3 | tr '\n' ' ')" >&2
   exit 2
 fi
-IFACE="$(route -n get "$VM_IP" 2>/dev/null | awk '/interface:/ {print $2; exit}')"
+IFACE="$(route -n get "$VM_IP" 2>/dev/null | awk '/interface:/ {print $2; exit}' || true)"
 [[ -n "$IFACE" ]] || { echo "run-vm-gate: route -n get $VM_IP names no interface" >&2; exit 2; }
 nc -z -G 3 "$VM_IP" 22 >/dev/null 2>&1 || { echo "run-vm-gate: no ssh to $VM_IP:22 from the Mac (Local Network prompt? launch from Terminal.app, F7)" >&2; exit 2; }
 echo "run-vm-gate: vm_ip=$VM_IP via $IFACE; preflight ok"
 
 # ── agent + guest runner ──
-GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d '[:space:]')"
+GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d '[:space:]' || true)"
 guest_head_is_candidate "$GUEST_HEAD" "$CANDIDATE" \
   || { echo "run-vm-gate: the guest checkout $GUEST_ROOT/repo is at '${GUEST_HEAD:-unreadable}', not the candidate $CANDIDATE" >&2; exit 2; }
 NONCE="$(openssl rand -hex 16)"
@@ -194,7 +196,7 @@ while :; do
 done
 
 # ── end-of-run invariants (F7): the guest's lima0 address must be unchanged ──
-VM_IP_END="$(limactl shell "$VM" -- ip -4 -o addr show 2>/dev/null | awk '/lima0/ {split($4, a, "/"); print a[1]; exit}')"
+VM_IP_END="$(limactl shell "$VM" -- ip -4 -o addr show 2>/dev/null | awk '/lima0/ {split($4, a, "/"); print a[1]; exit}' || true)"
 if [[ "$VM_IP_END" != "$VM_IP" ]]; then
   echo "run-vm-gate: FAIL: the guest lima0 address changed during the run ($VM_IP -> $VM_IP_END); the certificate/nonce binding is void (F7; a DHCP re-lease)" >&2
   RC=3
@@ -207,7 +209,7 @@ fi
 kill "$AGENT_PID" 2>/dev/null || true
 wait "$AGENT_PID" 2>/dev/null || true
 limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out" "$OUT/agent-from-guest" 2>/dev/null || echo "run-vm-gate: note: no agent-out tree was delivered (the rows may not have run)"
-RECEIPT_GUEST="$(limactl shell "$VM" -- sh -c "test -d $GUEST_RECEIPT && echo $GUEST_RECEIPT" 2>/dev/null | tr -d '[:space:]')"
+RECEIPT_GUEST="$(limactl shell "$VM" -- sh -c "test -d $GUEST_RECEIPT && echo $GUEST_RECEIPT" 2>/dev/null | tr -d '[:space:]' || true)"
 if [[ -n "${RECEIPT_GUEST:-}" ]]; then
   limactl copy --backend=scp -r "$VM:$RECEIPT_GUEST" "$OUT/$(basename "$RECEIPT_GUEST")"
   echo "run-vm-gate: receipt harvested: $(basename "$RECEIPT_GUEST")"
@@ -218,7 +220,7 @@ else
   RC=$((RC | 8))
 fi
 # T14: the run succeeds only as a candidate-bound PASS: the guest runner's own exit status and the harvested receipt's verdict
-RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d '[:space:]')"
+RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d '[:space:]' || true)"   # a runner killed before it finished leaves no runner.rc: run_outcome names that
 if OUTCOME_REASON="$(run_outcome "$RUNNER_RC" "${RECEIPT_GUEST:+$OUT/$(basename "$RECEIPT_GUEST")/receipt.md}" "$CANDIDATE")"; then
   echo "run-vm-gate: the run is a candidate-bound PASS (guest runner exit 0, receipt verdict PASS, candidate $CANDIDATE)"
 else

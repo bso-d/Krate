@@ -1696,12 +1696,12 @@ def check_topofix2(checks):
                     results[name] = run.stdout.strip()
             e(results == {'pass': '0|pid', 'fail': '1|pid'},
               f"the launcher's detached guest command records the runner's exit status beside its pid (0 for a pass, the failure status otherwise); got {results!r} (T14)")
-    e('RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d \'[:space:]\')"' in launcher_lines, 'the launcher reads the runner exit status from the guest (T14)')
+    e('RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d \'[:space:]\' || true)"' in launcher_lines, 'the launcher reads the runner exit status from the guest and survives a missing runner.rc (T14, R2)')
     # T12 (rest): the hello wait is for THIS run's nonce, not any non-empty file (a previous run's hello would pass `test -s`).
     # T13 (rest): the guest checkout must be at the candidate before the agent starts.
-    e('GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d \'[:space:]\')"' in launcher_lines
+    e('GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d \'[:space:]\' || true)"' in launcher_lines
       and 'guest_head_is_candidate "$GUEST_HEAD" "$CANDIDATE" \\' in [ln.strip() for ln in (ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text().splitlines()]
-      and launcher_lines.index('NONCE="$(openssl rand -hex 16)"') > launcher_lines.index('GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d \'[:space:]\')"'),
+      and launcher_lines.index('NONCE="$(openssl rand -hex 16)"') > launcher_lines.index('GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d \'[:space:]\' || true)"'),
       'the launcher reads the guest checkout HEAD and refuses a checkout that is not the candidate before it starts the agent (T13)')
     if bash_t is not None:
         head_funcs = bash_function_source(launcher_path, 'guest_head_is_candidate')
@@ -1776,6 +1776,95 @@ def check_topofix2(checks):
           f'guest_path_ok refuses relative, empty, non-normalized and non-plain guest paths before a guest rm -rf is built from them; accepted: {[b for b in bad_paths if guest_path_case(b) != "1"]!r} (R1)')
         e(any(ln.startswith('guest_path_ok "$GUEST_ROOT" || { echo "run-vm-gate: --guest-root must be a normalized absolute guest path') and ln.endswith('exit 2; }') for ln in launcher_lines),
           'the launcher refuses a --guest-root that is not a plain normalized guest path with exit 2, before any guest command (R1)')
+
+        # R2: the launcher runs under `set -euo pipefail`, so a guest read that FAILS used to end it silently (rc 1) before the message
+        # written for that case: a runner killed before it finished leaves no runner.rc, an unreadable guest checkout fails `git -C`, a
+        # missing receipt fails `test -d`. The launcher's own blocks run behind a fake limactl (shell: ip, git, cat, sh only; copy: cp -R) and
+        # fake route and git commands; each failing case is paired with a control showing the same block reaching its end when it works.
+        def launcher_block(start, end):
+            first = next((i for i, ln in enumerate(launcher_all) if ln.startswith(start)), -1)
+            last = next((i for i in range(first, len(launcher_all)) if end(launcher_all[i])), -1) if first >= 0 else -1
+            return '\n'.join(launcher_all[first:last + 1]) if first >= 0 and last >= 0 else ''
+
+        r2_blocks = {
+            'addr': launcher_block('VM_IP="$(limactl shell', lambda ln: ln == 'fi'),
+            'iface': launcher_block('IFACE="$(route', lambda ln: ln.startswith('[[ -n "$IFACE" ]]')),
+            'head': launcher_block('GUEST_HEAD="$(limactl shell', lambda ln: ln.lstrip().startswith('|| { echo "run-vm-gate: the guest checkout')),
+            'end': launcher_block('VM_IP_END="$(limactl shell', lambda ln: ln == 'fi'),
+            'tail': launcher_block('limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out"', lambda ln: ln == 'exit "$RC"'),
+        }
+        e(all(r2_blocks.values()), f'the launcher keeps the blocks the R2 test runs (VM address, interface, guest HEAD, end address, harvest tail); missing: {[k for k, v in r2_blocks.items() if not v]}')
+        fake_lima_r2 = """#!/bin/sh
+[ -z "$FAKE_FAIL" ] || exit 1
+sub="$1"; shift
+case "$sub" in
+  shell) shift; [ "$1" = -- ] && shift; cmd="$1"; shift
+    case "$cmd" in
+      ip) echo "3: lima0    inet 192.168.64.2/24 brd 192.168.64.255 scope global lima0" ;;
+      cat|sh) exec "$cmd" "$@" ;;
+      git) if [ -n "$FAKE_HEAD" ]; then echo "$FAKE_HEAD"; else echo "fatal: cannot change to '/g/repo': No such file or directory" >&2; exit 128; fi ;;
+      *) echo "fake limactl: refused $cmd" >&2; exit 9 ;;
+    esac ;;
+  copy) while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
+    exec cp -R "${1#*:}" "$2" ;;
+  *) exit 9 ;;
+esac
+"""
+        fake_route_r2 = '#!/bin/sh\nif [ -n "$FAKE_IFACE" ]; then echo "   interface: $FAKE_IFACE"; exit 0; fi\necho "route: writing to routing socket: not in table" >&2\nexit 1\n'
+
+        def r2_run(prelude, block, epilogue='', runner_rc=None, receipt=False, **fake_env):
+            with tempfile.TemporaryDirectory() as r2_tmp:
+                base = Path(r2_tmp)
+                (base / 'bin').mkdir()
+                (base / 'bin/limactl').write_text(fake_lima_r2)
+                (base / 'bin/route').write_text(fake_route_r2)
+                for tool in ('limactl', 'route'):
+                    (base / 'bin' / tool).chmod(0o755)
+                guest, out = base / 'guest', base / 'out'
+                (guest / 'rdv').mkdir(parents=True)
+                out.mkdir()
+                if runner_rc is not None:
+                    (guest / 'rdv/runner.rc').write_text(runner_rc + '\n')
+                if receipt:
+                    (guest / 'receipt-x').mkdir()
+                    (guest / 'receipt-x/receipt.md').write_text(receipt_text())
+                script = ('set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"; OUT="$2"; GUEST_RECEIPT="$1/receipt-x"; CANDIDATE="$3"; RC=0\n'
+                          + prelude + '\n' + block + '\n' + epilogue + '\n')
+                env = dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}', FAKE_FAIL='', FAKE_HEAD='', FAKE_IFACE='')
+                env.update({k.upper(): v for k, v in fake_env.items()})
+                run = subprocess.run([bash_t, '-c', script, 'bash', str(guest), str(out), candidate_sha], env=env, text=True, capture_output=True, timeout=30)
+            return run.returncode, run.stdout, run.stderr
+
+        if all(r2_blocks.values()):
+            rc_a, out_a, err_a = r2_run('', r2_blocks['addr'], fake_fail='1')
+            e(rc_a == 2 and 'no IPv4 address on the guest lima0' in err_a, f'an unreachable guest ends the VM address read in its message (exit 2), not silently; got rc {rc_a}: {err_a[:160]!r} (R2)')
+            rc_a, out_a, err_a = r2_run('', r2_blocks['addr'], 'echo "VM_IP=$VM_IP"')
+            e(rc_a == 0 and 'VM_IP=192.168.64.2' in out_a, f'control: a reachable guest gives its lima0 address; got rc {rc_a}: {out_a!r} {err_a[:160]!r} (R2)')
+            rc_b, out_b, err_b = r2_run('VM_IP=192.168.64.2', r2_blocks['iface'])
+            e(rc_b == 2 and 'names no interface' in err_b, f'a failing `route -n get` ends in its message (exit 2), not silently; got rc {rc_b}: {err_b[:160]!r} (R2)')
+            rc_b, out_b, err_b = r2_run('VM_IP=192.168.64.2', r2_blocks['iface'], 'echo "IFACE=$IFACE"', fake_iface='bridge100')
+            e(rc_b == 0 and 'IFACE=bridge100' in out_b, f'control: the interface of the route is taken; got rc {rc_b}: {out_b!r} (R2)')
+            rc_c, out_c, err_c = r2_run(head_funcs, r2_blocks['head'])
+            e(rc_c == 2 and "is at 'unreadable'" in err_c,
+              f"a guest checkout that cannot be read ends the launcher with the message `is at 'unreadable'` (exit 2); got rc {rc_c}: {err_c[:200]!r} (R2, T13)")
+            rc_c, out_c, err_c = r2_run(head_funcs, r2_blocks['head'], 'echo head-ok', fake_head=candidate_sha)
+            e(rc_c == 0 and 'head-ok' in out_c, f'control: a guest checkout at the candidate passes; got rc {rc_c}: {err_c[:160]!r} (R2)')
+            rc_d, out_d, err_d = r2_run('VM_IP=192.168.64.2', r2_blocks['end'], 'echo "RC=$RC"', fake_fail='1')
+            e(rc_d == 0 and 'RC=3' in out_d and 'the guest lima0 address changed during the run' in err_d,
+              f'an unreadable address at the end of the run is reported as a changed address (RC 3), not a silent exit; got rc {rc_d}: {out_d!r} {err_d[:160]!r} (R2)')
+            rc_d, out_d, err_d = r2_run('VM_IP=192.168.64.2', r2_blocks['end'], 'echo "RC=$RC"')
+            e(rc_d == 0 and 'RC=0' in out_d and 'unchanged at the end' in out_d, f'control: an unchanged address leaves RC 0; got rc {rc_d}: {out_d!r} (R2)')
+            tail_prelude = ''.join(bash_function_source(launcher_path, name) for name in ('receipt_verdict', 'receipt_candidate_ok', 'run_outcome'))
+            rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'], receipt=True)
+            e(rc_e == 16 and 'the guest runner left no exit status (it was killed before it finished)' in err_e and 'receipt harvested' in out_e,
+              f'a runner that left no runner.rc is reported by its message and bit 16 (T14: "left no exit status" is reachable); got rc {rc_e}: {err_e[:200]!r} (R2)')
+            rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'], runner_rc='0', receipt=True)
+            e(rc_e == 0 and 'candidate-bound PASS' in out_e, f'control: runner exit 0 with a PASS receipt of the candidate is a success; got rc {rc_e}: {out_e[-200:]!r} {err_e[:160]!r} (R2)')
+            rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'], runner_rc='1', receipt=True)
+            e(rc_e == 16 and 'the guest runner exited 1' in err_e, f'a runner exit 1 keeps bit 16 and its reason; got rc {rc_e}: {err_e[:160]!r} (R2)')
+            rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'])
+            e(rc_e == 24 and 'the named guest receipt' in err_e and 'does not exist' in err_e and 'left no exit status' in err_e,
+              f'a guest with neither receipt nor runner.rc reports both reasons and bits 8 and 16 (S3, T14); got rc {rc_e}: {err_e[:300]!r} (R2)')
     e("The launcher empties the guest's `agent-out` folder before every run" in guide_flat
       and "W5 evaluates its result file only when that file's sha256 equals the `w5-result.json` entry in the `files[]` of the agent's response" in guide_flat,
       'the guide says the launcher empties the guest agent-out and W5 binds its result file to the response files[] sha256 (R1)')
