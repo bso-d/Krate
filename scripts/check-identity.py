@@ -1535,6 +1535,63 @@ def check_topofix2(checks):
     e(len(id_path_uses) == 2 and any(ln.startswith('const outDir = join(TMP, `${req.id}-${sub}`);') for ln in id_path_uses)
       and any(ln.startswith("guestPut(`resp-${String(req.id).padStart(4, '0')}.json`") for ln in id_path_uses),
       f'the request id reaches a path in exactly two places, runRow\'s scratch folder and the response name, both after claimRequest validated it; found {id_path_uses!r} (T11)')
+
+    # T07 / T21 / T20: the external-request guard is context-wide and installed before the first navigation of every story (and U15,
+    # whose interstitial acceptance is already a page load); no story registers a tracker late or page by page; a failed evidence
+    # collection fails U15 in the Mac vantage.
+    for line in ('async guard(context) {',
+                 'await context.route(/.*/, async (route) => {',
+                 "return await route.abort('blockedbyclient');",
+                 'await context.routeWebSocket((url) => url.hostname !== host, (ws) => {',
+                 "context.on('request', (request) => {",
+                 'attachContext(context) { for (const p of context.pages()) hook(p); context.on(\'page\', hook); return this; },'):
+        e(line in launch_lines, f'browser-launch.mjs must carry the code line {line!r} (T07/T21: the guard is context-wide, it aborts before dispatch and it takes websockets too)')
+    for guarded, guard_line, ctx_name, first_nav in (
+        ('screenshots.mjs', 'if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }', 'ctx', 'acceptGateCertificate('),
+        ('screenshots-grafana.mjs', 'if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }', 'ctx', 'const decision = await acceptGateCertificate('),
+        ('screenshots-perses.mjs', 'if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }', 'ctx', 'const decision = await acceptGateCertificate('),
+        ('phase4-browser.mjs', 'if (MAC) { await ext.guard(context); serve.attachContext(context); }', 'context', 'const accepted = await acceptGateCertificate('),
+    ):
+        guarded_text = (ROOT / 'scripts/gate' / guarded).read_text()
+        guarded_lines = js_lines(guarded_text)
+        guard_at = guarded_lines.index(guard_line) if guard_line in guarded_lines else -1
+        nav_at = next((i for i, ln in enumerate(guarded_lines) if first_nav in ln and not ln.startswith('import ')), -1)
+        e(guard_at >= 0 and (nav_at < 0 or guard_at < nav_at),
+          f'{guarded} installs the context-wide guard ({guard_line!r}) before its first navigation (T07, T21)')
+        e('ext.onFailed' not in guarded_text and not re.search(r'serve\.attach\(', guarded_text) and not re.search(r"\.on\('requestfailed', \(r\) => ext", guarded_text),
+          f'{guarded} registers no tracker page by page or after a navigation (T07, T21: the Admin and later pages are covered by the context)')
+    e(re.search(r"\} catch \(e2\) \{\n  // Review T20[^\n]*\n  console\.error\('STORY FAILED: browser\.json not written: [^\n]*\n  if \(MAC\) process\.exitCode = 1;\n\}\nawait browser\.close\(\);",
+                (ROOT / 'scripts/gate/phase4-browser.mjs').read_text()) is not None,
+      'phase4-browser.mjs (U15) fails the Mac probe when browser.json cannot be written (the HeadlessChrome refusal included), as X1/X3/X4 do (T20)')
+    if node_binary:
+        guard_probe = (
+            "const lib = await import(process.argv[1]);\n"
+            "const handlers = {}; const events = {};\n"
+            "const context = { route: async (m, h) => { handlers.route = h; }, routeWebSocket: async (pred, h) => { handlers.pred = pred; handlers.ws = h; },\n"
+            "  on: (name, h) => { events[name] = h; }, pages: () => [] };\n"
+            "const tracker = lib.externalAttemptsTracker('krate-gate.test');\n"
+            "await tracker.guard(context);\n"
+            "const fake = (url) => { const calls = []; const request = { url: () => url }; return { calls, request: () => request, continue: async () => calls.push('continue'), abort: async (c) => calls.push('abort:' + c) }; };\n"
+            "const out = {};\n"
+            "const gate = fake('https://krate-gate.test:3443/api'); events.request(gate.request()); await handlers.route(gate); out.gate = gate.calls;\n"
+            "const ip = fake('http://127.0.0.1:9/x'); events.request(ip.request()); await handlers.route(ip); out.ipLiteral = ip.calls;\n"
+            "const data = fake('data:text/plain,hi'); await handlers.route(data); out.data = data.calls;\n"
+            "const bare = fake('https://203.0.113.9/y'); await handlers.route(bare); out.routeOnly = bare.calls;\n"
+            "out.websocketPredicate = [handlers.pred(new URL('wss://krate-gate.test/api/live')), handlers.pred(new URL('ws://127.0.0.1:1/ws'))];\n"
+            "const ws = { url: () => 'ws://127.0.0.1:1/ws', closed: null, close(o) { this.closed = o; } }; handlers.ws(ws); out.websocketClosed = ws.closed && ws.closed.code;\n"
+            "out.list = tracker.list.map((x) => x.how + ':' + x.host);\n"
+            "try { tracker.assertClean(); out.assertClean = 'clean'; } catch { out.assertClean = 'threw'; }\n"
+            "console.log(JSON.stringify(out));\n"
+        )
+        run_guard = subprocess.run([node_binary, '--input-type=module', '-e', guard_probe, str(ROOT / 'scripts/gate/browser-launch.mjs')], text=True, capture_output=True)
+        try:
+            guard_out = json.loads(run_guard.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            guard_out = {}
+        e(run_guard.returncode == 0 and guard_out == {'gate': ['continue'], 'ipLiteral': ['abort:blockedbyclient'], 'data': ['continue'], 'routeOnly': ['abort:blockedbyclient'],
+                                                    'websocketPredicate': [False, True], 'websocketClosed': 1008,
+                                                    'list': ['blocked:127.0.0.1', 'blocked:203.0.113.9', 'websocket-blocked:127.0.0.1'], 'assertClean': 'threw'},
+          f'the external guard continues gate-host and non-network requests, aborts and records an IP-literal and a bare external request before dispatch, routes only non-gate websockets and closes them, and assertClean then throws; got rc {run_guard.returncode}: {run_guard.stderr.strip()[:200]!r} {guard_out!r} (T07)')
     e("agent_request" in topo_runner_text and 'CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request' in topo_runner_text
       and '2>&1)"; rc=$?\n  if [[ -n "$REND_NONCE" ]]' not in topo_runner_text,
       'agent_request no longer merges the requester stderr into CAP (T01)')

@@ -203,7 +203,8 @@ const ext = MAC ? externalAttemptsTracker(HOST) : null;
 try {
   const ctx = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
   page = MAC ? (ctx.pages()[0] || await ctx.newPage()) : await ctx.newPage();
-  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
+  // Review T07/T21: context-wide guard and serve tracker, installed before the first navigation (later pages are covered by it).
+  if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }
 
   // ── Mac vantage gate: the trust-nothing profile must show and pass Chrome's own certificate
   // interstitial on the story's entry URL (the Perses gateway) before story step 1 (M0 points
@@ -262,7 +263,6 @@ try {
 
   // ── shot 3: the Admin in the same project, with the create/edit controls the Viewer does not have ──
   page = await ctx.newPage();
-  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
   await openPersesAtKeycloak(page);
   await keycloakLogin(page, ADMIN, ADMIN_PW, ADMIN_TOTP);
   await persesSignIn(page);
@@ -314,7 +314,6 @@ try {
 
   // ── shot 5: the disabled user is refused by Keycloak ──
   page = await ctx.newPage();
-  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
   await openPersesAtKeycloak(page);
   await page.fill('#username', DISABLED);
   await page.fill('#password', DISABLED_PW);
@@ -327,7 +326,6 @@ try {
 
   // ── shot 6: the no-group user is refused at /oauth2/callback ──
   page = await ctx.newPage();
-  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
   await openPersesAtKeycloak(page);
   await keycloakLogin(page, NOGROUP, NOGROUP_PW, NOGROUP_TOTP);
   await page.waitForLoadState('networkidle');

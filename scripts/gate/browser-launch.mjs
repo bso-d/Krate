@@ -49,8 +49,40 @@ function exit2(msg) { console.error(msg); process.exit(2); }
 // URL` — an attempt would appear as ERR_NAME_NOT_RESOLVED under MAP * ~NOTFOUND.
 export function externalAttemptsTracker(host) {
   const list = [];
+  const entries = new Map();   // request -> its list entry (the `request` event fires before the route handler: one entry per attempt)
+  const NON_NETWORK = new Set(['data:', 'blob:', 'about:', 'chrome:', 'chrome-error:', 'devtools:', 'chrome-extension:']);
+  const urlOf = (obj) => { try { return new URL(obj.url()); } catch { return null; } };   // host and scheme only are ever recorded, never the path or query
+  const note = (u, how, error) => { const entry = { host: u.hostname, scheme: u.protocol.replace(':', ''), how, error: error || '' }; list.push(entry); return entry; };
   return {
     list,
+    // Review T07: `requestfailed` alone proves nothing: a SUCCESSFUL external request never fails, an IP-literal URL bypasses the
+    // resolver rules, and a tracker attached after the first navigation misses that page load. The guard is CONTEXT-wide (every
+    // page, popups and pages opened later included) and is installed before the first navigation: a route aborts every network
+    // request whose host is not the gate host BEFORE it is dispatched and records it; the context's `request` event records
+    // everything the route cannot stop (redirect hops); non-gate websockets are intercepted and closed (they bypass route()).
+    async guard(context) {
+      await context.route(/.*/, async (route) => {
+        const request = route.request();
+        const u = urlOf(request);
+        try {
+          if (!u || NON_NETWORK.has(u.protocol) || u.hostname === host) return await route.continue();
+          (entries.get(request) || note(u, 'blocked')).how = 'blocked';
+          return await route.abort('blockedbyclient');
+        } catch { /* the page went away while the request was pending */ }
+      });
+      context.on('request', (request) => {
+        const u = urlOf(request);
+        if (u && !NON_NETWORK.has(u.protocol) && u.hostname !== host) entries.set(request, note(u, 'request'));
+      });
+      // A websocket never passes through route(): routeWebSocket takes every one whose host is not the gate host (a predicate, so
+      // the gate's own websockets, Grafana's live tail among them, are not routed at all) and closes it unconnected.
+      await context.routeWebSocket((url) => url.hostname !== host, (ws) => {
+        const u = urlOf(ws);
+        if (u) note(u, 'websocket-blocked');
+        return ws.close({ code: 1008, reason: 'blocked: not the gate host' });
+      });
+      return this;
+    },
     attach(page) { page.on('requestfailed', (r) => this.onFailed(r)); return this; },
     onFailed(r) {
       let u = null;
@@ -60,7 +92,7 @@ export function externalAttemptsTracker(host) {
       // with the bare host, and X4's Perses origin is https://<host>:3443 — its own SPA churn
       // (M5 run 3 recorded the sibling SPA's at-rest net::ERR_ABORTED churn) is same-origin on
       // any port and must not be recorded as an external attempt.
-      if (u.hostname !== host) list.push({ host: u.hostname, scheme: u.protocol.replace(':', ''), error: r.failure()?.errorText || '' });
+      if (u.hostname !== host) list.push({ host: u.hostname, scheme: u.protocol.replace(':', ''), how: 'requestfailed', error: r.failure()?.errorText || '' });
     },
     // chrome:// and devtools:// targets are Chrome's own; everything else that failed must
     // not have been attempted at all (the resolver rule makes them NAME failures, hence the
@@ -255,7 +287,10 @@ export async function browserEvidence({ browser, mode, rules, headless, page, ce
 // being captured.
 export function attachServeTracker(page) {
   const state = { last: null, count: 0 };
+  const hooked = new WeakSet();
   const hook = (p) => {
+    if (hooked.has(p)) return;
+    hooked.add(p);
     p.on('response', (r) => {
       try {
         if (!r.request().isNavigationRequest() || r.request().frame() !== p.mainFrame()) return;
@@ -268,6 +303,9 @@ export function attachServeTracker(page) {
     count: () => state.count,
     last: () => state.last,
     attach(newPage) { hook(newPage); return this; },
+    // Review T21: attach to the context before any navigation, so every page of the story (the Admin's included) is tracked from
+    // its first request and a shot never reuses the previous page's last response.
+    attachContext(context) { for (const p of context.pages()) hook(p); context.on('page', hook); return this; },
     async record(expectedIp, pinned, what, asserted) {   // async: Response.serverAddr()/securityDetails() are Promises (Playwright 1.60.0 types.d.ts, review T08)
       if (!state.last) return null;
       asserted.push(await assertServedFrom(state.last, expectedIp, what));

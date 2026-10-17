@@ -93,6 +93,11 @@ const launch = await launchGateBrowser(chromium, { host: HOST, resolveTo, outDir
 const browser = launch.browser;
 const context = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
 let page = MAC ? (context.pages()[0] || await context.newPage()) : await context.newPage();
+// Review T07: the external-request guard and the served-response tracker are installed BEFORE the first navigation (the
+// certificate acceptance below is already a page load), context-wide so every later page is covered too.
+const serve = MAC ? attachServeTracker(null) : null;
+const ext = MAC ? externalAttemptsTracker(HOST) : null;
+if (MAC) { await ext.guard(context); serve.attachContext(context); }
 if (MAC) {
   // Review N3: U15's interstitial handling is the shared acceptGateCertificate path (the same
   // selectors, the same order the other three stories use: waitForSelector before the count
@@ -125,9 +130,6 @@ if (MAC) {
   }
   page = context.pages()[0] || await context.newPage();
 }
-const serve = MAC ? attachServeTracker(null) : null;  // attached to the fresh page below
-const ext = MAC ? externalAttemptsTracker(HOST) : null;
-if (MAC) { serve.attach(page); ext.attach(page); }
 page.on('console', m => {
   const e = { type: m.type(), text: m.text().slice(0, 300), url: page.url().replace(BASE, '').split(/[?#]/)[0] };
   if (/Content Security Policy|Refused to/i.test(m.text())) result.csp.push(e);
@@ -210,6 +212,10 @@ try {
   const ev = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'U15/U7 phase4-browser', servedFrom: served_from } });
   writeFileSync(`${OUT}/browser.json`, JSON.stringify(ev, null, 2));
   chmodSync(`${OUT}/browser.json`, 0o644);
-} catch (e2) { console.error('browser.json not written: ' + String(e2.message || e2).slice(0, 160)); }
+} catch (e2) {
+  // Review T20: a failed evidence collection (the HeadlessChrome refusal included) fails the Mac probe, as X1/X3/X4 do
+  console.error('STORY FAILED: browser.json not written: ' + String(e2.message || e2).slice(0, 160));
+  if (MAC) process.exitCode = 1;
+}
 await browser.close();
 if (MAC) cleanProfile(launch.profileDir, process.exitCode === 1);

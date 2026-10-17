@@ -94,7 +94,8 @@ const serve = MAC ? attachServeTracker(page) : null;
 // Mac vantage (F3): every failed request whose host is not the gate host is an external
 // attempt; the row fails on any that is not Chrome-internal (chrome://, devtools://).
 const ext = MAC ? externalAttemptsTracker('localhost') : null;
-if (ext) page.on('requestfailed', (r) => ext.onFailed(r));
+// Review T07/T21: the guard is context-wide and installed before the first navigation.
+if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }
 const account = `${BASE}/identity/realms/krate/account`;
 
 async function openLogin() {

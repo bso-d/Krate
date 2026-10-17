@@ -169,7 +169,9 @@ const ext = MAC ? externalAttemptsTracker(HOST) : null;
 try {
   const ctx = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
   page = MAC ? (ctx.pages()[0] || await ctx.newPage()) : await ctx.newPage();
-  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
+  // Review T07/T21: the external-request guard and the served-response tracker are CONTEXT-wide and installed before the first
+  // navigation, so the Admin page (created later by signedInDashboard) is covered from its first request.
+  if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }
 
   // ── Mac vantage gate: the trust-nothing profile must show and pass Chrome's own certificate
   // interstitial before story step 1 (M0 points 2-3; M5 run 2 for the render-after-reject
@@ -222,7 +224,6 @@ try {
   // ── shot 4: the Admin on the same dashboard with "Edit" ──
   const adminPage = await signedInDashboard(ctx, ADMIN, ADMIN_PW, ADMIN_TOTP);
   page = adminPage;
-  if (ext) { adminPage.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(adminPage); }
   assert(adminPage.url().startsWith(DASHBOARD), `the Admin landed on the same dashboard (${adminPage.url().split(/[?#]/)[0]})`);
   // NEEDS-LIVE-VERIFICATION: the exact presence selector for the Admin's "Edit"
   // control on Grafana 12.2 (same candidates as above, positive).
