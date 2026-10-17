@@ -429,8 +429,24 @@ export async function acceptGateCertificate(page, url, { onAssert, onShot } = {}
       throw new Error(`certificate interstitial shows ${decision.error || 'no code'}; expected net::ERR_CERT_AUTHORITY_INVALID (F2: the code does not rank below a name or date error, and a different code means a different defect)`);
     }
     await page.click('#details-button');
-    await Promise.all([page.waitForLoadState('load'), page.click('#proceed-link')]).catch(() => {});
-    await page.waitForLoadState('load').catch(() => {});
+    // The warning may already have loaded at the requested HTTPS URL. A load-state
+    // wait (or waitForURL matching that URL) can accept that old document. Arm the
+    // future main-frame navigation before Proceed and require its network response.
+    // Pinned Playwright 1.60 deprecates generic waitForNavigation use; this bounded
+    // same-URL action needs its new-document response, which waitForURL cannot supply.
+    const [response] = await Promise.all([
+      page.waitForNavigation({ waitUntil: 'load', timeout: 20000 }),
+      page.click('#proceed-link'),
+    ]);
+    if (!response) throw new Error('Proceed did not commit a network document');
+    const request = response.request();
+    if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) {
+      throw new Error('Proceed did not return the main-document response');
+    }
+    const destination = new URL(response.url());
+    if (destination.protocol !== 'https:' || destination.hostname !== new URL(url).hostname) {
+      throw new Error('Proceed did not commit the gate HTTPS document');
+    }
     decision.decision = 'proceed';
   } else {
     // No interstitial: an unexpected state for a trust-nothing profile (M0/M5 always saw the

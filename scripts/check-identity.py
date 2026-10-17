@@ -1304,6 +1304,132 @@ def check_firewall_round4(checks):
 
 
 
+def check_browser_certificate_proceed(checks):
+    """Exercise Proceed's shipped future-document and error-propagation contract."""
+    node = shutil.which('node')
+    if node is None:
+        print('Identity check NOT RUN: browser certificate Proceed regressions (Node unavailable on this host)', file=sys.stderr)
+        return
+    source = r'''import process from 'node:process';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+// Controlled shipped-export contract probe: no browser, socket, timer or fixtures.
+// Default click below retains Playwright's main-frame navigation signal barrier.
+const modulePath = resolve(process.argv[2] || 'scripts/gate/browser-launch.mjs');
+const { acceptGateCertificate } = await import(pathToFileURL(modulePath).href);
+const sha256 = createHash('sha256').update(readFileSync(modulePath)).digest('hex');
+const HOST = 'gate.test';
+const URL_START = 'https://gate.test:3443/start';
+const deferred = () => {
+  let release; let fail;
+  const promise = new Promise((yes, no) => { release = yes; fail = no; });
+  // A signal barrier consumes navigation failure even without an explicit client wait.
+  promise.catch(() => {});
+  return { promise, release, fail };
+};
+const configs = [
+  { name: 'positive-click-signal-barrier', deferred: true, control: true },
+  { name: 'failed-Proceed-click', clickError: true, reject: true },
+  { name: 'failed-navigation', navigationError: 'Navigation failed', reject: true },
+  { name: 'navigation-timeout', navigationError: 'Timeout 20000ms exceeded', reject: true },
+  { name: 'null-same-document', nullResponse: true, reject: true },
+  { name: 'wrong-host-response', responseURL: 'https://outside.test/landing', reject: true },
+  { name: 'non-HTTPS-response', responseURL: 'http://gate.test/landing', reject: true },
+  { name: 'not-navigation-request', notNavigation: true, reject: true },
+  { name: 'wrong-frame-response', wrongFrame: true, reject: true },
+  { name: 'same-host-port-redirect', responseURL: 'https://gate.test:443/identity/login' },
+  { name: 'no-interstitial', noInterstitial: true },
+  { name: 'hooks-before-expected-code-refusal', code: 'net::ERR_CERT_DATE_INVALID', reject: true },
+  { name: 'hooks-before-Proceed' },
+  { name: 'prearmed-bounded-main-navigation', requirePrearmed: true },
+  { name: 'failed-Advanced-click', advancedError: true, reject: true },
+  { name: 'hook-refusal-propagates', hookError: true, reject: true },
+];
+const rows = [];
+for (const config of configs) {
+  const failures = [];
+  const events = [];
+  const navigation = deferred();
+  const frame = {};
+  let settled = false; let decision; let error;
+  let proceedClicked = false; let waiterArmed = false; let armedAtClick = false; let waitOptions;
+  const response = config.nullResponse ? null : {
+    url: () => config.responseURL || URL_START,
+    request: () => ({ isNavigationRequest: () => !config.notNavigation, frame: () => config.wrongFrame ? {} : frame }),
+  };
+  const check = (yes, assertion) => { if (!yes) failures.push(assertion); };
+  const page = {
+    mainFrame: () => frame,
+    goto: async () => { events.push('initial-goto'); if (!config.noInterstitial) throw new Error('net::ERR_CERT_AUTHORITY_INVALID'); return response; },
+    waitForSelector: async () => { events.push('warning-selector'); if (config.noInterstitial) throw new Error('warning missing'); },
+    locator: selector => ({
+      count: async () => selector === '#details-button' && !config.noInterstitial ? 1 : 0,
+      textContent: async () => config.code || 'net::ERR_CERT_AUTHORITY_INVALID',
+    }),
+    // The interstitial already loaded. This must not be treated as a future-document wait.
+    waitForLoadState: async () => { events.push('warning-already-load'); },
+    waitForNavigation: options => { events.push('wait-navigation'); waiterArmed = true; waitOptions = options; return navigation.promise; },
+    click: async selector => {
+      events.push(selector === '#details-button' ? 'Advanced' : 'Proceed');
+      if (selector === '#details-button') { if (config.advancedError) throw new Error('Advanced click failed'); return; }
+      proceedClicked = true;
+      armedAtClick = waiterArmed;
+      if (config.clickError) throw new Error('Proceed click failed');
+      if (!config.deferred) {
+        if (config.navigationError) navigation.fail(new Error(config.navigationError));
+        else navigation.release(response);
+      }
+      // PW v1.60 SignalBarrier waits main-frame navigation announced by the click,
+      // and consumes navigation failures. It does not prove the caller's response contract.
+      await navigation.promise.catch(() => {});
+    },
+  };
+  const pending = acceptGateCertificate(page, URL_START, {
+    onAssert: async d => { events.push('onAssert'); check(d.seen && d.decision === 'none', 'assert hook sees warning before decision'); if (config.hookError) throw new Error('hook refused'); },
+    onShot: async d => { events.push('onShot'); check(d.seen && d.decision === 'none', 'shot hook sees warning before decision'); },
+  }).then(value => { decision = value; settled = true; }, reason => { error = reason; settled = true; });
+  // Only microtask observation: no clock delay, browser scheduling or early-return claim.
+  if (config.deferred) {
+    for (let i = 0; i < 64 && !proceedClicked && !settled; i++) await Promise.resolve();
+    check(proceedClicked, 'positive control reached Proceed');
+    check(!settled, 'source-faithful click barrier keeps helper pending');
+    navigation.release(response);
+  }
+  await pending;
+  // Release any unused adapter-only waiter after a failed click or earlier refusal.
+  navigation.release(response);
+  if (config.reject) check(Boolean(error) && !decision, 'failed contract must reject, never report proceeded');
+  else if (config.noInterstitial) check(!error && decision?.decision === 'no-interstitial' && !proceedClicked, 'no-interstitial behavior retained');
+  else check(!error && decision?.decision === 'proceed', 'valid Proceed accepted');
+  if (!config.noInterstitial) {
+    check(events.indexOf('onAssert') >= 0, 'assert hook ran');
+    if (!config.hookError) check(events.indexOf('onShot') > events.indexOf('onAssert'), 'shot follows assertion');
+    if (proceedClicked) check(events.indexOf('onShot') < events.indexOf('Advanced') && events.indexOf('Advanced') < events.indexOf('Proceed'), 'hooks precede Advanced and Proceed');
+  }
+  if (config.code || config.hookError || config.advancedError) check(!proceedClicked, 'earlier refusal never reaches Proceed');
+  if (config.requirePrearmed) {
+    check(armedAtClick, 'future navigation waiter armed before Proceed click');
+    check(waitOptions?.waitUntil === 'load' && waitOptions?.timeout === 20000, 'wait is load-bound and finite');
+  }
+  rows.push({ name: config.name, passed: failures.length === 0, failures, events, result: decision?.decision || null, rejected: Boolean(error), error: error?.message || null });
+}
+const failedAssertions = rows.reduce((sum, row) => sum + row.failures.length, 0);
+console.log(JSON.stringify({ kind: 'controlled shipped-helper contract; no native scheduling claim', modulePath, sha256, gateHostname: HOST, cases: rows.length, failedAssertions, rows }, null, 2));
+if (failedAssertions) process.exitCode = 1;
+'''
+    result = subprocess.run([node, '--input-type=module', '-', str(ROOT / 'scripts/gate/browser-launch.mjs')],
+                            input=source, text=True, capture_output=True, timeout=30)
+    try:
+        summary = json.loads(result.stdout)
+    except ValueError:
+        summary = {}
+    checks.expect(result.returncode == 0 and summary.get('cases') == 16 and summary.get('failedAssertions') == 0,
+                  'Browser certificate Proceed contract failed: ' + result.stdout[-2400:] + result.stderr[-600:])
+
+
 def check_browser_certificate_binding(checks):
     """Run current-main-browser leaf/cleanup/tracker regressions on the shipped exports."""
     node = shutil.which('node')
@@ -8588,7 +8714,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
