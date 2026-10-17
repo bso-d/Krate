@@ -21,11 +21,13 @@
 // observed in M0: a wrong-name and an expired certificate show the same
 // net::ERR_CERT_AUTHORITY_INVALID): name and date validity are evidenced by the Node pin
 // (authorised TLS against the pinned CA with the name check on), the pinned certificate's
-// validity window against the Mac clock, and the served-certificate fields from
-// Response.securityDetails compared with the pinned certificate (M0 point 4). CDP
-// Network.getCertificate is NOT used: M0 point 6 — it returned {"tableNames": []} after
-// Proceed in Chrome 155, so it has no certificate digest to give.
+// validity window against the Mac clock, and the current browser main-document leaf DER
+// from Security.visibleSecurityStateChanged compared with the pin (round4 manual A/B).
+// Response.securityDetails fields remain additional metadata. Network.getCertificate is
+// not used: its origin resource cache cannot select this current main document.
 import { createHash, X509Certificate } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+import { setTimeout, clearTimeout } from 'node:timers';
 import { readFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import net from 'node:net';
@@ -308,8 +310,12 @@ export function attachServeTracker(page) {
     attachContext(context) { for (const p of context.pages()) hook(p); context.on('page', hook); return this; },
     async record(expectedIp, pinned, what, asserted) {   // async: Response.serverAddr()/securityDetails() are Promises (Playwright 1.60.0 types.d.ts, review T08)
       if (!state.last) return null;
-      asserted.push(await assertServedFrom(state.last, expectedIp, what));
-      if (pinned) asserted.push(await assertServedCertificate(state.last, pinned, what));
+      const response = state.last;
+      const count = state.count;
+      const proof = [await assertServedFrom(response, expectedIp, what)];
+      if (pinned) proof.push(await assertServedCertificate(response, pinned, what));
+      if (state.last !== response || state.count !== count) throw new Error(`${what}: main-document response changed during served-address/certificate assertions`);
+      asserted.push(...proof);
       return true;
     },
   };
@@ -380,20 +386,91 @@ export async function assertServedFrom(resp, expected, what) {
   return `served from ${addr.ipAddress}:${addr.port || '?'} (Response.serverAddr)`;
 }
 
-// F2 (c), the digest source: the served certificate's fields compared with the pinned one.
-// Response.securityDetails() gives issuer, subjectName, protocol and the validity dates; M0
-// point 4 observed exactly those fields populated on the Mac. Equal subjectAnd issuer plus
-// the Node pin's fingerprint close the "what did Chrome actually receive" question without
-// CDP Network.getCertificate (M0 point 6: it has no certificates to give in Chrome 155).
+// F2 (c): fingerprint the current browser main document, with Response metadata as an
+// additional check. Equal subject/issuer alone cannot distinguish same-DN different keys
+// (round4 certificate manual A/B). A fresh Security.enable reports Chrome's visible-entry
+// DER chain synchronously; listen first. This is current-page evidence, not a fingerprint
+// API for an arbitrary historical Response or an origin resource cache.
 export async function assertServedCertificate(resp, pinned, what) {
   if (!resp) throw new Error(`${what}: no main-document response to assert securityDetails on`);
-  let details;
-  try { details = await resp.securityDetails(); } catch (e) { throw new Error(`${what}: Response.securityDetails() unavailable: ${String(e.message || e).slice(0, 120)}`); }
-  if (!details || !details.subjectName) throw new Error(`${what}: Response.securityDetails() empty (the story must be in mac mode against a fixture certificate)`);
-  const wrong = [];
-  if (details.subjectName && pinned.subject && !dnFold(pinned.subject).includes(dnFold(details.subjectName))) wrong.push(`subject ${details.subjectName}`);
-  if (details.issuer && pinned.issuer && !dnFold(pinned.issuer).includes(dnFold(details.issuer))) wrong.push(`issuer ${details.issuer}`);
-  if (wrong.length) throw new Error(`${what}: the browser received a different certificate than the pinned one (${wrong.join(', ')}; expected subject/issuer of certs/server.crt)`);
-  const valid = { protocol: details.protocol || '', subject: details.subjectName, issuer: details.issuer || '', validFrom: details.validFrom || '', validTo: details.validTo || '' };
-  return `TLS ${valid.protocol || '?'}, subject ${valid.subject}, issuer ${valid.issuer}, valid to ${valid.validTo || '?'} (Response.securityDetails)`;
+  if (!/^[a-f0-9]{64}$/i.test(pinned?.sha256 || '')) throw new Error(`${what}: missing pinned leaf sha256`);
+  const request = resp.request();
+  const frame = request.frame();
+  const page = frame.page();
+  const origin = new URL(resp.url()).origin;
+  if (!request.isNavigationRequest() || frame !== page.mainFrame() || page.isClosed()
+      || new URL(resp.url()).protocol !== 'https:' || new URL(page.url()).origin !== origin) {
+    throw new Error(`${what}: certificate assertion requires a live main-document HTTPS response and its current page origin`);
+  }
+  let changed = false;
+  const onRequest = (r) => {
+    try { if (r.isNavigationRequest() && r.frame() === frame) changed = true; }
+    catch { changed = true; }
+  };
+  const onNavigated = (f) => { if (f === frame) changed = true; };
+  page.on('request', onRequest);
+  page.on('framenavigated', onNavigated);
+  let session;
+  let timer;
+  let onSecurity;
+  let proof;
+  try {
+    let details;
+    try { details = await resp.securityDetails(); } catch (e) { throw new Error(`${what}: Response.securityDetails() unavailable: ${String(e.message || e).slice(0, 120)}`); }
+    if (!details || !details.subjectName) throw new Error(`${what}: Response.securityDetails() empty (the story must be in mac mode against a fixture certificate)`);
+    const wrong = [];
+    if (details.subjectName && pinned.subject && !dnFold(pinned.subject).includes(dnFold(details.subjectName))) wrong.push(`subject ${details.subjectName}`);
+    if (details.issuer && pinned.issuer && !dnFold(pinned.issuer).includes(dnFold(details.issuer))) wrong.push(`issuer ${details.issuer}`);
+    if (wrong.length) throw new Error(`${what}: the browser response metadata differs from the pinned certificate (${wrong.join(', ')}; expected subject/issuer of certs/server.crt)`);
+    session = await page.context().newCDPSession(page);
+    const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${what}: no complete browser certificate evidence within 5 s`)), 5000); });
+    const bounded = (promise) => Promise.race([promise, deadline]);
+    const stateReady = new Promise((resolve) => { onSecurity = (event) => resolve(event.visibleSecurityState); });
+    session.on('Security.visibleSecurityStateChanged', onSecurity);
+    const snapshot = async () => {
+      const { frameTree } = await bounded(session.send('Page.getFrameTree'));
+      const current = frameTree?.frame;
+      if (changed || page.isClosed() || frame !== page.mainFrame() || !current?.id || !current.loaderId
+          || current.parentId || current.unreachableUrl || new URL(current.url).origin !== origin
+          || current.securityOrigin !== origin || new URL(page.url()).origin !== origin) {
+        throw new Error(`${what}: current browser main document is unavailable, changing or outside the response HTTPS origin`);
+      }
+      return current;
+    };
+    const before = await snapshot();
+    await bounded(session.send('Security.enable'));
+    const visible = await bounded(stateReady);
+    const chain = visible?.certificateSecurityState?.certificate;
+    if (!visible || !['secure', 'insecure', 'insecure-broken', 'info'].includes(visible.securityState)
+        || !Array.isArray(chain) || typeof chain[0] !== 'string' || !chain[0]) {
+      throw new Error(`${what}: current browser main document has no TLS leaf DER certificate`);
+    }
+    let leaf;
+    try { leaf = new X509Certificate(Buffer.from(chain[0], 'base64')); }
+    catch { throw new Error(`${what}: browser main-document leaf DER is not a certificate`); }
+    const sha256 = createHash('sha256').update(leaf.raw).digest('hex');
+    if (sha256 !== pinned.sha256.toLowerCase()) {
+      throw new Error(`${what}: current browser main-document leaf sha256 ${sha256} differs from pinned ${pinned.sha256}`);
+    }
+    const after = await snapshot();
+    if (before.id !== after.id || before.loaderId !== after.loaderId || before.url !== after.url) {
+      throw new Error(`${what}: browser main document changed while sampling its certificate`);
+    }
+    proof = `current main-document browser leaf sha256 ${sha256} (Security.visibleSecurityStateChanged; stable main frame/loader); TLS ${details.protocol || '?'}, subject ${details.subjectName}, issuer ${details.issuer || ''}, valid to ${details.validTo || '?'} (Response.securityDetails additional metadata)`;
+  } finally {
+    clearTimeout(timer);
+    try {
+      if (session) {
+        if (onSecurity) session.off('Security.visibleSecurityStateChanged', onSecurity);
+        await session.detach();
+      }
+    } finally {
+      page.off('request', onRequest);
+      page.off('framenavigated', onNavigated);
+    }
+  }
+  if (changed || page.isClosed() || frame !== page.mainFrame() || new URL(page.url()).origin !== origin) {
+    throw new Error(`${what}: browser main document changed during certificate assertion`);
+  }
+  return proof;
 }

@@ -1304,6 +1304,163 @@ def check_firewall_round4(checks):
 
 
 
+def check_browser_certificate_binding(checks):
+    """Run current-main-browser leaf/cleanup/tracker regressions on the shipped exports."""
+    node = shutil.which('node')
+    if node is None:
+        print('Identity check NOT RUN: browser certificate binding regressions (Node unavailable on this host)', file=sys.stderr)
+        return
+    source = r'''import { EventEmitter } from 'node:events';
+import process from 'node:process';
+import { Buffer } from 'node:buffer';
+import { readFileSync } from 'node:fs';
+import { createHash, X509Certificate } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+
+// Actual shipped exported assertion; only Playwright/CDP boundary state is adapted.
+const source = resolve(process.argv[2] || 'scripts/gate/browser-launch.mjs');
+const lib = await import(pathToFileURL(source).href);
+// Throwaway same-DN leaves are created under harness and removed after this check.
+const a = new X509Certificate(readFileSync(process.argv[3]));
+// A and B have independent keys; no fixture certificate/key is committed.
+const b = new X509Certificate(readFileSync(process.argv[4]));
+const pin = lib.certDigests(a.raw);
+const details = { subjectName: 'gate.test', issuer: 'gate.test', protocol: 'TLS 1.3', validFrom: 1, validTo: 2 };
+const cases = [
+  ['same leaf', {}, true],
+  ['same DN different leaf', { leaf: b.raw }, false],
+  ['empty certificate chain', { chain: [] }, false],
+  ['invalid DER', { chain: [Buffer.from('not a certificate').toString('base64')] }, false],
+  ['neutral security state', { securityState: 'neutral' }, false],
+  ['missing security state', { noState: true }, false],
+  ['enable fails', { fail: 'Security.enable' }, false],
+  ['CDP attach fails', { attachFails: true }, false],
+  ['CDP frame snapshot fails', { fail: 'Page.getFrameTree' }, false],
+  ['frame loader changes', { loaderChanges: true }, false],
+  ['main navigation during sampling', { navigating: true }, false],
+  ['main frame navigation during sampling', { frameNavigating: true }, false],
+  ['main navigation during detach', { navigationOnDetach: true }, false],
+  ['session detach fails', { detachFails: true }, false],
+  ['interstitial main frame', { interstitial: true }, false],
+  ['missing pinned digest', { missingPin: true }, false],
+  ['different current origin', { pageUrl: 'https://other.test/' }, false],
+  ['subframe response', { subframe: true }, false],
+  ['not a navigation response', { notNavigation: true }, false],
+  ['closed page', { closed: true }, false],
+  ['same-origin SPA path', { pageUrl: 'https://gate.test/route#shot' }, true],
+  ['different response subject', { wrongSubject: true }, false],
+];
+const results = [];
+for (const [name, options, expected] of cases) {
+  const calls = [];
+  const page = new EventEmitter();
+  const session = new EventEmitter();
+  let snapshots = 0;
+  let detaches = 0;
+  const frame = { page: () => page, isDetached: () => false };
+  const request = { frame: () => frame, isNavigationRequest: () => !options.notNavigation,
+    redirectedTo: () => null };
+  const url = options.pageUrl || 'https://gate.test/certificate';
+  Object.assign(page, { url: () => url, isClosed: () => !!options.closed,
+    mainFrame: () => options.subframe ? {} : frame,
+    context: () => ({ newCDPSession: async (target) => {
+      if (target !== page) throw new Error('session is not bound to response page');
+      calls.push('attach');
+      if (options.attachFails) throw new Error('attach refused');
+      return session;
+    } }) });
+  session.send = async (method) => {
+    calls.push(method);
+    if (options.fail === method) throw new Error(method + ' refused');
+    if (method === 'Page.getFrameTree') {
+      snapshots++;
+      return { frameTree: { frame: { id: 'main', loaderId: options.loaderChanges && snapshots > 1 ? 'later' : 'current',
+        url: url.split('#')[0], securityOrigin: new URL(url).origin, unreachableUrl: options.interstitial ? url : undefined } } };
+    }
+    if (method === 'Security.enable') {
+      if (!session.listenerCount('Security.visibleSecurityStateChanged')) throw new Error('Security listener installed too late');
+      if (options.navigating) page.emit('request', request);
+      if (options.frameNavigating) page.emit('framenavigated', frame);
+      if (!options.noState) session.emit('Security.visibleSecurityStateChanged', { visibleSecurityState: {
+        securityState: options.securityState || 'insecure-broken',
+        certificateSecurityState: { certificate: options.chain || [(options.leaf || a.raw).toString('base64')] },
+      } });
+      return {};
+    }
+    throw new Error('unexpected protocol method ' + method);
+  };
+  session.detach = async () => {
+    calls.push('detach'); detaches++;
+    if (options.navigationOnDetach) page.emit('request', request);
+    if (options.detachFails) throw new Error('detach refused');
+  };
+  const response = { securityDetails: async () => ({ ...details, subjectName: options.wrongSubject ? 'other.test' : details.subjectName }),
+    request: () => request, url: () => 'https://gate.test/certificate', finished: async () => null };
+  let result = null;
+  let error = null;
+  try { result = await lib.assertServedCertificate(response, options.missingPin ? { ...pin, sha256: '' } : pin, name); }
+  catch (e) { error = String(e.message || e); }
+  const accepted = error === null;
+  const problems = [];
+  if (accepted !== expected) problems.push('expected accepted=' + expected + ', got ' + accepted);
+  if (calls.includes('attach') && !options.attachFails && detaches !== 1) problems.push('owned CDP session not detached exactly once');
+  if (page.eventNames().some(event => page.listenerCount(event))) problems.push('page listeners left behind');
+  if (session.eventNames().some(event => session.listenerCount(event))) problems.push('CDP listeners left behind');
+  results.push({ name, expected, accepted, passed: problems.length === 0, problems, result, error, calls });
+}
+// Actual exported tracker: proof strings must be appended atomically only for a
+// response/count that remained current across asynchronous address/certificate checks.
+for (const mode of ['stable', 'different response', 'same response counted again']) {
+  const page = new EventEmitter();
+  const frame = {};
+  page.mainFrame = () => frame;
+  const request = { isNavigationRequest: () => true, frame: () => frame };
+  const later = { request: () => request };
+  const response = { request: () => request, serverAddr: async () => {
+    if (mode !== 'stable') page.emit('response', mode === 'different response' ? later : response);
+    return { ipAddress: '192.168.64.3', port: 443 };
+  } };
+  const tracker = lib.attachServeTracker(page);
+  page.emit('response', response);
+  const asserted = [];
+  let error = null;
+  try { await tracker.record('192.168.64.3', null, mode, asserted); }
+  catch (e) { error = String(e.message || e); }
+  const expected = mode === 'stable';
+  const accepted = error === null;
+  const problems = [];
+  if (accepted !== expected) problems.push('unexpected tracker verdict');
+  if (asserted.length !== (expected ? 1 : 0)) problems.push('tracker published partial/stale proof');
+  results.push({ name: 'tracker ' + mode, expected, accepted, asserted, error, problems, passed: !problems.length });
+}
+const report = { source, sourceSha256: createHash('sha256').update(readFileSync(source)).digest('hex'),
+  aLeaf: createHash('sha256').update(a.raw).digest('hex'), bLeaf: createHash('sha256').update(b.raw).digest('hex'),
+  results, failures: results.filter(row => !row.passed).length };
+console.log(JSON.stringify(report, null, 2));
+process.exitCode = report.failures ? 1 : 0;
+'''
+    openssl_binary = shutil.which('openssl')
+    if openssl_binary is None:
+        checks.expect(False, 'OpenSSL is required to generate throwaway browser certificate fixtures')
+        return
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='browser-cert-', dir=fixture_base) as fixture_dir:
+        fixture = Path(fixture_dir)
+        for name in ('a', 'b'):
+            made = subprocess.run([openssl_binary, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                                   '-sha256', '-days', '1', '-subj', '/CN=gate.test',
+                                   '-keyout', str(fixture / (name + '.key')), '-out', str(fixture / (name + '.crt'))],
+                                  capture_output=True, text=True, timeout=15)
+            if not checks.expect(made.returncode == 0, f'cannot generate browser leaf {name}: {made.stderr[:200]}'):
+                return
+        run = subprocess.run([node, '--input-type=module', '-', str(ROOT / 'scripts/gate/browser-launch.mjs'),
+                              str(fixture / 'a.crt'), str(fixture / 'b.crt')],
+                             input=source, text=True, capture_output=True, timeout=30)
+        checks.expect(run.returncode == 0, f'Browser certificate/current-main-frame/cleanup/tracker regressions: rc={run.returncode}, stdout={run.stdout!r}, stderr={run.stderr!r}')
+
+
 def check_topofix2(checks):
     """TOPOFIX2 fix round (harness/phase4-completion/w2/TOPOFIX2-BRIEF.md): behaviour pins for the defects the first read of the
     Mac agent vantage found (PRE-0..PRE-7, F1-F8, G5-G7). Pins are whole-line matches on the code lines (js_lines) or
@@ -1665,8 +1822,12 @@ def check_topofix2(checks):
     # (playwright-core/types/types.d.ts), so the helpers that read them, the tracker's record() and every caller are async.
     for line in ('export async function assertServedFrom(resp, expected, what) {',
                  'export async function assertServedCertificate(resp, pinned, what) {',
-                 'asserted.push(await assertServedFrom(state.last, expectedIp, what));',
-                 'if (pinned) asserted.push(await assertServedCertificate(state.last, pinned, what));'):
+                 'const response = state.last;',
+                 'const count = state.count;',
+                 'const proof = [await assertServedFrom(response, expectedIp, what)];',
+                 'if (pinned) proof.push(await assertServedCertificate(response, pinned, what));',
+                 'if (state.last !== response || state.count !== count) throw new Error(`${what}: main-document response changed during served-address/certificate assertions`);',
+                 'asserted.push(...proof);'):
         e(line in launch_lines, f'browser-launch.mjs must carry the code line {line!r} (T08: the Response helpers are asynchronous)')
     e(any(ln.startswith('try { addr = await resp.serverAddr(); }') for ln in launch_lines)
       and any(ln.startswith('try { details = await resp.securityDetails(); }') for ln in launch_lines)
@@ -1689,14 +1850,12 @@ def check_topofix2(checks):
         probe_src = (
             "const lib = await import(process.argv[1]);\n"
             "const good = { serverAddr: async () => ({ ipAddress: '192.168.64.2', port: 443 }),\n"
-            "  securityDetails: async () => ({ subjectName: 'krate-oi.test', issuer: 'Krate Test CA', protocol: 'TLSv1.3', validFrom: 1, validTo: 2 }) };\n"
-            "const out = { from: await lib.assertServedFrom(good, '192.168.64.2', 'x'),\n"
-            "  cert: await lib.assertServedCertificate(good, { subject: 'CN=krate-oi.test', issuer: 'CN=Krate Test CA' }, 'x') };\n"
+            "};\n"
+            "const out = { from: await lib.assertServedFrom(good, '192.168.64.2', 'x') };\n"
             "const refuse = async (fn) => { try { await fn(); return false; } catch { return true; } };\n"
             "out.loopbackRefused = await refuse(() => lib.assertServedFrom({ serverAddr: async () => ({ ipAddress: '127.0.0.1', port: 443 }) }, '192.168.64.2', 'x'));\n"
             "out.loopbackRefusedWithoutExpectation = await refuse(() => lib.assertServedFrom({ serverAddr: async () => ({ ipAddress: '::1', port: 443 }) }, '', 'x'));\n"
             "out.emptyRefused = await refuse(() => lib.assertServedFrom({ serverAddr: async () => null }, '192.168.64.2', 'x'));\n"
-            "out.certMismatchRefused = await refuse(() => lib.assertServedCertificate(good, { subject: 'CN=other.test', issuer: 'CN=Krate Test CA' }, 'x'));\n"
             "console.log(JSON.stringify(out));\n"
         )
         run_node = subprocess.run([node_binary, '--input-type=module', '-e', probe_src, str(ROOT / 'scripts/gate/browser-launch.mjs')], text=True, capture_output=True)
@@ -1704,10 +1863,10 @@ def check_topofix2(checks):
             node_out = json.loads(run_node.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
             node_out = {}
-        e(run_node.returncode == 0 and 'served from 192.168.64.2:443' in node_out.get('from', '') and node_out.get('cert', '').startswith('TLS TLSv1.3')
+        e(run_node.returncode == 0 and 'served from 192.168.64.2:443' in node_out.get('from', '')
           and node_out.get('loopbackRefused') is True and node_out.get('loopbackRefusedWithoutExpectation') is True
-          and node_out.get('emptyRefused') is True and node_out.get('certMismatchRefused') is True,
-          f'the served-address and served-certificate assertions accept a valid asynchronous Response and refuse loopback, empty and mismatching ones; got rc {run_node.returncode}: {run_node.stderr.strip()[:200]!r} {node_out!r} (T08)')
+          and node_out.get('emptyRefused') is True,
+          f'the served-address assertion accepts a valid asynchronous Response and refuses loopback and empty ones; browser certificate binding has its own full CDP/DER regression check; got rc {run_node.returncode}: {run_node.stderr.strip()[:200]!r} {node_out!r} (T08)')
 
     # T01 / T02 / T04: the runner's own functions run in bash against stubs. agent_request takes only the requester's stdout as the
     # response (its stderr announcement goes to the raw log), w5_published_any_ports reads the service label with a template
@@ -7836,7 +7995,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_binding, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
