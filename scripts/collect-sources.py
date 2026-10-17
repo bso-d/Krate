@@ -557,13 +557,20 @@ def main(argv=None):
         whole, size, parts = make_archive(out_dir, Path(args.archive), args.part_size)
         log(f'archive {args.archive}: {size} bytes sha256 {whole}' + (f' in {len(parts)} parts' if parts else ''))
     # Every download fails the same way without a certificate store: name the remedy once, beside the totals.
-    failed = sum('CERTIFICATE_VERIFY_FAILED' in (c.reason or '') for c in comps)
-    if failed:
-        print(CERTIFICATE_HINT % ('collect-sources.py', 'CERTIFICATE_VERIFY_FAILED in %d components' % failed),
-              file=sys.stderr, flush=True)
+    hint = certificate_summary(comps)
+    if hint:
+        print(hint, file=sys.stderr, flush=True)
     if args.fail_on_unresolved and manifest['totals']['unresolved']:
         return 2
     return 0
+
+
+def certificate_summary(comps):
+    """The certificate hint for the totals when any component failed certificate verification, else None."""
+    failed = sum('CERTIFICATE_VERIFY_FAILED' in (c.reason or '') for c in comps)
+    if not failed:
+        return None
+    return CERTIFICATE_HINT % ('collect-sources.py', 'CERTIFICATE_VERIFY_FAILED in %d components' % failed)
 
 
 def certificate_failure(error):

@@ -4885,6 +4885,7 @@ def check_build_certificate_hint(checks):
     import ast
     import ssl
     import threading
+    import types
     import urllib.error
     e = checks.expect
     verify = ssl.SSLCertVerificationError(1, 'certificate verify failed: unable to get local issuer certificate')
@@ -4913,16 +4914,23 @@ def check_build_certificate_hint(checks):
         a.__cause__, b.__cause__ = b, a
         raise a
 
+    def exit_three():
+        try:
+            raise urllib.error.URLError(verify)
+        except urllib.error.URLError:
+            raise SystemExit(3)  # an exit of main() whose context happens to be a certificate failure
+
     for rel, prog in (('kafbat-ui/build.py', 'build.py'), ('scripts/collect-sources.py', 'collect-sources.py')):
         text = (ROOT / rel).read_text()
         tree = ast.parse(text)
+        lifted = ('certificate_failure', 'certificate_summary') if prog == 'collect-sources.py' else ('certificate_failure',)
         wanted: list[ast.stmt] = [node for node in tree.body
-                                  if (isinstance(node, ast.FunctionDef) and node.name == 'certificate_failure')
+                                  if (isinstance(node, ast.FunctionDef) and node.name in lifted)
                                   or (isinstance(node, ast.Assign)
                                       and any(getattr(t, 'id', '') == 'CERTIFICATE_HINT' for t in node.targets))]
         guard = [node for node in tree.body if isinstance(node, ast.If) and "__name__ == '__main__'" in ast.unparse(node.test)]
-        if not e(len(wanted) == 2 and len(guard) == 1,
-                 f'{rel}: defines certificate_failure, CERTIFICATE_HINT and one __main__ guard at top level'):
+        if not e(len(wanted) == len(lifted) + 1 and len(guard) == 1,
+                 f'{rel}: defines {", ".join(lifted)}, CERTIFICATE_HINT and one __main__ guard at top level'):
             continue
         namespace: dict = {'ssl': ssl}
         exec(compile(ast.Module(body=wanted, type_ignores=[]), rel, 'exec'), namespace)
@@ -4972,14 +4980,24 @@ def check_build_certificate_hint(checks):
           f'{rel}: any other failure still raises')
         e(run_guard(lambda: (_ for _ in ()).throw(KeyboardInterrupt())) == ('raised', 'KeyboardInterrupt'),
           f'{rel}: Ctrl-C still raises')
+        e(run_guard(exit_three) == ('exit', 3), f'{rel}: an exit of main() keeps its code even with a certificate failure '
+                                                 f'as its context; got {run_guard(exit_three)}')
         if prog == 'collect-sources.py':
             e(run_guard(lambda: 2) == ('exit', 2) and run_guard(lambda: 0) == ('exit', 0),
               f'{rel}: the exit code of main() is kept (2 on unresolved sources)')
-            tail = text[text.index("log(f'{args.edition}: {manifest[\"totals\"]}')"):text.index('def certificate_failure')]
-            e("failed = sum('CERTIFICATE_VERIFY_FAILED' in (c.reason or '') for c in comps)" in tail
-              and 'file=sys.stderr' in tail[tail.index('CERTIFICATE_HINT'):tail.index('return 2')]
-              and tail.index('CERTIFICATE_HINT') < tail.index('return 2'),
-              f'{rel}: the summary prints the hint on stderr, before the exit code, when a reason is a certificate failure')
+            summary = namespace['certificate_summary']
+            failing = 'Tree API failed: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed>'
+            comps = [types.SimpleNamespace(reason=reason) for reason in (failing, None, 'checksum mismatch', failing)]
+            line = summary(comps)
+            e(summary([types.SimpleNamespace(reason=None), types.SimpleNamespace(reason='HTTP 404')]) is None
+              and isinstance(line, str) and line.startswith('collect-sources.py: ')
+              and 'CERTIFICATE_VERIFY_FAILED in 2 components' in line,
+              f'{rel}: certificate_summary is None without a certificate failure and counts the failed components; got {line!r}')
+            start = text.find("log(f'{args.edition}: {manifest[\"totals\"]}')")
+            tail = text[start:text.find('def certificate_summary')] if start >= 0 else ''
+            printed, returned = tail.find('print(hint, file=sys.stderr'), tail.find('return 2')
+            e('hint = certificate_summary(comps)' in tail and 0 <= printed < returned,
+              f'{rel}: the summary prints certificate_summary() on stderr, before the exit code')
         else:
             e(run_guard(lambda: None) == ('returned', None), f'{rel}: a successful build returns normally')
 
