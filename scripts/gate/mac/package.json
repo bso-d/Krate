@@ -1,7 +1,7 @@
 {
   "name": "krate-mac-gate",
   "private": true,
-  "description": "Playwright pinned to the gate image version (scripts/gate-identity.sh:889), driving the installed Google Chrome on the Mac. Install once on the connected Mac: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix <this directory>, then point PW_MODULES at <this directory>/node_modules (harness/mac-browser already holds the same pin and is the live source this pin mirrors).",
+  "description": "Playwright pinned to the gate image version, driving the installed Google Chrome on the Mac. Install once on the connected Mac: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix <this directory>, then point PW_MODULES at <this directory>/node_modules (harness/mac-browser already holds the same pin and is the live source this pin mirrors).",
   "dependencies": {
     "playwright": "1.60.0"
   }

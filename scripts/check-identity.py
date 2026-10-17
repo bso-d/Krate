@@ -1229,6 +1229,32 @@ def check_topofix2(checks):
             rc_f7, out_f7, err_f7 = preflight_case(bad_src)
             e(rc_f7 == 2 and 'mac_src_ip' in err_f7 and 'MAC_SRC_IP=' not in out_f7, f'the preflight refuses mac_src_ip {bad_src} (outside the three RFC1918 networks); got rc {rc_f7}: {err_f7.strip()[:120]!r} (F7)')
 
+    # F3: finish() records the vmip row BEFORE it computes the verdict from FAILS (a vmip FAIL must turn the verdict into FAIL).
+    finish_body = re.search(r'^finish\(\) \{\n(.*?)^\}\n', topo_runner_text, re.M | re.S)
+    if finish_body is None:
+        e(False, 'scripts/gate-identity.sh must define finish() (F3)')
+    else:
+        finish_text = finish_body.group(1)
+        vmip_records = [m.start() for m in re.finditer(r'^\s*record vmip "\$\{PHASE\}" W (?:PASS|FAIL) ', finish_text, re.M)]
+        verdict_lines = [m.start() for m in re.finditer(r'^\s*\(\( FAILS == 0 \)\) \|\| verdict=FAIL\s*$', finish_text, re.M)]
+        e(len(vmip_records) == 2 and len(verdict_lines) == 1 and max(vmip_records) < verdict_lines[0],
+          'finish() records both vmip rows (PASS and FAIL branch) before `(( FAILS == 0 )) || verdict=FAIL`, so a vmip FAIL turns the verdict into FAIL (F3)')
+
+    # F5: the Mac package.json carries no line anchor into the runner (the old one, gate-identity.sh:889, points at a kcadm line).
+    mac_package = json.loads((ROOT / 'scripts/gate/mac/package.json').read_text())
+    e(re.search(r'gate-identity\.sh:\d+', mac_package.get('description', '')) is None and mac_package.get('dependencies') == {'playwright': '1.60.0'},
+      'scripts/gate/mac/package.json carries no gate-identity.sh:<line> anchor and still pins playwright 1.60.0 (F5)')
+
+    # F6: the browser vantage receipt row is written in every receipt (same indentation as the host and images rows, outside any
+    # agent condition); only vmip is agent-only. The guide says so.
+    row_indent = {name: re.search(r'^( *)echo "\| ' + name + r' \|', topo_runner_text, re.M) for name in ('host', 'browser vantage', 'images')}
+    e(all(m is not None for m in row_indent.values()) and len({len(m.group(1)) for m in row_indent.values() if m}) == 1,
+      'the receipt header writes the browser vantage row unconditionally, beside the host and images rows (F6)')
+    e('Only an agent run adds a `vmip` row at the end' in guide_flat and 'the `browser vantage` receipt row is written in every receipt' in guide_flat
+      and '| browser vantage | the `--browser` mode of the run' in guide_text and 'The row is written in every receipt, agent run or not' in guide_flat
+      and 'adds a `vmip` row at the end (the fixture\'s NIC address must still be the hello\'s — a change voids the binding) and a receipt `browser vantage` row' not in guide_flat,
+      'the guide says the browser vantage row is in every receipt and only vmip is agent-only, and its field table lists the row (F6)')
+
 
 def check_k37_wiring(checks):
     """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""
