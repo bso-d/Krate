@@ -97,6 +97,67 @@ TRUSTSTORE_MODES = ('local', 'system')
 # .env key carrying the truststore digest; part of keycloak's Compose environment, so a changed
 # PEM set recreates Keycloak (it reads KC_TRUSTSTORE_PATHS at start only). Like KRATE_PROXY_CONF_SHA.
 TRUSTSTORE_SHA_KEY = 'KRATE_TRUSTSTORE_SHA'
+# ─── The MFA stance of a brokered site (enforce-if-asserted) ──────────────────
+# A site decides explicitly how Keycloak treats PingFederate's MFA assertion. The one mechanism
+# that can refuse a brokered sign-in without the assertion is Keycloak's IdP-side "Verify essential
+# claim": `filteredByClaim` true with `claimFilterName` and `claimFilterValue` on the provider's
+# config makes getFederatedIdentity throw before any user is created — the claim is read from the ID
+# token only, and a missing claim and an unmatched value both fail (OIDCIdentityProvider.java
+# 490-512 at 26.8.0). A site that does not opt in records `mfa_not_asserted: true` in its site file,
+# which the plan carries as a top-level key that is never sent to Keycloak: "MFA for SSO users is
+# enforced at PingFederate only". A plan or a site file that states neither stance is refused
+# (MfaStanceError), by `krate auth configure` and by every preflight that reads the plan, so the
+# choice can never stay unstated.
+# The three filter keys are MANAGED: the plan is the whole truth about them. The provider update the
+# CLI sends replaces the provider's configuration (kcadm `update -f -` merges nothing: merge mode is on
+# only with --merge/-m or attributes and no --file, AbstractRequestCmd.java 26.8.0:171 and :244; the
+# admin API builds the model from the representation, IdentityProviderResource.java updateIdpFromRep,
+# and stores its config map whole, JpaIdentityProviderStorageProvider.update), so a live filter the
+# plan no longer carries is reconciled away: provider_differs() reports it.
+MFA_FILTER_KEYS = ('filteredByClaim', 'claimFilterName', 'claimFilterValue')
+MFA_NOT_ASSERTED_KEY = 'mfa_not_asserted'
+# sso/dual-example.json ships REPLACE_WITH_... for the claim pair; an unedited copy must not configure a filter.
+MFA_PLACEHOLDER = 'REPLACE_WITH'
+# The claim name Keycloak matches is a top-level ID-token claim (the groups-claim rule).
+MFA_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+# JsonWebToken's own fields: Keycloak parses the brokered ID token as a JsonWebToken
+# (OIDCIdentityProvider.validateToken) and filters on getOtherClaims(), where these names never appear,
+# so a filter on one of them would refuse every sign-in.
+MFA_TYPED_CLAIMS = ('jti', 'iss', 'aud', 'sub', 'typ', 'azp', 'exp', 'nbf', 'iat')
+# The claim value: one literal, or several separated by `|`. Keycloak applies the value with Java's
+# String.matches; Python's `re` cannot check Java's grammar (the two disagree on named groups, `a*+`,
+# `\p{L}`, `{,n}`, ...), so only a subset that means the same everywhere is accepted: letters, digits
+# and . _ : / - (a `.` matches any one character, as in every engine), each alternative holding at
+# least one letter or digit. A claim passes when one of its values matches (`anyMatch`, same lines).
+MFA_VALUE_LITERAL = re.compile(r'[A-Za-z0-9._:/-]+')
+MFA_VALUE_RULE = ('mfa_claim_value must be one literal or several literals separated by | (each made of letters, digits and . _ : / -, '
+                  'with at least one letter or digit); other regular-expression syntax is refused because Java and Python disagree on it')
+MFA_STANCE_HINT = ('set mfa_claim_name and mfa_claim_value in the site file (Keycloak then refuses a PingFederate sign-in whose ID token '
+                   f'lacks that claim) or {MFA_NOT_ASSERTED_KEY}: true (MFA for SSO users is enforced at PingFederate only)')
+
+
+class MfaStanceError(ValueError):
+    """A plan or site file that states no MFA stance; the message is complete (it names the options and the way back)."""
+
+
+def validate_mfa_filter(name, value):
+    """The essential-claim filter's claim name and value; ValueError names the broken side and the rule."""
+    for label, item in (('mfa_claim_name', name), ('mfa_claim_value', value)):
+        if isinstance(item, str) and MFA_PLACEHOLDER in item:
+            raise ValueError(f'{label} still holds the example placeholder {item}: replace it with the claim PingFederate asserts '
+                             f'and its value, or state {MFA_NOT_ASSERTED_KEY}: true instead of the pair')
+    if not isinstance(name, str) or not MFA_NAME.fullmatch(name):
+        raise ValueError('mfa_claim_name must be a top-level identifier, e.g. acr or amr')
+    if name in MFA_TYPED_CLAIMS:
+        raise ValueError(f'mfa_claim_name {name} is a registered JWT field, which Keycloak never offers to the claim filter '
+                         f'(it would refuse every sign-in); name another claim, e.g. acr or amr')
+    if not isinstance(value, str) or not value:
+        raise ValueError('mfa_claim_value must be a nonempty string')
+    for alternative in value.split('|'):
+        if not MFA_VALUE_LITERAL.fullmatch(alternative) or not any(c.isalnum() for c in alternative):
+            raise ValueError(MFA_VALUE_RULE)
+
+
 RBAC_RESOURCES = ('applicationconfig', 'clusterconfig', 'topic', 'consumer', 'schema', 'connect',
                   'connector', 'acl', 'audit', 'client_quotas')
 PATTERN_RESOURCES = ('topic', 'consumer', 'schema', 'connect', 'connector')
@@ -928,6 +989,28 @@ def broker_plan(path):
         raise ValueError(f'{path}: browserFlow must be {BROWSER_FLOW!r}')
     if plan.get('truststore', 'local') not in TRUSTSTORE_MODES:
         raise ValueError(f'{path}: truststore must be one of {list(TRUSTSTORE_MODES)}')
+    # The MFA stance is explicit (never fails open over an unstated one): either the three
+    # essential-claim keys together on the provider's config, or the opt-out marker — never both.
+    stance = plan.get(MFA_NOT_ASSERTED_KEY)
+    if stance is not None and stance is not True:
+        raise ValueError(f'{path}: {MFA_NOT_ASSERTED_KEY} must be the boolean true')
+    filter_keys = [key for key in MFA_FILTER_KEYS if key in config]
+    if filter_keys and stance is True:
+        raise ValueError(f'{path}: {MFA_NOT_ASSERTED_KEY} conflicts with the essential-claim filter'
+                         ' (filteredByClaim, claimFilterName, claimFilterValue);'
+                         ' the plan carries exactly one of the two MFA stances')
+    if filter_keys:
+        missing = [key for key in MFA_FILTER_KEYS if key not in config]
+        if missing:
+            raise ValueError(f'{path}: the essential-claim filter must set all three config keys together'
+                             f' (filteredByClaim, claimFilterName, claimFilterValue); missing {missing[0]}')
+        if config.get('filteredByClaim') != 'true':
+            raise ValueError(f'{path}: config.filteredByClaim must be the string "true"'
+                             ' (Keycloak provider config values are strings)')
+        validate_mfa_filter(config.get('claimFilterName'), config.get('claimFilterValue'))
+    elif stance is not True:
+        raise MfaStanceError(f'{path} states no MFA stance: {MFA_STANCE_HINT}; add one of the two to the site file, remove '
+                             f'auth/ui/runtime.yml and {BROKER_PLAN}, then run krate auth configure <site.json>')
     return plan
 
 
@@ -970,6 +1053,28 @@ def differs(wanted, current):
     return wanted != current
 
 
+def provider_differs(plan, current):
+    """True when the live provider `current` differs from the plan.
+
+    Beyond differs() (a planned key lacks or differs), the claim-filter keys are managed: a live provider
+    that still carries one the plan does not — the site switched from the claim pair to the opt-out — differs,
+    so the apply sends the plan's representation, whose configuration replaces the live one. A live
+    `filteredByClaim` of "false" is a filter that is off and is left alone.
+    """
+    wanted = broker_provider(plan)
+    if differs(wanted, current):
+        return True
+    live = current.get('config') if isinstance(current, dict) else None
+    live = live if isinstance(live, dict) else {}
+    for key in MFA_FILTER_KEYS:
+        if key in wanted['config'] or key not in live:
+            continue
+        if key == 'filteredByClaim' and str(live[key]).lower() == 'false':
+            continue
+        return True
+    return False
+
+
 def truststore_files(directory):
     """Every regular file under the truststores directory, recursively, sorted by relative path (Keycloak scans it that way)."""
     directory = Path(directory)
@@ -1004,7 +1109,7 @@ def cmd_broker(args):
         # The secret travels stdin -> kcadm only; this output is piped, never logged or captured.
         out.write(json.dumps(broker_provider(plan, args.with_secret)) + '\n')
     elif args.item == 'provider-differs':
-        out.write(('differs' if differs(broker_provider(plan), json.load(sys.stdin)) else 'same') + '\n')
+        out.write(('differs' if provider_differs(plan, json.load(sys.stdin)) else 'same') + '\n')
     elif args.item == 'mappers':
         for mapper in plan['identityProviderMappers']:
             out.write(json.dumps(mapper) + '\n')

@@ -2699,6 +2699,15 @@ def load_configure_dual():
     return module
 
 
+def example_site(**changes):
+    """sso/dual-example.json with its two claim placeholders replaced by a real claim: the shipped file is refused as it is
+    (the placeholders must be edited), so every case that needs a valid PingFederate site starts from this one."""
+    site = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    site.update(mfa_claim_name='amr', mfa_claim_value='otp')
+    site.update(changes)
+    return site
+
+
 def check_configure_dual(checks):
     """auth configure FILE writes the same runtime.yml as the local planner plus the identity-provider plan; the realm file belongs to identity up."""
     e = checks.expect
@@ -2706,9 +2715,9 @@ def check_configure_dual(checks):
     e('"keycloak/krate-realm.json"' not in source, 'configure-dual.py: must not write keycloak/krate-realm.json (owned by krate identity up)')
     for key in ('allow-shared-login', 'shared-role'):
         e(key not in source, f'configure-dual.py: must not mention {key} (no shared form login in Keycloak mode)')
-    example = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    example = example_site()
     for key in MOVED_SITE_KEYS:
-        e(key not in example, f'sso/dual-example.json: {key} moved to .env and must not be in the example')
+        e(key not in json.loads((ROOT / 'sso/dual-example.json').read_text()), f'sso/dual-example.json: {key} moved to .env and must not be in the example')
     module = load_configure_dual()
     result = module.configs(example, SYNTHETIC)
     e(set(result) == {'ui/runtime.yml', 'keycloak/pingfederate-idp.json'},
@@ -2994,7 +3003,7 @@ def check_broker_plan_shape(checks, idp):
       'no execution allows user setup')
     e(idp.get('truststore') == 'local', f'the plan declares truststore local by default (site key idp_truststore); got {idp.get("truststore")!r}')
     module = load_configure_dual()
-    example = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    example = example_site()
     e(module.configs(dict(example, idp_truststore='system'), SYNTHETIC)['keycloak/pingfederate-idp.json'].get('truststore') == 'system',
       'idp_truststore: system is carried into the plan as truststore system')
     try:
@@ -3086,7 +3095,7 @@ def truststore_pem(site, name='enterprise-ca.pem', mode=0o644):
 
 def check_runtime_preflight(checks):
     """preflight --mode runtime.yml accepts the planned site (local planner and configure-dual alike) and refuses what widens access."""
-    settings = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    settings = example_site()
     settings['public_url'] = 'https://' + PUBLIC_HOST
     for edition, ping in zip(EDITIONS, (False, True)):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3287,6 +3296,31 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     expect_refusal('an unreadable plan file', 'not valid JSON')
     identity.write_file(plan_file, plan_original, 0o644)
     expect_pass('the ping site restored')
+    # The MFA stance (enforce-if-asserted): a plan that states neither stance is refused by name, in both preflight modes —
+    # this is what makes a site's forgotten choice block `auth apply` and `identity up` instead of failing open there.
+    # The example plan carries the claim pair, so "neither" removes the three provider keys.
+    mutated_plan(lambda p: [p['identityProviders'][0]['config'].pop(key) for key in identity.MFA_FILTER_KEYS])
+    expect_refusal('a plan without an MFA stance', 'no MFA stance')
+    expect_refusal('the stance refusal names both options', 'mfa_claim_name')
+    expect_refusal('the stance refusal names the opt-out', 'mfa_not_asserted')
+    expect_refusal('the stance refusal names the way back', 'then run krate auth configure <site.json>')
+    outcome = preflight(site, 'runtime.yml', rendered)
+    checks.expect(outcome.stderr.count('regenerate') == 0 and outcome.stderr.count('remove auth/ui/runtime.yml') == 1,
+                  f'{edition}: the stance refusal is complete: it must not repeat the generic regenerate hint; got {outcome.stderr.strip()}')
+    outcome = preflight(site, 'identity', rendered)
+    checks.expect(outcome.returncode == 1 and 'no MFA stance' in outcome.stderr,
+                  f'{edition}: identity-mode preflight (identity up) must refuse a plan without an MFA stance; got exit {outcome.returncode}: {outcome.stderr.strip()}')
+    # The opt-out (mfa_not_asserted, no claim keys) is the accepted alternative; so is the claim pair (restored below).
+    mutated_plan(lambda p: ([p['identityProviders'][0]['config'].pop(key) for key in identity.MFA_FILTER_KEYS], p.__setitem__(identity.MFA_NOT_ASSERTED_KEY, True)))
+    expect_pass('an opted-out plan (mfa_not_asserted)')
+    # A claim filter that is switched off or Java-ambiguous is refused at preflight too (the plan validator is the single rule).
+    identity.write_file(plan_file, plan_original, 0o644)
+    mutated_plan(lambda p: p['identityProviders'][0]['config'].__setitem__('filteredByClaim', 'false'))
+    expect_refusal('filteredByClaim "false" with a claim name and value', 'string "true"')
+    mutated_plan(lambda p: p['identityProviders'][0]['config'].__setitem__('claimFilterValue', '(?<n>x)'))
+    expect_refusal('a claim value outside the literal subset', 'literals separated by |')
+    identity.write_file(plan_file, plan_original, 0o644)
+    expect_pass('the claim-pair plan restored')
 
 
 def check_runtime_refusals(checks, edition, site, env, rendered):
@@ -4635,7 +4669,7 @@ def check_broker_apply(checks):
           f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
     if bash_binary() is None:
         return
-    plan = load_configure_dual().configs(json.loads((ROOT / 'sso/dual-example.json').read_text()), SYNTHETIC)['keycloak/pingfederate-idp.json']
+    plan = load_configure_dual().configs(example_site(), SYNTHETIC)['keycloak/pingfederate-idp.json']
     secret = RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']
     script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', *APPLY_FUNCTIONS) + r'''
 SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; IDENTITY_REALM=krate; IDENTITY_CHANGED=false; IDENTITY_BROWSER_KEPT=""
@@ -4777,6 +4811,34 @@ echo "changed=$IDENTITY_CHANGED"
         kinds = sorted(set((c[0], c[1].split('/')[0] + ('/' + c[1].split('/')[1] if c[1].startswith('authentication/') else '')) for c in mutating(calls)))
         e(('create', 'authentication/flows') not in kinds and ('create', 'identity-provider') not in kinds, f'{label}: nothing is recreated; got {kinds}')
         e('up reconciled identity provider pingfederate' in journal.read_text().splitlines()[-1], f'{label}: the journal line names the command (up)')
+        # F1 (MFA review): the three claim-filter keys are managed. The site switched from the claim pair to the opt-out; the live
+        # provider still carries the filter, the plan does not: apply must UPDATE the provider (never print No changes), the update
+        # replaces the configuration so the keys are gone, and the next apply has nothing to do.
+        optout_plan = json.loads(json.dumps(plan))
+        for key in identity.MFA_FILTER_KEYS:
+            optout_plan['identityProviders'][0]['config'].pop(key)
+        optout_plan[identity.MFA_NOT_ASSERTED_KEY] = True
+        plan_file.write_text(json.dumps(optout_plan, indent=2) + '\n')
+        state_file.write_text(json.dumps(state))
+        result, calls, state_withdrawn = run()
+        label = 'apply after the site switched from the claim pair to mfa_not_asserted'
+        updates = [c for c in calls if c[0] == 'update' and c[1] == 'identity-provider/instances/pingfederate']
+        kept = [key for key in identity.MFA_FILTER_KEYS if key in (state_withdrawn['provider'] or {}).get('config', {})]
+        e(result.returncode == 0 and len(updates) == 1 and 'provider updated' in result.stdout and 'No changes' not in result.stdout
+          and 'changed=true' in result.stdout and kept == [],
+          f'{label}: must update the provider and leave none of the claim-filter keys; got exit {result.returncode} updates {len(updates)} kept {kept} {result.stdout.strip()[-220:]!r}')
+        e('reconciled identity provider pingfederate: provider updated' in journal.read_text().splitlines()[-1], f'{label}: the journal records the provider update; got {journal.read_text().splitlines()[-1]!r}')
+        result, calls, state_settled = run()
+        e(result.returncode == 0 and 'No changes' in result.stdout and mutating(calls) == [] and state_settled == state_withdrawn,
+          f'{label} (second run): nothing left to do; got {mutating(calls)} {result.stdout.strip()[-160:]!r}')
+        offline = json.loads(json.dumps(state_withdrawn))
+        offline['provider']['config']['filteredByClaim'] = 'false'
+        state_file.write_text(json.dumps(offline))
+        result, calls, state_off = run()
+        e(result.returncode == 0 and 'No changes' in result.stdout and mutating(calls) == [] and state_off == offline,
+          f'{label}: a live filteredByClaim "false" is a filter that is off and is left alone; got {mutating(calls)} {result.stdout.strip()[-160:]!r}')
+        plan_file.write_text(json.dumps(plan, indent=2) + '\n')
+        state_file.write_text(json.dumps(state))
         # B2: a failing or empty helper answer must stop the apply, never read as "same" and print No changes.
         for label, extra, needle in (('config GET fails', {'KC_FAIL_GET': 'authentication/config/'}, 'configuration'),
                                      ('config GET answers nothing', {'KC_EMPTY_GET': 'authentication/config/'}, 'configuration'),
@@ -5133,6 +5195,730 @@ def check_broker_docs(checks):
     dual = (ROOT / 'sso/guides/dual-login.md').read_text()
     checks.expect('In `local.yml` mode the command recreates only the UI' in dual,
                   'dual-login.md: the switch-back paragraph must scope "recreates only the UI" to local.yml mode')
+
+
+def check_mfa_choice(checks):
+    """The MFA stance (enforce-if-asserted): the site file states exactly one of the
+    two stances, `auth configure` and the plan validator refuse neither, the claim value is a subset both Java and Python
+    read the same way, and the three claim-filter keys are managed by the plan (the reconcile clears a filter the plan lost)."""
+    e = checks.expect
+    refuse_value = identity.MFA_VALUE_RULE
+
+    def refuses(name, value, needle):
+        try:
+            identity.validate_mfa_filter(name, value)
+            e(False, f'identity.validate_mfa_filter must refuse {name!r}/{value!r} naming {needle!r}')
+        except ValueError as exc:
+            e(needle in str(exc), f'identity.validate_mfa_filter must refuse {name!r}/{value!r} naming {needle!r}; got {exc}')
+
+    for name in ('acr', 'amr', 'OTP', 'my_claim1'):
+        try:
+            identity.validate_mfa_filter(name, 'gold')
+        except ValueError as exc:
+            e(False, f'identity.validate_mfa_filter must accept the claim name {name!r}; got {exc}')
+    for name in ('user.name', 5, '', 'a b', '1x'):
+        refuses(name, 'gold', 'top-level identifier')
+    e(set(identity.MFA_TYPED_CLAIMS) == {'jti', 'iss', 'aud', 'sub', 'typ', 'azp', 'exp', 'nbf', 'iat'},
+      f'identity.MFA_TYPED_CLAIMS must be the nine registered JsonWebToken fields; got {identity.MFA_TYPED_CLAIMS}')
+    for name in identity.MFA_TYPED_CLAIMS:
+        refuses(name, 'gold', 'registered JWT field')
+    # F4: the value is a literal or a |-list of literals; everything else is refused on every interpreter (Java and Python
+    # disagree on the rest of the grammar), so the answer cannot depend on the Python that runs the check.
+    for value in ('otp', 'OTP', 'a|b', 'pwd|otp|mfa', 'urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport',
+                  'http://schemas.openid.net/pape/policies/2007/06/multi-factor', 'mfa-1_x/y.z',
+                  '2', '0|1|2'):
+        try:
+            identity.validate_mfa_filter('acr', value)
+        except ValueError as exc:
+            e(False, f'identity.validate_mfa_filter must accept the literal value {value!r}; got {exc}')
+    for value in ('.*', '.+', '(.*)', '.*.*', '^.*$', '(?s).*', '[\\s\\S]*', '.', '...', '..|a', 'a||b', '|a', 'a|', 'a b', 'a\tb', 'a$', 'a\n',
+                  '(?P<n>x)', 'a{,3}', '{x}', '(?#c)', '(?<n>x)', '\\p{L}+', '\\h', 'a*+', '(?>x)', 'a[(', 'ａｂ',
+                  'a+', 'a++', 'a?', 'a*', 'a(b)'):
+        refuses('acr', value, refuse_value)
+    refuses('acr', '', 'nonempty string')
+    refuses('acr', 9, 'nonempty string')
+    example = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    module = load_configure_dual()
+    # F7.2: the shipped example states the claim pair with placeholders; it does not carry the weakest stance.
+    e('mfa_claim_name' in example and 'mfa_claim_value' in example and identity.MFA_NOT_ASSERTED_KEY not in example,
+      'sso/dual-example.json must carry the placeholder claim pair and not the opt-out (a copy must not state "enforced at Ping only" unread)')
+    # N3: the placeholders are refused as they are (a forgotten edit must not apply a filter on a claim no token carries, which
+    # would refuse every brokered sign-in): by the site validator, by `krate auth configure`, and by the plan reader.
+    e(identity.MFA_PLACEHOLDER in example.get('mfa_claim_name', '') and identity.MFA_PLACEHOLDER in example.get('mfa_claim_value', ''),
+      f'sso/dual-example.json must carry {identity.MFA_PLACEHOLDER}_... placeholders for the claim name and value')
+    site = example_site()
+    for label, candidate, needle in (('the shipped example as it is', example, 'mfa_claim_name still holds the example placeholder'),
+                                     ('a placeholder claim name', dict(site, mfa_claim_name=example['mfa_claim_name']), 'mfa_claim_name still holds the example placeholder'),
+                                     ('a placeholder claim value', dict(site, mfa_claim_value=example['mfa_claim_value']), 'mfa_claim_value still holds the example placeholder')):
+        try:
+            module.configs(candidate, SYNTHETIC)
+            e(False, f'configure-dual must refuse {label}')
+        except ValueError as exc:
+            e(needle in str(exc) and 'mfa_not_asserted' in str(exc), f'configure-dual refusing {label} must name {needle!r} and the opt-out; got {exc}')
+    with tempfile.TemporaryDirectory() as tmp:
+        settings_file = Path(tmp) / 'site.json'
+        settings_file.write_text(json.dumps(example))
+        outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/configure-dual.py'), '--settings', str(settings_file),
+                                  '--output-dir', str(Path(tmp) / 'out')], text=True, capture_output=True)
+        e(outcome.returncode == 1 and 'example placeholder' in outcome.stderr and not (Path(tmp) / 'out/keycloak').exists()
+          and not (Path(tmp) / 'out/ui').exists(),
+          f'configure-dual.py on the unedited example must exit 1 naming the placeholder and write nothing; got exit {outcome.returncode} {outcome.stderr.strip()[:160]}')
+    pair_plan = module.configs(site, SYNTHETIC)['keycloak/pingfederate-idp.json']
+    config = pair_plan['identityProviders'][0]['config']
+    e(all(config.get(key) == value for key, value in zip(identity.MFA_FILTER_KEYS, ('true', site['mfa_claim_name'], site['mfa_claim_value'])))
+      and identity.MFA_NOT_ASSERTED_KEY not in pair_plan,
+      f"configure-dual: the opted-in plan's config must carry filteredByClaim \"true\", claimFilterName and claimFilterValue from the site file ({ {k: config.get(k) for k in identity.MFA_FILTER_KEYS} })")
+    optout_site = {key: value for key, value in site.items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
+    plan = module.configs(optout_site, SYNTHETIC)['keycloak/pingfederate-idp.json']
+    e(plan.get(identity.MFA_NOT_ASSERTED_KEY) is True,
+      f'configure-dual: a site file with mfa_not_asserted must write the plan key {identity.MFA_NOT_ASSERTED_KEY} true')
+    e(not any(key in plan['identityProviders'][0]['config'] for key in identity.MFA_FILTER_KEYS),
+      'configure-dual: the opt-out stance must not put the claim-filter keys on the provider config')
+    e(set(plan) == IDP_PLAN_KEYS | {identity.MFA_NOT_ASSERTED_KEY},
+      f'configure-dual: the opted-out plan must carry exactly the plan keys plus {identity.MFA_NOT_ASSERTED_KEY}; got {sorted(plan)}')
+    # F7: `auth configure` itself refuses a site file that states neither stance, with the complete message.
+    bare_site = {key: value for key, value in site.items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    for label, stanceless_site in (('no stance key at all', bare_site), ('mfa_not_asserted false', dict(bare_site, mfa_not_asserted=False))):
+        try:
+            module.configs(stanceless_site, SYNTHETIC)
+            e(False, f'configure-dual must refuse a site file with {label}')
+        except identity.MfaStanceError as exc:
+            message = str(exc)
+            e('no MFA stance' in message and 'mfa_claim_name' in message and 'mfa_not_asserted' in message and 'run krate auth configure again' in message,
+              f'configure-dual refusing {label} must name both options and the way back; got {message}')
+        except ValueError as exc:
+            e(False, f'configure-dual refusing {label} must raise MfaStanceError; got {exc}')
+    with tempfile.TemporaryDirectory() as tmp:
+        settings_file = Path(tmp) / 'site.json'
+        settings_file.write_text(json.dumps(bare_site))
+        outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/configure-dual.py'), '--settings', str(settings_file),
+                                  '--output-dir', str(Path(tmp) / 'out')], text=True, capture_output=True)
+        e(outcome.returncode == 1 and 'no MFA stance' in outcome.stderr and not (Path(tmp) / 'out/keycloak').exists()
+          and not (Path(tmp) / 'out/ui').exists(),
+          f'configure-dual.py with a stance-less site file must exit 1 naming the stance and write nothing; got exit {outcome.returncode} {outcome.stderr.strip()[:160]}')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'plan.json'
+        for label, planned in (('opted-out', plan), ('claim-filter', pair_plan)):
+            path.write_text(json.dumps(planned))
+            try:
+                identity.broker_plan(path)
+            except ValueError as exc:
+                e(False, f'identity.broker_plan must accept the {label} planned file; got {exc}')
+
+        def plan_refusal(label, base, mutation: 'Callable[[dict], object]', *needles):
+            mutated = json.loads(json.dumps(base))
+            mutation(mutated)
+            path.write_text(json.dumps(mutated))
+            try:
+                identity.broker_plan(path)
+                e(False, f'identity.broker_plan must refuse {label}')
+            except ValueError as exc:
+                e(all(needle in str(exc) for needle in needles),
+                  f'identity.broker_plan refusing {label} must name {needles[0]!r}; got {exc}')
+
+        def provider_config(p):
+            return p['identityProviders'][0]['config']
+        plan_refusal('no MFA stance at all', plan, lambda p: p.pop(identity.MFA_NOT_ASSERTED_KEY),
+                     'no MFA stance', 'mfa_claim_name', 'mfa_not_asserted', 'remove auth/ui/runtime.yml', 'then run krate auth configure <site.json>')
+        plan_refusal('mfa_not_asserted written as a string', plan, lambda p: p.__setitem__(identity.MFA_NOT_ASSERTED_KEY, 'true'), 'boolean true')
+        plan_refusal('mfa_not_asserted false', plan, lambda p: p.__setitem__(identity.MFA_NOT_ASSERTED_KEY, False), 'boolean true')
+        plan_refusal('the marker beside the filter keys', pair_plan, lambda p: p.__setitem__(identity.MFA_NOT_ASSERTED_KEY, True), 'exactly one')
+        plan_refusal('filteredByClaim without the claim name', pair_plan, lambda p: provider_config(p).pop('claimFilterName'),
+                     'must set all three config keys together')
+        for label, value in (('the boolean true', True), ('the string "false"', 'false'), ('the string "TRUE"', 'TRUE'), ('the string "True"', 'True')):
+            plan_refusal(f'filteredByClaim as {label}', pair_plan, lambda p, v=value: provider_config(p).__setitem__('filteredByClaim', v), 'string "true"')
+        plan_refusal('a claimFilterValue of .*', pair_plan, lambda p: provider_config(p).__setitem__('claimFilterValue', '.*'), refuse_value)
+        plan_refusal('an invalid claimFilterValue', pair_plan, lambda p: provider_config(p).__setitem__('claimFilterValue', 'a[('), refuse_value)
+        plan_refusal('a claimFilterName that is not an identifier', pair_plan, lambda p: provider_config(p).__setitem__('claimFilterName', 'a b'),
+                     'top-level identifier')
+        plan_refusal('a claimFilterName that is a registered JWT field', pair_plan, lambda p: provider_config(p).__setitem__('claimFilterName', 'sub'),
+                     'registered JWT field')
+        plan_refusal('a claimFilterName that is the example placeholder', pair_plan,
+                     lambda p: provider_config(p).__setitem__('claimFilterName', 'REPLACE_WITH_ASSERTED_CLAIM'), 'mfa_claim_name still holds the example placeholder')
+        plan_refusal('a claimFilterValue that is the example placeholder', pair_plan,
+                     lambda p: provider_config(p).__setitem__('claimFilterValue', 'REPLACE_WITH_ASSERTED_VALUE'), 'mfa_claim_value still holds the example placeholder')
+    # The site validator (sso/configure.py). `broker=True` is the PingFederate broker plan, the only consumer of the keys.
+    spec = importlib.util.spec_from_file_location('configure_validations', ROOT / 'sso/configure.py')
+    assert spec is not None and spec.loader is not None
+    module_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module_config)
+    for label, accepted in (('the example with its placeholders replaced (the claim pair)', site), ('the opt-out site', optout_site)):
+        try:
+            module_config.validate(accepted, 'kafbat', broker=True)
+        except ValueError as exc:
+            e(False, f'configure.validate must accept {label} for the broker plan; got {exc}')
+    try:
+        module_config.validate(example, 'kafbat', broker=True)
+        e(False, 'configure.validate must refuse the shipped example as it is (its claim placeholders are not a claim)')
+    except ValueError as exc:
+        e('example placeholder' in str(exc), f'configure.validate refusing the shipped example must name the example placeholder; got {exc}')
+    pair = {'mfa_claim_name': 'acr', 'mfa_claim_value': 'otp'}
+    site_cases = (
+        ('mfa_claim_name alone', dict(bare_site, mfa_claim_name='acr', mfa_not_asserted=False), 'together or neither'),
+        ('mfa_claim_value alone', dict(bare_site, mfa_claim_value='otp', mfa_not_asserted=False), 'together or neither'),
+        ('the opt-out beside the pair', dict(bare_site, **pair, mfa_not_asserted=True), 'excludes'),
+        ('mfa_not_asserted as a string', dict(bare_site, mfa_not_asserted='true'), 'mfa_not_asserted must be boolean'),
+        ('mfa_not_asserted as a string beside the pair', dict(bare_site, **pair, mfa_not_asserted='true'), 'mfa_not_asserted must be boolean'),
+        ('mfa_claim_value .*', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='.*'), refuse_value),
+        ('a claim name that is not an identifier', dict(bare_site, mfa_claim_name='user.name', mfa_claim_value='otp'), 'top-level identifier'),
+        # text() is the first guard of both values: it names the precise reason before the claim rules run.
+        ('a claim value with $', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='o$tp'), 'configuration interpolation characters'),
+        ('a claim value with {', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='o{tp'), 'configuration interpolation characters'),
+        ('a claim value with a control character', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='o\ntp'), 'mfa_claim_value must be a nonempty single-line string'),
+        ('a blank claim value', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='   '), 'mfa_claim_value must be a nonempty single-line string'),
+        ('a claim name with $', dict(bare_site, mfa_claim_name='a$cr', mfa_claim_value='otp'), 'configuration interpolation characters'),
+        ('a blank claim name', dict(bare_site, mfa_claim_name='  ', mfa_claim_value='otp'), 'mfa_claim_name must be a nonempty single-line string'),
+    )
+    for label, candidate, needle in site_cases:
+        try:
+            module_config.validate(candidate, 'kafbat', broker=True)
+            e(False, f'configure.validate must refuse {label}')
+        except ValueError as exc:
+            e(needle in str(exc), f'configure.validate refusing {label} must name {needle!r}; got {exc}')
+    # F9: every other generator of this program refuses the keys (rejected, not ignored), whatever the app.
+    for app in ('kafbat', 'grafana', 'perses'):
+        settings = {'issuer': 'https://realm.example.test', 'public_url': 'https://realm.example.test', 'client_id': 'id',
+                    'viewer_group': 'VIEW', 'admin_group': 'ADMIN', 'groups_claim': 'groups', 'scopes': ['openid'], 'clusters': CLUSTERS}
+        for keys in (pair, {'mfa_not_asserted': True}):
+            try:
+                module_config.validate(dict(settings, **keys), app)
+                e(False, f'configure.validate must refuse {sorted(keys)} for {app} without the broker plan')
+            except ValueError as exc:
+                e('PingFederate broker plan' in str(exc) and 'remove them from this settings file' in str(exc),
+                  f'configure.validate refusing {sorted(keys)} for {app} must name the PingFederate broker plan; got {exc}')
+    with tempfile.TemporaryDirectory() as tmp:
+        settings_file = Path(tmp) / 'site.json'
+        settings_file.write_text(json.dumps(dict(json.loads((ROOT / 'sso/example.json').read_text()), **pair)))
+        outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/configure.py'), '--app', 'kafbat', '--settings', str(settings_file),
+                                  '--output', str(Path(tmp) / 'kafbat.yml')], text=True, capture_output=True)
+        e(outcome.returncode == 1 and 'PingFederate broker plan' in outcome.stderr and not (Path(tmp) / 'kafbat.yml').exists(),
+          f'sso/configure.py --app kafbat must refuse the mfa keys (they have no effect there) and write nothing; got exit {outcome.returncode} {outcome.stderr.strip()[:160]}')
+
+
+def check_mfa_reconcile(checks):
+    """F1: the three claim-filter keys are managed. A live provider that still carries a filter the plan does not is a difference,
+    and the update the CLI sends (the plan's representation, no merge) leaves none of the keys."""
+    e = checks.expect
+    module = load_configure_dual()
+    example = example_site()
+    optout_site = {key: value for key, value in example.items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
+    trio = {'filteredByClaim': 'true', 'claimFilterName': 'amr', 'claimFilterValue': 'otp'}
+    with tempfile.TemporaryDirectory() as tmp:
+        files = {}
+        for name, site in (('pair', example), ('optout', optout_site)):
+            files[name] = Path(tmp) / f'{name}.json'
+            files[name].write_text(json.dumps(module.configs(site, SYNTHETIC)['keycloak/pingfederate-idp.json']))
+        plans = {name: identity.broker_plan(path) for name, path in files.items()}
+
+        def live_of(name, extra=None, drop=()):
+            rep = json.loads(json.dumps(plans[name]['identityProviders'][0]))
+            rep['config']['clientSecret'] = '**********'
+            rep.update({'internalId': 'x', 'types': ['USER_AUTHENTICATION']})
+            for key in drop:
+                rep['config'].pop(key, None)
+            rep['config'].update(extra or {})
+            return rep
+        cases = (
+            ('the opt-out plan against a live provider equal to it', 'optout', live_of('optout'), False),
+            ('the opt-out plan against a live provider that still carries the whole filter (the site switched from the pair)', 'optout', live_of('optout', trio), True),
+            ('the opt-out plan against a live claimFilterName alone', 'optout', live_of('optout', {'claimFilterName': 'amr'}), True),
+            ('the opt-out plan against a live claimFilterValue alone', 'optout', live_of('optout', {'claimFilterValue': 'otp'}), True),
+            ('the opt-out plan against a live filteredByClaim "true"', 'optout', live_of('optout', {'filteredByClaim': 'true'}), True),
+            ('the opt-out plan against a live filteredByClaim "TRUE"', 'optout', live_of('optout', {'filteredByClaim': 'TRUE'}), True),
+            ('the opt-out plan against a live filteredByClaim "false" (a filter that is off)', 'optout', live_of('optout', {'filteredByClaim': 'false'}), False),
+            ('the opt-out plan against a live filteredByClaim "FALSE" (Boolean.parseBoolean reads any casing)', 'optout', live_of('optout', {'filteredByClaim': 'FALSE'}), False),
+            ('the opt-out plan against a live filteredByClaim "false" plus a live claimFilterName', 'optout', live_of('optout', {'filteredByClaim': 'false', 'claimFilterName': 'amr'}), True),
+            ('the opt-out plan, live filter plus another drifted key', 'optout', live_of('optout', dict(trio, tokenUrl='https://other.example/t')), True),
+            ('the pair plan against a live provider equal to it', 'pair', live_of('pair'), False),
+            ('the pair plan against a live provider without the filter', 'pair', live_of('pair', drop=identity.MFA_FILTER_KEYS), True),
+            ('the pair plan against a changed live claim value', 'pair', live_of('pair', {'claimFilterValue': 'other'}), True),
+        )
+        for label, name, live, wanted in cases:
+            got = identity.provider_differs(plans[name], live)
+            e(got is wanted, f'identity.provider_differs: {label} must be {"a difference" if wanted else "no difference"}; got {got}')
+            outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/identity.py'), 'broker', '--plan', str(files[name]), 'provider-differs'],
+                                     input=json.dumps(live), text=True, capture_output=True)
+            e(outcome.returncode == 0 and outcome.stdout.strip() == ('differs' if wanted else 'same'),
+              f'identity.py broker provider-differs (the verdict auth apply reads): {label} must answer {"differs" if wanted else "same"}; got {outcome.stdout.strip()!r} {outcome.stderr.strip()[:120]}')
+        # The update body is the plan's whole representation: with no pair planned, none of the three keys is in it.
+        body = identity.broker_provider(plans['optout'])
+        e(not any(key in body['config'] for key in identity.MFA_FILTER_KEYS) and 'clientSecret' not in body['config'],
+          f'the opt-out provider body (what kcadm update -f - sends) must carry none of the claim-filter keys; got {sorted(body["config"])}')
+        outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/identity.py'), 'broker', '--plan', str(files['optout']), 'provider'],
+                                 text=True, capture_output=True)
+        sent = json.loads(outcome.stdout or '{}')
+        e(outcome.returncode == 0 and not any(key in sent.get('config', {}) for key in identity.MFA_FILTER_KEYS),
+          f'identity.py broker provider (the update body) for the opt-out plan must carry none of the claim-filter keys; got {outcome.stdout[:120]!r}')
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        put = function_body(cli, 'identity_put_idp_provider')
+        e('kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" -f -' in put and '--merge' not in put and ' -m ' not in put
+          and ' -s ' not in put,
+          f'{edition}/krate: the provider update must send the plan as the whole body (-f -), never merged or patched with -s (the filter keys leave only through a replace)')
+
+
+P18_MODEL = r'''
+# The product as the P18 block's stubs model it: the REAL identity.py (broker_plan, provider_differs, broker_provider)
+# decides the preflight and the reconcile; the realm, the stand-in IdP and the browser are stubs (INJECT perturbs one effect).
+import json, os, sys
+sys.path.insert(0, os.environ['ROOT'] + '/sso')
+import identity
+S = os.environ['S']
+INJ = set(filter(None, os.environ.get('INJECT', '').split(',')))
+live_path = S + '/live.json'
+
+
+def live():
+    return json.load(open(live_path)) if os.path.exists(live_path) else None
+
+
+def counter(name, bump=0):
+    path = S + '/' + name
+    value = int(open(path).read() or 0) if os.path.exists(path) else 0
+    if bump:
+        open(path, 'w').write(str(value + bump))
+    return value
+
+
+def write_live(plan):
+    rep = json.loads(json.dumps(plan['identityProviders'][0]))
+    rep['config']['clientSecret'] = '**********'
+    json.dump(rep, open(live_path, 'w'))
+
+
+def add_user():
+    open(S + '/users', 'a').write('ping-mfa 11111111-2222-3333-4444-555555555555\n')
+
+
+def verdict(plan, current):
+    if 'f1_bug' in INJ:  # the pre-fix reconcile: only the planned keys are compared
+        return identity.differs(identity.broker_provider(plan), current)
+    return identity.provider_differs(plan, current)
+
+
+cmd = sys.argv[1]
+if cmd == 'seed':
+    write_live(identity.broker_plan(sys.argv[2]))
+elif cmd == 'validate':
+    if 'preflight_accepts' in INJ:
+        sys.exit(0)
+    try:
+        identity.broker_plan(sys.argv[2])
+    except identity.MfaStanceError as exc:
+        print(f'Authentication preflight failed: {exc}'); sys.exit(1)
+    except ValueError as exc:
+        print(f'Authentication preflight failed: {exc}; regenerate it'); sys.exit(1)
+elif cmd == 'apply':
+    n = counter('applies', 1) + 1
+    try:
+        plan = identity.broker_plan(sys.argv[2])
+    except ValueError as exc:
+        print(f'{exc}'); sys.exit(1)
+    current = live()
+    if current is None or verdict(plan, current):
+        if n == 2 and 'withdraw_keys_stay' in INJ:
+            pass
+        else:
+            write_live(plan)
+        if n == 2 and 'withdraw_says_no_changes' in INJ:
+            print('Identity provider pingfederate: No changes')
+        else:
+            print('Identity provider pingfederate applied to realm krate (1 change(s): provider updated)')
+    else:
+        print('Identity provider pingfederate: No changes')
+elif cmd == 'expect':
+    if 'realm_mismatch_once' in INJ and counter('expects', 1) == 0:
+        print('phase3_realm: provider.config.filteredByClaim: planned true, live None'); sys.exit(1)
+    plan, current = json.load(open(sys.argv[2])), live()
+    if current is None:
+        print('phase3_realm: provider pingfederate is not in the realm'); sys.exit(1)
+    bad = [k for k, v in plan['identityProviders'][0]['config'].items() if k != 'clientSecret' and str(v) != str(current['config'].get(k))]
+    for k in bad:
+        print(f'phase3_realm: provider.config.{k} differs')
+    sys.exit(1 if bad else 0)
+elif cmd == 'login':
+    user, current = sys.argv[2], live()
+    cfg = (current or {}).get('config', {})
+    if user == 'ping-viewer':
+        print('error\tping-viewer: error 502 at /identity/realms/krate/broker/pingfederate/endpoint' if 'control_fails' in INJ
+              else 'ok\tping-viewer: ok 200 at /; federated identities 1; hops: 302 x')
+    elif cfg.get('filteredByClaim') == 'true' and not ('withdraw_keys_stay' in INJ and counter('applies') >= 2):
+        counter('events', 2 if 'two_events' in INJ else 1)
+        if 'created_on_refusal' in INJ:
+            add_user()
+        status = '500' if 'refused_not_502' in INJ else '502'
+        print(f'error\tping-mfa: error {status} at /identity/realms/krate/broker/pingfederate/endpoint (Unexpected error); federated identities 0; hops: 302 x')
+    elif 'relogin_fails' in INJ:
+        print('unexpected\tping-mfa: unexpected landed 200 /login')
+    else:
+        add_user()
+        print('ok\tping-mfa: ok 200 at /; federated identities 1; hops: 302 x')
+elif cmd == 'users':
+    if 'users_query_fails' in INJ:
+        sys.exit(1)
+    if 'preexisting_once' in INJ and counter('user-queries', 1) == 0:
+        print('99999999-2222-3333-4444-555555555555'); sys.exit(0)
+    if os.path.exists(S + '/users'):
+        for line in open(S + '/users'):
+            print(line.split()[1])
+elif cmd == 'events':
+    if 'events_query_fails' in INJ:
+        sys.exit(1)
+    for _ in range(counter('events') + (250 if 'events_cap' in INJ else 3)):
+        print('IDENTITY_PROVIDER_LOGIN_ERROR,identity_provider_login_failure')
+elif cmd == 'idp':
+    if 'idp_get_fails' in INJ or live() is None:
+        sys.exit(1)
+    print(json.dumps(live(), indent=2))
+elif cmd == 'delete-users':
+    open(S + '/users', 'w').write('')
+'''
+
+P18_DRIVER = r'''set -uo pipefail
+S="$1"; export S
+plan="$S/pingfederate-idp.json"; RAW="$S/raw.log"; : > "$RAW"; STATE="$S/st"; PROJECT=stubproj; STUB_DIR="$S"; KRATE="$S/krate-stub"; STUB="$S/stub-stub"
+mkdir -p "$STATE"; cp "$S/plan.optout.json" "$plan"; cp "$plan" "$STATE/plan.saved"
+python3 -I -B "$S/model.py" seed "$plan"
+cap() { local rc; CAP="$("$@" 2>&1)"; rc=$?; printf -- '--- %s (exit %s)\n%s\n' "$*" "$rc" "$CAP" >> "$RAW"; return $rc; }
+sleep() { :; }
+preflight_runtime() { python3 -I -B "$S/model.py" validate "$plan"; }
+realm_state() { [[ "$1" == --expect ]] || return 2; python3 -I -B "$S/model.py" expect "$2"; }
+realm_diffs() { printf '%s\n' "$1" | grep -E '^phase3_realm:' | sed 's/^phase3_realm: //' | head -3 | tr '\n' ';'; }
+login_probe() { python3 -I -B "$S/model.py" login "$1"; }
+kcadm_master() {
+  case "$1 $2" in
+    "get users") python3 -I -B "$S/model.py" users ;;
+    "get events") python3 -I -B "$S/model.py" events ;;
+    "get identity-provider/instances/pingfederate") python3 -I -B "$S/model.py" idp ;;
+    "delete users/"*) python3 -I -B "$S/model.py" delete-users ;;
+    *) echo "stub kcadm: unhandled: $*" >&2; return 3 ;;
+  esac
+}
+printf '#!/usr/bin/env bash\n[[ "$1 $2" == "auth apply" ]] || exit 2\nexec python3 -I -B "$S/model.py" apply "$S/pingfederate-idp.json"\n' > "$KRATE"
+printf '#!/usr/bin/env bash\n[[ "${INJECT:-}" == *adduser_fails* ]] && { echo "stub: could not create stub user"; exit 1; }\nexit 0\n' > "$STUB"
+chmod +x "$KRATE" "$STUB"
+ok_if() { if [[ "$4" == 0 ]]; then echo "RESULT $1 PASS"; else echo "RESULT $1 FAIL"; fi; echo "EVIDENCE ${5:0:600}"; }
+run() {
+@@LOCALS@@
+  plan="$S/pingfederate-idp.json"
+@@BLOCK@@
+}
+run
+'''
+
+# Each injection perturbs exactly one effect of the P18 block's world and must turn the row to FAIL; the term it isolates is named.
+P18_INJECTIONS = (
+    ('preflight_accepts', 'a: the stance-less plan must be refused by the preflight'),
+    ('realm_mismatch_once', 'b: the claim-filter plan must be applied (realm matches the plan)'),
+    ('control_fails', 'c: the positive control must sign in'),
+    ('adduser_fails', 'd: the fresh stand-in user must be created'),
+    ('preexisting_once', 'e: no realm user may exist before the refused attempt'),
+    ('created_on_refusal', 'f: no realm user may exist after the refused attempt'),
+    ('refused_not_502', 'g: the refused attempt must end error 502 under the realm'),
+    ('two_events', 'h: exactly one more error event'),
+    ('events_cap', 'h: the event read must stay below its cap'),
+    ('events_query_fails', 'h: a failing event read is a failure'),
+    ('users_query_fails', 'e/f: a failing user read is a failure'),
+    ('withdraw_says_no_changes', 'w: the withdrawing apply must update the provider, not print No changes'),
+    ('withdraw_keys_stay', 'k: the live provider must lose the three keys'),
+    ('idp_get_fails', 'k: a failing provider read is a failure'),
+    ('relogin_fails', 'l: the same user must sign in after the withdrawal'),
+    ('f1_bug', 'w/k/l: the reconcile that compares only planned keys (the F1 defect) must fail the row'),
+)
+
+
+def check_p18_logic(checks):
+    """P18's decision logic against stubs: the runner's own block (extracted verbatim) runs in a bash driver whose effects are stubs
+    and whose product logic (preflight, reconcile) is the real identity.py. NOT a live observation: it pins that every term of the
+    row's pass condition can fail alone, so dropping or weakening a term is caught, and that the F1 defect shape fails the row."""
+    e = checks.expect
+    if bash_binary() is None:
+        return
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text().split('\n')
+    try:
+        start = next(i for i, line in enumerate(runner) if line.startswith('  # ── P18:'))
+        end = next(i for i, line in enumerate(runner) if line.startswith('  ok_if P18 3 P'))
+        locals_ = [line for line in runner if line.startswith('  local ') and ' refused stance ' in line or line.startswith('  local rc rc2 rc3 ev before')]
+    except StopIteration:
+        e(False, 'check_p18_logic: the P18 block (from its comment header to its ok_if line) was not found in scripts/gate-identity.sh')
+        return
+    driver = P18_DRIVER.replace('@@LOCALS@@', '\n'.join(locals_)).replace('@@BLOCK@@', '\n'.join(runner[start:end + 1]))
+    example = example_site()
+    optout_site = {key: value for key, value in example.items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
+    optout_plan = load_configure_dual().configs(optout_site, SYNTHETIC)['keycloak/pingfederate-idp.json']
+
+    def run(inject):
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp)
+            (scratch / 'model.py').write_text(P18_MODEL)
+            (scratch / 'plan.optout.json').write_text(json.dumps(optout_plan, indent=2) + '\n')
+            (scratch / 'driver.sh').write_text(driver)
+            (scratch / 'events').write_text('0')
+            environment = dict(os.environ, ROOT=str(ROOT), INJECT=inject)
+            outcome = subprocess.run([bash_binary() or 'bash', str(scratch / 'driver.sh'), str(scratch)], text=True, capture_output=True, env=environment, timeout=120)
+        return outcome.stdout, outcome.stderr, outcome.returncode
+    out, err, rc = run('')
+    e('RESULT P18 PASS' in out, f'check_p18_logic: the happy path of the P18 block must PASS against the stubs; got {out.strip()[-500:]!r} {err.strip()[-300:]!r}')
+    e(not any(secret in out + err for secret in ALL_SECRETS), 'check_p18_logic: the P18 stub run must not print a secret')
+    for inject, why in P18_INJECTIONS:
+        out, err, rc = run(inject)
+        e('RESULT P18 FAIL' in out, f'check_p18_logic: with {inject} the P18 block must FAIL ({why}); got {out.strip()[-300:]!r} {err.strip()[-200:]!r}')
+
+
+ROTATE_DRIVER = r"""
+SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; ENV_TEMPLATE="$1/.env.template"; IDENTITY_REALM=krate; IDENTITY_TIMEOUT=5
+IDENTITY_IDP_PLAN=auth/keycloak/pingfederate-idp.json; IDENTITY_IDP_ALIAS=pingfederate
+PING_SECRET_RULE="must be a PingFederate secret"
+sso_dir() { echo "$SSO_DIR"; }
+# Everything that changes state or reaches Keycloak or Docker is recorded in $EFFECTS (names and paths, never a value).
+require_compose() { :; }
+require_compose_file() { :; }
+require_sso_compose() { :; }
+# The real preparation runs chmod and this image-pin boundary. Record its write so an early
+# mutation cannot hide behind a no-op prepare_identity_env stub.
+sync_image_pins() { echo prepare_identity_env >> "$EFFECTS"; echo PREPARED=true >> "$1"; }
+require_env() { :; }
+identity_lock() { :; }
+identity_state() { echo existing; }
+identity_verify_admin() { :; }
+identity_verify_cli() { echo "identity_verify_cli" >> "$EFFECTS"; }
+identity_journal() { printf 'journal %s %s %s\n' "$1" "$2" "$3" >> "$EFFECTS"; }
+kcadm_login() { echo "kcadm_login" >> "$EFFECTS"; }
+kcadm_logout() { :; }
+kcadm_client_id() { echo client-id-1; }
+random_secret() { echo "generated0123456789abcdefghij"; }
+compose_cmd() { echo "compose_cmd $*" >> "$EFFECTS"; }
+identity_compose() { echo "identity_compose $*" >> "$EFFECTS"; }
+identity_up_service() { echo "identity_up_service $*" >> "$EFFECTS"; }
+kcadm() {
+  while [[ $# -gt 0 && "$1" != -- ]]; do shift; done
+  shift
+  echo "kcadm $1 $2" >> "$EFFECTS"
+  if [[ "${KCADM_STDIN:-}" == 1 ]]; then cat > /dev/null; fi
+  if [[ "$1" == get ]]; then echo '{"alias":"pingfederate"}'; fi
+  return 0
+}
+cmd_identity_rotate "${@:2}"
+"""
+
+
+def check_rotate_stance(checks):
+    """N1 (MFA re-review): `identity rotate` of a secret the PingFederate plan travels with refuses a plan that states no MFA stance
+    BEFORE the first change. The real cmd_identity_rotate of both editions runs against stubs that record every effect: on a
+    refusal .env is byte-identical and nothing was written to Keycloak, recreated or journaled; with a valid plan the same
+    harness reaches every write (so the refusal case is not vacuous)."""
+    e = checks.expect
+    if bash_binary() is None:
+        return
+    module = load_configure_dual()
+    pair_plan = module.configs(example_site(), SYNTHETIC)['keycloak/pingfederate-idp.json']
+    stanceless = json.loads(json.dumps(pair_plan))
+    for key in identity.MFA_FILTER_KEYS:
+        stanceless['identityProviders'][0]['config'].pop(key)
+    e(identity.MFA_NOT_ASSERTED_KEY not in stanceless, 'the stance-less rotate fixture must carry neither the pair nor the opt-out')
+    optout_site = {key: value for key, value in example_site().items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
+    optout_plan = module.configs(optout_site, SYNTHETIC)['keycloak/pingfederate-idp.json']
+    rotated = 'synthetic-rotated-ping-secret-7a1b2c3d4e'
+    writes = ('prepare_identity_env', 'kcadm update', 'kcadm create', 'kcadm delete', 'compose_cmd', 'identity_compose', 'identity_up_service', 'journal', 'identity_verify_cli')
+    for edition in EDITIONS:
+        cli_text = (ROOT / edition / 'krate').read_text()
+        has_check = re.search(r'^identity_rotate_plan_check\(\) \{$', cli_text, re.M) is not None
+        e(has_check, f'{edition}/krate: identity_rotate_plan_check must exist (the plan is read before the first change of identity rotate)')
+        functions = bash_functions(ROOT / edition / 'krate', 'prepare_identity_env', 'env_value', 'replace_env_file', 'set_env_file_value', 'ping_secret_valid',
+                                   'identity_put_idp_provider', 'identity_rotate_ping_secret', *(['identity_rotate_plan_check'] if has_check else []), 'cmd_identity_rotate')
+        script = BASH_STUBS + functions + ROTATE_DRIVER
+
+        def rotate(plan, key, mode='runtime.yml', stdin=None):
+            with tempfile.TemporaryDirectory() as tmp:
+                site = Path(tmp)
+                (site / 'auth/keycloak').mkdir(parents=True)
+                if plan is not None:
+                    (site / 'auth/keycloak/pingfederate-idp.json').write_text(json.dumps(plan, indent=2) + '\n')
+                write_env(site, dict(SYNTHETIC, KAFKA_UI_AUTH_CONFIG=mode, PING_KEYCLOAK_CLIENT_SECRET=RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']))
+                before = (site / '.env').read_bytes()
+                effects = site / 'effects.log'
+                effects.write_text('')
+                environment = dict(os.environ, EFFECTS=str(effects), SSO_DIR=str(ROOT / 'sso'))
+                outcome = run_bash(script, site, key, *(['--value'] if stdin else []), env=environment, stdin=stdin)
+                result = (outcome, before, (site / '.env').read_bytes(), effects.read_text().splitlines())
+            return result
+
+        for key, mode, stdin in (('PING_KEYCLOAK_CLIENT_SECRET', 'runtime.yml', rotated + '\n'), ('KEYCLOAK_KAFBAT_CLIENT_SECRET', 'runtime.yml', None)):
+            label = f'{edition}: identity rotate {key} ({mode}) on a plan that states no MFA stance'
+            outcome, env_before, env_after, effects = rotate(stanceless, key, mode, stdin)
+            e(outcome.returncode != 0 and 'no MFA stance' in outcome.stderr and 'Nothing was rotated' in outcome.stderr,
+              f'{label} must refuse naming the stance and that nothing was rotated; got exit {outcome.returncode} {outcome.stderr.strip()[-200:]!r}')
+            e(env_after == env_before, f'{label}: .env must be byte-identical after the refusal')
+            e(not any(line.startswith(prefix) for line in effects for prefix in writes) and 'kcadm_login' not in effects,
+              f'{label}: nothing may be written to Keycloak, recreated, verified or journaled before the refusal; got {effects}')
+            e(rotated not in outcome.stdout + outcome.stderr, f'{label}: the secret is never printed')
+            # The same harness reaches every write with a valid plan (and with the opt-out, the other valid stance).
+            for stance, good in (('the claim pair', pair_plan), ('the opt-out', optout_plan)):
+                outcome, env_before, env_after, effects = rotate(good, key, mode, stdin)
+                wanted = (['kcadm update identity-provider/instances/pingfederate', 'identity_up_service keycloak'] if key.startswith('PING')
+                          else ['kcadm update clients/client-id-1', 'compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout 5 kafka-ui'])
+                e(outcome.returncode == 0 and env_after != env_before and 'prepare_identity_env' in effects and all(item in effects for item in wanted),
+                  f'{edition}: identity rotate {key} on a plan with {stance} must reach its writes ({wanted}); got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        # The check is exactly as wide as the commands that read the plan.
+        outcome, env_before, env_after, effects = rotate(stanceless, 'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'local.yml', None)
+        e(outcome.returncode == 0 and env_after != env_before and 'kcadm update clients/client-id-1' in effects and not any(l.startswith('compose_cmd') for l in effects),
+          f'{edition}: identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET in local.yml mode recreates nothing and never reads the plan; it must not be refused; got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        outcome, env_before, env_after, effects = rotate(stanceless, 'KEYCLOAK_CLI_CLIENT_SECRET', 'runtime.yml', None)
+        e(outcome.returncode == 0 and env_after != env_before and 'kcadm update clients/client-id-1' in effects,
+          f'{edition}: identity rotate KEYCLOAK_CLI_CLIENT_SECRET does not read the plan; it must not be refused; got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        outcome, env_before, env_after, effects = rotate(None, 'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'runtime.yml', None)
+        e(outcome.returncode == 0 and env_after != env_before and 'kcadm update clients/client-id-1' in effects,
+          f'{edition}: identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET with no plan file (a site without PingFederate) must not be refused; got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        for key, needle in (('NOT_A_KEY', 'Usage: krate identity rotate'), ('PING_KEYCLOAK_CLIENT_SECRET', 'is issued by PingFederate')):
+            outcome, env_before, env_after, effects = rotate(stanceless, key)
+            e(outcome.returncode != 0 and needle in outcome.stderr and 'no MFA stance' not in outcome.stderr and env_after == env_before and not effects,
+              f'{edition}: invalid key or missing --value must retain its argument error before the plan check or preparation; got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        body = function_body((ROOT / edition / 'krate').read_text(), 'cmd_identity_rotate')
+        guard = '  identity_rotate_plan_check "$key"\n'
+        e(body.count(guard) == 1 and body.index(guard) < body.index('prepare_identity_env; require_env')
+          and body.index(guard) < body.index('read -rsp') and body.index(guard) < body.index('set_env_file_value')
+          and body.index(guard) < body.index('kcadm_login'),
+          f'{edition}/krate: cmd_identity_rotate must run identity_rotate_plan_check before preparation, reading a value, writing .env or logging in to Keycloak')
+
+
+def check_mfa_docs(checks):
+    """The guides state what the code does and no more: the commands that refuse a stance-less plan, the withdrawal procedure,
+    the measured/asserted wording of P18 and the deprovisioning figures, and the Keycloak anchor lines."""
+    e = checks.expect
+    dual = (ROOT / 'sso/guides/dual-login.md').read_text()
+    flat = ' '.join(dual.split())
+
+    def between(text, start, stop):
+        """The text from `start` up to `stop`; empty when `start` is missing, so the assertions below fail with their own message."""
+        begin = text.find(start)
+        if begin < 0:
+            return ''
+        end = text.find(stop, begin)
+        return text[begin:end if end >= 0 else len(text)]
+    # F3: the upgrade paragraph lists every command that refuses a plan without a stance; each is tied to the code below.
+    upgrade = between(flat, 'A PingFederate site whose plan file was written before the MFA stance existed', '## Company SSO through PingFederate')
+    for command in ('./krate start', './krate install', './krate auth apply', './krate identity up',
+                    './krate identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET', './krate identity rotate PING_KEYCLOAK_CLIENT_SECRET'):
+        e(command in upgrade, f'dual-login.md: the upgrade paragraph must list {command} among the commands that refuse a plan without an MFA stance')
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        compose = function_body(cli, 'compose_cmd')
+        e('preflight.py' in compose and '--mode runtime.yml' in compose and '== up' in compose,
+          f'{edition}/krate: compose_cmd must run the runtime.yml preflight on `up` (it is how start, install and the rotate recreate refuse a plan)')
+        for name in ('cmd_start', 'cmd_install'):
+            e('compose_cmd up' in function_body(cli, name), f'{edition}/krate: {name} must go through compose_cmd up (the preflight)')
+        rotate = function_body(cli, 'cmd_identity_rotate')
+        e('compose_cmd up' in rotate and 'identity_rotate_ping_secret' in rotate,
+          f'{edition}/krate: cmd_identity_rotate must recreate kafka-ui through compose_cmd up and update the provider through identity_rotate_ping_secret')
+        e('identity.py" broker --plan "$plan" provider --with-secret' in function_body(cli, 'identity_put_idp_provider'),
+          f'{edition}/krate: the provider update must read the plan through identity.py broker (broker_plan)')
+    e('python3 "$sso_dir/preflight.py" --directory "$SCRIPT_DIR" --mode "$mode"' in (ROOT / 'sso/activate.sh').read_text(),
+      'sso/activate.sh: apply_auth must run the preflight (auth apply)')
+    e('preflight.py" --directory "$SCRIPT_DIR" --mode identity' in (ROOT / 'kraft/krate').read_text(),
+      'kraft/krate: identity up must run the identity-mode preflight')
+    e("`./krate auth configure` refuses a site file that states neither" in flat and 'first refusing' not in flat,
+      'dual-login.md: step 3 must say that `auth configure` refuses a site file that states neither stance')
+    # F1: the operator's way to change or withdraw the filter.
+    e('### Changing or withdrawing the MFA claim filter' in dual, 'dual-login.md must carry the section "Changing or withdrawing the MFA claim filter"')
+    section = between(flat, '### Changing or withdrawing the MFA claim filter', '### Rotating the PingFederate client secret')
+    for needle in ('"mfa_not_asserted": true', 'remove `auth/ui/runtime.yml` and `auth/keycloak/pingfederate-idp.json`', './krate auth configure /path/to/site.json',
+                   './krate auth apply', 'provider updated', 'not `No changes`', 'kcadm update -f -', 'merges nothing', 'federated-identity links',
+                   'removing the plan file and applying'):
+        e(needle in section, f'dual-login.md: the withdrawal section must state {needle!r}')
+    # F8: figures and tenses the evidence supports.
+    e('measured for a local user: gone within 5 s, gate row U25' in flat, 'dual-login.md: the U25 figure is a local-user measurement and must say so')
+    e('gate row P18 tests' not in flat and '(gate row P18)' not in flat, 'dual-login.md must not cite gate row P18 as proof of a behavior the row has not yet shown live')
+    gate = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    row = next((line for line in gate.splitlines() if line.startswith('| P18 |')), '')
+    e('not yet observed on a live fixture' in row and 'not yet been observed on a live fixture' in ' '.join(gate.split()),
+      'identity-gate.md must state that P18 has not yet been observed on a live fixture')
+    e('no Kafbat `SESSION` cookie' not in row and '(`ok`, session, realm user)' not in row,
+      'the identity-gate.md P18 row must not claim a Kafbat session or a realm user it does not measure')
+    for needle in ('provider updated', 'Identity provider pingfederate: No changes', 'both counts below the 200-event read cap'):
+        e(needle in row, f'the identity-gate.md P18 row must state {needle!r}')
+    # N1: both rotates read the plan before their first change (check_rotate_stance runs it); the guide says exactly that.
+    for needle in ('read it before their first change and refuse it without touching `.env`, Keycloak or any container',
+                   'after a reboot `start` brings up no container until the plan is regenerated'):
+        e(needle in upgrade, f'dual-login.md: the upgrade paragraph must state {needle!r}')
+    # N3: step 2 tells the operator that the example's placeholders are refused.
+    e('refuses a file that still holds the `REPLACE_WITH_...` placeholders and writes nothing' in flat,
+      'dual-login.md: step 2 must say that `./krate auth configure` refuses a site file that still holds the placeholders')
+    # N4: no citation of an untracked design or tracker identifier in a shipped file (the tokens are split so this file does not contain them).
+    untracked = ('PF-' 'AMR', 'D12-' 'D13-DESIGN', "design's " 'forge', 'design ' 'cites', 'DESIGN ' '4.5', 'design file is ' 'a historical')
+    for rel in ('scripts/gate-identity.sh', 'scripts/gate/stub_idp.sh', 'scripts/check-identity.py', 'sso/identity.py', 'sso/configure.py', 'sso/configure-dual.py',
+                'sso/preflight.py', 'sso/guides/dual-login.md', 'sso/guides/identity-gate.md', 'sso/guides/identity-foundation.md', 'sso/guides/pingfederate-iam-guide.md',
+                'README.md'):
+        text = (ROOT / rel).read_text()
+        e(not any(token in text for token in untracked), f'{rel}: must not cite a design or tracker identifier that no tracked file carries')
+    # N5: the merge decision is cited where the code takes it (AbstractRequestCmd), not at kcadm's help text (UpdateCmd).
+    for rel in ('sso/identity.py', 'sso/guides/identity-gate.md'):
+        text = ' '.join((ROOT / rel).read_text().split())
+        e('AbstractRequestCmd.java' in text and ':171 and :244' in text and 'UpdateCmd' not in text,
+          f'{rel}: kcadm merge mode must be cited at AbstractRequestCmd.java :171 and :244, not at UpdateCmd.java help text')
+    # N6: identity-foundation.md says where identity up refuses a plan without a stance.
+    foundation = ' '.join((ROOT / 'sso/guides/identity-foundation.md').read_text().split())
+    e('refuses one that states no MFA stance' in foundation and 'step 4 has already refused a plan that states no MFA stance' in foundation,
+      'identity-foundation.md must say that the identity preflight (step 4) refuses a plan without an MFA stance and that step 10 relies on it')
+    e('Before step 1, for `KEYCLOAK_KAFBAT_CLIENT_SECRET` in `runtime.yml` mode and for `PING_KEYCLOAK_CLIENT_SECRET`' in foundation
+      and 'stops it with `Nothing was rotated`' in foundation and 'stops the command with `Nothing was rotated`' in flat,
+      'identity-foundation.md and dual-login.md must say that identity rotate reads the plan before its first change and stops with `Nothing was rotated`')
+    # N7: the withdrawal says what not to do exactly, and the replace semantics are stated as read from source, not observed.
+    e('without regenerating it' in section and 'has not yet been observed on a running Keycloak' in section,
+      'dual-login.md: the withdrawal section must say "without regenerating it" and that the replace semantics are not yet observed on a running Keycloak')
+    e('exercised by the row' not in row and 'not yet observed on a running Keycloak' in row,
+      'identity-gate.md: the P18 row must state the provider-update semantics as read from source and not yet observed on a running Keycloak')
+    # F10: the filter code is at OIDCIdentityProvider.java 490-512, not 479-512.
+    for rel in ('sso/identity.py', 'scripts/gate-identity.sh', 'sso/guides/identity-gate.md', 'sso/guides/dual-login.md'):
+        e('479-512' not in (ROOT / rel).read_text(), f'{rel}: the claim filter is at OIDCIdentityProvider.java 490-512 (479 is the passMaxAge block)')
+    e('MFA stance' in (ROOT / 'README.md').read_text(), 'README.md must mention that the PingFederate site file states the MFA stance')
+    e('mfa_not_asserted' in (ROOT / 'sso/guides/pingfederate-iam-guide.md').read_text(), 'pingfederate-iam-guide.md must ask IAM for the MFA claim or the statement that none is asserted')
+    # F5: P18 must not write the journal line P14 looks for, and P14 must require a NEW line.
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text()
+    p18_block = between(runner, '  # ── P18:', '  ok_if P18 3 P')
+    p14_block = between(runner, '  # ── P14:', '  ok_if P14 3 P')
+    e(p18_block != '' and 'rm -f "$plan"' not in p18_block,
+      'P18 must not remove the plan file: that apply would write the journal line P14 checks and drop the brokered users\' links')
+    counted = p14_block.find("jb=\"$(grep -c ' apply removed identity provider'")
+    e(0 <= counted < p14_block.find('cap "$KRATE" auth apply') and '-gt "${jb:-0}"' in p14_block,
+      "P14's journal term must compare the line count after its own apply with the count taken before it")
+
+    # The row's wiring and the guide's counts (carried over from round 1; the inventory arithmetic is derived from the runner's arrays).
+    e('P18' in runner and re.search(r'^REQUIRED_P3=\(.*\bP18\b.*\)$', runner, re.M) is not None, 'the runner inventory REQUIRED_P3 must carry P18')
+    e(len([line for line in runner.splitlines() if line.startswith('  ok_if P18 3 P')]) == 1, 'the runner must hold exactly one ok_if P18 3 P row')
+    e('IDENTITY_PROVIDER_LOGIN_ERROR' in runner and runner.count('login_probe ping-mfa') == 2,
+      'the P18 row must drive the refusal through the runner login_probe twice (the refused attempt and the sign-in after the withdrawal)')
+    e(row != '', 'identity-gate.md must have a row for the gate row P18')
+    for needle in ('502', 'IDENTITY_PROVIDER_LOGIN_ERROR', 'mfa_not_asserted', 'no realm user', 'identity_provider_login_failure', 'keycloak_login_flow.py:132'):
+        e(needle in row, f'the identity-gate.md P18 row must state {needle!r}')
+    e('enforce-if-asserted' in gate and 'mfa_not_asserted' in gate and 'MFA enforced at Ping only' in gate,
+      'identity-gate.md must state the enforce-if-asserted decision and the opt-out wording')
+    e(re.search(r'`REQUIRED_P3` is P1–P16, P18 and Z3 \(18 ids\)', gate) is not None, 'identity-gate.md must count P18 in REQUIRED_P3 (18 ids)')
+
+    def required(name):
+        found = re.search(r'^REQUIRED_%s=\((.*)\)$' % name, runner, re.M)
+        return found.group(1).split() if found else []
+    sizes = {name: required(name) for name in ('P1', 'P2', 'P3', 'X')}
+    total = sum(len(ids) for ids in sizes.values())
+    static = len([i for i in sizes['P1'] if i.startswith('S')])
+    gate_flat = ' '.join(gate.split())
+    e(f'is {total} ids ({total - 1} where J7 leaves the inventory' in gate_flat
+      and f'`--no-static --no-screenshots` {total - static - 1}, {total - static - 2} without J7' in gate_flat
+      and f'AG1–AG5 add five ({total + 5}, {total + 4}, {total - static + 4}, {total - static + 3})' in gate_flat,
+      f'identity-gate.md must state the --phase 3/all inventory as {total} ids ({total - 1} without J7; {total - static - 1}/{total - static - 2} with --no-static --no-screenshots; '
+      f'{total + 5}/{total + 4}/{total - static + 4}/{total - static + 3} on a bundle host with AG1-AG5)')
+    e('### Deprovisioning a PingFederate user' in dual and 'users disable' in dual and 'users logout' in dual
+      and 'P20' in dual and '8 hours' in dual and '15 minutes' in dual,
+      'dual-login.md must carry the decided deprovisioning contract (two-step, upstream alone ends nothing, the bounds, P20)')
+    e("State the site's MFA stance explicitly, one of the two (enforce-if-asserted):" in dual
+      and 'mfa_claim_name' in dual and 'mfa_claim_value' in dual and 'mfa_not_asserted' in dual,
+      'dual-login.md must document the site-file MFA stance keys and the explicit choice (enforce-if-asserted)')
+    e('"mfa_not_asserted": True' in (ROOT / 'scripts/gate/stub_idp.sh').read_text(),
+      'stub_idp.sh must write the stand-in site file with the explicit mfa_not_asserted stance')
+
 
 def check_health(checks):
     """N4: health names the Compose service of a crash-looping container (RestartCount, Restarting) and survives a vanished one."""
@@ -6748,7 +7534,7 @@ def main():
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
                   check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip, check_public_cert_permissions,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
-                  check_broker_apply, check_truststore_env, check_broker_docs):
+                  check_broker_apply, check_truststore_env, check_broker_docs, check_mfa_choice, check_mfa_reconcile, check_rotate_stance, check_mfa_docs, check_p18_logic):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others
@@ -6760,7 +7546,7 @@ def main():
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
           'runtime.yml incl. refusals), configure-dual, stub_idp.sh down, proxy environment and edge rules, release permissions, RPM dependency '
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
-          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
+          'PingFederate broker plan/apply/removal, the MFA stance (site keys, plan, claim-filter reconcile, P18 logic against stubs), truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
           'Prometheus lifecycle off and the SIGHUP reload result, the read-only Loki gateway, '
           'the Grafana realm switch (compose, proxy front, CLI, realm.ini and clients).')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence

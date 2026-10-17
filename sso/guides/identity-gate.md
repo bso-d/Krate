@@ -280,10 +280,12 @@ The stand-in IdP (`scripts/gate/stub_idp.sh`, above) plays PingFederate: users
 `ping-viewer` (AD group APP-KAFKA-VIEWERS), `ping-admin` (APP-KAFKA-ADMINS),
 `ping-both` (both), `ping-none` (none), a `groups` claim, client `krate-keycloak`
 whose redirect is the realm's broker endpoint. The rows run on the Phase 2 stack
-(brokers, Kafbat in `runtime.yml` mode, proxy, identity). P1–P4, P14 and P15 are
+(brokers, Kafbat in `runtime.yml` mode, proxy, identity). P1–P4, P14, P15 and P18 are
 the runner's (CLI, `.env`, journal, container state and `scripts/gate/phase3_realm.py`,
 which reads the realm's brokering state through kcadm as the master admin and
-compares it with the plan file); P5–P13 are `scripts/gate/phase3_broker.py`, a
+compares it with the plan file; P18's sign-in attempts run through
+`phase3_broker.py --login-probe`, the same pinned-TLS browser as P5–P13's rows); P5–P13 are
+`scripts/gate/phase3_broker.py`, a
 headless browser that starts every sign-in at Kafbat's `/oauth2/authorization/keycloak`,
 follows the hops through the realm to the stand-in's login form, posts the
 credentials there and follows the way back, recording each hop; its TLS is pinned on
@@ -292,6 +294,27 @@ verify fails every row (no unverified fallback). Secret values
 (the stand-in's passwords and client secret, the local users' temporary
 passwords) travel through 0600 files and the environment and are redacted
 from every published line.
+
+The MFA stance of the brokered site is a decided contract (enforce-if-asserted):
+the site file states exactly one of the two stances — `mfa_claim_name`/
+`mfa_claim_value` (Keycloak's IdP-side "Verify essential claim" then refuses a
+PingFederate sign-in whose ID token lacks the claim or whose value does not match,
+before any user is created, OIDCIdentityProvider.java 26.8.0:490-512, the claim
+read from the ID token only) or `mfa_not_asserted: true` ("MFA enforced at Ping
+only"). `krate auth configure` refuses a site file that states neither, and the
+preflight refuses a plan file that does, so nothing continues over an unstated
+choice. The three claim-filter keys are managed by the plan: when the plan carries
+no claim pair (the site switched to the opt-out), `auth apply` updates the live
+provider, and that update replaces the provider's configuration, which clears
+them. The stand-in's site file opts out (`mfa_not_asserted`); P18 asserts the
+refusal mechanism at the stand-in with a negative control through the real flow
+and no forge (no forge sidecar, which would sign ID tokens with and without the
+claim, exists at this commit; the row uses the applied plan instead). P18 is
+encoded from the 26.8.0 source and the P5/P16 machinery and has not yet been
+observed on a live fixture: that hand-walk comes before the row counts. The realm
+token's `acr` claim is picked up in the Phase 2 login helper at
+`scripts/gate/keycloak_login_flow.py:132` (`:128` is that file's
+`code exchange failed` assertion); the P18 row cites the `:132` line.
 
 | id | test | pass condition |
 |---|---|---|
@@ -309,13 +332,15 @@ from every published line.
 | P12 | local user `gate3clash` (`identity users add --viewer`) and a stand-in user of the same name signing in through the broker (D2) | the first-broker-login flow answers HTTP 409 at `…/login-actions/first-broker-login` with "User with username gate3clash already exists. Please login to account management to link the account." (seen live on the development fixture); the local user has no federated identity; the realm still holds exactly one `gate3clash` |
 | P13 | `ping-viewer` signed in, Kafbat `POST /logout` (XSRF token), the realm end-session, then a new sign-in in the same browser | the logout redirects to Keycloak's end-session; exactly the session this browser made is gone from the user's realm sessions; the next sign-in's hops include `…/broker/pingfederate/login` and the stand-in (the realm asked the IdP; no cookie login) |
 | P16 | the stand-in's client secret rotated (`stub_idp.sh rotate-secret`, new value in its 0600 file); a brokered sign-in; `identity rotate PING_KEYCLOAK_CLIENT_SECRET --value` with the value on stdin (the Phase 1 convention); a brokered sign-in | before the rotate the realm presents the old secret and `ping-viewer`'s sign-in fails at the realm (status and hop recorded); the rotate exits 0, prints the line `Identity provider pingfederate: secret updated`, journals `rotate PING_KEYCLOAK_CLIENT_SECRET applied to identity provider pingfederate` and `.env` carries the new value; afterwards `ping-viewer` signs in again with its federated identity kept (1 link, no clash page) |
-| P14 | the plan file removed, `auth apply`, then Kafbat's default path | exit 0; `phase3_realm.py --expect-absent`: no `pingfederate` provider, no `krate …` flow, `browserFlow` `browser`; journal `apply removed identity provider`; the realm's authorization endpoint answers 200 with the login form (local login on the default path) |
+| P14 | the plan file removed, `auth apply`, then Kafbat's default path | exit 0; `phase3_realm.py --expect-absent`: no `pingfederate` provider, no `krate …` flow, `browserFlow` `browser`; the journal gains a new `apply removed identity provider` line (its count is taken before this apply); the realm's authorization endpoint answers 200 with the login form (local login on the default path) |
 | P15 | the plan file restored, `CONFIGURE_TOTP` `defaultAction` set to true behind the CLI's back (full representation PUT), `identity up` | drift confirmed before; `identity up` exit 0; afterwards `defaultAction` false and the realm matches the plan again (the provider re-applied after P14's removal); journal `up reconciled required action CONFIGURE_TOTP` and `up reconciled identity provider` |
+| P18 | the MFA stance row (runner, after P16; not yet observed on a live fixture): a brokered sign-in with the opted-out plan (positive control); the preflight (`--mode runtime.yml`) against the plan whose `mfa_not_asserted` top-level key was removed; the claim filter applied to the realm through the plan (`filteredByClaim` "true", `claimFilterName` `amr` — a claim no stand-in token is expected to carry — and `claimFilterValue` `otp`) and `auth apply`, then a fresh stand-in user `ping-mfa` (`stub_idp.sh add-user`, the viewer group) whose sign-in is driven through `phase3_broker.py --login-probe`; then the filter withdrawn the operator's way: the plan switched back to the opt-out (P2's saved copy), `auth apply`, and the same user's sign-in again; its realm user removed afterwards | positive control: the probe answers `ok` (the probe's `ok` needs a Kafbat `SESSION` cookie); the stance-less plan is refused naming both options (`states no MFA stance … mfa_claim_name … mfa_not_asserted: true`); with the filter the probe ends `error` with status `502` and a landing path under `/identity/realms/krate/`, `ping-mfa` has no realm user (kcadm) before or after, and exactly one more IDENTITY_PROVIDER_LOGIN_ERROR event with error `identity_provider_login_failure` is stored than before (both counts below the 200-event read cap); the withdrawing `auth apply` exits 0, prints `provider updated` and not `Identity provider pingfederate: No changes` (the three claim-filter keys are managed: the live filter is a difference the opt-out plan must reconcile), the realm then matches the plan, the live provider read by kcadm names `pingfederate` and carries none of `filteredByClaim`/`claimFilterName`/`claimFilterValue`, and the same user's probe answers `ok`; every "absent" reading (no realm user, no filter key, the event count) fails closed on a kcadm failure. The row asserts the mechanism at the stand-in (the tenant's assertion policy is site work — the site file carries `mfa_not_asserted`, "MFA enforced at Ping only"); the provider update is the whole representation (kcadm `update -f -` does not merge: merge mode needs `--merge`/`-m`, or attributes without `--file`, `AbstractRequestCmd.java` 26.8.0:171 and :244; the server stores the rebuilt configuration, `IdentityProviderResource.java` `updateIdpFromRep`) — read from the 26.8.0 source, not yet observed on a running Keycloak; the row is what observes it; the row does not measure the users' federated-identity links: the provider is updated in place, never removed, as in the client secret rotation whose P16 row keeps `ping-viewer`'s link. A forged-token variant pair (an ID token with and without the claim) is not encoded here (the forge sidecar does not exist at this commit); the `acr` claim the Phase 2 login helper reads is picked up at `scripts/gate/keycloak_login_flow.py:132` |
 | Z3 | the leak scan of Z1/Z2 after Phase 3, with the stand-in's log and its admin password, client secrets (both) and user password in the searched set | 0 hits. The fail conditions are those of Z1/Z2: the same function decides the three rows. |
 
-`REQUIRED_P3` is P1–P16 and Z3 (17 ids); with screenshots and the static block the
-full inventory of `--phase 3`/`all` is 119 ids (113 with `--no-static --no-screenshots`).
-The rows run in the order P1, P2, P3, P4, P5–P13 (helper), P16, P14, P15, Z3.
+`REQUIRED_P3` is P1–P16, P18 and Z3 (18 ids); with screenshots and the static block the
+full inventory of `--phase 3`/`all` is 121 ids (120 where J7 leaves the inventory, as on the Mac; with
+`--no-static --no-screenshots` 116, 115 without J7); on a bundle host AG1–AG5 add five (126, 125, 121, 120).
+The rows run in the order P1, P2, P3, P4, P5–P13 (helper), P16, P18, P14, P15, Z3.
 On an EPC edition directory the Phase 3 rows are NOT_RUN for the same reason as
 Phase 2 (the Kafbat runtime fixture is KRaft on this runner). Phase 4 is different:
 its slices run on **both** editions (the slice acceptance includes the EPC receipt

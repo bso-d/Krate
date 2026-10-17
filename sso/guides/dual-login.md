@@ -476,6 +476,22 @@ site file, remove `auth/ui/runtime.yml` and `auth/keycloak/pingfederate-idp.json
 run `./krate auth configure <site.json>`, then `./krate auth apply`. Recreating
 `kafka-ui` ends every Kafbat session.
 
+A PingFederate site whose plan file was written before the MFA stance existed
+(`auth/keycloak/pingfederate-idp.json` with neither `mfa_not_asserted` nor the
+claim-filter keys) is refused the same way. In `runtime.yml` mode `./krate start`
+and `./krate install` refuse it (both run the same `up` for the whole stack, so
+after a reboot `start` brings up no container until the plan is regenerated), and
+so do `./krate auth apply` and `./krate identity up`. Both `./krate identity
+rotate PING_KEYCLOAK_CLIENT_SECRET` and, in `runtime.yml` mode, `./krate identity
+rotate KEYCLOAK_KAFBAT_CLIENT_SECRET` read the plan too (the first updates the
+provider from it, the second recreates `kafka-ui` through the same `up`); they
+read it before their first change and refuse it without touching `.env`,
+Keycloak or any container, so nothing is half rotated. The refusal names both
+options. State one in the site file (step 3 of "Set up" below: the claim
+pair or `"mfa_not_asserted": true`), remove `auth/ui/runtime.yml` and
+`auth/keycloak/pingfederate-idp.json`, run `./krate auth configure <site.json>`,
+then `./krate auth apply`.
+
 ## Company SSO through PingFederate (Phase 3)
 
 The same Kafbat configuration serves the brokered login: Keycloak stays the
@@ -501,7 +517,10 @@ reach PingFederate on the ports in its approved endpoint URLs.
 2. Copy `sso/dual-example.json` to a private site file. Set `public_url`, the
    PingFederate issuer, client ID and the four endpoints (all `https`), the
    two AD group names and `groups_claim`, and `clusters` to every exact
-   Kafbat cluster name this UI shows (including remote clusters). The session
+   Kafbat cluster name this UI shows (including remote clusters). The example
+   carries a placeholder claim pair (`mfa_claim_name`, `mfa_claim_value`): replace
+   it as step 3 says (`./krate auth configure` refuses a file that still holds
+   the `REPLACE_WITH_...` placeholders and writes nothing). The session
    idle limit, the session maximum and the viewer message opt-in are not
    site-file keys: they come from `.env` (`KEYCLOAK_SESSION_IDLE_MINUTES`,
    `KEYCLOAK_SESSION_MAX_HOURS`, `KAFKA_UI_VIEWER_MESSAGES`) so that both flows plan the same
@@ -510,28 +529,49 @@ reach PingFederate on the ports in its approved endpoint URLs.
    not on the public host and port) or `"system"` (the JVM default truststore
    is relied on; the preflight then prints one line saying so). It is carried
    into the plan as the top-level key `truststore`.
-3. `./krate auth configure /path/to/site.json` writes `auth/ui/runtime.yml`
+3. State the site's MFA stance explicitly, one of the two (enforce-if-asserted):
+   `"mfa_claim_name"` with `"mfa_claim_value"` (both or neither), when
+   PingFederate asserts that claim in its ID tokens — Keycloak's IdP-side
+   "Verify essential claim" then refuses a brokered sign-in whose ID token
+   lacks the claim or whose value does not match (the claim is read from the
+   ID token only, and must be a claim of its own: a registered JWT field such as
+   `sub` or `iss` is refused; of an array claim such as `amr` one matching
+   element is enough). The value is one literal or several separated by `|`,
+   each made of letters, digits and `. _ : / -` (a `.` matches any one
+   character): Keycloak applies the value as a Java regular expression that must
+   match the whole claim value, and every other syntax is refused here because
+   Java and Python disagree on it. Or `"mfa_not_asserted": true` — the plan then
+   carries no claim filter, stating "MFA for SSO users is enforced at Ping only".
+   `./krate auth configure` refuses a site file that states neither (the message
+   names both options), so the choice can never stay unstated. The keys belong
+   to this broker plan: the other generator of this program (`sso/configure.py`,
+   for Grafana's and Perses' site files) refuses them. To change or withdraw the
+   choice later see "Changing or withdrawing the MFA claim filter" below.
+4. `./krate auth configure /path/to/site.json` writes `auth/ui/runtime.yml`
    (identical to the local plan for that origin and cluster list) and the
    broker plan `auth/keycloak/pingfederate-idp.json` (schema in
    `sso/configure-dual.py`): the identity provider `pingfederate`, two
    mappers that place a user whose `groups_claim` carries the site's AD group
    into the realm group of the same role (`KEYCLOAK_VIEWER_GROUP`,
    `KEYCLOAK_ADMIN_GROUP`), which is what Kafbat's roles read, and the realm
-   flows below. The plan carries the client secret only as the
+   flows below; with the opted-in stance the provider's `config` gains
+   `filteredByClaim`, `claimFilterName` and `claimFilterValue`, and with the
+   opt-out stance the plan carries the top-level key `mfa_not_asserted`
+   (never sent to Keycloak). The plan carries the client secret only as the
    `${PING_KEYCLOAK_CLIENT_SECRET}` placeholder. It does not replace existing
    files (remove `auth/ui/runtime.yml` and the plan file to regenerate them)
    and sets `KEYCLOAK_PUBLIC_URL` from `public_url`.
-4. `./krate identity up` (the realm must exist before the plan is applied).
+5. `./krate identity up` (the realm must exist before the plan is applied).
    With the plan file present and the secret still unset it says so and
    applies nothing; `auth apply` does.
-5. `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml`, then
+6. `./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml`, then
    `./krate auth apply`. On a terminal it asks for the one value it cannot
    generate, the client secret PingFederate issued for Keycloak, only when
    the plan exists. Without a terminal (automation) feed it on standard
    input first: `printf '%s\n' "$SECRET" | ./krate identity rotate
    PING_KEYCLOAK_CLIENT_SECRET --value` (the value never appears on a command
-   line; the same command rotates it later, see "Rotating the PingFederate
-   client secret").
+   line; the same command rotates it later, see "Rotating the
+   PingFederate client secret").
 
 ### What `auth apply` does with the plan (ping mode)
 
@@ -574,7 +614,8 @@ differs from the plan, in this order:
    way, and a level-0 execution the plan does not name removed.
 2. The identity provider `pingfederate` (`PUT` by alias when any planned
    field differs; the plan's fields are compared, Keycloak's own additions
-   are ignored). A changed `PING_KEYCLOAK_CLIENT_SECRET` alone is not visible
+   are ignored, except that the three claim-filter keys are managed: a live
+   filter the plan no longer carries is a difference too). A changed `PING_KEYCLOAK_CLIENT_SECRET` alone is not visible
    in that comparison (Keycloak masks the stored secret): rotate it with the
    command in "Rotating the PingFederate client secret" below, never by
    removing the plan.
@@ -590,6 +631,28 @@ reconciled identity provider pingfederate: ...`), after it reconciles the
 `krate-ui` client, the realm policy and the required-action defaults
 ([identity foundation guide](identity-foundation.md)).
 
+### Changing or withdrawing the MFA claim filter
+
+The three provider keys `filteredByClaim`, `claimFilterName` and
+`claimFilterValue` are managed by the plan: what the plan does not carry,
+`auth apply` removes from a live provider. To change the claim or its value,
+edit the pair in the site file; to withdraw the filter, replace the pair with
+`"mfa_not_asserted": true` ("MFA enforced at Ping only"). Then, in this order:
+remove `auth/ui/runtime.yml` and `auth/keycloak/pingfederate-idp.json`
+(`auth configure` refuses to replace either one), run
+`./krate auth configure /path/to/site.json`, then `./krate auth apply`. The apply
+reports `Identity provider pingfederate applied to realm krate (... change(s):
+provider updated)`, not `No changes`: it sends the plan's representation, which
+replaces the provider's configuration (`kcadm update -f -` merges nothing, and
+Keycloak 26.8.0's source stores the configuration it is sent whole; this has not
+yet been observed on a running Keycloak), so the keys the plan no longer carries
+are gone from the live provider; Keycloak reads a missing `filteredByClaim` as
+false and checks no claim. The brokered
+users keep their federated-identity links, because the provider is updated in
+place, as the client secret rotation below does. Do not withdraw the filter by
+removing the plan file and applying without regenerating it: that removes the
+provider and with it every brokered user's link (see "Back to local sign-in").
+
 ### Rotating the PingFederate client secret
 
 When IAM issues a new client secret for Keycloak, apply it on both sides with
@@ -599,7 +662,10 @@ printf '%s\n' "$NEW_SECRET" | ./krate identity rotate PING_KEYCLOAK_CLIENT_SECRE
 ```
 
 (on a terminal without a pipe the command asks for the value; `--value` is
-required for this key because Krate cannot generate it). The value is taken
+required for this key because Krate cannot generate it). When the plan file exists
+it is read first, through the validator `auth apply` uses: a plan that states no
+MFA stance (or is otherwise refused) stops the command with `Nothing was
+rotated`, and `.env`, Keycloak and the containers stay as they were. The value is taken
 as PingFederate issued it: 16 or more printable ASCII characters; whitespace,
 quotes, backslash, backtick and `$` are refused because `.env` quoting, Compose
 interpolation or the shell would alter them. It writes `.env`
@@ -658,7 +724,12 @@ The realm flows the plan states:
   its unverified flag until a sign-in in which PingFederate asserts a verified
   address, or until an administrator sets it in Keycloak.
 - SSO users get no Keycloak TOTP and no profile page: MFA is the enterprise
-  identity provider's (D1).
+  identity provider's (D1). When the site's file names the claim PingFederate
+  asserts (`mfa_claim_name`/`mfa_claim_value`), Keycloak additionally refuses a
+  brokered sign-in whose ID token lacks that claim or whose value does not
+  match (its IdP-side "Verify essential claim": the check runs before any realm
+  user is created, and the refusal is an error page). A site that has not set
+  the pair states `mfa_not_asserted: true` instead: MFA enforced at Ping only.
 - Revocation: the mappers and the provider sync with `syncMode` `FORCE`, so
   removing the user from the AD group takes effect at the user's next
   sign-in through Keycloak (Keycloak recomputes the group memberships from
@@ -666,6 +737,30 @@ The realm flows the plan states:
   limit, the session maximum or a sign-out (see "Revocation and session behaviour").
 - Logout (Kafbat's Log out) ends the Keycloak session as in Phase 2; the next
   login goes to PingFederate again, because the realm has no cookie.
+
+### Deprovisioning a PingFederate user
+
+Removing a PingFederate user's access is the Krate-side two-step, and that is
+the approved deprovisioning limit for these users: `./krate identity users
+disable <name>`, then `./krate identity users logout <name>`. `users disable`
+prevents the user's next Krate sign-in; `users logout` ends every session the
+user holds, which Kafbat sees through its back-channel logout within seconds
+(measured for a local user: gone within 5 s, gate row U25). `krate identity users` has no delete
+verb (it offers list, add, enable, disable, reset-password, groups, logout and
+set-email), so these two commands are the whole supported procedure.
+
+An upstream disable or delete alone — in PingFederate or in the directory it
+asserts — ends no Krate session and does not stop a silent re-login through the
+live realm SSO session: the realm holds the brokered user and its active
+session, and Kafbat recomputes nothing until the user signs in again. A browser
+whose realm SSO session is still live is signed in again through that session
+without ever reaching PingFederate, so the upstream change is not even
+consulted. The bound on a session that is only left to time is the idle limit
+(`KEYCLOAK_SESSION_IDLE_MINUTES`, default 15 minutes) and the absolute maximum
+(`KEYCLOAK_SESSION_MAX_HOURS`, default 8 hours, gate row K37), whichever comes
+first. Gate row P20 will measure the window an upstream change alone leaves open
+for a brokered user; until it has run, the 15 minutes and 8 hours are the
+configured limits, not measured ones.
 
 ### Break-glass: local users
 
@@ -752,7 +847,12 @@ form again.
   Keycloak admin console (not with `identity users add`) gets `CONFIGURE_TOTP`
   only when it is set on that user or through `identity users reset-password`;
   a Phase 1 console-created user who never signed in loses the realm-default
-  demand when `identity up` reconciles the realm.
+  demand when `identity up` reconciles the realm. The MFA stance is the
+  site's, enforced if asserted: the essential-claim filter keys
+  (`mfa_claim_name`/`mfa_claim_value`) in the site file make the realm refuse
+  a PingFederate sign-in whose ID token lacks the claim, the explicit
+  `mfa_not_asserted: true` states "MFA enforced at Ping only", and a site file
+  or plan file that states neither is refused.
 - D2: SSO identities never link to local accounts (`krate first broker login`
   = Create User If Unique, REQUIRED). A username/email clash with a local
   user is an error page, not a merge.

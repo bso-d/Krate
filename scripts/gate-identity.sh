@@ -460,7 +460,7 @@ REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 G7 G8 A1 A
 as_root() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 if { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v logrotate >/dev/null 2>&1; then J7_REQUIRED=true; fi
 REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K31 K32 K33 K34 M1 M2 Z2)
-REQUIRED_P3=(P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 Z3)
+REQUIRED_P3=(P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P18 Z3)
 REQUIRED_X=(X1)
 # Phase 4 inventories (PHASE4-INSTRUCTIONS-v3.md section 5): a slice is REQUIRED_P1
 # plus its own rows, and it holds no Phase 2/3 ids (on an EPC edition directory the
@@ -1184,6 +1184,7 @@ realm_diffs() { printf '%s\n' "$1" | grep -E '^phase3_realm:' | sed 's/^phase3_r
 preflight_runtime() { compose config --format json 2>>"$RAW" | python3 -I "$SSO/preflight.py" --directory "$ED" --mode runtime.yml; }
 run_phase3() {
   local rc rc2 rc3 ev before after names id result evidence plan pem pem2 sha sha2 cluster a b c j kc1 kc2 kc3 local_pw reason
+  local refused stance user_uid events_before events_after pf_rc ap_rc rs_rc ad_rc wd_rc rs2_rc d e f g h w k l e2 jb  # P18's and P14's own variables (the MFA-stance row, P14's journal count)
   section "Phase 3 fixture: the Phase 2 stack + the stand-in IdP (stub_idp.sh, port $STUB_PORT) brokered into realm krate"
   if [[ "$EDITION" != kraft ]]; then
     for id in "${REQUIRED_P3[@]}"; do [[ "$id" == Z* ]] || record "$id" 3 P NOT_RUN "Phase 3 runtime fixture is KRaft on this runner (Phase 2's Kafbat stack); EPC runtime is covered by the Phase 1 receipt inside the Linux VM"; done
@@ -1271,15 +1272,89 @@ EOF
   [[ $rc -eq 0 && "$before" == error* && $rc2 -eq 0 && $a -eq 0 && $j -eq 0 && "$after" == ok* && "$after" == *"federated identities 1"* && "$(envv PING_KEYCLOAK_CLIENT_SECRET)" == "$(tr -d '\n' < "$STUB_DIR/.client-secret")" ]]; st=$?
   ok_if P16 3 P "$st" "stand-in secret rotated (exit $rc); before identity rotate the brokered sign-in fails at the realm: ${before%%; hops*}; identity rotate PING_KEYCLOAK_CLIENT_SECRET --value (stdin) exit $rc2, line 'Identity provider pingfederate: secret updated', journal 'rotate … applied to identity provider pingfederate', .env carries the new value; afterwards ping-viewer signs in again with its link kept: ${after%%; hops*}"
 
+  # ── P18: the MFA stance (enforce-if-asserted) ──
+  # NOT YET RUN ON A LIVE FIXTURE: the hand-walk observes the 502 page, the event pair and the provider update once
+  # before this row counts (owner rule 11). What the row asserts, from source (Keycloak 26.8.0) and the existing P16/P5
+  # machinery: the applied plan (the stand-in site file opted out, mfa_not_asserted: true, no claim filter) still brokers
+  # a sign-in; the preflight — the gate `auth apply` runs — refuses a plan whose site file stated neither stance; then
+  # Keycloak's "Verify essential claim" (filteredByClaim/claimFilterName/claimFilterValue on the provider's config; the
+  # claim is read from the ID token only, a missing claim and an unmatched value both fail, OIDCIdentityProvider.java
+  # 490-512) is applied for `amr` — a claim no stand-in token is expected to carry — through the plan and `auth apply`;
+  # a fresh stand-in user's sign-in then ends at the realm as `error` with status 502, no realm user exists before or
+  # after, and exactly one more IDENTITY_PROVIDER_LOGIN_ERROR event with error identity_provider_login_failure is
+  # stored (EventBuilder.error stores error events immediately; the realm plan's empty enabledEventTypes keeps every
+  # save-by-default type). The filter is withdrawn the way an operator withdraws it: the site switches to the opt-out,
+  # so the plan (P2's saved copy) no longer carries the three keys, and `auth apply` must UPDATE the live provider (not
+  # print "No changes"): the three keys are managed (identity.provider_differs), and the update replaces the provider's
+  # configuration (kcadm `update -f -` does not merge; IdentityProviderResource.updateIdpFromRep builds the model from
+  # the representation). The same user then signs in, and the brokered users' federated-identity links are untouched
+  # (the provider is updated in place, never removed). Every "absent" reading fails closed: a kcadm failure is a FAIL.
+  p18_user_ids() { kcadm_master get users -r krate -q username=ping-mfa -q exact=true --fields id --format csv --noquotes; }
+  p18_events() { local out; out="$(kcadm_master get events -r krate -q type=IDENTITY_PROVIDER_LOGIN_ERROR -q max=200 --fields type,error --format csv --noquotes)" || return 1
+    printf '%s\n' "$out" | grep -c 'identity_provider_login_failure' || true; }
+  p18_clean() { local json; json="$(kcadm_master get identity-provider/instances/pingfederate -r krate)" || return 1
+    [[ "$json" == *'"pingfederate"'* && "$json" != *filteredByClaim* && "$json" != *claimFilterName* && "$json" != *claimFilterValue* ]]; }
+  before="$(login_probe ping-viewer)"  # pre-filter positive control: the opted-out plan still signs in
+  [[ "$before" == ok* ]]; c=$?
+  python3 -I - "$plan" <<'EOF' >/dev/null 2>>"$RAW"
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data.pop('mfa_not_asserted', None)  # the stance refusal: neither the claim pair nor the opt-out marker
+open(path, 'w').write(json.dumps(data, indent=2) + '\n')
+EOF
+  cap preflight_runtime; pf_rc=$?
+  [[ $pf_rc -ne 0 && "$CAP" == *"no MFA stance"* && "$CAP" == *"mfa_claim_name"* && "$CAP" == *"mfa_not_asserted"* ]]; a=$?
+  stance="$(printf '%s' "$CAP" | grep -o -E 'states no MFA stance[^;]{0,140}' | head -1)"
+  python3 -I - "$plan" <<'EOF' >/dev/null 2>>"$RAW"
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data.pop('mfa_not_asserted', None)  # the filter keys are the stance; the marker must not ride beside them
+data['identityProviders'][0]['config']['filteredByClaim'] = 'true'
+data['identityProviders'][0]['config']['claimFilterName'] = 'amr'  # no stand-in client carries an amr mapper
+data['identityProviders'][0]['config']['claimFilterValue'] = 'otp'
+open(path, 'w').write(json.dumps(data, indent=2) + '\n')
+EOF
+  cap "$KRATE" auth apply; ap_rc=$?
+  cap realm_state --expect "$plan"; rs_rc=$?; ev="$(realm_diffs "$CAP")"
+  [[ $ap_rc -eq 0 && $rs_rc -eq 0 ]]; b=$?
+  cap "$STUB" add-user --project "$PROJECT" --out "$STUB_DIR" ping-mfa APP-KAFKA-VIEWERS; ad_rc=$?
+  [[ $ad_rc -eq 0 || "$CAP" == *"already exists"* ]]; d=$?
+  user_uid="$(p18_user_ids)"; e=$?
+  [[ $e -eq 0 ]] && ! grep -q -E '[0-9a-f-]{36}' <<< "$user_uid"; e=$?
+  events_before="$(p18_events)"; h=$?
+  refused="$(login_probe ping-mfa)"
+  sleep 2
+  events_after="$(p18_events)"; h=$((h + $?))
+  [[ $h -eq 0 && "$events_before" =~ ^[0-9]+$ && "$events_after" =~ ^[0-9]+$ && $events_before -lt 200 && $events_after -lt 200 && $((events_after - events_before)) -eq 1 ]]; h=$?
+  user_uid="$(p18_user_ids)"; f=$?
+  [[ $f -eq 0 ]] && ! grep -q -E '[0-9a-f-]{36}' <<< "$user_uid"; f=$?
+  [[ "$refused" == error* && "$refused" == *"502"* && "$refused" == *"/identity/realms/krate/"* ]]; g=$?
+  # Withdrawn the operator's way: the site switches to the opt-out (P2's saved plan: the marker, no claim keys), auth apply updates the provider.
+  cp "$STATE/plan.saved" "$plan"; chmod 644 "$plan"
+  cap "$KRATE" auth apply; wd_rc=$?
+  [[ $wd_rc -eq 0 ]] && grep -q 'provider updated' <<< "$CAP" && ! grep -q -E 'Identity provider pingfederate: No changes$' <<< "$CAP"; w=$?
+  cap realm_state --expect "$plan"; rs2_rc=$?
+  p18_clean; e2=$?
+  [[ $rs2_rc -eq 0 && $e2 -eq 0 ]]; k=$?
+  after="$(login_probe ping-mfa)"
+  [[ "$after" == ok* ]]; l=$?
+  user_uid="$(p18_user_ids | grep -o -E '[0-9a-f-]{36}' | head -1)"
+  [[ -n "$user_uid" ]] && kcadm_master delete "users/$user_uid" -r krate >/dev/null 2>&1
+  [[ $a -eq 0 && $b -eq 0 && $c -eq 0 && $d -eq 0 && $e -eq 0 && $f -eq 0 && $g -eq 0 && $h -eq 0 && $w -eq 0 && $k -eq 0 && $l -eq 0 ]]; st=$?
+  ok_if P18 3 P "$st" "MFA stance (enforce-if-asserted): the opted-out plan brokers ping-viewer (${before%%; hops*}; pre-filter control); preflight refused the plan that states no MFA stance (exit $pf_rc: ${stance:-not phrased}); the claim filter (filteredByClaim=true, claimFilterName amr, claimFilterValue otp) applied via auth apply (exit $ap_rc; realm vs plan exit $rs_rc: ${ev:-identical}); fresh stand-in user ping-mfa (no realm user before: exit $e) refused: ${refused%%; hops*} (no realm user after: exit $f), IDENTITY_PROVIDER_LOGIN_ERROR(identity_provider_login_failure) events ${events_before:-?} → ${events_after:-?} (+1 and both below the 200-event read cap: exit $h); filter withdrawn by switching the site to the opt-out: auth apply exit $wd_rc printed 'provider updated' and not 'No changes' (exit $w), realm matches the plan (exit $rs2_rc), the live provider carries none of the three keys (exit $e2; both together: exit $k); the same user signs in right after (${after%%; hops*}), its realm user removed afterwards. Mechanism asserted at the stand-in, not yet observed live; the tenant's assertion policy is site work (site mfa_not_asserted today: MFA enforced at Ping only)"
+
   # ── P14: the plan removed + auth apply → provider, mappers and flows gone, browser flow rebound, local login on the default path ──
+  jb="$(grep -c ' apply removed identity provider' "$JOURNAL" 2>/dev/null || true)"  # lines before P14's own apply: the term below needs a NEW line
   rm -f "$plan"
   cap "$KRATE" auth apply; rc=$?
   cap realm_state --expect-absent; rc2=$?; ev="$(realm_diffs "$CAP")"
-  journal_has ' apply removed identity provider'; j=$?
+  [[ "$(grep -c ' apply removed identity provider' "$JOURNAL")" -gt "${jb:-0}" ]]; j=$?
   before="$(curl -sk -o /dev/null -w '%{redirect_url}' --max-time 20 "$BASE/oauth2/authorization/keycloak")"
   after="$(curl -sk -o "$STATE/p14.html" -w '%{http_code}' --max-time 20 "$before")"; names="$(grep -c 'kc-form-login' "$STATE/p14.html")"; rm -f "$STATE/p14.html"
   [[ $rc -eq 0 && $rc2 -eq 0 && $j -eq 0 && "$after" == 200 && "$names" -ge 1 ]]; st=$?
-  ok_if P14 3 P "$st" "plan file removed; auth apply exit $rc; realm: ${ev:-provider gone, no krate flow, browserFlow browser}; journal 'apply removed identity provider'; Kafbat's default path → realm auth answers HTTP $after with the login form ($names form) instead of the broker redirect"
+  ok_if P14 3 P "$st" "plan file removed; auth apply exit $rc; realm: ${ev:-provider gone, no krate flow, browserFlow browser}; journal gained an 'apply removed identity provider' line (${jb:-0} before this apply); Kafbat's default path → realm auth answers HTTP $after with the login form ($names form) instead of the broker redirect"
 
   # ── P15: identity up on the existing realm reconciles CONFIGURE_TOTP default=false and re-applies the provider from the plan ──
   cp "$STATE/plan.saved" "$plan"; chmod 644 "$plan"

@@ -2100,6 +2100,25 @@ cmd_identity_users() {
 # Change a Keycloak credential in its authoritative store first, then in .env,
 # then recreate the consumer and verify. A value is generated unless --value
 # reads one from stdin (never from an argument).
+# `identity rotate` of a secret the plan carries ends in a read of the PingFederate plan: the
+# provider update (PING_KEYCLOAK_CLIENT_SECRET) or the preflight of the kafka-ui recreate
+# (KEYCLOAK_KAFBAT_CLIENT_SECRET in runtime.yml mode). Both come after the first write, and both
+# refuse a plan that states no MFA stance, so the plan is read through the same validator
+# (identity.py broker_plan) before preparation syncs image pins in .env: a refusal leaves .env, Keycloak and the
+# containers as they were.
+identity_rotate_plan_check() {
+  local plan="$SCRIPT_DIR/$IDENTITY_IDP_PLAN"
+  case "$1" in
+    PING_KEYCLOAK_CLIENT_SECRET) ;;
+    KEYCLOAK_KAFBAT_CLIENT_SECRET) [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml ]] || return 0 ;;
+    *) return 0 ;;
+  esac
+  [[ -f "$plan" ]] || return 0
+  command -v python3 >/dev/null || die "python3 is required for krate identity"
+  python3 "$(sso_dir)/identity.py" broker --plan "$plan" provider >/dev/null \
+    || die "Nothing was rotated: $IDENTITY_IDP_PLAN is refused (see above). Fix the site file, run krate auth configure <site.json>, then rotate again."
+}
+
 cmd_identity_rotate() {
   local key="${1:-}" value state client cid id json q
   case "$key" in
@@ -2110,6 +2129,7 @@ cmd_identity_rotate() {
     *) die "Usage: krate identity rotate {KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET} [--value] | PING_KEYCLOAK_CLIENT_SECRET --value" ;;
   esac
   [[ $# -eq 1 || "${2:-}" == --value ]] || die "Usage: krate identity rotate <KEY> [--value]   (--value reads the new value from stdin)"
+  identity_rotate_plan_check "$key"
   prepare_identity_env; require_env
   identity_lock
   state="$(identity_state)" || exit 1

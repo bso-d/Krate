@@ -49,6 +49,14 @@ rules to the configured cluster names.
 | Neither or missing claim | SSO access denied |
 | Shared Kafbat account | Admin access only when SSO is off (`KAFKA_UI_AUTH_CONFIG=local.yml`); not accepted while SSO is active, because Kafbat then has no form login |
 
+Ask IAM whether PingFederate puts an MFA assertion in the ID token itself (not
+only in the userinfo response): a claim such as `amr` or `acr`, and the value it
+carries. If it does, the operator can have Keycloak refuse a sign-in whose ID
+token lacks that claim or value (`mfa_claim_name` and `mfa_claim_value` in the
+site file, see the [setup guide](dual-login.md)). If it does not, the operator
+records that MFA for SSO users is enforced at PingFederate only
+(`mfa_not_asserted`). The site file must state one of the two.
+
 KSQL has no safe read-only execute right in this setup, so Viewer cannot run
 KSQL. Kafbat UI roles do not secure direct Kafka producer or consumer access.
 An AD group change applies at the next app sign-in. End active Kafbat sessions
@@ -73,7 +81,8 @@ downloads images before offline delivery.
 
 ## 4. Give the operator these values
 
-Give the non-secret values above and deliver the PingFederate client secret
+Give the non-secret values above, the MFA claim name and value (or the statement
+that none is asserted), and deliver the PingFederate client secret
 through the approved secret process. The operator uses the
 [setup guide](dual-login.md). The Keycloak public URL must equal the app URL
 plus `/identity`.
