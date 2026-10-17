@@ -60,7 +60,7 @@ CANDIDATE_ARG=""
 REPO_ARG=""
 PUBLIC_HOST=""          # Phase 4: the non-loopback public name (--public-host)
 SESSION_MAX_HOURS=""    # Phase 4a/4b companion runs: KEYCLOAK_SESSION_MAX_HOURS=N (--session-max-hours)
-BROWSER_MODE=container  # container (default, the walked shape) | local (the fixture's own Mac/family host) | agent (a Mac agent over the rendezvous, TOPOFIX F4)
+BROWSER_MODE=container  # container (default, the walked shape) | agent (a Mac agent over the rendezvous, TOPOFIX F4)
 RENDEZVOUS=""           # --browser agent only: the guest directory shared with the Mac agent
 REND_NONCE=""           # --browser agent only: the run's rendezvous nonce from the Mac launcher (never printed)
 # Monitoring ports of the fixture (the defaults may be in use on a developer host);
@@ -101,10 +101,9 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
                    install without Makefile or git; its HEAD must be the --candidate commit, and the
                    installed product is compared with it (scripts/gate/candidate_binding.py)
   --stub-port N    Phase 3: the stand-in IdP's port on 127.0.0.1 (default $STUB_PORT; must be free)
-  --browser MODE   container (default: the walked krate-harness/playwright container vantage), local
-                   (the fixture's own host browser, when a run lives there) or agent (the Mac agent
-                   over the rendezvous, for a vzNAT VM fixture: TOPOFIX F4; the agent carries
-                   W5/W6-W7's row plan, and X rows through it are a later batch)
+  --browser MODE   container (default: the walked krate-harness/playwright container vantage) or
+                   agent (the Mac agent over the rendezvous, for a vzNAT VM fixture: TOPOFIX F4; the
+                   agent carries W5/W6-W7's row plan, and X rows through it are a later batch)
   --rendezvous DIR --browser agent only: the guest directory shared with the Mac agent
                    (scripts/gate/mac/agent.mjs hello + {schema,id,row,nonce} requests)
   --rendezvous-nonce TOKEN
@@ -173,7 +172,7 @@ if [[ -n "$SESSION_MAX_HOURS" ]]; then
 fi
 # ── browser vantage (TOPOFIX F3/F4/F9): the agent is the VM vantage; its preflight reads the
 # Mac agent's hello here, before anything is started, like the --repo checks above. ──
-case "$BROWSER_MODE" in container|local|agent) ;; *) echo "--browser must be container, local or agent: $BROWSER_MODE" >&2; exit 2 ;; esac
+case "$BROWSER_MODE" in container|agent) ;; *) echo "--browser must be container or agent: $BROWSER_MODE" >&2; exit 2 ;; esac
 agent_preflight() { # hello younger than 60 s, nonce-bound, skew <= 10 s, private mac_src_ip (F7), and the
   # gate_files digests of the Mac worktree must be exactly this runner's own copies (F4: the Mac
   # runs the very bytes the receipt binds)
@@ -258,7 +257,7 @@ case "$BROWSER_MODE" in
     esac
     agent_preflight
     ;;
-  local|container)
+  container)
     [[ -z "$RENDEZVOUS" && -z "$REND_NONCE" ]] \
       || { echo "--rendezvous/--rendezvous-nonce belong to --browser agent (they name the shared guest directory and its run token)" >&2; exit 2; }
     ;;

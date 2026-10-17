@@ -67,10 +67,13 @@ check: the pinned `nginx:1.27-alpine@sha256:…` reference does not resolve afte
 value of the installed `.env.template`); the check names the image it rendered with in the
 run log, and the S4 evidence reads `check-identity rc=…; py_compile of N gate helpers rc=…`. X1 needs the
 `krate-harness/playwright:1.60.0` image loaded from a saved archive (3.8 GB on
-disk, 0.94 GB gzipped, arm64), and J7 needs root. On a vzNAT VM fixture run with
-`--browser agent` that archive is no longer loaded into the guest at all: the
-browser and its Playwright module live on the Mac (`scripts/gate/mac/`), and the
-W5–W7 rows need neither image. The AG rows (below) need the air gap of the host's provisioning: the `krate-airgap` unit (`airgap.sh install`, v2.2 or later), its install record (`phase4_airgap.py install-record`), the bundle's python image and root or passwordless `sudo` for `iptables` and `journalctl`; without them they FAIL.
+disk, 0.94 GB gzipped, arm64), and J7 needs root. A `--phase 4c --browser agent` run
+on a vzNAT VM fixture needs neither image: its W5 and W6 rows run from the Mac
+(`scripts/gate/mac/`: the installed Chrome and its Playwright module live there)
+and W7 reads the guest's firewall, so that archive is not loaded into the guest
+for it. The 4a/4b stories (U15, X3, X4) still run in the guest's container
+vantage and need the archive; their Mac vantage is the story started on the Mac
+with `GATE_BROWSER_MAC=1`, as the X1 row describes. The AG rows (below) need the air gap of the host's provisioning: the `krate-airgap` unit (`airgap.sh install`, v2.2 or later), its install record (`phase4_airgap.py install-record`), the bundle's python image and root or passwordless `sudo` for `iptables` and `journalctl`; without them they FAIL.
 
 The runner refuses to start when another Krate installation runs on the host or
 when monitoring volumes of the edition's project already exist, because it would
@@ -345,7 +348,8 @@ TLS keeps the real name). `auth apply` starts a separate `sso/probe.py` process;
 the runner passes `KRATE_PROBE_CONNECT_IP=127.0.0.1` to it so the public
 discovery request reaches the same fixture proxy while still checking NAME in
 the certificate and the issuer document. Containers resolve NAME through their
-`extra_hosts` host-gateway entry. On the Mac vantage (`--browser agent`) the same
+`extra_hosts` host-gateway entry. On the Mac vantage (`GATE_BROWSER_MAC=1`, the story
+started on the Mac) the same
 name is mapped inside Chrome itself with `--host-resolver-rules=MAP NAME vm-ip,
 MAP * ~NOTFOUND, EXCLUDE vm-ip`: the name is resolved to the guest's NIC address,
 every other name is forced to fail so the browser stays offline, and nothing is
@@ -398,11 +402,13 @@ host carrying the `net::ERR_NAME_NOT_RESOLVED` fingerprint of the
 attempts into `external_attempts` and the row fails on any that is not
 Chrome-internal.
 
-The Mac vantage (TOPOFIX): a Phase 4 slice on a vzNAT VM fixture can run under
+The Mac vantage (TOPOFIX): a Phase 4 slice on a vzNAT VM fixture accepts
 `--browser agent --rendezvous DIR --rendezvous-nonce TOKEN`, driven by
 `scripts/gate/mac/run-vm-gate.sh` (battery/caffeinate/proxy preflights, the
 candidate worktree, the agent `scripts/gate/mac/agent.mjs`, the guest runner
-detached). The guest may ask the Mac agent for a planned row with nothing but a
+detached). Only the rows W5 and W6 of slice 4c go through the agent: under 4a/4b
+the stories (U15, X3, X4) keep the guest's container vantage, and X rows through
+the agent are a later batch. The guest may ask the Mac agent for a planned row with nothing but a
 `{schema, id, row, nonce}` request; the agent owns the row table, the fixed
 arguments, the pinned certificate (`certs/server.crt`), the wall-clock budget,
 one `limactl shell` command per guest read, one `limactl copy --backend=scp -r`

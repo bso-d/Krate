@@ -1181,6 +1181,34 @@ def check_topofix2(checks):
         e(w7_ubuntu(pass_sudo, 'echo "Status: unknown"') == '1|Status: unknown|ufw status unreadable (needs root or passwordless sudo)',
           'W7 (Ubuntu) fails on any first line that is neither Status: active nor Status: inactive (PRE-4)')
 
+    # F2: --browser knows container and agent only (`local` selected nothing and was only recorded in the receipt row), and the
+    # guide says what the code does: a 4c agent run needs neither image; the 4a/4b stories keep the guest's container vantage.
+    topo_runner_flat = '\n'.join(topo_runner_lines)
+    e('case "$BROWSER_MODE" in container|agent) ;; *) echo "--browser must be container or agent: $BROWSER_MODE" >&2; exit 2 ;; esac' in topo_runner_lines
+      and 'container)' in topo_runner_lines
+      and 'container|local' not in topo_runner_flat and 'local|container' not in topo_runner_flat and 'container, local' not in topo_runner_flat
+      and 'local (the fixture' not in topo_runner_text,
+      'the runner accepts --browser container or agent only: no `local` in the parser case, the second case, the usage text or the default comment (F2)')
+    # The behaviour is checked on the runner's own refusal line alone, never by running the runner: a runner that wrongly accepted
+    # the mode would go on to start a gate run (a mutant did, and recursed through this check).
+    bash_for_f2 = bash_binary()
+    browser_case = next((ln for ln in topo_runner_lines if ln.startswith('case "$BROWSER_MODE" in ') and ' exit 2 ;; esac' in ln), '')
+    if bash_for_f2 is not None and browser_case:
+        def browser_refusal(mode):
+            run = subprocess.run([bash_for_f2, '-c', 'BROWSER_MODE="$1"\n' + browser_case + '\necho reached', 'bash', mode], text=True, capture_output=True)
+            return run.returncode, run.stdout.strip(), run.stderr.strip()
+        e(browser_refusal('local') == (2, '', '--browser must be container or agent: local'),
+          f'`--browser local` is refused with exit 2 and the message (the runner\'s own refusal line); got {browser_refusal("local")!r} (F2)')
+        e(browser_refusal('container') == (0, 'reached', '') and browser_refusal('agent') == (0, 'reached', ''),
+          'the runner\'s refusal line lets container and agent through (F2)')
+    guide_flat = ' '.join(guide_text.split())
+    e('A `--phase 4c --browser agent` run on a vzNAT VM fixture needs neither image' in guide_flat
+      and "The 4a/4b stories (U15, X3, X4) still run in the guest's container vantage and need the archive" in guide_flat
+      and 'their Mac vantage is the story started on the Mac with `GATE_BROWSER_MAC=1`, as the X1 row describes' in guide_flat
+      and 'that archive is no longer loaded into the guest at all' not in guide_flat
+      and 'Only the rows W5 and W6 of slice 4c go through the agent' in guide_flat,
+      'the guide says what the code does: a 4c agent run needs neither image, the 4a/4b stories keep the guest container vantage and need the archive, only W5/W6 go through the agent (F2)')
+
 
 def check_k37_wiring(checks):
     """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""
