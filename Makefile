@@ -527,14 +527,14 @@ docker-rpms:
 >    # selinux-policy-targeted are what every RHEL host has. It no longer decides what
 >    # is bundled: the main set and optional/ are exact named dnf download lists
 >    # without --resolve (scripts/check-identity.py asserts that), so every package is
->    # built by one distro release (the builder's Rocky 9), never by whatever repos the
->    # target host has. iptables-nft, nftables and their libraries are not in the
+>    # built by one distro release (Rocky 9, the builder image), never by whatever repos
+>    # the target host has. iptables-nft, nftables and their libraries are not in the
 >    # baseline: a minimal or cloud host may lack them, so they are downloaded into
 >    # optional/ below (dnf download takes a named package whether or not the
 >    # builder has it installed).
 >    dnf install -y -q policycoreutils selinux-policy-targeted diffutils
 >    # No --resolve on either set: take exactly the named packages, so the bundle
->    # carries no dependency the builder's dnf picked from another release.
+>    # carries no dependency the builder dnf picked from another release.
 >    dnf download --destdir /output $$PKGS
 >    mkdir -p /output/optional
 >    dnf download --destdir /output/optional $$OPTIONAL
