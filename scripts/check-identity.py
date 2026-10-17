@@ -1662,6 +1662,16 @@ def check_topofix2(checks):
         e(head_case(candidate_sha, candidate_sha) == '0' and head_case(candidate_sha, candidate_sha[:9]) == '0'
           and head_case('', candidate_sha) == '1' and head_case('f' + candidate_sha[1:], candidate_sha) == '1' and head_case(candidate_sha, 'f' + candidate_sha[1:]) == '1',
           'guest_head_is_candidate accepts the candidate (full or abbreviated) and refuses an unreadable or different HEAD (T13)')
+    # the guide says what the review fixes made true (T16, T03, T02, T05, T17, T14, T13)
+    guide_flat = ' '.join((ROOT / 'sso/guides/identity-gate.md').read_text().split())
+    for sentence in ("read from the saved agent response, where the scan lives, and required to be present and valid",
+                     "built from `docker inspect` of every container of both Compose projects; a failed inspect fails the row",
+                     "a probe that found no route or scope proves nothing and fails",
+                     "the branch follows the fixture's OS (`/etc/os-release` `ID`/`ID_LIKE`: RHEL-family fixtures must run firewalld and fail without it",
+                     "whose target is `ACCEPT` as `firewall-cmd --info-zone=docker` reports it",
+                     "the launcher returns success only for a candidate-bound PASS",
+                     "and the guest checkout is at that candidate before anything starts"):
+        e(sentence in guide_flat, f'the guide must say: {sentence!r} (review T02/T03/T05/T13/T14/T16/T17)')
     e('RC=$((RC | 16))' in launcher_lines and any(ln.startswith('if OUTCOME_REASON="$(run_outcome "$RUNNER_RC"') for ln in launcher_lines),
       'the launcher turns a run that is not a candidate-bound PASS into a non-zero exit (T14)')
     e("agent_request" in topo_runner_text and 'CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request' in topo_runner_text
