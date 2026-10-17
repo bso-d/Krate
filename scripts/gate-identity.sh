@@ -14,6 +14,7 @@
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe [--phase 1|2|3|all] [--stub-port N]
 #   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test
+#   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test --session-max-hours 1
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1
 #
 # The fixture directory is a disposable checkout or a fixture installation whose
@@ -86,7 +87,7 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
   --session-max-hours N
                    Phase 4a/4b companion run: KEYCLOAK_SESSION_MAX_HOURS=N is set in the
                    fixture .env before the realm is created (the value applies at realm
-                   creation only), then REQUIRED_P1 plus U27 (4a) or U27 and V23 (4b) run,
+                   creation only), then REQUIRED_P1 plus U27 and K37 (4a) or U27 and V23 (4b) run,
                    and the receipt names N
   --candidate SHA  the commit the edition files come from, when the directory has no git (a bundle install);
                    it binds only with --repo, which compares the installed product bytes with it
@@ -151,7 +152,7 @@ if [[ -n "$SESSION_MAX_HOURS" ]]; then
   [[ "$SESSION_MAX_HOURS" =~ ^[0-9]+$ && "$SESSION_MAX_HOURS" -ge 1 ]] \
     || { echo "--session-max-hours must be a whole number of at least 1 (sso/identity.py KEYCLOAK_SESSION_MAX_HOURS)" >&2; exit 2; }
   [[ "$PHASE" == 4a || "$PHASE" == 4b ]] \
-    || { echo "--session-max-hours runs with --phase 4a or 4b only (the session-maximum rows are U27 and V23)" >&2; exit 2; }
+    || { echo "--session-max-hours runs with --phase 4a or 4b only (the session-maximum rows are U27, V23 and K37)" >&2; exit 2; }
 fi
 
 ED="$EDITION_DIR"
@@ -354,12 +355,12 @@ REQUIRED_X=(X1)
 # Phase 4 inventories (PHASE4-INSTRUCTIONS-v3.md section 5): a slice is REQUIRED_P1
 # plus its own rows, and it holds no Phase 2/3 ids (on an EPC edition directory the
 # Phase 2/3 rows would be NOT_RUN and finish() would turn that into INCOMPLETE).
-# The session-maximum rows (U27, V23) run only in the --session-max-hours companion
+# The session-maximum rows (U27, V23, K37) run only in the --session-max-hours companion
 # runs and are not part of the default inventories.
 REQUIRED_P4A=(U1 U2 U3 U4 U5 U6 U7 U8 U9 U10 U11 U12 U13 U14 U15 U16 U17 U18 U19 U20 U21a U21b U22 U23 U24 U25 U26 U28 U29 X3 Z4a)
 REQUIRED_P4B=(V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15 V16 V17 V18 V19 V20 V21 V22 V24 X4 Z4b)
 REQUIRED_P4C=(W1 W2 W3 W4)
-SESSION_P4A=(U27)
+SESSION_P4A=(U27 K37)
 SESSION_P4B=(U27 V23)
 phase4_session_ids() { case "$1" in 4a) printf '%s\n' "${SESSION_P4A[@]}" ;; 4b) printf '%s\n' "${SESSION_P4B[@]}" ;; esac; }
 # W3 (the foreign-source probe) follows the J7 pattern: on the Mac it runs (a)+(b)
@@ -1180,7 +1181,7 @@ EOF
 # harness/phase4/PHASE4-INSTRUCTIONS-v3.md); X3/X4 (screenshot stories), Z4a/Z4b
 # (the extended leak scans) and W1-W4 are the runner's. A --session-max-hours N
 # companion run sets N in fixture_env (before the realm is created) and runs
-# REQUIRED_P1 plus U27 (4a) or U27 and V23 (4b) only.
+# REQUIRED_P1 plus U27 and K37 (4a) or U27 and V23 (4b) only.
 in_inv() { # id inventory...: membership without a subshell
   local want="$1"; shift; local have
   for have in "$@"; do [[ "$have" == "$want" ]] && return 0; done
@@ -1955,13 +1956,15 @@ run_phase4() { # slice: 4a|4b|4c
   run_inv=("${inv[@]}")
   # Which helper produces which rows (section 5): "<script> <only|- for all> <id prefix>".
   # A companion --session-max-hours run executes U27 (through the Grafana helper) for
-  # both 4a and 4b, and V23 (through the Perses helper) for 4b; U27/V23 are the only
-  # rows of the companion inventory besides REQUIRED_P1.
+  # both 4a and 4b, V23 (through the Perses helper) for 4b and K37 (Kafbat's absolute
+  # session lifetime, through the Kafbat helper) for 4a: the Kafbat fork and its
+  # runtime.yml are the same in both slices, so one measurement per host is enough;
+  # U27/V23/K37 are the only rows of the companion inventory besides REQUIRED_P1.
   if [[ -n "$SESSION_MAX_HOURS" ]]; then
     run_inv=()
     while IFS= read -r id; do run_inv+=("$id"); done < <(phase4_session_ids "$slice")
     case "$slice" in
-      4a) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U") ;;
+      4a) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U" "$GATE_DIR/phase4_kafbat.py K37 K") ;;
       4b) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U" "$GATE_DIR/phase4_perses.py V23 V") ;;
     esac
   else
@@ -1980,35 +1983,39 @@ run_phase4() { # slice: 4a|4b|4c
     bringup_failed "$slice" "${run_inv[@]}"
     return
   fi
-  # A companion prepares the shared fixture once. Both timed observers then use
-  # read-only prepared preflights and start together; their setup must not race.
+  # A companion prepares the shared fixture once per helper that owns a timed row, one
+  # pass after the other (they must not race). The timed observers then use read-only
+  # prepared preflights and start together.
   if [[ -n "$SESSION_MAX_HOURS" ]]; then
     local prep_helper prep_tsv prep_rc
+    local -a prep_helpers=()
     case "$slice" in
-      4a) prep_helper="$GATE_DIR/phase4_grafana.py" ;;
-      4b) prep_helper="$GATE_DIR/phase4_perses.py" ;;
+      4a) prep_helpers=("$GATE_DIR/phase4_grafana.py" "$GATE_DIR/phase4_kafbat.py") ;;
+      4b) prep_helpers=("$GATE_DIR/phase4_perses.py") ;;
     esac
-    prep_tsv="$STATE/phase4-preparation.tsv"
     local -a prep_extra=()
     if [[ "$slice" == 4b ]]; then
       prep_extra=(--stub-dir "$STUB_DIR" --stub-port "$STUB_PORT" --stub-script "$STUB")
     fi
-    python3 -I "$prep_helper" run --edition-dir "$ED" --base-url "$BASE" \
-      --monitor-project "$MON_PROJECT" --state "$STATE" --prepare-only \
-      ${prep_extra[@]+"${prep_extra[@]}"} > "$prep_tsv" 2>>"$RAW" & CHILD=$!
-    wait "$CHILD" && prep_rc=0 || prep_rc=$?
-    CHILD=""
-    phase4_ingest "$prep_tsv" "$slice" '^$'
-    if [[ $prep_rc -ne 0 || "$(awk -F '\t' '$1=="setup" {print $2}' "$prep_tsv")" != PASS ]]; then
-      if [[ -z "${SEEN[${slice}-setup]:-}" ]]; then
-        record "${slice}-setup" "$slice" setup FAIL "shared companion preparation exited $prep_rc without a PASS setup row"
+    for prep_helper in "${prep_helpers[@]}"; do
+      prep_tsv="$STATE/phase4-preparation-$(basename "$prep_helper" .py).tsv"
+      python3 -I "$prep_helper" run --edition-dir "$ED" --base-url "$BASE" \
+        --monitor-project "$MON_PROJECT" --state "$STATE" --prepare-only \
+        ${prep_extra[@]+"${prep_extra[@]}"} > "$prep_tsv" 2>>"$RAW" & CHILD=$!
+      wait "$CHILD" && prep_rc=0 || prep_rc=$?
+      CHILD=""
+      phase4_ingest "$prep_tsv" "$slice" '^$'
+      if [[ $prep_rc -ne 0 || "$(awk -F '\t' '$1=="setup" {print $2}' "$prep_tsv")" != PASS ]]; then
+        if [[ -z "${SEEN[${slice}-setup]:-}" ]]; then
+          record "${slice}-setup" "$slice" setup FAIL "shared companion preparation ($(basename "$prep_helper")) exited $prep_rc without a PASS setup row"
+        fi
+        for id in "${run_inv[@]}"; do
+          crit="${id%%[0-9]*}"
+          record "$id" "$slice" "$crit" NOT_RUN "shared companion preparation failed; see $(basename "$prep_tsv")"
+        done
+        return
       fi
-      for id in "${run_inv[@]}"; do
-        crit="${id%%[0-9]*}"
-        record "$id" "$slice" "$crit" NOT_RUN "shared companion preparation failed; see phase4-preparation.tsv"
-      done
-      return
-    fi
+    done
   fi
   # The normal slice helper runs once. Companion observers start together and
   # are all owned by PHASE4_CHILDREN so an interrupt can stop every worker.

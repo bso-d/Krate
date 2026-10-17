@@ -201,12 +201,12 @@ request.
   `auth.oauth2.max-session-lifetime`) at every `auth apply`. The lifetime counts
   from the first request of the sign-in and applies however busy the session is:
   the first request after it that needs a sign-in (a click in the UI, an API call)
-  is answered with a redirect (302) to the Keycloak sign-in and nothing it asked
-  for is done; a request to a page that needs no sign-in is answered as anonymous;
-  either way the `SESSION` cookie is expired. A response that is already being
-  sent is not interrupted. The shared Admin login of `local.yml` mode has only
-  Spring's 30-minute idle limit and no maximum: the maximum belongs to the Keycloak
-  sign-in.
+  is answered with a redirect (302) to the Keycloak sign-in (gate row K37) and
+  nothing it asked for is done; a request to a page that needs no sign-in is
+  answered as anonymous; either way the `SESSION` cookie is expired. A response
+  that is already being sent is not interrupted. The shared Admin login of
+  `local.yml` mode has only Spring's 30-minute idle limit and no maximum: the
+  maximum belongs to the Keycloak sign-in.
 - Back-channel logout: the realm client `krate-ui` registers
   `http://kafka-ui:8080/logout/connect/back-channel/keycloak` (reachable only
   over the private `identity` network: the public proxy answers 404 for

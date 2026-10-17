@@ -12,7 +12,8 @@ slices in a fixed order — 4a Grafana, then 4b Perses, then 4c backing services
 A slice runs `REQUIRED_P1` plus its own inventory under a non-loopback public
 host (`--public-host NAME`, required for 4a/4b/4c and refused for 1-3), on the
 Mac and on both VMs; 4a and 4b each need one `--session-max-hours 1` companion
-receipt per host, and 4b additionally one Mac run at the shipped 8 h. A slice is
+receipt per host (the 4a companion also runs K37, Kafbat's absolute session
+lifetime), and 4b additionally one Mac run at the shipped 8 h. A slice is
 complete only with both receipts per host. Phase 4 rows are encoded from a live
 hand-walk of each slice (`harness/phase4/live4a|4b|4c/`, owner rule 11); a row
 whose walk has not landed is a NOT_RUN scaffold, so a slice receipt is
@@ -28,6 +29,7 @@ scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe      
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 2  # Phases 1 and 2 only
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 3 --stub-port 18444   # all three; the stand-in IdP on another port
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test   # Phase 1 + the Grafana slice
+scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test --session-max-hours 1   # companion run: REQUIRED_P1 + U27 + K37
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1   # companion run: REQUIRED_P1 + U27 + V23
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle: smoke run, unbound
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo             # the same with the full inventory (see below)
@@ -101,7 +103,7 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 | images | every `*_IMAGE` value of the installed edition template: digests on a git checkout, the offline runtime tags on a bundle host (compared through the product byte binding row) |
 | runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py`, `*.mjs` and `*.sh` (file list, sorted; `stub_idp.sh` is bound by this digest and linted by S3 with the runner), plus the commit (and dirty state) of the repository the runner was executed from |
 | host | OS, Docker, Compose, python, openssl versions |
-| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `REQUIRED_P3` with `--phase 3` or `all`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. For a Phase 4 slice (`--phase 4a\|4b\|4c`) the inventory is `REQUIRED_P1` plus the slice's own list (`REQUIRED_P4A`/`REQUIRED_P4B`/`REQUIRED_P4C` — no Phase 2/3 ids, and `X1` is not part of it); with `--session-max-hours N` it is `REQUIRED_P1` plus U27 (4a) or U27 and V23 (4b) only, and the receipt names N; `X3`/`X4` leave it under `--no-screenshots` like `X1`, and `W3` leaves it on a Linux host without root (or sudo) or without iproute2 (the J7 pattern; the Mac always runs its W3 variant). Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
+| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `REQUIRED_P3` with `--phase 3` or `all`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. For a Phase 4 slice (`--phase 4a\|4b\|4c`) the inventory is `REQUIRED_P1` plus the slice's own list (`REQUIRED_P4A`/`REQUIRED_P4B`/`REQUIRED_P4C` — no Phase 2/3 ids, and `X1` is not part of it); with `--session-max-hours N` it is `REQUIRED_P1` plus U27 and K37 (4a) or U27 and V23 (4b) only, and the receipt names N; `X3`/`X4` leave it under `--no-screenshots` like `X1`, and `W3` leaves it on a Linux host without root (or sudo) or without iproute2 (the J7 pattern; the Mac always runs its W3 variant). Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
 
 The required inventory is declared in the runner before anything runs
 (`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_P3`, `REQUIRED_X`, and for the Phase 4
@@ -253,6 +255,7 @@ Every id is one row of the receipt.
 | K28 | anonymous `/api/clusters` | redirects to `/oauth2/authorization/keycloak` on the public origin |
 | K33 | `Host: evil.example.test` on the public port (Keycloak sign-in mode sets `KRATE_PROXY_PUBLIC_HOST` to the public authority, port included; the raw header is compared); the public authority as Host; plain HTTP on the HTTP port with `Host: localhost` | 444: connection closed without a response (curl exit 52); the public authority answers 302; plain HTTP answers 301 to the public origin (the HTTPS port carried by the public authority, not by the plain-HTTP Host) |
 | K34 | `gen-cert` then `auth apply`, then a second `auth apply` | `KRATE_PROXY_CONF_SHA` changed and the proxy container was recreated; the second apply keeps the container; the proxy serves |
+| K37 | helper (4a `--session-max-hours N` companion only: `scripts/gate/phase4_kafbat.py`, one `--prepare-only` pass after the Grafana helper's, then `--prepared --only K37 --session-max-minutes 60·N`) | M = 60·N min, counted from the first request of the sign-in; the viewer `p4kmax` signs in to Kafbat (the TOTP codes come from the per-user ledger) and requests `/api/clusters` every 30 s, so the idle limit never applies. `cadence_60s`: the first request is within 60 s of the sign-in and none are more than 60 s apart; `early_200`: every request before M−1 min answers 200; `refused_M10_M60`: the first request at or after M+10 s, no later than M+1 min, is a 302 to `/oauth2/authorization/keycloak`, every refusal on the way (the one that ended the session included) is such a redirect, and no 200 follows the first refusal; `ended_logged`: the Kafbat log gained `Ended a session that reached its maximum lifetime of PT<N>H` (so the refusal is the maximum's, not a restart or a logout); `stays_refused`: the dead `SESSION` cookie, sent alone 30 s later, is refused again; `new_login_ok`: a new sign-in of the same user in a new browser (password and TOTP) works and its first request answers 200. The preparation proves `auth.oauth2.max-session-lifetime` in `runtime.yml` is Nh, the realm's `ssoSessionMaxLifespan` is 3600·N and the running Kafbat's last start logged `Absolute session lifetime: PT<N>H`. Runs in parallel with U27, about M + 3 min |
 | M1/M2 | see G above | |
 | K17 | EPC | informational row (`owned by runner`): the EPC Compose rendering and CLI parity are S1/S4; the EPC runtime is the Phase 1 gate run inside the Rocky 9 VM (`--no-static --no-screenshots`, receipt under `harness/gate-receipts/epc-vm-<sha>/`) |
 
@@ -310,7 +313,7 @@ Slices are gated separately and in the fixed order 4a, then 4b, then 4c. A slice
 runs `REQUIRED_P1` (with its Z1 scan; X1's story does not run and is not in the
 inventory) plus its own rows: `REQUIRED_P4A` (U1–U20, U21a, U21b, U22–U26, U28,
 U29, X3, Z4a), `REQUIRED_P4B` (V1–V22, V24, X4, Z4b), `REQUIRED_P4C` (W1–W4).
-No Phase 4 inventory holds a Phase 2/3 id. The session-maximum rows U27 (4a) and
+No Phase 4 inventory holds a Phase 2/3 id. The session-maximum rows U27+K37 (4a) and
 U27+V23 (4b) run only in the `--session-max-hours N` companion receipts and are
 not part of the default inventories; a slice is complete with both receipts per
 host (default and `--session-max-hours 1`), and 4b also with the Mac's
@@ -347,7 +350,8 @@ Phase 3's P2 requires. `--session-max-hours N` sets
 (the realm plan applies it at realm creation only), and the receipt names N.
 
 Rows: the slice helpers `scripts/gate/phase4_grafana.py` (U rows) and
-`scripts/gate/phase4_perses.py` (V rows) print TSV rows
+`scripts/gate/phase4_perses.py` (V rows), and `scripts/gate/phase4_kafbat.py` (K37,
+in the 4a companion run only), print TSV rows
 `<id>\tPASS|FAIL|NOT_RUN\t<evidence>` with `phase2_kafbat.py`'s exit codes; the
 runner-owned rows are X3/X4 (screenshot stories `screenshots-grafana.mjs` /
 `screenshots-perses.mjs`, own directories and `manifest.tsv` with sha256; X1's
@@ -363,7 +367,7 @@ long rows run in background threads where they do not disrupt each other:
 V15's Keycloak outage runs before V10's 36-minute uninterrupted activity walk;
 V7/V8 run alongside V10 on separate users, and V24 follows their joins and
 V20's final snapshot. U29 takes 17 minutes; U10/U11 and V7/V8 are bounded by
-330/420 seconds; U27/V23 run in the session companions. Runtime secrets (JWTs,
+330/420 seconds; U27/V23/K37 run in the session companions. Runtime secrets (JWTs,
 cookies, tokens, enrolled passwords and TOTP seeds) go to
 `$STATE/phase4-secrets.txt`, which the runner adds to its leak set. W3 follows
 the J7 pattern: on the Mac it always runs, variant (a)+(b) from the Mac's LAN

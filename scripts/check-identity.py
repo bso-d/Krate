@@ -615,9 +615,11 @@ def check_gate_scripts(checks):
     """The gate helpers import and their pure helpers behave; --help works under python3 -I (a self-recursive helper once passed every static tool)."""
     import types
     e = lambda cond, msg: checks.expect(cond, 'gate scripts: ' + msg)  # noqa: E731
-    for name in ('scripts/gate/phase2_kafbat.py', 'scripts/gate/keycloak_login_flow.py'):
+    for name in ('scripts/gate/phase2_kafbat.py', 'scripts/gate/keycloak_login_flow.py', 'scripts/gate/phase4_kafbat.py'):
         result = subprocess.run([sys.executable, '-I', str(ROOT / name), '--help'], text=True, capture_output=True)
         e(result.returncode == 0 and 'usage' in result.stdout.lower(), f'{name} --help must exit 0; got {result.returncode}: {result.stderr.strip()[:120]}')
+    k37 = subprocess.run([sys.executable, '-I', str(ROOT / 'scripts/gate/phase4_kafbat.py'), '--selftest'], text=True, capture_output=True)
+    e(k37.returncode == 0 and 'selftest ok' in k37.stdout, f'phase4_kafbat.py --selftest (the K37 windows) must pass; got {k37.returncode}: {k37.stderr.strip()[:120]}')
     spec = importlib.util.spec_from_file_location('phase2_kafbat', ROOT / 'scripts/gate/phase2_kafbat.py')
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -837,6 +839,38 @@ def check_gate_scripts(checks):
       'interval; got %s keeps in %.0f s' % (u9_keeps, u9_now[0] - 1000.0))
 
 
+def check_k37_wiring(checks):
+    """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""
+    e = lambda cond, msg: checks.expect(cond, 'gate row K37: ' + msg)  # noqa: E731
+    if str(ROOT / 'scripts/gate') not in sys.path:
+        sys.path.insert(0, str(ROOT / 'scripts/gate'))
+    kafbat = __import__('phase4_kafbat')
+    phase2 = __import__('phase2_kafbat')
+    e(kafbat.CASES == ['K37'] and kafbat.Gate.CASES == ['K37'] and kafbat.Gate.SLICE == '4a',
+      f'phase4_kafbat.py owns exactly K37 in slice 4a; got {kafbat.CASES} / {kafbat.Gate.SLICE}')
+    e('K37' not in phase2.CASES, 'phase2_kafbat.CASES must not print K37 (it would be ingested into every Phase 2 receipt as a NOT_RUN row)')
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e(re.search(r'^SESSION_P4A=\(U27 K37\)$', runner, re.M) is not None, 'the 4a companion inventory SESSION_P4A must be (U27 K37)')
+    e(re.search(r'^SESSION_P4B=\(U27 V23\)$', runner, re.M) is not None, 'the 4b companion inventory SESSION_P4B must stay (U27 V23): K37 runs once per host, in 4a')
+    e(re.search(r'^REQUIRED_P(?:2|4[ABC])=\(.*\bK37\b', runner, re.M) is None, 'K37 belongs to no default inventory, only to the companion')
+    e('4a) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U" "$GATE_DIR/phase4_kafbat.py K37 K") ;;' in runner,
+      'the 4a companion must run phase4_kafbat.py --only K37 beside U27')
+    e('4a) prep_helpers=("$GATE_DIR/phase4_grafana.py" "$GATE_DIR/phase4_kafbat.py") ;;' in runner,
+      'the 4a companion must prepare the K37 viewer after the Grafana preparation')
+    e('phase4_kafbat' not in runner[runner.index('4b) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U"'):].split('\n', 1)[0],
+      'the 4b companion must not run K37')
+    guide = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    for row in ('U27', 'V23', 'K37'):
+        e(re.search(r'^\| %s \|' % row, guide, re.M) is not None, f'identity-gate.md must have a row for the companion row {row}')
+    k37_row = next((line for line in guide.splitlines() if line.startswith('| K37 |')), '')
+    for probe in kafbat.PROBES:
+        e(f'`{probe}`' in k37_row, f'the identity-gate.md K37 row must describe the probe {probe}')
+    e('Ended a session that reached its maximum lifetime of PT<N>H' in k37_row and 'Absolute session lifetime: PT<N>H' in k37_row,
+      'the identity-gate.md K37 row must name the two Kafbat log lines the row reads')
+    e('gate row K37' in (ROOT / 'sso/guides/dual-login.md').read_text(),
+      'dual-login.md must cite gate row K37 where it states the absolute session lifetime')
+
+
 def check_phase4_monitor_paths(checks):
     """The Phase IV gate must find monitoring in both source and offline bundle layouts."""
     from unittest.mock import patch
@@ -846,6 +880,7 @@ def check_phase4_monitor_paths(checks):
     sys.path.insert(0, str(ROOT / 'scripts/gate'))
     grafana = __import__('phase4_grafana')
     perses = __import__('phase4_perses')
+    kafbat = __import__('phase4_kafbat')
     phase2 = __import__('phase2_kafbat')
     runner = (ROOT / 'scripts/gate-identity.sh').read_text()
     start = runner.index('MON_DIR="$ED/monitoring"')
@@ -853,7 +888,7 @@ def check_phase4_monitor_paths(checks):
     select_shell = runner[start:stop]
 
     def check_case(edition, expected):
-        for module in (grafana, perses):
+        for module in (grafana, perses, kafbat):
             gate = object.__new__(module.Gate)
             gate.edition = str(edition)
             e(gate.mon_dir() == str(expected),
@@ -891,7 +926,7 @@ def check_phase4_monitor_paths(checks):
         expected = base / 'monitoring'
         check_case(missing_edition, expected)
         e(not (expected / '.env').is_file(), 'missing monitoring/.env fixture must have no false positive')
-        for module in (grafana, perses):
+        for module in (grafana, perses, kafbat):
             gate = object.__new__(module.Gate)
             gate.edition = str(missing_edition)
             gate.project = 'path-contract'
@@ -5094,7 +5129,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_phase4_monitor_paths,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
