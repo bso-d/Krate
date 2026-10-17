@@ -88,7 +88,16 @@ def main():
     args = parser.parse_args()
     output = ROOT / 'dist/kafbat-ui' / args.arch
     output.mkdir(parents=True, exist_ok=True)
-    source = args.source.resolve() if args.source else output / 'upstream'
+    if args.source:
+        source = args.source.resolve()
+    else:
+        # Auto-managed checkouts are keyed by the revision and the patch bytes, so a
+        # changed patch always starts from a clean v1.5.0 checkout instead of failing
+        # the reverse/forward checks against a checkout the old patch already changed.
+        key = hashlib.sha256(REVISION.encode())
+        for patch in (PATCH, AUTH_PATCH):
+            key.update(patch.read_bytes())
+        source = output / ('upstream-' + key.hexdigest()[:12])
     if not source.exists():
         run('git', 'clone', '--depth', '1', '--branch', 'v1.5.0', REPOSITORY, str(source))
     revision = run('git', 'rev-parse', 'HEAD', cwd=source, capture=True)
