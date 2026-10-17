@@ -961,6 +961,75 @@ def check_gate_scripts(checks):
       'interval; got %s keeps in %.0f s' % (u9_keeps, u9_now[0] - 1000.0))
 
 
+def js_lines(text):
+    """The code lines of a JS source, stripped, with comment-only lines and trailing `// ...` comments removed.
+    Every pin built on these lines is a whole-line match: a claim kept in a comment cannot satisfy it (TR2 G6)."""
+    out = []
+    for raw in text.splitlines():
+        line = re.sub(r'\s//(?:\s.*)?$', '', raw).strip()
+        if line and not line.startswith('//'):
+            out.append(line)
+    return out
+
+
+def check_topofix2(checks):
+    """TOPOFIX2 fix round (harness/phase4-completion/w2/TOPOFIX2-BRIEF.md): behaviour pins for the defects the first read of the
+    Mac agent vantage found (PRE-0..PRE-7, F1-F8, G5-G7). Pins are whole-line matches on the code lines (js_lines) or
+    multiline regexes anchored at the line start, each with a mutant in harness/phase4-completion/raw/TOPOFIX2/mutants.log."""
+    e = lambda cond, msg: checks.expect(cond, 'topofix2: ' + msg)  # noqa: E731
+    agent_text = (ROOT / 'scripts/gate/mac/agent.mjs').read_text()
+    agent_lines = js_lines(agent_text)
+    agent_code = '\n'.join(agent_lines)
+    remote_text = (ROOT / 'scripts/gate/browser_remote.py').read_text()
+
+    # PRE-0: the rendezvous lives in the GUEST (the VM is --mount-none). Every operation on it is a guest operation
+    # through limactl; nothing in the agent touches a Mac file named after RDV, a claim or a guest temp.
+    for line in (
+        'const GUEST_PATH_RE = /^\\/[A-Za-z0-9._/-]+$/;',
+        "if (typeof p !== 'string' || !GUEST_PATH_RE.test(p) || posix.normalize(p) !== p) {",
+        "function q(p) { return `'${guestPath('guest command path', p)}'`; }",
+        "if (!RDV.startsWith(GUEST_ROOT + '/')) die('--rendezvous must sit under --guest-root');",
+        "return sh('limactl', ['shell', VM, '--', 'sh', '-c', script], { timeout: opts.timeout || 30000, allowFail: opts.allowFail });",
+        "return guestSh(`ls -1A -- ${q(RDV)}`).out.split('\\n').filter((x) => /^req-[0-9]{4}\\.json$/.test(x)).sort();",
+        'const src = `${RDV}/${file}`;',
+        'const claimed = `${src}.claimed-${process.pid}`;',
+        'if (guestSh(`mv -- ${q(src)} ${q(claimed)}`, { allowFail: true }).status !== 0) return null;',
+        'try { parsed = guestReadJson(claimed, RDV); } catch (e) {',
+        "return JSON.parse(guestReadFile(fixedPath, mustBeUnder).toString('utf8'));",
+        "guestPut('agent-hello.json', JSON.stringify(hello, null, 2) + '\\n');",
+        'const guestTmp = `${RDV}/.${name}.${process.pid}.tmp`;',
+        'writeFileSync(local, text, { mode: 0o600 });',
+        'chmodSync(local, 0o600);',
+        "sh('limactl', ['copy', '--backend=scp', local, `${VM}:${guestTmp}`], { timeout: 60000 });",
+        'guestSh(`mv -f -- ${q(guestTmp)} ${q(`${RDV}/${name}`)}`);',
+        'rmSync(local, { force: true });',
+        'dropClaimed(claimedPath);',
+        "if (!Number.isInteger(parsed.id) || parsed.id < 1 || parsed.id > 9999) {",
+    ):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (PRE-0: the rendezvous is a guest directory reached only through limactl; a mutant that keeps it in a comment fails)')
+    e(re.search(r"^const RDV = guestPath\('--rendezvous', ", agent_code, re.M) is not None
+      and re.search(r"^const GUEST_ROOT = guestPath\('--guest-root', ", agent_code, re.M) is not None
+      and re.search(r"^const GUEST_CERT_PATH = guestPath\('--guest-cert', ", agent_code, re.M) is not None,
+      'agent.mjs validates --rendezvous, --guest-root and --guest-cert as guest paths (no resolve(): they are not Mac paths)')
+    e(re.search(r"^try \{ guestSh\(`rm -f -- \$\{q\(claimedPath\)\}`\); \} catch \(e\)", agent_code, re.M) is not None,
+      'agent.mjs removes a claimed request with one guest `rm -f --` (after its response or its refusal)')
+    e(re.search(r"^const poll = setInterval\(\(\) => \{\n(?:.*\n)*?\}, POLL_INTERVAL_MS\);", agent_code, re.M) is not None
+      and 'guestListRequests()' in agent_code,
+      'agent.mjs polls the guest rendezvous through guestListRequests() on POLL_INTERVAL_MS')
+    e(re.search(r"\b(?:writeFileSync|renameSync|readFileSync|readdirSync|rmSync|existsSync|statSync|mkdirSync|copyFileSync|unlinkSync|openSync|chmodSync)\([^;\n]*\b(?:RDV|claimed|claimedPath|guestTmp|src)\b", agent_code) is None,
+      'agent.mjs must not apply a Mac file-system call to the rendezvous (RDV, a claim, a guest temp): PRE-0, the VM is --mount-none')
+    e('renameSync' not in agent_code and 'readdirSync(RDV' not in agent_code and 'resolve(args.rendezvous' not in agent_code
+      and "resolve(args['guest-root']" not in agent_code and 'addSecret' not in agent_code and 'GUEST_STATE_DIR' not in agent_code,
+      'agent.mjs carries no Mac rename, no Mac rendezvous listing, no resolve() of a guest path, no addSecret and no GUEST_STATE_DIR (PRE-0)')
+
+    # PRE-1: the requester sends the int id, waits for resp-<4 digits>.json and compares the int.
+    e(re.search(r"^guestPut\(`resp-\$\{String\(req\.id\)\.padStart\(4, '0'\)\}\.json`, ", agent_code, re.M) is not None,
+      'agent.mjs writes the response as resp-<4 digit id>.json, the name browser_remote.py waits for (PRE-1)')
+    remote_lines = [ln.strip() for ln in remote_text.splitlines()]
+    e('if resp.get("nonce") != nonce or resp.get("id") != int(req_id):' in remote_lines and 'resp.get("id") != req_id' not in remote_text,
+      'browser_remote.py compares the response id with int(req_id): the request carries the int and the file name the padded string (PRE-1)')
+
+
 def check_k37_wiring(checks):
     """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""
     e = lambda cond, msg: checks.expect(cond, 'gate row K37: ' + msg)  # noqa: E731
@@ -5577,7 +5646,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,

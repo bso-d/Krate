@@ -102,7 +102,7 @@ def wait_response(rendezvous, req_id, timeout, nonce):
             if keys != want:
                 sys.stderr.write("browser_remote: response carries [%s]; expected [%s]\n" % (keys, want))
                 sys.exit(6)
-            if resp.get("nonce") != nonce or resp.get("id") != req_id:
+            if resp.get("nonce") != nonce or resp.get("id") != int(req_id):
                 sys.stderr.write("browser_remote: response nonce/id do not bind this run (nonce mismatch); refusing it\n")
                 sys.exit(5)
             return resp
