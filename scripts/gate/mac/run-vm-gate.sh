@@ -92,6 +92,24 @@ guest_head_is_candidate() { # head candidate: the guest checkout's HEAD starts w
   [[ -n "$1" && "$1" == "$2"* ]]
 }
 
+# Review round 4: the directory name is not proof of candidate identity. Check the
+# actual checkout and every gate source (tracked or untracked) before executing the agent.
+candidate_worktree_ok() { # worktree candidate: fail closed on either unreadable Git query
+  local head changes
+  head="$(git -C "$1" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || {
+    echo "run-vm-gate: cannot read the candidate worktree HEAD at $1" >&2; return 1;
+  }
+  [[ "$head" == "$2" ]] || {
+    echo "run-vm-gate: the candidate worktree $1 is at '$head', not $2" >&2; return 1;
+  }
+  changes="$(git -C "$1" status --porcelain=v1 --untracked-files=all -- scripts/gate scripts/gate-identity.sh 2>/dev/null)" || {
+    echo "run-vm-gate: cannot read gate-source cleanliness at $1" >&2; return 1;
+  }
+  [[ -z "$changes" ]] || {
+    echo "run-vm-gate: the candidate worktree $1 has changed or untracked gate source" >&2; return 1;
+  }
+}
+
 # ── preconditions ──
 PREFLIGHT_FAIL=0
 if ! pmset -g batt 2>/dev/null | grep -q 'AC Power'; then
@@ -128,6 +146,7 @@ else
   git -C "$REPO" worktree add "$WT" "$CANDIDATE" >/dev/null 2>&1
   echo "run-vm-gate: ledger row for the operator (Serena project/keycloak-first-resources): created worktree $WT from $CANDIDATE; remove it with git worktree remove and mark the row removed when the run is harvested"
 fi
+candidate_worktree_ok "$WT" "$CANDIDATE" || PREFLIGHT_FAIL=1
 [[ -f "$WT/scripts/gate/browser-launch.mjs" && -f "$WT/scripts/gate/mac/agent.mjs" && -f "$WT/scripts/gate/browser_remote.py" ]] \
   || { echo "run-vm-gate: the candidate worktree $WT lacks the gate files this launcher binds (browser-launch.mjs, mac/agent.mjs, browser_remote.py)" >&2; PREFLIGHT_FAIL=1; }
 (( PREFLIGHT_FAIL == 0 )) || exit 2
@@ -209,7 +228,10 @@ fi
 # ── stop the agent and harvest ──
 kill "$AGENT_PID" 2>/dev/null || true
 wait "$AGENT_PID" 2>/dev/null || true
-limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out" "$OUT/agent-from-guest" 2>/dev/null || echo "run-vm-gate: note: no agent-out tree was delivered (the rows may not have run)"
+if ! limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out" "$OUT/agent-from-guest" 2>/dev/null; then
+  echo "run-vm-gate: FAIL: could not harvest the agent-out tree; continuing to collect the guest receipt" >&2
+  RC=$((RC | 4))
+fi
 RECEIPT_GUEST="$(limactl shell "$VM" -- sh -c "test -d $GUEST_RECEIPT && echo $GUEST_RECEIPT" 2>/dev/null | tr -d '[:space:]' || true)"
 if [[ -n "${RECEIPT_GUEST:-}" ]]; then
   limactl copy --backend=scp -r "$VM:$RECEIPT_GUEST" "$OUT/$(basename "$RECEIPT_GUEST")"
@@ -230,6 +252,10 @@ else
 fi
 # agent-manifest vs harvested evidence: every manifest row's file digest must appear in the
 # delivered agent-from-guest tree (the guest's receipt copy is the runner's own evidence path).
+if [[ "$PHASE" == 4c && ( ! -f "$OUT/agent-manifest.tsv" || ! -s "$OUT/agent-manifest.tsv" || ! -r "$OUT/agent-manifest.tsv" || ! -d "$OUT/agent-from-guest" ) ]]; then
+  echo "run-vm-gate: FAIL: phase 4c requires a readable, nonempty Mac agent-manifest.tsv and harvested agent-from-guest tree" >&2
+  RC=$((RC | 4))
+fi
 if [[ -f "$OUT/agent-manifest.tsv" && -d "$OUT/agent-from-guest" ]]; then
   BAD=0
   while IFS=$'\t' read -r rid row rsha files _; do # the TSV: id, row, request sha, file digests, chrome version
@@ -243,7 +269,7 @@ if [[ -f "$OUT/agent-manifest.tsv" && -d "$OUT/agent-from-guest" ]]; then
     done
   done < "$OUT/agent-manifest.tsv"
   (( BAD == 0 )) || RC=$((RC | 4))
-  echo "run-vm-gate: agent-manifest verified against the harvested evidence"
+  (( BAD != 0 )) || echo "run-vm-gate: agent-manifest verified against the harvested evidence"
 fi
 echo "run-vm-gate: out=$OUT rc=$RC; the agent-manifest.tsv, agent.log and the guest receipt are in that folder"
 exit "$RC"

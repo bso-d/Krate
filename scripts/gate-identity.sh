@@ -2141,6 +2141,27 @@ w5_published_any_ports() { # prints `service=port` for every any-address publish
     return 1
   fi
 }
+w5_control_listener() { # port 111 must accept IPv4 connections addressed to lima0 before a refusal can prove filtering
+  local nic_info nic_addresses listeners endpoint address
+  if ! nic_info="$(ip -4 -o addr show dev lima0 2>>"$RAW")"; then
+    echo "cannot read lima0 IPv4 addresses for the port 111 control"; return 1
+  fi
+  nic_addresses="$(awk '$3 == "inet" {sub(/\/.*/, "", $4); print $4}' <<<"$nic_info")"
+  [[ -n "$nic_addresses" ]] || { echo "lima0 has no IPv4 address for the port 111 control"; return 1; }
+  if ! listeners="$(ss -4 -ltnH 'sport = :111' 2>>"$RAW")"; then
+    echo "cannot read IPv4 TCP listeners for the port 111 control"; return 1
+  fi
+  while read -r _ _ _ endpoint _; do
+    case "$endpoint" in
+      0.0.0.0:111 | \*:111) echo "port 111 IPv4 listener bound to $endpoint"; return 0 ;;
+    esac
+    while IFS= read -r address; do
+      if [[ "$endpoint" == "$address:111" ]]; then echo "port 111 IPv4 listener bound to lima0 $endpoint"; return 0; fi
+    done <<<"$nic_addresses"
+  done <<<"$listeners"
+  echo "port 111 has no IPv4 TCP listener bound to a wildcard or lima0 address (loopback-only or absent cannot prove filtering)"
+  return 1
+}
 phase4_row_w5() {
   local slice="$1"
   section "W5: published-port surface from the Mac over the fixture's NIC address (derived expected set, control port 111, three outcomes, TCP only)"
@@ -2171,6 +2192,13 @@ phase4_row_w5() {
   ss_udp="$(ss -lunH 2>/dev/null | awk '{print $4}' | tr '\n' ' ' | cut -c1-120)"
   # shellcheck disable=SC2086
   if ! fw_state="$( { sudo -n firewall-cmd --state 2>/dev/null || firewall-cmd --state 2>/dev/null; } | grep -E '^(running|not running)$' | head -1)"; then fw_state="firewalld not answerable"; fi
+  local control_listener="no firewall-effectiveness control required"
+  if [[ "$fw_state" == running && ",$expected_csv," != *,111,* ]]; then
+    if ! control_listener="$(w5_control_listener)"; then
+      record W5 "$slice" W FAIL "firewall-effectiveness control precondition: $control_listener"
+      return
+    fi
+  fi
   # The Mac side: one {schema,id,row,nonce} request (F4); the agent owns the sweep's fixed
   # arguments, the certificate and the budget, and delivers the result file back (one
   # limactl copy --backend=scp -r invocation per response).
@@ -2304,9 +2332,9 @@ PYW5
   )" || rc_eval=$?
   breaches="$(printf '%s\n' "$evidence" | grep -c '^BREACH ' || true)"
   if (( rc_eval != 0 || breaches > 0 )); then
-    record W5 "$slice" W FAIL "$evidence (eval exit=$rc_eval breaches=$breaches; TCP only; ss -ltnH: ${ss_listeners:-none})"
+    record W5 "$slice" W FAIL "$evidence (eval exit=$rc_eval breaches=$breaches; TCP only; $control_listener; ss -ltnH: ${ss_listeners:-none})"
   else
-    record W5 "$slice" W PASS "$evidence (TCP only; ss -ltnH: ${ss_listeners:-none}; ss -lunH: ${ss_udp:-none}; exposed binds: ${ports_svc:-none})"
+    record W5 "$slice" W PASS "$evidence (TCP only; $control_listener; ss -ltnH: ${ss_listeners:-none}; ss -lunH: ${ss_udp:-none}; exposed binds: ${ports_svc:-none})"
   fi
 }
 
@@ -2390,29 +2418,34 @@ phase4_row_w7() {
     ev+="RHEL-family fixture without a running firewalld (firewall-cmd: $(command -v firewall-cmd || echo missing); systemctl is-active firewalld: $(systemctl is-active firewalld 2>/dev/null || echo unknown)): the supported fixture requires it running with lima0 in its default zone"
   elif [[ "$os_family" == rhel ]]; then
     local fwcmd def zone_lima0 zone_bridge docker_target bridge svc_rt svc_perm ports_rt ports_perm proto_rt proto_perm
-    local icmp_rt icmp_perm rich fwd policies doctor
+    local icmp_rt icmp_perm rich fwd policies doctor fw_read_rc fw_read_errors=""
     # Review T06/R3: every firewall command whose output W7 reads runs under LC_ALL=C (ufw's status line is gettext-translated, so a
     # guest with a translated catalogue would otherwise fail a correct fixture as "unreadable"); `env` inside sudo keeps it whatever
     # sudo's env_reset does with the caller's locale.
     fwcmd=(sudo -n env LC_ALL=C firewall-cmd)
     sudo -n true 2>/dev/null || fwcmd=(env LC_ALL=C firewall-cmd)
-    def="$("${fwcmd[@]}" --get-default-zone 2>>"$RAW")"
-    zone_lima0="$("${fwcmd[@]}" --get-zone-of-interface=lima0 2>>"$RAW")"
+    def="$("${fwcmd[@]}" --get-default-zone 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --get-default-zone=$fw_read_rc"; }
+    zone_lima0="$("${fwcmd[@]}" --get-zone-of-interface=lima0 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --get-zone-of-interface=lima0=$fw_read_rc"; }
     bridge=""
     for netdev in /sys/class/net/docker* /sys/class/net/br-*; do
       if [[ -e "$netdev" ]]; then bridge="$(basename "$netdev")"; break; fi
     done
-    zone_bridge="$("${fwcmd[@]}" --get-zone-of-interface="${bridge:-none}" 2>>"$RAW" || echo "no bridge interface")"
+    zone_bridge="$("${fwcmd[@]}" --get-zone-of-interface="${bridge:-none}" 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --get-zone-of-interface=${bridge:-none}=$fw_read_rc"; }
     # Review T17: the docker zone must also be ACCEPT (a docker zone changed to DROP/REJECT changes the forwarding behaviour the row
     # asserts). The query is the doctor's own (epc/krate: firewall-cmd --info-zone=docker); --get-target is a --permanent-only query
     # (firewall-cmd(1): "--permanent [--zone=zone] --get-target") and the docker zone is runtime-managed.
-    docker_target="$("${fwcmd[@]}" --info-zone=docker 2>>"$RAW" | awk -F': ' '/target:/{print $2}' | tr -d '[:space:]')"
-    svc_rt="$("${fwcmd[@]}" --zone="$def" --list-services 2>>"$RAW")"; svc_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-services 2>>"$RAW")"
-    ports_rt="$("${fwcmd[@]}" --zone="$def" --list-ports 2>>"$RAW")"; ports_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-ports 2>>"$RAW")"
-    proto_rt="$("${fwcmd[@]}" --zone="$def" --list-protocols 2>>"$RAW")"; proto_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-protocols 2>>"$RAW")"
-    icmp_rt="$("${fwcmd[@]}" --zone="$def" --list-icmp-blocks 2>>"$RAW")"; icmp_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-icmp-blocks 2>>"$RAW")"
-    rich="$("${fwcmd[@]}" --zone="$def" --list-rich-rules 2>>"$RAW")"; fwd="$("${fwcmd[@]}" --zone="$def" --list-forward-ports 2>>"$RAW")"
-    policies="$("${fwcmd[@]}" --get-policies 2>>"$RAW" || true)"
+    docker_target="$("${fwcmd[@]}" --info-zone=docker 2>>"$RAW" | awk -F': ' '/target:/{print $2}' | tr -d '[:space:]')" || { fw_read_rc=$?; st=1; fw_read_errors+=" --info-zone=docker=$fw_read_rc"; }
+    svc_rt="$("${fwcmd[@]}" --zone="$def" --list-services 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" runtime --list-services=$fw_read_rc"; }
+    svc_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-services 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" permanent --list-services=$fw_read_rc"; }
+    ports_rt="$("${fwcmd[@]}" --zone="$def" --list-ports 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" runtime --list-ports=$fw_read_rc"; }
+    ports_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-ports 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" permanent --list-ports=$fw_read_rc"; }
+    proto_rt="$("${fwcmd[@]}" --zone="$def" --list-protocols 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" runtime --list-protocols=$fw_read_rc"; }
+    proto_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-protocols 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" permanent --list-protocols=$fw_read_rc"; }
+    icmp_rt="$("${fwcmd[@]}" --zone="$def" --list-icmp-blocks 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" runtime --list-icmp-blocks=$fw_read_rc"; }
+    icmp_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-icmp-blocks 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" permanent --list-icmp-blocks=$fw_read_rc"; }
+    rich="$("${fwcmd[@]}" --zone="$def" --list-rich-rules 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --list-rich-rules=$fw_read_rc"; }
+    fwd="$("${fwcmd[@]}" --zone="$def" --list-forward-ports 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --list-forward-ports=$fw_read_rc"; }
+    policies="$("${fwcmd[@]}" --get-policies 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --get-policies=$fw_read_rc"; }
     doctor="$("$KRATE" doctor 2>>"$RAW" | grep -i firewall | head -2 | tr '\n' ' ' || true)"
     [[ "$def" != "?" && "$zone_lima0" == "$def" ]] || st=1
     [[ "$zone_bridge" == "docker" ]] || st=1
@@ -2430,6 +2463,7 @@ phase4_row_w7() {
       st=1
     fi
     ev+=" doctor: ${doctor:-none printed}"
+    [[ -z "$fw_read_errors" ]] || ev+="; firewall queries failed (exit status):$fw_read_errors"
   else
     local ufw_state ufw_first ufw_reason="" ufw_status input_head doctor
     ufw_state="$(systemctl is-active ufw 2>/dev/null || true)"   # evidence text only: ufw.service is a oneshot that reads `active` (exited) while `ufw status` says inactive (TOPOFIX2 PRE-4)

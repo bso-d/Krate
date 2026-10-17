@@ -997,6 +997,313 @@ def bash_function_source(path, name):
     return match.group(0)
 
 
+def check_mac_launcher_round4(checks):
+    """Run shipped admission and harvest boundaries with Git/Lima adapters only."""
+    bash = shutil.which('bash')
+    if bash is None:
+        checks.expect(False, 'Bash is required for the Mac launcher regression checks')
+        return
+    text = (ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text()
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='mac-launcher-', dir=fixture_base) as fixture_dir:
+        fixture = Path(fixture_dir)
+        candidate = '0123456789abcdef0123456789abcdef01234567'
+        wt = fixture / 'harness/worktrees' / ('gate-' + candidate[:7])
+        for rel in ('scripts/gate/mac/agent.mjs', 'scripts/gate/browser-launch.mjs', 'scripts/gate/browser_remote.py'):
+            path = wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('// inert fixture\n')
+        binding = text[text.index('if [[ -e "$REPO/harness/worktrees/gate-'):text.index('caffeinate -dims &')]
+        # Any helper the live binding calls must come from its actual shipped function body.
+        if 'candidate_worktree_ok() {' in text:
+            start = text.index('candidate_worktree_ok() {')
+            end = text.index('\n}\n', start) + 3
+            binding = text[start:end] + '\n' + binding
+        head_stub = r"""
+        git() {
+          printf '%s\n' "$*" >> "$FIXTURE/git-calls"
+          case "$*" in
+            *rev-parse*) [[ "$CASE" != unreadable-head ]] || return 9
+              if [[ "$CASE" == wrong-head ]]; then printf '%040d\n' 1; else printf '%s\n' "$CANDIDATE"; fi ;;
+            *status*) [[ "$CASE" != unreadable-status ]] || return 8
+              case "$CASE" in dirty-tracked) echo ' M scripts/gate/mac/probe.mjs';; dirty-untracked) echo '?? scripts/gate/mac/injected.mjs';; esac ;;
+            *) return 97 ;;
+          esac
+        }
+        """
+        for case in ('clean', 'wrong-head', 'dirty-tracked', 'dirty-untracked', 'unreadable-head', 'unreadable-status'):
+            script = 'set -euo pipefail\n' + head_stub + '\n' + binding + '\necho ADMITTED\n'
+            env = dict(os.environ, REPO=str(fixture), CANDIDATE=candidate, PREFLIGHT_FAIL='0', CASE=case, FIXTURE=str(fixture))
+            result = subprocess.run([bash, '-c', script], env=env, text=True, capture_output=True, timeout=5)
+            expected = case == 'clean'
+            ok = (result.returncode == 0 and 'ADMITTED' in result.stdout) == expected
+            checks.expect(ok, f'launcher candidate binding {case}: expected admitted={expected}; rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}')
+        # Run the complete shipped post-agent harvest/outcome/manifest tail, stubbing only limactl.
+        functions = text[text.index('receipt_verdict() {'):text.index('# Review T13:')]
+        harvest_at = text.index('limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out"')
+        harvest = text[text.rfind('\n', 0, harvest_at) + 1:]
+        harvest_stub = r"""
+        limactl() {
+          case "$1" in
+            copy)
+              case "$4" in
+                *:*/agent-out)
+                  if [[ "$CASE" == copy-fails || "$CASE" == copy-fails-partial ]]; then
+                    if [[ "$CASE" == copy-fails-partial ]]; then mkdir -p "$5"; printf proof > "$5/proof.json"; fi
+                    return 7
+                  fi
+                  mkdir -p "$5"; printf 'proof' > "$5/proof.json" ;;
+                *) mkdir -p "$5"
+                  printf '| verdict | **PASS** |\n| candidate commit | %s |\n' "$CANDIDATE" > "$5/receipt.md"
+                  printf 'receipt-copy\n' >> "$OUT/calls" ;;
+              esac ;;
+            shell)
+              case "$*" in
+                *runner.rc*) echo 0 ;;
+                *) echo "$GUEST_RECEIPT" ;;
+              esac ;;
+            *) return 98 ;;
+          esac
+        }
+        """
+        digest = hashlib.sha256(b'proof').hexdigest()[:12]
+        for phase, case in [('4c', 'valid'), ('4c', 'copy-fails'), ('4c', 'copy-fails-partial'),
+                            ('4c', 'missing-manifest'), ('4c', 'empty-manifest'), ('4c', 'manifest-directory'), ('4c', 'missing-tree'), ('4a', 'optional-evidence'),
+                            ('4b', 'copy-fails')]:
+            destination = fixture / (phase + '-' + case)
+            destination.mkdir(exist_ok=True)
+            manifest = destination / 'agent-manifest.tsv'
+            if case not in ('missing-manifest', 'manifest-directory', 'optional-evidence'):
+                manifest.write_text('request_id\trow\trequest_sha\tfiles\tchrome\n1\tW5\trequest\t' + digest + '\t155\n')
+            if case == 'manifest-directory':
+                manifest.mkdir()
+            if case == 'empty-manifest':
+                manifest.write_text('')
+            # Missing tree is a successful-copy/no-output boundary, not an actual SCP claim.
+            stub = harvest_stub
+            if case in ('missing-tree', 'optional-evidence'):
+                stub = stub.replace('mkdir -p "$5"; printf \'proof\' > "$5/proof.json"', ':')
+            env = dict(os.environ, VM='fake', GUEST_ROOT='/fixture', GUEST_RECEIPT='/fixture/receipt',
+                       OUT=str(destination), RDV='/fixture/rdv', CANDIDATE=candidate, PHASE=phase,
+                       CASE=case, RC='0')
+            result = subprocess.run([bash, '-c', 'set -euo pipefail\n' + functions + stub + harvest],
+                                    env=env, text=True, capture_output=True, timeout=5)
+            expected = case in ('valid', 'optional-evidence')
+            receipt = (destination / 'receipt/receipt.md').is_file()
+            ok = (result.returncode == 0) == expected and receipt
+            checks.expect(ok and result.returncode == (0 if expected else 4), f'launcher harvest {phase}/{case}: expected success={expected}, receipt required; rc={result.returncode}, receipt={receipt}, stdout={result.stdout!r}, stderr={result.stderr!r}')
+
+
+def check_mac_ipv6_ports(checks):
+    """Execute the entire shipped sweep with deterministic filesystem/socket adapters."""
+    node = shutil.which('node')
+    if node is None:
+        print('Identity check NOT RUN: Mac IPv6 sweep regressions (Node unavailable on this host)', file=sys.stderr)
+        return
+    source = r'''import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import vm from 'node:vm';
+
+// Execute the complete shipped entrypoint, replacing only boundary dependencies.
+// No copied port-selection expression, source rewriting, real sockets or product stack.
+const sourcePath = resolve(process.argv[2] || 'scripts/gate/mac/probe.mjs');
+const source = readFileSync(sourcePath, 'utf8');
+const cases = [
+  { name: 'runtime ports with default options', ports: [22, 13443, 32000], v6: true },
+  { name: 'explicit ports add, deduplicate and validate', ports: [22, 13443, 32000], v6: true,
+    extra: ['--v6-ports', '4444,13443,4444,0,65536,nope'] },
+  { name: 'explicit ports without IPv4 opens preserve controls', ports: [], v6: true,
+    extra: ['--v6-ports', '4444'] },
+  { name: 'no IPv6 address preserves IPv4-only behavior', ports: [22, 13443], v6: false },
+];
+let failures = 0;
+for (const test of cases) {
+  const files = new Map();
+  const connections = [];
+  const argv = ['node', sourcePath, 'sweep', '--ip', '127.0.0.1', '--host', 'fixture.test', '--out', '/owned-output'];
+  if (test.v6) argv.push('--v6', '::1');
+  argv.push(...(test.extra || []));
+  const context = vm.createContext({
+    process: { argv, stdout: { write() {} }, exit(rc) { throw new Error('unexpected exit ' + rc); } },
+    console: { log() {}, error() {} },
+  });
+  const module = new vm.SourceTextModule(source, {
+    context, identifier: pathToFileURL(sourcePath).href,
+    initializeImportMeta(meta) { meta.url = pathToFileURL(sourcePath).href; },
+  });
+  const imported = new Map();
+  await module.link(async (specifier) => {
+    if (imported.has(specifier)) return imported.get(specifier);
+    const namespace = { ...await import(specifier) };
+    if (specifier === 'node:fs') {
+      namespace.mkdirSync = () => {};
+      namespace.writeFileSync = (path, data) => files.set(path, String(data));
+    }
+    if (specifier === 'node:net') {
+      namespace.default = { ...namespace.default, connect(options) {
+        const socket = new EventEmitter();
+        socket.setTimeout = () => socket;
+        socket.destroy = () => socket;
+        if (options.family === 6) connections.push(options.port);
+        queueMicrotask(() => {
+          if (test.ports.includes(options.port)) socket.emit('connect');
+          else socket.emit('error', Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }));
+        });
+        return socket;
+      } };
+    }
+    const keys = Object.keys(namespace);
+    const linked = new vm.SyntheticModule(keys, function () {
+      for (const key of keys) this.setExport(key, namespace[key]);
+    }, { context });
+    imported.set(specifier, linked);
+    return linked;
+  });
+  await module.evaluate({ timeout: 10000 });
+  const report = JSON.parse(files.get('/owned-output/w5-result.json'));
+  const problems = [];
+  const check = (condition, message) => { if (!condition) problems.push(message); };
+  assert.deepEqual(report.open, test.ports);
+  assert.equal(Object.values(report.counts).reduce((a, b) => a + b), 65535);
+  if (test.v6) {
+    const ports = report.v6.ports.map(p => p.port);
+    check(test.ports.every(p => ports.includes(p)), 'missing IPv4-open ports: ' + test.ports.filter(p => !ports.includes(p)));
+    check(ports.includes(111), 'default firewall control 111 missing');
+    check(!test.extra || ports.includes(4444), 'explicit additional port 4444 missing');
+    check(ports.length === new Set(ports).size, 'duplicate IPv6 probes');
+    check(ports.every(p => Number.isInteger(p) && p >= 1 && p <= 65535), 'out-of-range IPv6 probes');
+    check(ports.every((p, i) => !i || ports[i - 1] < p), 'IPv6 probes not sorted');
+    assert.deepEqual(connections, ports);
+  } else {
+    assert.equal(report.v6, undefined);
+    assert.deepEqual(connections, []);
+  }
+  console.log(JSON.stringify({ case: test.name, verdict: problems.length ? 'FAIL' : 'PASS',
+    ipv4Open: report.open, ipv6Ports: report.v6?.ports.map(p => p.port) || [], problems }));
+  failures += problems.length;
+}
+console.log(JSON.stringify({ cases: cases.length, failedAssertions: failures }));
+process.exitCode = failures ? 1 : 0;
+'''
+    run = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-',
+                          str(ROOT / 'scripts/gate/mac/probe.mjs')], input=source,
+                         text=True, capture_output=True, timeout=30)
+    checks.expect(run.returncode == 0, f'Mac sweep IPv6 runtime-port/default/additional/IPv4-only regressions: rc={run.returncode}, stdout={run.stdout!r}, stderr={run.stderr!r}')
+
+
+def check_firewall_round4(checks):
+    """Run full shipped W5/W7 rows against deterministic listener/firewall producers."""
+    bash = shutil.which('bash')
+    if bash is None:
+        checks.expect(False, 'Bash is required for W5/W7 firewall regression checks')
+        return
+    text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='firewall-', dir=fixture_base) as fixture_dir:
+        folder = Path(fixture_dir)
+        def function(name):
+            start = text.index(name + '() {')
+            return text[start:text.index('\n}\n', start) + 3] + '\n'
+
+        common = r'''
+        set -uo pipefail
+        section() { :; }
+        record() { printf 'RECORD %s|%s\n' "$4" "$5"; }
+        sudo() { [[ "$1" == -n ]] && shift; "$@"; }
+        env() { [[ "$1" == LC_ALL=C ]] && shift; "$@"; }
+        systemctl() { echo active; }
+        RAW=/dev/stderr; KRATE=/usr/bin/true
+        '''
+
+        def run(condition, case, script, env, expected):
+            result = subprocess.run([bash, '-c', script], env=dict(os.environ, **env),
+                                    text=True, capture_output=True, timeout=5)
+            verdict = next((line.split('|')[0].split()[-1] for line in result.stdout.splitlines()
+                            if line.startswith('RECORD ')), 'MISSING')
+            checks.expect(verdict == expected, f'{condition}/{case}: expected {expected}, got {verdict}; rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}')
+            if condition == 'W5 listener precondition' and expected == 'FAIL':
+                checks.expect('AGENT_CALLED' not in result.stdout, f'W5/{case}: failed control precondition must stop before requesting the Mac sweep')
+
+        w5_stub = r'''
+        firewall-cmd() { echo "$FW_STATE"; }
+        w5_published_any_ports() { echo proxy=443; [[ "$PUBLISHED_CONTROL" != yes ]] || echo control=111; }
+        ip() { [[ "$IP_RC" == 0 ]] || return "$IP_RC"; printf '%s\n' "$NIC_INFO"; }
+        ss() {
+          if [[ "$*" == *'sport = :111'* ]]; then
+            [[ "$SS_RC" == 0 ]] || return "$SS_RC"; printf '%s\n' "$LISTENERS"
+          fi
+        }
+        agent_request() { CAP="$ENVELOPE"; printf 'AGENT_CALLED\n'; }
+        agent_delivered_dir() { echo "$CASE_DIR"; }
+        '''
+        w5_script = common + w5_stub
+        if 'w5_control_listener() {' in text:
+            w5_script += function('w5_control_listener')
+        w5_script += function('phase4_row_w5') + 'phase4_row_w5 4c\n'
+        nic = '3: lima0 inet 192.168.64.3/24 scope global lima0'
+        for case, listener, ip_rc, ss_rc, fw, published, expected in (
+            ('wildcard', 'LISTEN 0 4096 0.0.0.0:111 0.0.0.0:*', 0, 0, 'running', 'no', 'PASS'),
+            ('nic', 'LISTEN 0 4096 192.168.64.3:111 0.0.0.0:*', 0, 0, 'running', 'no', 'PASS'),
+            ('asterisk', 'LISTEN 0 4096 *:111 *:*', 0, 0, 'running', 'no', 'PASS'),
+            ('absent', '', 0, 0, 'running', 'no', 'FAIL'),
+            ('loopback', 'LISTEN 0 4096 127.0.0.1:111 0.0.0.0:*', 0, 0, 'running', 'no', 'FAIL'),
+            ('other-nic', 'LISTEN 0 4096 192.168.5.15:111 0.0.0.0:*', 0, 0, 'running', 'no', 'FAIL'),
+            ('ipv6-only', 'LISTEN 0 4096 [::]:111 [::]:*', 0, 0, 'running', 'no', 'FAIL'),
+            ('ip-read-fails', '', 19, 0, 'running', 'no', 'FAIL'),
+            ('ss-read-fails', '', 0, 20, 'running', 'no', 'FAIL'),
+            ('no-firewall', '', 0, 0, 'not running', 'no', 'PASS'),
+            ('published-control', '', 0, 0, 'running', 'yes', 'PASS'),
+        ):
+            directory = folder / case
+            directory.mkdir(exist_ok=True)
+            ports = [22, 443] if published == 'no' else [22, 111, 443]
+            report = dict(open=ports, swept={'tcpOnly': True}, counts={},
+                          spot=[{'port': 111, 'outcome': 'refused'}], cert={'authorized': True},
+                          v6={'address': '2001:db8::1', 'addressClass': 'global',
+                              'ports': [{'port': 22, 'outcome': 'open'}, {'port': 443, 'outcome': 'refused'}]})
+            data = json.dumps(report).encode()
+            (directory / 'w5-result.json').write_bytes(data)
+            envelope = dict(files=[{'name': 'w5-result.json', 'sha256': hashlib.sha256(data).hexdigest()}],
+                            exit=0, mac_leak_scan={'values': 1, 'hits': 0, 'stores': ['agent.log']})
+            run('W5 listener precondition', case, w5_script,
+                dict(STATE=str(directory), CASE_DIR=str(directory), ENVELOPE=json.dumps(envelope),
+                     FW_STATE=fw, PUBLISHED_CONTROL=published, IP_RC=str(ip_rc), SS_RC=str(ss_rc),
+                     NIC_INFO=nic, LISTENERS=listener, VM_G6='2001:db8::1'), expected)
+
+        w7_stub = r'''
+        firewall-cmd() {
+          local result='' key="$*"
+          case "$*" in
+            *--get-default-zone*|*--get-zone-of-interface=lima0*) result=public ;;
+            *--get-zone-of-interface=*) result=docker ;;
+            *--info-zone=docker*) result=$'docker (active)\n target: ACCEPT' ;;
+            *--list-services*) result=ssh ;;
+            *--get-policies*) result=docker-forwarding ;;
+          esac
+          printf '%s\n' "$result"
+          if [[ "$key" == "$FAIL_QUERY" || ( "$FAIL_QUERY" == bridge-zone && "$key" == --get-zone-of-interface=* && "$key" != --get-zone-of-interface=lima0 ) ]]; then echo 'manual producer refusal rc23' >&2; return 23; fi
+          return 0
+        }
+        '''
+        w7_script = common + w7_stub + function('w7_os_family') + function('phase4_row_w7')
+        w7_script += "phase4_row_w7 4c <(printf 'ID=rocky\\n')\n"
+        queries = ['--get-default-zone', '--get-zone-of-interface=lima0', 'bridge-zone',
+                   '--info-zone=docker', '--get-policies']
+        for query in ('--list-services', '--list-ports', '--list-protocols', '--list-icmp-blocks'):
+            queries += ['--zone=public ' + query, '--permanent --zone=public ' + query]
+        queries += ['--zone=public --list-rich-rules', '--zone=public --list-forward-ports']
+        run('W7 query status', 'clean', w7_script, {'FAIL_QUERY': ''}, 'PASS')
+        for query in queries:
+            run('W7 query status', query + ' returns23 with valid-looking stdout', w7_script,
+                {'FAIL_QUERY': query}, 'FAIL')
+
+
+
 def check_topofix2(checks):
     """TOPOFIX2 fix round (harness/phase4-completion/w2/TOPOFIX2-BRIEF.md): behaviour pins for the defects the first read of the
     Mac agent vantage found (PRE-0..PRE-7, F1-F8, G5-G7). Pins are whole-line matches on the code lines (js_lines) or
@@ -2007,7 +2314,7 @@ console.log(JSON.stringify({ length: out.length, newline: out.includes('\n'), pa
             'iface': launcher_block('IFACE="$(route', lambda ln: ln.startswith('[[ -n "$IFACE" ]]')),
             'head': launcher_block('GUEST_HEAD="$(limactl shell', lambda ln: ln.lstrip().startswith('|| { echo "run-vm-gate: the guest checkout')),
             'end': launcher_block('VM_IP_END="$(limactl shell', lambda ln: ln == 'fi'),
-            'tail': launcher_block('limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out"', lambda ln: ln == 'exit "$RC"'),
+            'tail': launcher_block('if ! limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out"', lambda ln: ln == 'exit "$RC"'),
         }
         e(all(r2_blocks.values()), f'the launcher keeps the blocks the R2 test runs (VM address, interface, guest HEAD, end address, harvest tail); missing: {[k for k, v in r2_blocks.items() if not v]}')
         fake_lima_r2 = """#!/bin/sh
@@ -2038,13 +2345,14 @@ esac
                     (base / 'bin' / tool).chmod(0o755)
                 guest, out = base / 'guest', base / 'out'
                 (guest / 'rdv').mkdir(parents=True)
+                (guest / 'agent-out').mkdir()
                 out.mkdir()
                 if runner_rc is not None:
                     (guest / 'rdv/runner.rc').write_text(runner_rc + '\n')
                 if receipt:
                     (guest / 'receipt-x').mkdir()
                     (guest / 'receipt-x/receipt.md').write_text(receipt_text())
-                script = ('set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"; OUT="$2"; GUEST_RECEIPT="$1/receipt-x"; CANDIDATE="$3"; RC=0\n'
+                script = ('set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"; OUT="$2"; GUEST_RECEIPT="$1/receipt-x"; CANDIDATE="$3"; RC=0; PHASE=4a\n'
                           + prelude + '\n' + block + '\n' + epilogue + '\n')
                 env = dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}', FAKE_FAIL='', FAKE_HEAD='', FAKE_IFACE='')
                 env.update({k.upper(): v for k, v in fake_env.items()})
@@ -7528,7 +7836,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,

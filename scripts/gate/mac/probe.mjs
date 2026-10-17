@@ -142,7 +142,11 @@ async function subSweep() {
     const linkLocal = /^fe[89ab][0-9a-f]:/i.test(ll);
     if (!net.isIPv6(ll) || (linkLocal && !iface) || (!linkLocal && iface)) die(`--v6 must be a global <ipv6> without a zone (the agent passes the guest's lima0 GLOBAL address from the hello's vm_g6) or an fe80::/10 address with its <mac-iface> zone (M4 probed the link-local %bridge100), got ${args.v6}`);
     const target = iface ? `${ll}%${iface}` : ll;
-    const v6Ports = args['v6-ports'] ? String(args['v6-ports']).split(',').map((s) => Number(s.trim())).filter(Number.isInteger) : [22, 80, 443, 111, 3443, 9092, 9093];
+    // The IPv4 open set carries the runtime-published ports (including fixture overrides).
+    // Explicit ports add probes; they must never replace that coverage or the controls.
+    const extraV6Ports = String(args['v6-ports'] || '').split(',').map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n >= 1 && n <= 65535);
+    const v6Ports = [...new Set([...open, 22, 80, 443, 111, 3443, 9092, 9093, ...extraV6Ports])].sort((a, b) => a - b);
     const v6 = [];
     for (const p of v6Ports) {
       const r = await connectOnce(target, p, 6, Math.max(timeoutMs, 3000));
