@@ -1024,7 +1024,12 @@ run_phase2() {
   [[ $rc -eq 0 && "$ev" == *"prom=[9090/tcp -> 127.0.0.1:19090"* && "$ev" == *"loki=[3100/tcp -> 127.0.0.1:13100"* && "$ev" == *"grafana=[3000/tcp -> 0.0.0.0:13000"* && "$ev" != *"9090/tcp -> 0.0.0.0"* && "$ev" != *"3100/tcp -> 0.0.0.0"* ]]; st=$?; ok_if M1 2 M "$st" "monitor up exit=$rc; Prometheus and Loki bound to 127.0.0.1 only, Grafana on all interfaces: $ev"
   after="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$(mon_cid kafka-exporter)" 2>/dev/null)"
   [[ "$after" == *"${PROJECT}_kafka-network"* && "$after" != *"${PROJECT}_identity"* ]]; st=$?; ok_if M2 2 M "$st" "kafka-exporter networks: [$after] (brokers' network, not identity)"
-  local svc; for svc in prometheus grafana loki; do [[ -z "$(mon_cid "$svc")" ]] || docker logs "$(mon_cid "$svc")" > "$STATE/mon-$svc.log" 2>&1 || true; done
+  # A monitoring log this copy cannot take is named in logs-not-captured.txt: leak_scan then fails Z2 and Z3 with it listed as not read.
+  local svc mid; for svc in prometheus grafana loki; do
+    mid="$(mon_cid "$svc")"
+    if [[ -z "$mid" ]]; then echo "mon-$svc.log (no container)" >> "$STATE/logs-not-captured.txt"
+    else docker logs "$mid" > "$STATE/mon-$svc.log" 2>&1 || echo "mon-$svc.log (docker logs failed)" >> "$STATE/logs-not-captured.txt"; fi
+  done
   cap "$KRATE" monitor down
   # Kafbat authorization ladder (a background child, so an interrupt reaches it)
   if [[ -f "$GATE_DIR/phase2_kafbat.py" ]]; then
@@ -1169,7 +1174,7 @@ EOF
   [[ $before -eq 0 && $rc -eq 0 && $rc2 -eq 0 && $j -eq 0 ]]; st=$?
   ok_if P15 3 P "$st" "CONFIGURE_TOTP defaultAction set to true behind the CLI's back (drift confirmed: $before); identity up exit $rc; afterwards defaultAction false and the realm matches the plan again (provider re-applied after P14's removal): ${ev:-identical}; journal 'up reconciled required action CONFIGURE_TOTP' and 'up reconciled identity provider'"
   for id in "${REQUIRED_P3[@]}"; do [[ "$id" == Z* || -n "${SEEN[$id]:-}" ]] || record "$id" 3 P FAIL "no result produced (scripts/gate/phase3_broker.py missing or incomplete)"; done
-  docker logs "${PROJECT}-gate3-pingstub" > "$STATE/pingstub.log" 2>&1 || true
+  docker logs "${PROJECT}-gate3-pingstub" > "$STATE/pingstub.log" 2>&1 || echo "pingstub.log (docker logs failed)" >> "$STATE/logs-not-captured.txt"
 }
 
 # ═══════════════════════════ phase 4 ═══════════════════════════
@@ -1304,7 +1309,7 @@ phase4_leak_scan_z4a() {
   done
 
   local raw_without_display="$STATE/raw-without-display.log"
-  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || true
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || unread+=("raw log (no display)")
 
   local secrets_all="$STATE/secrets-all.$$.txt"
   local secrets_temp="$STATE/secrets-temp.$$.txt"
@@ -1345,8 +1350,6 @@ def mark_unreadable(name):
 
 
 for p in places:
-    if not os.path.isfile(p):
-        continue
     try:
         content = open(p, "rb").read().decode("utf-8", "replace")
     except OSError:
@@ -1358,32 +1361,28 @@ for p in places:
             hits += c
             print(f"LEAK: secret appears in {os.path.basename(p)} x{c}", file=sys.stderr)
 
-if os.path.isfile(raw_file):
-    try:
-        raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
-        for s in all_secrets:
-            if s not in temp_secrets:
-                c = raw_content.count(s)
-                if c > 0:
-                    hits += c
-                    print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
-    except OSError:
-        mark_unreadable("raw log")
-else:
+try:
+    raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
+except OSError:
     mark_unreadable("raw log")
-
-if os.path.isfile(raw_no_disp):
-    try:
-        raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
-        for s in temp_secrets:
-            c = raw_nd_content.count(s)
+else:
+    for s in all_secrets:
+        if s not in temp_secrets:
+            c = raw_content.count(s)
             if c > 0:
                 hits += c
-                print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
-    except OSError:
-        mark_unreadable("raw log (no display)")
-else:
+                print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
+
+try:
+    raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
+except OSError:
     mark_unreadable("raw log (no display)")
+else:
+    for s in temp_secrets:
+        c = raw_nd_content.count(s)
+        if c > 0:
+            hits += c
+            print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
 
 ed_auth = sys.argv[6]
 
@@ -1397,19 +1396,18 @@ def walk_error(err):
     mark_unreadable(auth_label(err.filename))
 
 
-if os.path.isdir(ed_auth):
-    for root, _dirs, files in os.walk(ed_auth, onerror=walk_error):
-        for fn in files:
-            fp = os.path.join(root, fn)
-            try:
-                content = open(fp, "rb").read().decode("utf-8", "replace")
-                for s in all_secrets:
-                    c = content.count(s)
-                    if c > 0:
-                        hits += c
-                        print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
-            except OSError:
-                mark_unreadable(auth_label(fp))
+for root, _dirs, files in os.walk(ed_auth, onerror=walk_error):
+    for fn in files:
+        fp = os.path.join(root, fn)
+        try:
+            content = open(fp, "rb").read().decode("utf-8", "replace")
+            for s in all_secrets:
+                c = content.count(s)
+                if c > 0:
+                    hits += c
+                    print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
+        except OSError:
+            mark_unreadable(auth_label(fp))
 
 names = sorted(set(unreadable))
 print(hits, len(unreadable), ", ".join(names[:10]) + (f" (+{len(names) - 10} more)" if len(names) > 10 else ""))
@@ -1559,7 +1557,7 @@ phase4_leak_scan_z4b() {
   done
 
   local raw_without_display="$STATE/raw-without-display.log"
-  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || true
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || unread+=("raw log (no display)")
 
   local secrets_all="$STATE/secrets-all.$$.txt"
   local secrets_temp="$STATE/secrets-temp.$$.txt"
@@ -1605,8 +1603,6 @@ def mark_unreadable(name):
 
 
 for p in places:
-    if not os.path.isfile(p):
-        continue
     try:
         content = open(p, "rb").read().decode("utf-8", "replace")
     except OSError:
@@ -1624,32 +1620,28 @@ for p in places:
                 hits += c
                 print(f"LEAK: banned pattern {bp} appears in {os.path.basename(p)} x{c}", file=sys.stderr)
 
-if os.path.isfile(raw_file):
-    try:
-        raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
-        for s in all_secrets:
-            if s not in temp_secrets:
-                c = raw_content.count(s)
-                if c > 0:
-                    hits += c
-                    print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
-    except OSError:
-        mark_unreadable("raw log")
-else:
+try:
+    raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
+except OSError:
     mark_unreadable("raw log")
-
-if os.path.isfile(raw_no_disp):
-    try:
-        raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
-        for s in temp_secrets:
-            c = raw_nd_content.count(s)
+else:
+    for s in all_secrets:
+        if s not in temp_secrets:
+            c = raw_content.count(s)
             if c > 0:
                 hits += c
-                print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
-    except OSError:
-        mark_unreadable("raw log (no display)")
-else:
+                print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
+
+try:
+    raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
+except OSError:
     mark_unreadable("raw log (no display)")
+else:
+    for s in temp_secrets:
+        c = raw_nd_content.count(s)
+        if c > 0:
+            hits += c
+            print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
 
 ed_auth = sys.argv[6]
 
@@ -1663,19 +1655,18 @@ def walk_error(err):
     mark_unreadable(auth_label(err.filename))
 
 
-if os.path.isdir(ed_auth):
-    for root, _dirs, files in os.walk(ed_auth, onerror=walk_error):
-        for fn in files:
-            fp = os.path.join(root, fn)
-            try:
-                content = open(fp, "rb").read().decode("utf-8", "replace")
-                for s in all_secrets:
-                    c = content.count(s)
-                    if c > 0:
-                        hits += c
-                        print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
-            except OSError:
-                mark_unreadable(auth_label(fp))
+for root, _dirs, files in os.walk(ed_auth, onerror=walk_error):
+    for fn in files:
+        fp = os.path.join(root, fn)
+        try:
+            content = open(fp, "rb").read().decode("utf-8", "replace")
+            for s in all_secrets:
+                c = content.count(s)
+                if c > 0:
+                    hits += c
+                    print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
+        except OSError:
+            mark_unreadable(auth_label(fp))
 
 names = sorted(set(unreadable))
 print(hits, len(unreadable), ", ".join(names[:10]) + (f" (+{len(names) - 10} more)" if len(names) > 10 else ""))
@@ -2116,28 +2107,64 @@ run_phase4() { # slice: 4a|4b|4c
 # ═══════════════════════════ leak scan, teardown, verdict ═══════════════════════════
 leak_scan() {
   section "Z: secret-leak scan over every captured output, the journal, plan files, receipt files and container logs"
-  local hits=0 s where t is_temp where_raw svc
-  local -a places=("$JOURNAL" "$RECEIPT" "$OUT/screenshots/manifest.json")
+  local hits=0 s where t is_temp where_raw svc id label rc u st gaps="" list="" seen=$'\n'
+  local -a places=("$JOURNAL" "$RECEIPT" "$OUT/screenshots/manifest.json") unread=()
+  # An input that cannot be read fails the row, as in Z4a/Z4b: a scan over nothing is not a clean scan.
+  # keycloak and keycloak-db exist whenever this runs (run_phase1 ends with `identity up`; `identity down` only
+  # stops them), so a missing one is a log that was not read. kafka-ui and proxy are searched when they exist
+  # (a run without brokers has no kafka-ui). The listing's status is checked here and not through cid: cid prints
+  # nothing both for a daemon that cannot be reached and for a missing container, and its status is the pipeline's.
   for svc in keycloak keycloak-db kafka-ui proxy; do
-    [[ -n "$(cid "$svc")" ]] || continue
-    docker logs "$(cid "$svc")" > "$STATE/$svc.log" 2>&1 || true; places+=("$STATE/$svc.log")
+    id="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=$svc" 2>/dev/null)" \
+      || { unread+=("$svc (container listing failed)"); continue; }
+    id="${id%%$'\n'*}"
+    if [[ -z "$id" ]]; then
+      case "$svc" in keycloak|keycloak-db) unread+=("$svc (no container)") ;; esac
+      continue
+    fi
+    docker logs "$id" > "$STATE/$svc.log" 2>&1 || unread+=("$svc (docker logs failed)")
+    places+=("$STATE/$svc.log")
   done
   for svc in prometheus grafana loki; do  # captured by run_phase2 before monitor down
     [[ -f "$STATE/mon-$svc.log" ]] && places+=("$STATE/mon-$svc.log")
   done
   [[ -f "$STATE/pingstub.log" ]] && places+=("$STATE/pingstub.log")  # captured by run_phase3 before the stand-in goes down
+  if [[ -s "$STATE/logs-not-captured.txt" ]]; then  # run_phase2/run_phase3 name each monitoring or stand-in log they could not copy
+    while IFS= read -r u; do [[ -z "$u" ]] || unread+=("$u"); done < "$STATE/logs-not-captured.txt" || unread+=("logs-not-captured.txt")
+  fi
   local raw_without_display="$STATE/raw-without-display.log"
-  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display"
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" || unread+=("raw log (no display)")
+  # Both raw-log inputs are opened whatever the secrets are (the copy serves temporary passwords only): a missing or unreadable one fails the row.
+  { : < "$RAW"; } 2>/dev/null || unread+=("raw log")
+  { : < "$raw_without_display"; } 2>/dev/null || unread+=("raw log (no display)")
   local one="$STATE/one-secret.txt"
   for s in "${SECRETS[@]}"; do
     is_temp=false; for t in "${TEMP_SECRETS[@]}"; do [[ "$t" == "$s" ]] && is_temp=true; done
     if $is_temp; then where_raw="$raw_without_display"; else where_raw="$RAW"; fi
-    printf '%s\n' "$s" > "$one"; chmod 600 "$one"
-    for where in "$where_raw" "${places[@]}"; do [[ -f "$where" ]] && grep -qF -f "$one" "$where" && { hits=$((hits+1)); log "LEAK: a secret value appears in ${where##*/}"; }; done
-    grep -rqF -f "$one" "$ED/auth/keycloak/" 2>/dev/null && { hits=$((hits+1)); log "LEAK: a secret value appears under auth/keycloak/"; }
+    if ! printf '%s\n' "$s" > "$one"; then unread+=("secret pattern file"); continue; fi
+    chmod 600 "$one"
+    for where in "$where_raw" "${places[@]}"; do
+      [[ -f "$where" ]] || continue
+      case "$where" in "$RAW") label="raw log" ;; "$raw_without_display") label="raw log (no display)" ;; *) label="${where##*/}" ;; esac
+      grep -qF -f "$one" "$where" 2>/dev/null; rc=$?  # 0 a hit, 1 none, above 1 the file could not be read
+      if (( rc == 0 )); then hits=$((hits+1)); log "LEAK: a secret value appears in $label"
+      elif (( rc > 1 )); then unread+=("$label"); fi
+    done
+    if [[ -d "$ED/auth/keycloak" ]]; then
+      grep -rqF -f "$one" "$ED/auth/keycloak/" 2>/dev/null; rc=$?
+      if (( rc == 0 )); then hits=$((hits+1)); log "LEAK: a secret value appears under auth/keycloak/"
+      elif (( rc > 1 )); then unread+=("auth/keycloak"); fi
+    fi
   done
   rm -f "$raw_without_display" "$one"
-  [[ $hits -eq 0 ]]; st=$?; ok_if "$1" "$2" Z "$st" "${#SECRETS[@]} distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, ${#TEMP_SECRETS[@]} temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: $hits hits"
+  for u in "${unread[@]}"; do  # one entry per input however many secrets or checks reported it
+    [[ "$seen" == *$'\n'"$u"$'\n'* ]] && continue
+    seen+="$u"$'\n'; list+="${list:+, }$u"
+  done
+  [[ -z "$list" ]] || { gaps+="; not read: $list"; log "NOT READ: $list"; }
+  (( ${#SECRETS[@]} )) || gaps+="; no secret values to search"
+  [[ $hits -eq 0 && -z "$gaps" ]]; st=$?
+  ok_if "$1" "$2" Z "$st" "${#SECRETS[@]} distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, ${#TEMP_SECRETS[@]} temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: $hits hits$gaps"
 }
 restore_prometheus_config() {
   local backup="$STATE/prometheus.yml.bak"
