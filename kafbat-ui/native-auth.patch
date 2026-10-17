@@ -49,22 +49,32 @@ index 0000000..569ec29
 +  }
 +}
 diff --git a/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java b/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
-index 16b75d4..fe77ae8 100644
+index 16b75d4..846558c 100644
 --- a/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
 +++ b/api/src/main/java/io/kafbat/ui/config/auth/OAuthSecurityConfig.java
-@@ -5,6 +5,7 @@ import io.kafbat.ui.service.rbac.AccessControlService;
+@@ -4,7 +4,12 @@ import io.kafbat.ui.config.auth.logout.OAuthLogoutSuccessHandler;
+ import io.kafbat.ui.service.rbac.AccessControlService;
  import io.kafbat.ui.service.rbac.extractor.ProviderAuthorityExtractor;
  import io.kafbat.ui.util.StaticFileWebFilter;
++import java.net.URI;
++import java.time.Duration;
++import java.time.Instant;
++import java.time.temporal.ChronoUnit;
  import java.util.ArrayList;
 +import java.util.HashMap;
  import java.util.List;
  import java.util.Map;
  import java.util.Optional;
-@@ -18,10 +19,13 @@ import org.springframework.boot.autoconfigure.security.oauth2.resource.OAuth2Res
+@@ -16,12 +21,18 @@ import org.springframework.boot.autoconfigure.security.oauth2.client.OAuth2Clien
+ import org.springframework.boot.autoconfigure.security.oauth2.client.OAuth2ClientPropertiesMapper;
+ import org.springframework.boot.autoconfigure.security.oauth2.resource.OAuth2ResourceServerProperties;
  import org.springframework.boot.context.properties.EnableConfigurationProperties;
++import org.springframework.boot.convert.DurationStyle;
  import org.springframework.context.annotation.Bean;
  import org.springframework.context.annotation.Configuration;
 +import org.springframework.core.env.Environment;
++import org.springframework.http.HttpMethod;
++import org.springframework.http.HttpStatus;
  import org.springframework.http.client.reactive.ReactorClientHttpConnector;
  import org.springframework.security.authentication.DelegatingReactiveAuthenticationManager;
 +import org.springframework.security.config.Customizer;
@@ -74,7 +84,7 @@ index 16b75d4..fe77ae8 100644
  import org.springframework.security.config.web.server.SecurityWebFiltersOrder;
  import org.springframework.security.config.web.server.ServerHttpSecurity;
  import org.springframework.security.oauth2.client.authentication.OAuth2LoginReactiveAuthenticationManager;
-@@ -29,6 +33,9 @@ import org.springframework.security.oauth2.client.endpoint.OAuth2AuthorizationCo
+@@ -29,6 +40,9 @@ import org.springframework.security.oauth2.client.endpoint.OAuth2AuthorizationCo
  import org.springframework.security.oauth2.client.endpoint.ReactiveOAuth2AccessTokenResponseClient;
  import org.springframework.security.oauth2.client.endpoint.WebClientReactiveAuthorizationCodeTokenResponseClient;
  import org.springframework.security.oauth2.client.oidc.authentication.OidcAuthorizationCodeReactiveAuthenticationManager;
@@ -84,7 +94,7 @@ index 16b75d4..fe77ae8 100644
  import org.springframework.security.oauth2.client.oidc.userinfo.OidcReactiveOAuth2UserService;
  import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserRequest;
  import org.springframework.security.oauth2.client.oidc.web.server.logout.OidcClientInitiatedServerLogoutSuccessHandler;
-@@ -38,13 +45,29 @@ import org.springframework.security.oauth2.client.registration.ReactiveClientReg
+@@ -38,13 +52,34 @@ import org.springframework.security.oauth2.client.registration.ReactiveClientReg
  import org.springframework.security.oauth2.client.userinfo.DefaultReactiveOAuth2UserService;
  import org.springframework.security.oauth2.client.userinfo.OAuth2UserRequest;
  import org.springframework.security.oauth2.client.userinfo.ReactiveOAuth2UserService;
@@ -109,16 +119,25 @@ index 16b75d4..fe77ae8 100644
 +import org.springframework.security.web.server.csrf.CsrfToken;
 +import org.springframework.security.web.server.csrf.ServerCsrfTokenRequestAttributeHandler;
 +import org.springframework.security.web.server.savedrequest.WebSessionServerRequestCache;
++import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher;
++import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatchers;
  import org.springframework.web.reactive.function.client.WebClient;
++import org.springframework.web.server.ServerWebExchange;
 +import org.springframework.web.server.WebFilter;
++import org.springframework.web.server.WebFilterChain;
++import org.springframework.web.server.WebSession;
  import reactor.core.publisher.Mono;
  import reactor.netty.http.client.HttpClient;
  
-@@ -57,7 +80,12 @@ import reactor.netty.http.client.HttpClient;
+@@ -57,7 +92,16 @@ import reactor.netty.http.client.HttpClient;
  @Slf4j
  public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
  
 +  private static final String REQUIRE_MAPPED_ROLE = "auth.oauth2.require-mapped-role";
++  /** Absolute session lifetime as a Spring duration (8h, 90m, 300s); a bare number is seconds. */
++  private static final String MAX_SESSION_LIFETIME = "auth.oauth2.max-session-lifetime";
++  /** Krate's approved session maximum (owner decision G4: 8 hours) when the property is absent. */
++  private static final Duration DEFAULT_MAX_SESSION_LIFETIME = Duration.ofHours(8);
 +  /** Client custom-param naming the provider's end_session_endpoint when its endpoints are explicit. */
 +  static final String END_SESSION_URI = "end-session-uri";
 +
@@ -127,7 +146,7 @@ index 16b75d4..fe77ae8 100644
  
    /**
     * WebClient configured to use system proxy properties (http.proxyHost/https.proxyHost,
-@@ -78,17 +106,38 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -78,17 +122,38 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
        ReactiveOAuth2AccessTokenResponseClient<OAuth2AuthorizationCodeGrantRequest> tokenResponseClient,
        ReactiveOAuth2UserService<OidcUserRequest, OidcUser> oidcUserService,
        ReactiveOAuth2UserService<OAuth2UserRequest, OAuth2User> oauth2UserService,
@@ -171,7 +190,7 @@ index 16b75d4..fe77ae8 100644
  
      var oauth2AuthManager =
          new OAuth2LoginReactiveAuthenticationManager(tokenResponseClient, oauth2UserService);
-@@ -96,15 +145,45 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -96,15 +161,50 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
      var delegatingAuthManager =
          new DelegatingReactiveAuthenticationManager(oidcAuthManager, oauth2AuthManager);
  
@@ -217,10 +236,15 @@ index 16b75d4..fe77ae8 100644
 +            .csrfTokenRepository(csrfRepository)
 +            .csrfTokenRequestHandler(new ServerCsrfTokenRequestAttributeHandler()));
 +    builder.addFilterAfter(csrfCookieWriter(), SecurityWebFiltersOrder.CSRF);
++    // The WebSession ends only by inactivity (server.reactive.session.timeout), while the realm's
++    // SSO session also ends at its maximum lifespan: bound this application's session the same way.
++    var maxSessionLifetime = maxSessionLifetime();
++    log.info("Absolute session lifetime: {} ({})", maxSessionLifetime, MAX_SESSION_LIFETIME);
++    builder.addFilterBefore(sessionLifetimeLimit(maxSessionLifetime), SecurityWebFiltersOrder.REACTOR_CONTEXT);
  
      if (properties.getResourceServer() != null) {
        OAuth2ResourceServerProperties resourceServer = properties.getResourceServer();
-@@ -130,6 +209,26 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -130,6 +230,95 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
      return builder.build();
    }
  
@@ -235,6 +259,75 @@ index 16b75d4..fe77ae8 100644
 +    };
 +  }
 +
++  /**
++   * The WebSession store expires a session only after inactivity, so a session that stays in use
++   * never ends. End one that was created longer ago than the maximum, however recently it was used,
++   * before the SecurityContext is read, and answer the end with a restart of the same request
++   * instead of continuing. The session reference is cached per exchange (DefaultServerWebExchange
++   * caches getSession()), so continuing after invalidate() would write the request's session data
++   * into the invalidated session: on /oauth2/authorization/..., Spring's authorization-request
++   * repository saves the state and PKCE on this same exchange, and DefaultWebSessionManager
++   * discards an invalidated session at response commit (its save() skips session.save()); the
++   * callback could not recover the authorization request and the sign-in failed once with
++   * /login?error. The restart answers 302 at the same request URI, spelled relative because the
++   * browser (the UI is only reached through the HTTPS proxy) resolves the scheme and host itself.
++   * The wrapped invalidate() also removes the session's ReactiveOidcSessionRegistry entry (the
++   * wrapper ServerHttpSecurity hands the chain), and DefaultWebSessionManager expires the SESSION
++   * cookie in this response's commit hook. The browser's repeat has no session: its first
++   * getSession() creates a healthy one, which Spring's authorization redirect then writes into.
++   * The creation time survives the session id change at login. A POST /logout
++   * is left to the logout filter: it ends the session itself, and with the user's own authentication
++   * the provider's end-session redirect still happens (OAuthLogoutSuccessHandler casts it).
++   */
++  private static WebFilter sessionLifetimeLimit(Duration maximum) {
++    var logout = ServerWebExchangeMatchers.pathMatchers(HttpMethod.POST, "/logout");
++    return (exchange, chain) -> logout.matches(exchange)
++        .map(ServerWebExchangeMatcher.MatchResult::isMatch)
++        .flatMap(isLogout -> isLogout
++            ? chain.filter(exchange)
++            : continueOrRestart(exchange, maximum, chain));
++  }
++
++  private static Mono<Void> continueOrRestart(ServerWebExchange exchange, Duration maximum,
++      WebFilterChain chain) {
++    return exchange.getSession()
++        .flatMap(session -> Duration.between(session.getCreationTime(), Instant.now()).compareTo(maximum) >= 0
++            ? restartRequest(exchange, session, maximum)
++            : chain.filter(exchange));
++  }
++
++  private static Mono<Void> restartRequest(
++      ServerWebExchange exchange, WebSession session, Duration maximum) {
++    log.info("Ended a session that reached its maximum lifetime of {}", maximum);
++    return session.invalidate().then(Mono.defer(() -> {
++      // Relative: the browser resolves it against the address it requested. The expired SESSION
++      // cookie is written in this response's commit (DefaultWebSessionManager.save).
++      URI uri = exchange.getRequest().getURI();
++      String location = uri.getRawPath() + (uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery());
++      var response = exchange.getResponse();
++      response.setStatusCode(HttpStatus.FOUND);
++      response.getHeaders().setLocation(URI.create(location));
++      return response.setComplete();
++    }));
++  }
++
++  private Duration maxSessionLifetime() {
++    String configured = environment.getProperty(MAX_SESSION_LIFETIME);
++    if (configured == null) {
++      return DEFAULT_MAX_SESSION_LIFETIME;
++    }
++    try {
++      Duration lifetime = DurationStyle.detectAndParse(configured.strip(), ChronoUnit.SECONDS);
++      if (lifetime.isPositive()) {
++        return lifetime;
++      }
++    } catch (IllegalArgumentException e) {
++      // Reported below with the property name.
++    }
++    throw new IllegalArgumentException(
++        MAX_SESSION_LIFETIME + " must be a positive duration such as 8h; got '" + configured + "'");
++  }
++
 +  private boolean requireMappedRole() {
 +    return environment.getProperty(REQUIRE_MAPPED_ROLE, Boolean.class, false);
 +  }
@@ -247,7 +340,7 @@ index 16b75d4..fe77ae8 100644
    @Bean
    public ReactiveOAuth2AccessTokenResponseClient<OAuth2AuthorizationCodeGrantRequest>
        authorizationCodeTokenResponseClient(@Qualifier("oauthWebClient") WebClient webClient) {
-@@ -151,11 +250,20 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -151,11 +340,20 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
            var provider = getProviderByProviderId(request.getClientRegistration().getRegistrationId());
            final var extractor = getExtractor(provider, acs);
            if (extractor == null) {
@@ -269,7 +362,7 @@ index 16b75d4..fe77ae8 100644
          });
    }
  
-@@ -170,19 +278,56 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -170,19 +368,56 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
            var provider = getProviderByProviderId(request.getClientRegistration().getRegistrationId());
            final var extractor = getExtractor(provider, acs);
            if (extractor == null) {
@@ -329,7 +422,7 @@ index 16b75d4..fe77ae8 100644
      if (registrations.isEmpty()) {
        throw new IllegalArgumentException("OAuth2 authentication is enabled but no providers specified.");
      }
-@@ -191,7 +336,31 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -191,7 +426,31 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
  
    @Bean
    public ServerLogoutSuccessHandler defaultOidcLogoutHandler(final ReactiveClientRegistrationRepository repository) {
@@ -362,7 +455,7 @@ index 16b75d4..fe77ae8 100644
    }
  
    private ProviderAuthorityExtractor getExtractor(final OAuthProperties.OAuth2Provider provider,
-@@ -209,4 +378,3 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
+@@ -209,4 +468,3 @@ public class OAuthSecurityConfig extends AbstractAuthSecurityConfig {
    }
  
  }

@@ -315,6 +315,7 @@ def runtime_settings(env, clusters, origin=None):
         'viewer_group': viewer_group,
         'admin_group': admin_group,
         'session_idle_minutes': _positive(env, 'KEYCLOAK_SESSION_IDLE_MINUTES'),
+        'session_max_hours': _positive(env, 'KEYCLOAK_SESSION_MAX_HOURS'),
         'clusters': cluster_names(clusters),
         'viewer_messages': env_flag(env, VIEWER_MESSAGES_KEY),
     }
@@ -444,8 +445,9 @@ def summary(data, path, outcome):
 def kafbat_role(name, group, clusters, admin=False, viewer_messages=False):
     """One Kafbat RBAC role whose only subject is a realm group carried in the `groups` claim.
 
-    The viewer gets `view` on every resource except `applicationconfig` (its view
-    renders the running configuration, client secret included) and `analysis_view`
+    The viewer gets `view` on every resource except `applicationconfig` (its view can
+    return the running configuration, client secret included, when Kafbat's dynamic
+    configuration is on) and `analysis_view`
     on topics; `messages_read` only when the site opted in. KSQL has `execute`
     only, which also permits mutations, so only the administrator gets it.
     """
@@ -474,7 +476,9 @@ def runtime(values):
     The Keycloak client secret appears as the `${KEYCLOAK_KAFBAT_CLIENT_SECRET}`
     placeholder, which Kafbat resolves from its container environment. The
     session cookie is named so the back-channel logout handler can end sessions,
-    and its idle timeout is the realm's (one source: KEYCLOAK_SESSION_IDLE_MINUTES).
+    its idle timeout is the realm's (one source: KEYCLOAK_SESSION_IDLE_MINUTES) and so is its
+    absolute lifetime, which the fork's session filter enforces (auth.oauth2.max-session-lifetime,
+    one source: KEYCLOAK_SESSION_MAX_HOURS).
     """
     origin = values['public_origin']
     realm_url = origin + '/identity/realms/' + REALM
@@ -503,7 +507,9 @@ def runtime(values):
             'timeout': f"{values['session_idle_minutes']}m",
             'cookie': {'name': UI_SESSION_COOKIE, 'secure': True, 'http-only': True, 'same-site': 'lax'},
         }}},
-        'auth': {'type': 'OAUTH2', 'oauth2': {'require-mapped-role': True, 'client': {UI_REGISTRATION: client}}},
+        'auth': {'type': 'OAUTH2', 'oauth2': {'require-mapped-role': True,
+                                              'max-session-lifetime': f"{values['session_max_hours']}h",
+                                              'client': {UI_REGISTRATION: client}}},
         'rbac': {'roles': roles},
     }
 
@@ -529,6 +535,7 @@ def runtime_summary(values, path, outcome):
         f"  roles: viewer <- group {values['viewer_group']}; administrator <- group {values['admin_group']}",
         '  viewer message payloads: ' + ('on' if values['viewer_messages'] else f'off ({VIEWER_MESSAGES_KEY}=true opts in)'),
         f"  session idle: {values['session_idle_minutes']}m (cookie {UI_SESSION_COOKIE}; from KEYCLOAK_SESSION_IDLE_MINUTES)",
+        f"  session maximum: {values['session_max_hours']}h (absolute, from KEYCLOAK_SESSION_MAX_HOURS)",
         '  placeholders for: KEYCLOAK_KAFBAT_CLIENT_SECRET (value stays in .env)',
         f'  {path}: {outcome}',
     ]

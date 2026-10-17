@@ -1,6 +1,6 @@
 # Native SSO customization
 
-EPC and regular Krate share `krate/kafka-ui:1.5.0-sso.6`, based on Kafbat v1.5.0
+EPC and regular Krate share `krate/kafka-ui:1.5.0-sso.9`, based on Kafbat v1.5.0
 at `afc9c918e13c4422268a3a5b7933c7b448746c82`. Upstream source and license:
 <https://github.com/kafbat/kafka-ui/tree/v1.5.0>.
 
@@ -176,6 +176,42 @@ form. The patch also:
   reference: "If `OidcBackChannelServerLogoutHandler` is not wired, then the
   URL is ... which is not recommended since it requires passing a CSRF token"
   (same logout page).
+- **Absolute session lifetime.** Spring's WebSession expires only after inactivity
+  (`server.reactive.session.timeout`: `InMemoryWebSessionStore.retrieveSession` drops a
+  session when `now - maxIdleTime` is after its last access, `checkExpired`,
+  `InMemoryWebSessionStore.java` 309-312 at v6.2.17), so a session in continuous use never
+  ended. `sessionLifetimeLimit` (a `WebFilter`, registered `addFilterBefore(...,
+  REACTOR_CONTEXT)`, i.e. before the SecurityContext is loaded and before the authorization
+  decision) ends a session whose `WebSession.getCreationTime()` is
+  `auth.oauth2.max-session-lifetime` or more in the past (a Spring duration such as `8h`; a
+  bare number is seconds; absent: 8 hours; zero, negative or unparsable: the application
+  refuses to start). The end restarts that same request instead of continuing it. The session
+  reference is cached per exchange (`DefaultServerWebExchange` caches `getSession()`, line 137
+  at v6.2.17), so a chain continued after the ending would save Spring's authorization request —
+  on `/oauth2/authorization/keycloak`, `WebSessionOAuth2ServerAuthorizationRequestRepository
+  .saveAuthorizationRequest` writes the state and PKCE into `exchange.getSession().getAttributes()`
+  at v6.5.9, on the same exchange — into the invalidated session, and `DefaultWebSessionManager.save`
+  discards it at response commit (`DefaultWebSessionManager.java` 105-124: an invalidated session's
+  commit-time save returns without `session.save()`); the callback then cannot recover the request
+  and the sign-in fails once with `/login?error`. Instead the filter calls `WebSession.invalidate()`
+  — the wrapped invalidate also removes the session's `ReactiveOidcSessionRegistry` entry
+  (`ServerHttpSecurity.java` 4763-4770: the WebSession that `ServerHttpSecurity` hands to the
+  chain) — and answers 302 at the request's own URI (the raw path and query, relative so the
+  browser, whose HTTPS proxy fronts the app, resolves the scheme and host itself); the `SESSION`
+  cookie is expired in that response's commit hook (`DefaultWebSessionManager.save` writes the
+  expired cookie of an invalidated session through `CookieWebSessionIdResolver.expireSession`,
+  lines 113-114 and 118-124 at v6.2.17). The browser's repeat carries no session: its first
+  `getSession()` creates a healthy one, which Spring's authorization redirect writes into, so a
+  login started after an expiry completes without the error page. The creation time is that of the first
+  request of the sign-in; the session id change at login
+  (`WebSessionServerSecurityContextRepository.save` calls `changeSessionId`) keeps it. A
+  `POST /logout` is left to the logout filter: it ends the session itself, and
+  `OAuthLogoutSuccessHandler` casts the authentication, which an invalidated session no
+  longer has. Krate's generated `runtime.yml` sets the value from `KEYCLOAK_SESSION_MAX_HOURS`,
+  the realm's `ssoSessionMaxLifespan`. A response that is already streaming is not
+  interrupted. The value must stay at or above the time a sign-in takes (a minute or two
+  with TOTP): the session that carries the authorization request counts from its first
+  request.
 - **PKCE and `login_hint`.** `NativeLoginSupport.resolver` wraps Spring's
   resolver with `OAuth2AuthorizationRequestCustomizers.withPkce()` and copies
   only a bounded `login_hint` query parameter (at most 254 characters, no

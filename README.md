@@ -263,17 +263,28 @@ port only redirects to the public origin; open the UI at the
 `KEYCLOAK_PUBLIC_URL` origin (`./krate ui` prints it).
 
 Offline Docker RPMs: `make docker-rpms` downloads the Docker CE packages plus the
-base-OS dependencies a minimal host may lack (`container-selinux`, `nftables`
-and the libraries nftables needs: `libnftnl`, `jansson`, `libmnl`) into
-`optional/`, from the builder image `RHEL_BUILDER_IMAGE` (default: the Rocky
+base-OS dependencies a minimal host may lack into `optional/`: `container-selinux`,
+`nftables` with the libraries it needs (`libnftnl`, `jansson`, `libmnl`), and
+`iptables-nft` with `iptables-libs`, `libnetfilter_conntrack` and `libnfnetlink`
+(docker-ce requires `(iptables-nft or iptables)`: a RHEL server has iptables-nft
+because firewalld requires it, a cloud image may have neither), from the builder
+image `RHEL_BUILDER_IMAGE` (default: the Rocky
 Linux project's maintained `rockylinux/rockylinux:9`, pinned by digest; the
 Docker Official Image `rockylinux:9` is no longer updated). `krate
 docker-install` (and the bundled `docker-offline/install-docker.sh`, which uses
 the same selection) adds only the bundled packages that provide a capability
-`dnf` names as missing on that host, over up to three rounds (an added package
-can name its own missing library), and otherwise tells you which capability to
-take from the OS media. The whole flow was proven offline on a Rocky Linux 9.8 VM
-with SELinux enforcing (see `sso/guides/identity-gate.md`).
+`dnf` names as missing on that host, round by round until no bundled package is
+left to add (an added package can name its own missing library; for a rich
+dependency such as `(iptables-nft or iptables)` the first alternative a bundled
+package provides is taken). When a capability stays unresolved it names that
+capability and tells you to take it from the OS media; the advice about
+`container-selinux` (it must match the host's `selinux-policy` build) appears only
+when `container-selinux` or one of its versioned requirements (the host's
+`selinux-policy`) is the one that stayed unresolved.
+The whole flow was proven offline on Rocky Linux 9.8 VMs with SELinux enforcing that already had iptables-nft
+(a standard RHEL 9 server has it through firewalld; see `sso/guides/identity-gate.md`), and `krate docker-install`
+also on a Rocky Linux 9.8 cloud VM with neither firewalld nor iptables, where it added `iptables-nft`,
+`nftables`, `libnftnl` and `container-selinux` from `optional/`.
 
 `./krate identity up` generates the database TLS material and the realm, starts
 PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the
@@ -362,7 +373,7 @@ epc/         Two-broker RHEL setup and krate command script
 monitoring/  Shared KRaft/EPC dashboards, alerts, and log collection
 docker/      Broker image definitions: release and debug versions
 sso/         SSO activation helpers and operator guides
-kafbat-ui/   Customized Kafbat UI build for shared login and SSO
+kafbat-ui/   Customized Kafbat UI build: shared login without SSO, or Keycloak SSO
 Makefile     Package builds and source checks
 ```
 
@@ -413,7 +424,7 @@ Krate uses the projects below. Credit belongs to their owners, maintainers, and 
 | [Confluent container images](https://github.com/confluentinc/cp-docker-images) | Confluent and contributors | Kafka and ZooKeeper images in the legacy edition |
 | [Docker Engine](https://www.docker.com/), [Compose](https://github.com/docker/compose), and [Buildx](https://github.com/docker/buildx) | Docker and project contributors | Running containers and building broker images |
 | [containerd](https://containerd.io/) | containerd maintainers and contributors; a CNCF project | Container runtime included with the Docker packages |
-| [Kafbat UI](https://github.com/kafbat/kafka-ui) | Kafbat and contributors | Browser interface for Kafka. KRaft and EPC ship a modified v1.5.0 build that adds the SSO button; the image contains the upstream license, notice, and patches. See the [build notes](kafbat-ui/README.md). |
+| [Kafbat UI](https://github.com/kafbat/kafka-ui) | Kafbat and contributors | Browser interface for Kafka. KRaft and EPC ship a modified v1.5.0 build with a native login page and Keycloak-only sign-in when SSO is on; the image contains the upstream license, notice, and patches. See the [build notes](kafbat-ui/README.md). |
 | [Eclipse Temurin](https://adoptium.net/) | Eclipse Adoptium Working Group and OpenJDK contributors | Java runtime of the KRaft and EPC Kafbat UI image |
 | [Keycloak](https://github.com/keycloak/keycloak) | Keycloak project and contributors; a CNCF project | SSO connection between Kafbat and the company identity provider |
 | [PostgreSQL](https://www.postgresql.org/) | PostgreSQL Global Development Group | Keycloak data storage |

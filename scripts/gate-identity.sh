@@ -14,6 +14,7 @@
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe [--phase 1|2|3|all] [--stub-port N]
 #   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test
+#   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test --session-max-hours 1
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1
 #
 # The fixture directory is a disposable checkout or a fixture installation whose
@@ -86,7 +87,7 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
   --session-max-hours N
                    Phase 4a/4b companion run: KEYCLOAK_SESSION_MAX_HOURS=N is set in the
                    fixture .env before the realm is created (the value applies at realm
-                   creation only), then REQUIRED_P1 plus U27 (4a) or U27 and V23 (4b) run,
+                   creation only), then REQUIRED_P1 plus U27 and K37 (4a) or U27 and V23 (4b) run,
                    and the receipt names N
   --candidate SHA  the commit the edition files come from, when the directory has no git (a bundle install);
                    it binds only with --repo, which compares the installed product bytes with it
@@ -151,7 +152,7 @@ if [[ -n "$SESSION_MAX_HOURS" ]]; then
   [[ "$SESSION_MAX_HOURS" =~ ^[0-9]+$ && "$SESSION_MAX_HOURS" -ge 1 ]] \
     || { echo "--session-max-hours must be a whole number of at least 1 (sso/identity.py KEYCLOAK_SESSION_MAX_HOURS)" >&2; exit 2; }
   [[ "$PHASE" == 4a || "$PHASE" == 4b ]] \
-    || { echo "--session-max-hours runs with --phase 4a or 4b only (the session-maximum rows are U27 and V23)" >&2; exit 2; }
+    || { echo "--session-max-hours runs with --phase 4a or 4b only (the session-maximum rows are U27, V23 and K37)" >&2; exit 2; }
 fi
 
 ED="$EDITION_DIR"
@@ -286,7 +287,7 @@ if [[ -n "$REPO_ARG" ]]; then
   [[ "$resolved" == "$repo_head" ]] || { echo "--repo HEAD $repo_head is not the candidate $CANDIDATE_ARG ($resolved)" >&2; exit 2; }
   TOPLEVEL="$REPO_ARG"
   PRODUCT_BINDING="$(bind_product "$resolved")" ||
-    { echo "$ED is not bound to the candidate (${PRODUCT_BINDING:-no result}; the lines above name each difference or the error); reinstall the candidate's bundle, delete the files it does not ship and load its images before this gate" >&2; exit 2; }
+    { echo "$ED is not bound to the candidate (${PRODUCT_BINDING:-no result}; the lines above name each difference or the error); reinstall the candidate's bundle, delete the files it does not ship and load its images before this gate (a NOTE about the Docker image store is not fixed by reinstalling: it names the likely cause, a different image store, not a bad bundle)" >&2; exit 2; }
   BOUND=true
   CANDIDATE="$resolved (stated as $CANDIDATE_ARG and resolved in --repo; product byte binding in its own row; static block on that checkout)"
   CANDIDATE_GIT_HEAD="$resolved"
@@ -354,12 +355,12 @@ REQUIRED_X=(X1)
 # Phase 4 inventories (PHASE4-INSTRUCTIONS-v3.md section 5): a slice is REQUIRED_P1
 # plus its own rows, and it holds no Phase 2/3 ids (on an EPC edition directory the
 # Phase 2/3 rows would be NOT_RUN and finish() would turn that into INCOMPLETE).
-# The session-maximum rows (U27, V23) run only in the --session-max-hours companion
+# The session-maximum rows (U27, V23, K37) run only in the --session-max-hours companion
 # runs and are not part of the default inventories.
 REQUIRED_P4A=(U1 U2 U3 U4 U5 U6 U7 U8 U9 U10 U11 U12 U13 U14 U15 U16 U17 U18 U19 U20 U21a U21b U22 U23 U24 U25 U26 U28 U29 X3 Z4a)
 REQUIRED_P4B=(V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15 V16 V17 V18 V19 V20 V21 V22 V24 X4 Z4b)
 REQUIRED_P4C=(W1 W2 W3 W4)
-SESSION_P4A=(U27)
+SESSION_P4A=(U27 K37)
 SESSION_P4B=(U27 V23)
 phase4_session_ids() { case "$1" in 4a) printf '%s\n' "${SESSION_P4A[@]}" ;; 4b) printf '%s\n' "${SESSION_P4B[@]}" ;; esac; }
 # W3 (the foreign-source probe) follows the J7 pattern: on the Mac it runs (a)+(b)
@@ -380,6 +381,9 @@ required_ids() { # the inventory that decides the verdict, given the flags
     if [[ "$id" == J7 ]] && ! $J7_REQUIRED; then continue; fi
     echo "$id"
   done
+  # The air gap of a bundle host (AG1-AG5, the airgap_* functions): a row that never reports fails the gate there. The Mac and a
+  # git checkout record the rows NOT_RUN outside the inventory.
+  if [[ "$(airgap_host_kind)" == bundle ]]; then for id in AG1 AG2 AG3 AG4 AG5; do echo "$id"; done; fi
   case "$PHASE" in
     1) ;;
     2) for id in "${REQUIRED_P2[@]}"; do echo "$id"; done ;;
@@ -552,7 +556,8 @@ hold_lock() { # a live process holds the identity lock until release_lock
 release_lock() { kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; }
 
 fixture_reset() {
-  local n; for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
+  local n; for n in $(docker ps -aq --filter "label=krate.gate=w4-probe"); do docker rm -f "$n" >/dev/null 2>&1; done  # a W4 probe left by a killed run
+  for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
@@ -584,7 +589,8 @@ fixture_env() {
 }
 host_conflicts() { # other krate installations on this Docker host block a run (one installation per host by design)
   local other mon
-  other="$(docker ps -a --format '{{.Names}} {{.Label "com.docker.compose.project"}}' | awk -v p="$PROJECT" '$1 ~ /^(krate|epc)-/ && $2 != p {print $1" ("$2")"}' | tr '\n' ' ')"
+  # A W4 probe (label krate.gate=w4-probe, no Compose project) is a gate artifact of a killed run, not another installation: fixture_reset removes it.
+  other="$(docker ps -a --format '{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Label "krate.gate"}}' | awk -F'|' -v p="$PROJECT" '$1 ~ /^(krate|epc)-/ && $2 != p && $3 != "w4-probe" {print $1" ("$2")"}' | tr '\n' ' ')"
   [[ -z "$other" ]] || { echo "Another Krate installation is running on this host: $other. Stop it first (one Keycloak deployment per host)." >&2; exit 2; }
   mon="$(docker volume ls -q | grep -c "^${MON_PROJECT}_" || true)"
   [[ "$mon" == 0 ]] || { echo "Monitoring volumes of project $MON_PROJECT already exist ($mon); this runner would destroy them. Remove them or use another host." >&2; exit 2; }
@@ -727,7 +733,11 @@ run_phase1() {
   uid="$(kcadm_master get users -r krate -q username=gateb -q exact=true --fields id --format csv --noquotes | grep -o -E '[0-9a-f-]{36}' | head -1)"
   ev="$(kcadm_master get "attack-detection/brute-force/users/$uid" -r krate | tr -d ' \n')"
   [[ "$ev" == *'"disabled":true'* && "$ev" =~ \"numFailures\":[2-9] ]]; st=$?; ok_if B5 1 B "$st" "after 5 rapid wrong passwords the account is temporarily locked (Keycloak's quick-login check locks after two rapid failures, later attempts are not counted): $ev"
-  sleep 61  # a code is single-use: let the step gatea's B1 login consumed expire before using "the previous step"
+  # a code is single-use: B7 sends the code of the previous step, which must not be one gatea's enrolment consumed.
+  # Wait only until the previous step is newer than the newest step the enrolment recorded in its state file
+  # (otp_steps), at most the 61 s this row always waited; a state file without otp_steps keeps the full 61 s.
+  pause="$(python3 -I -c 'import json,sys,time; s=json.load(open(sys.argv[1])).get("otp_steps") or []; w=61.0 if not s else min(61.0, max(0.0, (max(int(x) for x in s)+2)*30+1-time.time())); time.sleep(w); print("%.0f" % w)' "$STATE/gatea.json" 2>/dev/null || sleep 61)"
+  log "B7: waited ${pause:-61}s until the previous TOTP step is newer than gatea's enrolment steps"
   cap flow login --base "$BASE" --state "$STATE/gatea.json" --client-secret-env KEYCLOAK_KAFBAT_CLIENT_SECRET --expect ok --totp-offset -1; st=$?; ok_if B7 1 B "$st" "a one-time code from the previous 30-second step is accepted (realm look-ahead window 1): $(printf '%s' "$CAP" | tail -1 | cut -c1-60)"
   cap "$KRATE" identity users reset-password gatev; rc=$?; TEMP_PW="$(temp_password "$CAP")"; add_secret "$TEMP_PW" temp
   [[ $rc -eq 0 && -n "$TEMP_PW" ]]; st=$?; ok_if B6 1 B "$st" "reset-password sets a new temporary password (exit $rc; shown once)"
@@ -1017,7 +1027,12 @@ run_phase2() {
   [[ $rc -eq 0 && "$ev" == *"prom=[9090/tcp -> 127.0.0.1:19090"* && "$ev" == *"loki=[3100/tcp -> 127.0.0.1:13100"* && "$ev" == *"grafana=[3000/tcp -> 0.0.0.0:13000"* && "$ev" != *"9090/tcp -> 0.0.0.0"* && "$ev" != *"3100/tcp -> 0.0.0.0"* ]]; st=$?; ok_if M1 2 M "$st" "monitor up exit=$rc; Prometheus and Loki bound to 127.0.0.1 only, Grafana on all interfaces: $ev"
   after="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$(mon_cid kafka-exporter)" 2>/dev/null)"
   [[ "$after" == *"${PROJECT}_kafka-network"* && "$after" != *"${PROJECT}_identity"* ]]; st=$?; ok_if M2 2 M "$st" "kafka-exporter networks: [$after] (brokers' network, not identity)"
-  local svc; for svc in prometheus grafana loki; do [[ -z "$(mon_cid "$svc")" ]] || docker logs "$(mon_cid "$svc")" > "$STATE/mon-$svc.log" 2>&1 || true; done
+  # A monitoring log this copy cannot take is named in logs-not-captured.txt: leak_scan then fails Z2 and Z3 with it listed as not read.
+  local svc mid; for svc in prometheus grafana loki; do
+    mid="$(mon_cid "$svc")"
+    if [[ -z "$mid" ]]; then echo "mon-$svc.log (no container)" >> "$STATE/logs-not-captured.txt"
+    else docker logs "$mid" > "$STATE/mon-$svc.log" 2>&1 || echo "mon-$svc.log (docker logs failed)" >> "$STATE/logs-not-captured.txt"; fi
+  done
   cap "$KRATE" monitor down
   # Kafbat authorization ladder (a background child, so an interrupt reaches it)
   if [[ -f "$GATE_DIR/phase2_kafbat.py" ]]; then
@@ -1162,7 +1177,7 @@ EOF
   [[ $before -eq 0 && $rc -eq 0 && $rc2 -eq 0 && $j -eq 0 ]]; st=$?
   ok_if P15 3 P "$st" "CONFIGURE_TOTP defaultAction set to true behind the CLI's back (drift confirmed: $before); identity up exit $rc; afterwards defaultAction false and the realm matches the plan again (provider re-applied after P14's removal): ${ev:-identical}; journal 'up reconciled required action CONFIGURE_TOTP' and 'up reconciled identity provider'"
   for id in "${REQUIRED_P3[@]}"; do [[ "$id" == Z* || -n "${SEEN[$id]:-}" ]] || record "$id" 3 P FAIL "no result produced (scripts/gate/phase3_broker.py missing or incomplete)"; done
-  docker logs "${PROJECT}-gate3-pingstub" > "$STATE/pingstub.log" 2>&1 || true
+  docker logs "${PROJECT}-gate3-pingstub" > "$STATE/pingstub.log" 2>&1 || echo "pingstub.log (docker logs failed)" >> "$STATE/logs-not-captured.txt"
 }
 
 # ═══════════════════════════ phase 4 ═══════════════════════════
@@ -1174,7 +1189,7 @@ EOF
 # harness/phase4/PHASE4-INSTRUCTIONS-v3.md); X3/X4 (screenshot stories), Z4a/Z4b
 # (the extended leak scans) and W1-W4 are the runner's. A --session-max-hours N
 # companion run sets N in fixture_env (before the realm is created) and runs
-# REQUIRED_P1 plus U27 (4a) or U27 and V23 (4b) only.
+# REQUIRED_P1 plus U27 and K37 (4a) or U27 and V23 (4b) only.
 in_inv() { # id inventory...: membership without a subshell
   local want="$1"; shift; local have
   for have in "$@"; do [[ "$have" == "$want" ]] && return 0; done
@@ -1264,18 +1279,29 @@ phase4_leak_scan_z4a() {
       add_secret "$v"
     done < "$STATE/phase4-secrets.txt"
   fi
-  local -a cnames=() places=("$JOURNAL" "$RECEIPT")
+  local -a cnames=() places=("$JOURNAL" "$RECEIPT") unread=()
+  local listing="" out cn ps_failed=0
   if command -v docker >/dev/null 2>&1; then
+    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
+    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
+    # A listing or a log that cannot be read fails the row: a scan over nothing is not a clean scan.
+    out="$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$out"$'\n'
+    out="$(docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$out"$'\n'
+    out="$(docker ps -a --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$(printf '%s\n' "$out" | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-")"$'\n'
     while IFS= read -r cn; do
       [[ -n "$cn" ]] || continue
       cnames+=("$cn")
-      docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
-      places+=("$STATE/docker-$cn.log")
-    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
-    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
-    done < <({ docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}'
-              docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}'
-              docker ps -a --format '{{.Names}}' | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-"; } 2>/dev/null | sort -u)
+      if docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1; then
+        places+=("$STATE/docker-$cn.log")
+      else
+        unread+=("$cn")
+      fi
+    done < <(printf '%s' "$listing" | sort -u)
+  else
+    ps_failed=1
   fi
   local mf psd
   for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
@@ -1286,7 +1312,7 @@ phase4_leak_scan_z4a() {
   done
 
   local raw_without_display="$STATE/raw-without-display.log"
-  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || true
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || unread+=("raw log (no display)")
 
   local secrets_all="$STATE/secrets-all.$$.txt"
   local secrets_temp="$STATE/secrets-temp.$$.txt"
@@ -1307,8 +1333,8 @@ phase4_leak_scan_z4a() {
   done
 
   local scan_err="$STATE/leak-scan.$$.err"
-  local hits
-  hits=$(python3 -I -c '
+  local hits unreadable_n unreadable_names scan_out
+  scan_out=$(python3 -I -c '
 import sys, os
 
 all_secrets = [line.strip() for line in open(sys.argv[1], encoding="utf-8", errors="replace") if len(line.strip()) >= 6]
@@ -1318,13 +1344,19 @@ raw_file = sys.argv[4]
 raw_no_disp = sys.argv[5]
 
 hits = 0
+unreadable = []
+
+
+def mark_unreadable(name):
+    unreadable.append(name)
+    print(f"UNREADABLE: {name}", file=sys.stderr)
+
 
 for p in places:
-    if not os.path.isfile(p):
-        continue
     try:
         content = open(p, "rb").read().decode("utf-8", "replace")
     except OSError:
+        mark_unreadable(os.path.basename(p))
         continue
     for s in all_secrets:
         c = content.count(s)
@@ -1332,45 +1364,56 @@ for p in places:
             hits += c
             print(f"LEAK: secret appears in {os.path.basename(p)} x{c}", file=sys.stderr)
 
-if os.path.isfile(raw_file):
-    try:
-        raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
-        for s in all_secrets:
-            if s not in temp_secrets:
-                c = raw_content.count(s)
-                if c > 0:
-                    hits += c
-                    print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
-    except OSError:
-        pass
-
-if os.path.isfile(raw_no_disp):
-    try:
-        raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
-        for s in temp_secrets:
-            c = raw_nd_content.count(s)
+try:
+    raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
+except OSError:
+    mark_unreadable("raw log")
+else:
+    for s in all_secrets:
+        if s not in temp_secrets:
+            c = raw_content.count(s)
             if c > 0:
                 hits += c
-                print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
-    except OSError:
-        pass
+                print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
+
+try:
+    raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
+except OSError:
+    mark_unreadable("raw log (no display)")
+else:
+    for s in temp_secrets:
+        c = raw_nd_content.count(s)
+        if c > 0:
+            hits += c
+            print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
 
 ed_auth = sys.argv[6]
-if os.path.isdir(ed_auth):
-    for root, _dirs, files in os.walk(ed_auth):
-        for fn in files:
-            fp = os.path.join(root, fn)
-            try:
-                content = open(fp, "rb").read().decode("utf-8", "replace")
-                for s in all_secrets:
-                    c = content.count(s)
-                    if c > 0:
-                        hits += c
-                        print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
-            except OSError:
-                pass
 
-print(hits)
+
+def auth_label(path):
+    rel = os.path.relpath(path, ed_auth) if path else "."
+    return "auth/keycloak" if rel == "." else "auth/keycloak/" + rel
+
+
+def walk_error(err):
+    mark_unreadable(auth_label(err.filename))
+
+
+for root, _dirs, files in os.walk(ed_auth, onerror=walk_error):
+    for fn in files:
+        fp = os.path.join(root, fn)
+        try:
+            content = open(fp, "rb").read().decode("utf-8", "replace")
+            for s in all_secrets:
+                c = content.count(s)
+                if c > 0:
+                    hits += c
+                    print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
+        except OSError:
+            mark_unreadable(auth_label(fp))
+
+names = sorted(set(unreadable))
+print(hits, len(unreadable), ", ".join(names[:10]) + (f" (+{len(names) - 10} more)" if len(names) > 10 else ""))
 ' "$secrets_all" "$secrets_temp" "$files_list" "$RAW" "$raw_without_display" "$ED/auth/keycloak" 2>"$scan_err")
   if [[ -f "$scan_err" ]]; then
     cat "$scan_err" >> "$RAW"
@@ -1378,9 +1421,15 @@ print(hits)
   fi
 
   rm -f "$secrets_all" "$secrets_temp" "$files_list" "$raw_without_display"
-  local st
-  [[ "$hits" == "0" ]]; st=$?
-  ok_if Z4a "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): $hits hits; walk: live4a 901"
+  read -r hits unreadable_n unreadable_names <<<"${scan_out:-}"
+  local st gaps=""
+  (( ps_failed )) && gaps+="; the container listing failed"
+  (( ${#cnames[@]} )) || gaps+="; no container listed"
+  (( ${#unread[@]} )) && gaps+="; logs not read: ${unread[*]}"
+  [[ "${unreadable_n:-}" == "0" ]] || gaps+="; unreadable scan inputs: ${unreadable_n:-the scan did not finish}${unreadable_names:+ ($unreadable_names)}"
+  (( ${#SECRETS[@]} )) || gaps+="; no secret values to search"
+  [[ "${hits:-}" == "0" && -z "$gaps" ]]; st=$?
+  ok_if Z4a "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): ${hits:-?} hits$gaps; walk: live4a 901"
 }
 phase4_screenshots_x4() {
   local slice="$1" viewer_json="$STATE/p4/kc-p4v.json" admin_json="$STATE/p4/kc-p4both.json"
@@ -1478,18 +1527,29 @@ phase4_leak_scan_z4b() {
       add_secret "$v"
     done < "$STATE/phase4-secrets.txt"
   fi
-  local -a cnames=() places=("$JOURNAL" "$RECEIPT")
+  local -a cnames=() places=("$JOURNAL" "$RECEIPT") unread=()
+  local listing="" out cn ps_failed=0
   if command -v docker >/dev/null 2>&1; then
+    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
+    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
+    # A listing or a log that cannot be read fails the row: a scan over nothing is not a clean scan.
+    out="$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$out"$'\n'
+    out="$(docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$out"$'\n'
+    out="$(docker ps -a --format '{{.Names}}' 2>/dev/null)" || ps_failed=1
+    listing+="$(printf '%s\n' "$out" | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-")"$'\n'
     while IFS= read -r cn; do
       [[ -n "$cn" ]] || continue
       cnames+=("$cn")
-      docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1 || true
-      places+=("$STATE/docker-$cn.log")
-    # Every container of both Compose projects by label (the EPC cluster's own containers are named epc-*,
-    # which no name prefix below matches), plus the label-less gate containers by name (the stand-in IdP).
-    done < <({ docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}'
-              docker ps -a --filter "label=com.docker.compose.project=$MON_PROJECT" --format '{{.Names}}'
-              docker ps -a --format '{{.Names}}' | grep -E "^(${PROJECT}|${MON_PROJECT}|krate)-"; } 2>/dev/null | sort -u)
+      if docker logs "$cn" > "$STATE/docker-$cn.log" 2>&1; then
+        places+=("$STATE/docker-$cn.log")
+      else
+        unread+=("$cn")
+      fi
+    done < <(printf '%s' "$listing" | sort -u)
+  else
+    ps_failed=1
   fi
   local mf psd
   for mf in "$OUT"/screenshots*/manifest.tsv "$OUT"/screenshots*/manifest.json; do
@@ -1500,7 +1560,7 @@ phase4_leak_scan_z4b() {
   done
 
   local raw_without_display="$STATE/raw-without-display.log"
-  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || true
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" 2>/dev/null || unread+=("raw log (no display)")
 
   local secrets_all="$STATE/secrets-all.$$.txt"
   local secrets_temp="$STATE/secrets-temp.$$.txt"
@@ -1521,8 +1581,8 @@ phase4_leak_scan_z4b() {
   done
 
   local scan_err="$STATE/leak-scan-z4b.$$.err"
-  local hits
-  hits=$(python3 -I -c '
+  local hits unreadable_n unreadable_names scan_out
+  scan_out=$(python3 -I -c '
 import sys, os
 
 all_secrets = [line.strip() for line in open(sys.argv[1], encoding="utf-8", errors="replace") if len(line.strip()) >= 6]
@@ -1537,13 +1597,19 @@ banned_patterns = [
 ]
 
 hits = 0
+unreadable = []
+
+
+def mark_unreadable(name):
+    unreadable.append(name)
+    print(f"UNREADABLE: {name}", file=sys.stderr)
+
 
 for p in places:
-    if not os.path.isfile(p):
-        continue
     try:
         content = open(p, "rb").read().decode("utf-8", "replace")
     except OSError:
+        mark_unreadable(os.path.basename(p))
         continue
     for s in all_secrets:
         c = content.count(s)
@@ -1557,45 +1623,56 @@ for p in places:
                 hits += c
                 print(f"LEAK: banned pattern {bp} appears in {os.path.basename(p)} x{c}", file=sys.stderr)
 
-if os.path.isfile(raw_file):
-    try:
-        raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
-        for s in all_secrets:
-            if s not in temp_secrets:
-                c = raw_content.count(s)
-                if c > 0:
-                    hits += c
-                    print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
-    except OSError:
-        pass
-
-if os.path.isfile(raw_no_disp):
-    try:
-        raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
-        for s in temp_secrets:
-            c = raw_nd_content.count(s)
+try:
+    raw_content = open(raw_file, "rb").read().decode("utf-8", "replace")
+except OSError:
+    mark_unreadable("raw log")
+else:
+    for s in all_secrets:
+        if s not in temp_secrets:
+            c = raw_content.count(s)
             if c > 0:
                 hits += c
-                print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
-    except OSError:
-        pass
+                print(f"LEAK: non-temp secret appears in raw log x{c}", file=sys.stderr)
+
+try:
+    raw_nd_content = open(raw_no_disp, "rb").read().decode("utf-8", "replace")
+except OSError:
+    mark_unreadable("raw log (no display)")
+else:
+    for s in temp_secrets:
+        c = raw_nd_content.count(s)
+        if c > 0:
+            hits += c
+            print(f"LEAK: temp secret appears in raw log outside display x{c}", file=sys.stderr)
 
 ed_auth = sys.argv[6]
-if os.path.isdir(ed_auth):
-    for root, _dirs, files in os.walk(ed_auth):
-        for fn in files:
-            fp = os.path.join(root, fn)
-            try:
-                content = open(fp, "rb").read().decode("utf-8", "replace")
-                for s in all_secrets:
-                    c = content.count(s)
-                    if c > 0:
-                        hits += c
-                        print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
-            except OSError:
-                pass
 
-print(hits)
+
+def auth_label(path):
+    rel = os.path.relpath(path, ed_auth) if path else "."
+    return "auth/keycloak" if rel == "." else "auth/keycloak/" + rel
+
+
+def walk_error(err):
+    mark_unreadable(auth_label(err.filename))
+
+
+for root, _dirs, files in os.walk(ed_auth, onerror=walk_error):
+    for fn in files:
+        fp = os.path.join(root, fn)
+        try:
+            content = open(fp, "rb").read().decode("utf-8", "replace")
+            for s in all_secrets:
+                c = content.count(s)
+                if c > 0:
+                    hits += c
+                    print(f"LEAK: secret appears in {fp} x{c}", file=sys.stderr)
+        except OSError:
+            mark_unreadable(auth_label(fp))
+
+names = sorted(set(unreadable))
+print(hits, len(unreadable), ", ".join(names[:10]) + (f" (+{len(names) - 10} more)" if len(names) > 10 else ""))
 ' "$secrets_all" "$secrets_temp" "$files_list" "$RAW" "$raw_without_display" "$ED/auth/keycloak" 2>"$scan_err")
   if [[ -f "$scan_err" ]]; then
     cat "$scan_err" >> "$RAW"
@@ -1603,9 +1680,15 @@ print(hits)
   fi
 
   rm -f "$secrets_all" "$secrets_temp" "$files_list" "$raw_without_display"
-  local st
-  [[ "$hits" == "0" ]]; st=$?
-  ok_if Z4b "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): $hits hits"
+  read -r hits unreadable_n unreadable_names <<<"${scan_out:-}"
+  local st gaps=""
+  (( ps_failed )) && gaps+="; the container listing failed"
+  (( ${#cnames[@]} )) || gaps+="; no container listed"
+  (( ${#unread[@]} )) && gaps+="; logs not read: ${unread[*]}"
+  [[ "${unreadable_n:-}" == "0" ]] || gaps+="; unreadable scan inputs: ${unreadable_n:-the scan did not finish}${unreadable_names:+ ($unreadable_names)}"
+  (( ${#SECRETS[@]} )) || gaps+="; no secret values to search"
+  [[ "${hits:-}" == "0" && -z "$gaps" ]]; st=$?
+  ok_if Z4b "$slice" Z "$st" "extended leak scan over docker logs of ${#cnames[@]} containers, raw log, receipt, screenshot manifests, and ps dumps (${#SECRETS[@]} secret values searched): ${hits:-?} hits$gaps"
 }
 phase4_row_w1() {
   local slice="$1"
@@ -1867,13 +1950,15 @@ run_phase4() { # slice: 4a|4b|4c
   run_inv=("${inv[@]}")
   # Which helper produces which rows (section 5): "<script> <only|- for all> <id prefix>".
   # A companion --session-max-hours run executes U27 (through the Grafana helper) for
-  # both 4a and 4b, and V23 (through the Perses helper) for 4b; U27/V23 are the only
-  # rows of the companion inventory besides REQUIRED_P1.
+  # both 4a and 4b, V23 (through the Perses helper) for 4b and K37 (Kafbat's absolute
+  # session lifetime, through the Kafbat helper) for 4a: the Kafbat fork and its
+  # runtime.yml are the same in both slices, so one measurement per host is enough;
+  # U27/V23/K37 are the only rows of the companion inventory besides REQUIRED_P1.
   if [[ -n "$SESSION_MAX_HOURS" ]]; then
     run_inv=()
     while IFS= read -r id; do run_inv+=("$id"); done < <(phase4_session_ids "$slice")
     case "$slice" in
-      4a) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U") ;;
+      4a) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U" "$GATE_DIR/phase4_kafbat.py K37 K") ;;
       4b) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U" "$GATE_DIR/phase4_perses.py V23 V") ;;
     esac
   else
@@ -1892,35 +1977,39 @@ run_phase4() { # slice: 4a|4b|4c
     bringup_failed "$slice" "${run_inv[@]}"
     return
   fi
-  # A companion prepares the shared fixture once. Both timed observers then use
-  # read-only prepared preflights and start together; their setup must not race.
+  # A companion prepares the shared fixture once per helper that owns a timed row, one
+  # pass after the other (they must not race). The timed observers then use read-only
+  # prepared preflights and start together.
   if [[ -n "$SESSION_MAX_HOURS" ]]; then
     local prep_helper prep_tsv prep_rc
+    local -a prep_helpers=()
     case "$slice" in
-      4a) prep_helper="$GATE_DIR/phase4_grafana.py" ;;
-      4b) prep_helper="$GATE_DIR/phase4_perses.py" ;;
+      4a) prep_helpers=("$GATE_DIR/phase4_grafana.py" "$GATE_DIR/phase4_kafbat.py") ;;
+      4b) prep_helpers=("$GATE_DIR/phase4_perses.py") ;;
     esac
-    prep_tsv="$STATE/phase4-preparation.tsv"
     local -a prep_extra=()
     if [[ "$slice" == 4b ]]; then
       prep_extra=(--stub-dir "$STUB_DIR" --stub-port "$STUB_PORT" --stub-script "$STUB")
     fi
-    python3 -I "$prep_helper" run --edition-dir "$ED" --base-url "$BASE" \
-      --monitor-project "$MON_PROJECT" --state "$STATE" --prepare-only \
-      ${prep_extra[@]+"${prep_extra[@]}"} > "$prep_tsv" 2>>"$RAW" & CHILD=$!
-    wait "$CHILD" && prep_rc=0 || prep_rc=$?
-    CHILD=""
-    phase4_ingest "$prep_tsv" "$slice" '^$'
-    if [[ $prep_rc -ne 0 || "$(awk -F '\t' '$1=="setup" {print $2}' "$prep_tsv")" != PASS ]]; then
-      if [[ -z "${SEEN[${slice}-setup]:-}" ]]; then
-        record "${slice}-setup" "$slice" setup FAIL "shared companion preparation exited $prep_rc without a PASS setup row"
+    for prep_helper in "${prep_helpers[@]}"; do
+      prep_tsv="$STATE/phase4-preparation-$(basename "$prep_helper" .py).tsv"
+      python3 -I "$prep_helper" run --edition-dir "$ED" --base-url "$BASE" \
+        --monitor-project "$MON_PROJECT" --state "$STATE" --prepare-only \
+        ${prep_extra[@]+"${prep_extra[@]}"} > "$prep_tsv" 2>>"$RAW" & CHILD=$!
+      wait "$CHILD" && prep_rc=0 || prep_rc=$?
+      CHILD=""
+      phase4_ingest "$prep_tsv" "$slice" '^$'
+      if [[ $prep_rc -ne 0 || "$(awk -F '\t' '$1=="setup" {print $2}' "$prep_tsv")" != PASS ]]; then
+        if [[ -z "${SEEN[${slice}-setup]:-}" ]]; then
+          record "${slice}-setup" "$slice" setup FAIL "shared companion preparation ($(basename "$prep_helper")) exited $prep_rc without a PASS setup row"
+        fi
+        for id in "${run_inv[@]}"; do
+          crit="${id%%[0-9]*}"
+          record "$id" "$slice" "$crit" NOT_RUN "shared companion preparation failed; see $(basename "$prep_tsv")"
+        done
+        return
       fi
-      for id in "${run_inv[@]}"; do
-        crit="${id%%[0-9]*}"
-        record "$id" "$slice" "$crit" NOT_RUN "shared companion preparation failed; see phase4-preparation.tsv"
-      done
-      return
-    fi
+    done
   fi
   # The normal slice helper runs once. Companion observers start together and
   # are all owned by PHASE4_CHILDREN so an interrupt can stop every worker.
@@ -2018,31 +2107,113 @@ run_phase4() { # slice: 4a|4b|4c
   fi
 }
 
+# ═══════════════════════════ air gap (AG1-AG5) ═══════════════════════════
+# A receipt on a bundle host proves the offline condition it claims (owner programme: "Installation/start in the
+# offline test must not fetch missing components"; plan R2b). scripts/gate/phase4_airgap.py runs the probes and
+# decides every row: AG1 and AG4 before the first row, AG2, AG3 and AG5 after the last slice row and before the
+# teardown (a run that ends early runs them from finish()). The Mac and a git checkout record NOT_RUN with the
+# reason; a bundle host never records NOT_RUN or PASS for a probe that could not run.
+airgap_host_kind() { # darwin | bundle | checkout: the host the AG rows run on
+  if [[ "$(uname -s)" == Darwin ]]; then echo darwin
+  elif [[ -n "$REPO_ARG" || -z "$CANDIDATE_GIT_HEAD" ]]; then echo bundle  # an installed bundle: --repo, or no tracked git beside the edition
+  else echo checkout
+  fi
+}
+airgap_fill() { # id...: a row the helper did not return is FAIL on a bundle host and NOT_RUN elsewhere, never absent
+  local id kind; kind="$(airgap_host_kind)"
+  for id in "$@"; do
+    [[ -n "${SEEN[$id]:-}" ]] && continue
+    if [[ "$kind" == bundle ]]; then
+      record "$id" airgap AG FAIL "no air-gap result for $id: the helper returned no row (see the lines above in run.log)"
+    else
+      record "$id" airgap AG NOT_RUN "no air-gap result for $id on a host that is not a bundle host"
+    fi
+  done
+}
+airgap_step() { # before|after [exit-path]: run the helper, record the rows it returns
+  local when="$1" tsv rc
+  local -a extra=()
+  [[ "${2:-}" == exit-path ]] && extra=(--exit-path)
+  tsv="$STATE/airgap-$when.tsv"
+  python3 -I "$GATE_DIR/phase4_airgap.py" "$when" --host-kind "$(airgap_host_kind)" --state "$STATE/airgap" \
+    --edition-dir "$ED" --mon-dir "$MON_DIR" ${extra[@]+"${extra[@]}"} > "$tsv" 2>>"$RAW"; rc=$?
+  log "phase4_airgap.py $when exit=$rc"
+  phase4_ingest "$tsv" airgap '^AG[0-9]+$'
+}
+airgap_before_rows() {
+  section "AG: the air gap before the first row (AG1, AG4)"
+  airgap_step before
+  airgap_fill AG1 AG4
+}
+airgap_after_rows() { # [exit-path]: once per run; after the last slice row, or from finish() when the run ended early
+  [[ "${AIRGAP_AFTER_RAN:-false}" == true ]] && return 0
+  AIRGAP_AFTER_RAN=true
+  section "AG: the air gap after the last row (AG2, AG3, AG5)"
+  airgap_step after "${1:-}"
+  airgap_fill AG1 AG4 AG2 AG3 AG5  # AG1 and AG4 are absent only when the run ended before the before step
+}
+
 # ═══════════════════════════ leak scan, teardown, verdict ═══════════════════════════
 leak_scan() {
   section "Z: secret-leak scan over every captured output, the journal, plan files, receipt files and container logs"
-  local hits=0 s where t is_temp where_raw svc
-  local -a places=("$JOURNAL" "$RECEIPT" "$OUT/screenshots/manifest.json")
+  local hits=0 s where t is_temp where_raw svc id label rc u st gaps="" list="" seen=$'\n'
+  local -a places=("$JOURNAL" "$RECEIPT" "$OUT/screenshots/manifest.json") unread=()
+  # An input that cannot be read fails the row, as in Z4a/Z4b: a scan over nothing is not a clean scan.
+  # keycloak and keycloak-db exist whenever this runs (run_phase1 ends with `identity up`; `identity down` only
+  # stops them), so a missing one is a log that was not read. kafka-ui and proxy are searched when they exist
+  # (a run without brokers has no kafka-ui). The listing's status is checked here and not through cid: cid prints
+  # nothing both for a daemon that cannot be reached and for a missing container, and its status is the pipeline's.
   for svc in keycloak keycloak-db kafka-ui proxy; do
-    [[ -n "$(cid "$svc")" ]] || continue
-    docker logs "$(cid "$svc")" > "$STATE/$svc.log" 2>&1 || true; places+=("$STATE/$svc.log")
+    id="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=$svc" 2>/dev/null)" \
+      || { unread+=("$svc (container listing failed)"); continue; }
+    id="${id%%$'\n'*}"
+    if [[ -z "$id" ]]; then
+      case "$svc" in keycloak|keycloak-db) unread+=("$svc (no container)") ;; esac
+      continue
+    fi
+    docker logs "$id" > "$STATE/$svc.log" 2>&1 || unread+=("$svc (docker logs failed)")
+    places+=("$STATE/$svc.log")
   done
   for svc in prometheus grafana loki; do  # captured by run_phase2 before monitor down
     [[ -f "$STATE/mon-$svc.log" ]] && places+=("$STATE/mon-$svc.log")
   done
   [[ -f "$STATE/pingstub.log" ]] && places+=("$STATE/pingstub.log")  # captured by run_phase3 before the stand-in goes down
+  if [[ -s "$STATE/logs-not-captured.txt" ]]; then  # run_phase2/run_phase3 name each monitoring or stand-in log they could not copy
+    while IFS= read -r u; do [[ -z "$u" ]] || unread+=("$u"); done < "$STATE/logs-not-captured.txt" || unread+=("logs-not-captured.txt")
+  fi
   local raw_without_display="$STATE/raw-without-display.log"
-  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display"
+  awk '/Temporary password for/ {print; skip=1; next} skip {skip=0; next} {print}' "$RAW" > "$raw_without_display" || unread+=("raw log (no display)")
+  # Both raw-log inputs are opened whatever the secrets are (the copy serves temporary passwords only): a missing or unreadable one fails the row.
+  { : < "$RAW"; } 2>/dev/null || unread+=("raw log")
+  { : < "$raw_without_display"; } 2>/dev/null || unread+=("raw log (no display)")
   local one="$STATE/one-secret.txt"
   for s in "${SECRETS[@]}"; do
     is_temp=false; for t in "${TEMP_SECRETS[@]}"; do [[ "$t" == "$s" ]] && is_temp=true; done
     if $is_temp; then where_raw="$raw_without_display"; else where_raw="$RAW"; fi
-    printf '%s\n' "$s" > "$one"; chmod 600 "$one"
-    for where in "$where_raw" "${places[@]}"; do [[ -f "$where" ]] && grep -qF -f "$one" "$where" && { hits=$((hits+1)); log "LEAK: a secret value appears in ${where##*/}"; }; done
-    grep -rqF -f "$one" "$ED/auth/keycloak/" 2>/dev/null && { hits=$((hits+1)); log "LEAK: a secret value appears under auth/keycloak/"; }
+    if ! printf '%s\n' "$s" > "$one"; then unread+=("secret pattern file"); continue; fi
+    chmod 600 "$one"
+    for where in "$where_raw" "${places[@]}"; do
+      [[ -f "$where" ]] || continue
+      case "$where" in "$RAW") label="raw log" ;; "$raw_without_display") label="raw log (no display)" ;; *) label="${where##*/}" ;; esac
+      grep -qF -f "$one" "$where" 2>/dev/null; rc=$?  # 0 a hit, 1 none, above 1 the file could not be read
+      if (( rc == 0 )); then hits=$((hits+1)); log "LEAK: a secret value appears in $label"
+      elif (( rc > 1 )); then unread+=("$label"); fi
+    done
+    if [[ -d "$ED/auth/keycloak" ]]; then
+      grep -rqF -f "$one" "$ED/auth/keycloak/" 2>/dev/null; rc=$?
+      if (( rc == 0 )); then hits=$((hits+1)); log "LEAK: a secret value appears under auth/keycloak/"
+      elif (( rc > 1 )); then unread+=("auth/keycloak"); fi
+    fi
   done
   rm -f "$raw_without_display" "$one"
-  [[ $hits -eq 0 ]]; st=$?; ok_if "$1" "$2" Z "$st" "${#SECRETS[@]} distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, ${#TEMP_SECRETS[@]} temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: $hits hits"
+  for u in "${unread[@]}"; do  # one entry per input however many secrets or checks reported it
+    [[ "$seen" == *$'\n'"$u"$'\n'* ]] && continue
+    seen+="$u"$'\n'; list+="${list:+, }$u"
+  done
+  [[ -z "$list" ]] || { gaps+="; not read: $list"; log "NOT READ: $list"; }
+  (( ${#SECRETS[@]} )) || gaps+="; no secret values to search"
+  [[ $hits -eq 0 && -z "$gaps" ]]; st=$?
+  ok_if "$1" "$2" Z "$st" "${#SECRETS[@]} distinct secret values (.env and monitoring/.env passwords/secrets/keys, the backup passphrase, ${#TEMP_SECRETS[@]} temporary passwords, enrolled passwords and TOTP seeds) searched in the raw log (temporary passwords: outside their one-time display line), journal, plan files, receipt rows, screenshot captions and the keycloak, keycloak-db, kafka-ui, proxy and monitoring logs: $hits hits$gaps"
 }
 restore_prometheus_config() {
   local backup="$STATE/prometheus.yml.bak"
@@ -2095,6 +2266,8 @@ teardown() {
   log "fixture resources left: $left"
 }
 finish() {
+  airgap_after_rows exit-path  # a no-op when the run reached its normal end (it ran before the teardown)
+  airgap_fill AG1 AG4 AG2 AG3 AG5  # a signal during the after step leaves rows unrecorded: a bundle host gets FAIL rows, never absent ones
   local verdict=PASS missing=() id notrun_required=0
   while IFS= read -r id; do
     [[ -n "${SEEN[$id]:-}" ]] || { missing+=("$id"); continue; }
@@ -2180,6 +2353,7 @@ host_conflicts
 open_receipt
 trap on_signal HUP INT TERM
 trap on_exit EXIT
+airgap_before_rows
 run_static
 case "$PHASE" in
   1) run_phase1; run_screenshots; leak_scan Z1 1 ;;
@@ -2191,6 +2365,7 @@ case "$PHASE" in
   # are Z4a/Z4b.
   4a|4b|4c) run_phase1; leak_scan Z1 1; run_phase4 "$PHASE" ;;
 esac
+airgap_after_rows
 FINISHED=true
 trap - EXIT HUP INT TERM
 teardown

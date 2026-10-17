@@ -52,7 +52,7 @@ from configure import validate, url  # noqa: E402
 
 
 def configs(settings, env=None):
-    """{relative path: JSON data} for a site file; `env` is the parsed .env mapping (groups, idle limit, viewer opt-in)."""
+    """{relative path: JSON data} for a site file; `env` is the parsed .env mapping (groups, idle limit, session maximum, viewer opt-in)."""
     validate(settings, "kafbat")
     for endpoint in ("authorization_url", "token_url", "userinfo_url", "jwks_url"):
         url(settings, endpoint)
@@ -60,6 +60,7 @@ def configs(settings, env=None):
         raise ValueError("dual login does not request refresh tokens; remove offline_access")
     # One source for both sides of a session limit and for the viewer's message access.
     for key, env_key in (("session_idle_minutes", "KEYCLOAK_SESSION_IDLE_MINUTES"),
+                         ("session_max_hours", "KEYCLOAK_SESSION_MAX_HOURS"),
                          ("viewer_messages", identity.VIEWER_MESSAGES_KEY)):
         if key in settings:
             raise ValueError(f"{key} is read from .env: krate config set {env_key}=...; remove it from the site file")

@@ -94,12 +94,13 @@ changes go through `./krate` or `kcadm` from the host, with a backup first.
 ### Support visibility
 
 **PROPOSED (owner to confirm):** a support engineer who is not a host operator
-may see `./krate identity status`, the identity journal, and
-`./krate identity users list`. They do not get `.env`, `./krate credentials`,
-or the backups. In Kafbat (Phase 2) a viewer sees metrics, consumer lag and
-topic metadata, and does not see message payloads unless the site opts in with
-`KAFKA_UI_VIEWER_MESSAGES=true` (the table of what a viewer can and cannot do
-is in [dual-login.md](dual-login.md)).
+gets no shell, Docker, filesystem or `./krate` access. A host operator may share
+the output of `./krate identity status`, the identity journal, and
+`./krate identity users list` with that engineer. The operator does not share
+`.env`, `./krate credentials`, or the backups. In Kafbat (Phase 2) a viewer sees
+metrics, consumer lag and topic metadata, and does not see message payloads
+unless the site opts in with `KAFKA_UI_VIEWER_MESSAGES=true` (the table of what a
+viewer can and cannot do is in [dual-login.md](dual-login.md)).
 
 ### Claim-to-permission contract
 
@@ -489,7 +490,7 @@ All subcommands use `kcadm` with the `krate-cli` client credentials in realm
 | `users disable <username>` / `users enable <username>` | toggles the account |
 | `users reset-password <username>` | new one-time temporary password, printed once, same required actions |
 | `users groups <username>` | shows group membership |
-| `users logout <username>` | ends every session of the user in the realm; Keycloak then posts a back-channel logout token to each client of those sessions that has a reachable URL, so Kafbat ends at once. Pair it with `users disable` to revoke. The realm's "Sign out all active sessions" is not a substitute: it sends no logout token, so a live Kafbat session survives it until its idle limit |
+| `users logout <username>` | ends every session of the user in the realm; Keycloak then posts a back-channel logout token to each client of those sessions that has a reachable URL, so Kafbat ends at once. Pair it with `users disable` to revoke. The realm's "Sign out all active sessions" is not a substitute: it sends no logout token, so a live Kafbat session survives it until its idle limit or the session maximum, whichever comes first |
 | `users set-email <username> <addr>` | sets the user's e-mail address and marks it verified; also the way to verify the address of a user brokered in before the provider trusted it |
 
 Passwords are never accepted on the command line. The user changes the
@@ -667,7 +668,7 @@ The installation path must not contain whitespace, quotes or backslashes
 `./krate auth configure` (no settings file) plans Kafbat's Keycloak login,
 `auth/ui/runtime.yml`, with `sso/identity.py runtime`: the same module that
 plans the realm, so the client, the callback, the `groups` claim, the group
-names and the session idle limit have one source, `.env`. The viewer gets
+names, the session idle limit and the session maximum have one source, `.env`. The viewer gets
 message payloads only when `KAFKA_UI_VIEWER_MESSAGES=true`
 (`auth configure --viewer-messages` sets it). A `runtime.yml` that differs
 from the plan is replaced only with `--force`.
@@ -924,14 +925,17 @@ covers the required user lifecycle; the master realm stays off the proxy
 ### 3. Support visibility (confirm)
 
 Implemented for Phase 1: `identity status`, the journal and `users list`; no
-`.env`, no `credentials`, no backups. Implemented for Phase 2 (Kafbat side):
-viewer = `view` on every resource plus `analysis_view` on topics,
-`messages_read` only when the site sets `KAFKA_UI_VIEWER_MESSAGES=true` in
-`.env`; never `create`, `edit`, `delete`, `messages_produce`,
-`messages_delete`, `reset_offsets`, and never `ksql` (the Kafbat action names
-are from its RBAC reference [S12]). The preflight refuses a `runtime.yml`
-whose viewer reads messages without that opt-in. Source: the handover
-("Default support visibility should be metrics, lag and approved metadata").
+`.env`, no `credentials`, no backups. The handover adds that support credentials
+give no shell, Docker, filesystem or operational CLI access. Implemented for
+Phase 2 (Kafbat side):
+viewer = `view` on every resource except `applicationconfig` plus
+`analysis_view` on topics, `messages_read` only when the site sets
+`KAFKA_UI_VIEWER_MESSAGES=true` in `.env`; never `create`, `edit`, `delete`,
+`messages_produce`, `messages_delete`, `reset_offsets`, and never `ksql` (the
+Kafbat action names are from its RBAC reference [S12]). The preflight refuses a
+`runtime.yml` whose viewer reads messages without that opt-in. Source: the
+handover ("Default support visibility should be metrics, lag and approved
+metadata").
 
 ### 4. MFA and session defaults (confirm)
 

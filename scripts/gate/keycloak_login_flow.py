@@ -6,10 +6,14 @@ as a browser would: login form, required actions (TOTP enrolment, forced passwor
 update), OTP prompt, code exchange. Used by scripts/gate-identity.sh.
 
   enrol  --base URL --user U --password-env VAR --client-secret-env VAR --state FILE
+         [--no-step-wait]
          First login with the temporary password: completes CONFIGURE_TOTP and
          UPDATE_PASSWORD, then proves that a second login asks for the OTP, that a
          wrong OTP is refused and that the old password is refused. Writes the new
-         password and TOTP secret to FILE (mode 600). Prints the ID-token claims.
+         password, the TOTP secret and the TOTP steps its codes consumed (otp_steps)
+         to FILE (mode 600). Prints the ID-token claims. The second login waits for
+         the next 30-second step by default; --no-step-wait submits the next step's
+         code at once instead (the realm's look-around window accepts it).
   login  --base URL --state FILE --client-secret-env VAR [--expect ok|refused]
          Full login (password + OTP) for an enrolled user; prints claims or REFUSED.
   login  --base URL --user U --password-env VAR --client-secret-env VAR --expect refused
@@ -137,8 +141,34 @@ class Flow:
         return st in (302, 303) and h.get("Location", "").startswith(self.redirect)
 
 
+TOTP_PERIOD = 30
+# Keycloak's quick-login check (realm default quickLoginCheckMilliSeconds = 1000, not overridden by
+# sso/identity.py): two failed logins closer together than this lock the user for a minute (gate row B5).
+# The wrong-OTP refusal is the first failure of the second login; this pause keeps a refused valid code,
+# if it ever happened, a plain "Invalid authenticator code" instead of a one-minute lockout.
+QUICK_LOGIN_PAUSE = 1.1
+
+
 def wait_next_totp_step():
     time.sleep(30 - time.time() % 30 + 1)  # a TOTP code is single-use; wait for the next 30 s step
+
+
+def fresh_otp_step(consumed, now=None):
+    """The 30-second step whose code a login can submit now without reusing a consumed one.
+
+    Keycloak accepts a code once per credential (OTPCredentialProvider.isValid:
+    singleUseStore.putIfAbsent(credentialId + "." + code, period * (2 * lookAround + 1)), unless the OTP
+    policy marks codes reusable), and the CONFIGURE_TOTP code counts as used
+    (CredentialHelper.createOTPCredential validates it through the same method). The current step is used
+    while it is not consumed; otherwise the NEXT step, which the realm's look-around window of 1
+    (otpPolicyLookAheadWindow, sso/identity.py) accepts at once: TimeBasedOTP.validateTOTP checks the
+    current, the previous and the next step. No wait for the step boundary is needed.
+    """
+    current = int((time.time() if now is None else now) // TOTP_PERIOD)
+    for step in (current, current + 1):
+        if step not in consumed:
+            return step
+    raise AssertionError(f"steps {current} and {current + 1} are both consumed")
 
 
 def env_value(name):
@@ -156,6 +186,7 @@ def do_enrol(a):
     verifier, action = flow.start_auth()
     st, h, page = flow.password_step(action, a.user, temp_pw)
     secret_b32 = None
+    consumed = set()  # TOTP steps whose code this enrolment submitted successfully (Keycloak refuses a reuse)
     seen = []
     for _ in range(3):  # required actions in whatever order the realm presents them
         if st == 200 and 'name="totpSecret"' in page:
@@ -164,8 +195,10 @@ def do_enrol(a):
                 raise AssertionError("TOTP page without a totpSecret value: " + page[:200])
             raw = html.unescape(found.group(1))
             secret_b32 = base64.b32encode(raw.encode()).decode()  # Keycloak keys HmacOTP on the raw secret's bytes
-            st, h, page = flow.req(flow.form_action(page), {"totp": flow.totp(secret_b32), "totpSecret": raw,
+            enrol_at = time.time()
+            st, h, page = flow.req(flow.form_action(page), {"totp": flow.totp(secret_b32, enrol_at), "totpSecret": raw,
                                                            "userLabel": "gate", "logout-sessions": "on"})
+            consumed.add(int(enrol_at // TOTP_PERIOD))
             seen.append("CONFIGURE_TOTP")
             continue
         if st == 200 and 'name="password-new"' in page:
@@ -189,10 +222,16 @@ def do_enrol(a):
     st, h, page = flow.req(flow.form_action(page), {"otp": "000000"})
     if not (st == 200 and 'name="otp"' in page and "nvalid" in page):
         raise AssertionError(f"expected wrong-OTP refusal, got {st}: {page[:300]}")
-    wait_next_totp_step()
-    st, h, page = flow.req(flow.form_action(page), {"otp": flow.totp(secret_b32)})
+    if a.no_step_wait:
+        time.sleep(QUICK_LOGIN_PAUSE)
+        otp_at = fresh_otp_step(consumed) * TOTP_PERIOD
+    else:
+        wait_next_totp_step()
+        otp_at = time.time()
+    st, h, page = flow.req(flow.form_action(page), {"otp": flow.totp(secret_b32, otp_at)})
     if not flow.is_code_redirect(st, h):
         raise AssertionError(f"expected redirect with code after OTP, got {st}: {page[:300]}")
+    consumed.add(int(otp_at // TOTP_PERIOD))
     claims2 = flow.exchange(h["Location"], verifier)
 
     flow.jar.clear()
@@ -204,9 +243,9 @@ def do_enrol(a):
 
     fd = os.open(a.state, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        json.dump({"user": a.user, "password": new_pw, "totp": secret_b32}, f)
+        json.dump({"user": a.user, "password": new_pw, "totp": secret_b32, "otp_steps": sorted(consumed)}, f)
     print(json.dumps({"result": "ENROLLED", "required_actions": seen, "claims": claims1,
-                      "second_login_claims": claims2}))
+                      "second_login_claims": claims2, "otp_steps": sorted(consumed)}))
 
 
 def do_login(a):
@@ -265,6 +304,9 @@ def main():
     e.add_argument("--client-secret-env", required=True)
     e.add_argument("--state", required=True)
     e.add_argument("--cafile", help="pin the proxy certificate (certs/server.crt); without it verification is off")
+    e.add_argument("--no-step-wait", action="store_true",
+                   help="do not wait for the next TOTP step before the second login: submit the next step's code "
+                        "(needs the realm look-around window of 1); the caller owns the step bookkeeping (otp_steps)")
     l = sub.add_parser("login")
     l.add_argument("--base", required=True)
     l.add_argument("--state")

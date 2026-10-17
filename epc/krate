@@ -2078,8 +2078,9 @@ cmd_identity_users() {
       # logout token to each client of those sessions that has a reachable URL, so Kafbat
       # ends at once (harness/phase4/lab1 K-a: 204, tokens within ~25 ms). The realm's
       # "Sign out all active sessions" sends no logout token, so a live Kafbat session
-      # survives it until its idle limit. kcadm rejects the no-merge flag on this
-      # resource (rc 2); krate-cli's manage-users scope is enough
+      # survives it until its idle limit or the session maximum, whichever comes first.
+      # kcadm rejects the no-merge flag on this resource (rc 2); krate-cli's
+      # manage-users scope is enough
       # (harness/phase4/lab6 L5-8).
       kcadm -- create "users/$uid/logout" -r "$IDENTITY_REALM"
       identity_journal "users logout" ok "$user"
@@ -4467,27 +4468,121 @@ $rebuild_hint"
   ok "Docker installed successfully."
 }
 
-# The capabilities dnf reported missing in its output file $1, one per line:
-# "nothing provides libnftnl.so.11()(64bit) needed by nftables-..." names
-# libnftnl.so.11()(64bit); "nothing provides container-selinux >= 2:2.74 needed
-# by ..." names container-selinux (the version constraint is dnf's to check).
+# The capabilities dnf reported missing in its output file $1, one per line, as dnf
+# prints them between "nothing provides" and " needed by":
+#   libnftnl.so.11()(64bit)       a soname, kept whole
+#   /usr/sbin/nft                 a file path, kept whole
+#   container-selinux >= 2:2.74   a name with a version constraint: the bare name
+#                                 (the version constraint is dnf's to check)
+#   (iptables-nft or iptables)    a rich (boolean) dependency, kept whole; its
+#                                 alternatives are read by rpm_capability_alternatives
 rpm_missing_capabilities() {
-  sed -n 's/.*nothing provides \([^ ]*\).*/\1/p' "$1" | sort -u
+  sed -n -e 's/.*nothing provides \((.*)\) needed by .*/\1/p' -e 's/.*nothing provides \([^ (][^ ]*\).*/\1/p' "$1" | sort -u
 }
 
-# The RPM files among $2... that provide capability $1: by capability name
-# (rpm -qp --provides, version ignored) or, for a file path, by contents.
-rpm_providers_of() {
-  local need="$1" file listing
-  shift
-  for file in "$@"; do
-    if [[ "$need" == /* ]]; then
-      listing="$(rpm -qpl "$file" 2>/dev/null)" || continue
-    else
-      listing="$(rpm -qp --provides "$file" 2>/dev/null | awk '{print $1}')" || continue
-    fi
-    if [[ $'\n'"$listing"$'\n' == *$'\n'"$need"$'\n'* ]]; then echo "$file"; fi
+# The alternatives of capability $1, one per line, in the order dnf names them. A rich
+# dependency "(A or B [or C])" (rpm boolean dependencies,
+# https://rpm.org/docs/latest/manual/boolean_dependencies.html) gives its operands
+# without their version constraints; any other capability gives itself. The other
+# operators (and, if, unless, else, with, without) and nested expressions are not
+# interpreted: such a capability is given whole, no bundled package matches it, and it
+# is reported unresolved exactly as dnf printed it. A version constraint inside a rich
+# dependency is dropped like a plain one: "(foo >= 2 or bar)" selects a bundled foo even
+# if it is older and never tries bar; dnf evaluates the constraint on the next attempt,
+# so the outcome is a named unresolved capability, never a wrong install.
+rpm_capability_alternatives() {
+  local dep="$1" rest operand
+  local -a operands=()
+  if [[ "$dep" != "("*")" ]]; then
+    printf '%s\n' "$dep"
+    return 0
+  fi
+  rest="${dep#(}"
+  rest="${rest%)}"
+  case " $rest " in
+    *" and "*|*" if "*|*" unless "*|*" else "*|*" with "*|*" without "*)
+      printf '%s\n' "$dep"
+      return 0 ;;
+  esac
+  while [[ "$rest" == *" or "* ]]; do
+    operands+=("${rest%% or *}")
+    rest="${rest#* or }"
   done
+  operands+=("$rest")
+  for operand in "${operands[@]}"; do
+    if [[ -z "$operand" || "$operand" == "("* ]]; then
+      printf '%s\n' "$dep"
+      return 0
+    fi
+  done
+  for operand in "${operands[@]}"; do
+    printf '%s\n' "${operand%% *}"
+  done
+}
+
+# The RPM files among $2... that provide capability $1. Of a rich dependency only the
+# first alternative that any of them provides counts: a bundled A is taken and a
+# bundled B is left alone. An alternative is matched by capability name (rpm -qp
+# --provides, version ignored) or, for a file path, by contents.
+rpm_providers_of() {
+  local need="$1" alternative file listing found
+  shift
+  while IFS= read -r alternative; do
+    found=false
+    for file in "$@"; do
+      if [[ "$alternative" == /* ]]; then
+        listing="$(rpm -qpl "$file" 2>/dev/null)" || continue
+      else
+        listing="$(rpm -qp --provides "$file" 2>/dev/null | awk '{print $1}')" || continue
+      fi
+      if [[ $'\n'"$listing"$'\n' == *$'\n'"$alternative"$'\n'* ]]; then
+        echo "$file"
+        found=true
+      fi
+    done
+    if $found; then break; fi
+  done < <(rpm_capability_alternatives "$need")
+}
+
+# The text of a failed offline install. $1 is dnf's output of the last attempt, $2 the
+# bundled packages that were added (empty when none could be) and $3... the
+# capabilities the bundle could not supply. The advice about container-selinux follows
+# only when container-selinux is one of them, or one of them is a versioned requirement
+# of the container-selinux package (the host's selinux-policy build: dnf prints
+# "nothing provides selinux-policy-base >= 38.1.75-2.el9_8 needed by container-selinux-..."
+# with the constraint, which the lookup relies on). Every other capability, including an
+# unversioned requirement of container-selinux such as policycoreutils, gets the advice to
+# take it from the OS media.
+rpm_failure_message() {
+  local log="$1" added="$2" need line explained list="" others="" selinux=false
+  shift 2
+  for need in "$@"; do
+    list+="${list:+, }$need"
+    explained=false
+    if [[ "$need" == *container-selinux* ]]; then explained=true; fi
+    while IFS= read -r line; do
+      if [[ "$line" == *"nothing provides $need "*" needed by container-selinux-"* ]]; then explained=true; fi
+    done < "$log"
+    if $explained; then
+      selinux=true
+    else
+      others+="${others:+, }$need"
+    fi
+  done
+  if [[ -z "$added" ]]; then
+    echo "Offline install failed: this host lacks ${list:-a dependency dnf did not name}, and the bundle has no package for it."
+  else
+    echo "Offline install failed even with the bundled dependencies ($added)${list:+; the bundle cannot supply $list}."
+  fi
+  if [[ -z "$list" ]]; then
+    echo "dnf's output above names the cause."
+  fi
+  if [[ -n "$others" ]]; then
+    echo "Install $others from your RHEL media or Satellite."
+  fi
+  if $selinux; then
+    echo "container-selinux must match this host's selinux-policy build; install it from your RHEL media or Satellite (dnf install container-selinux)."
+  fi
 }
 
 # RHEL family. dnf resolves install order and inter-package deps itself, so the
@@ -4527,15 +4622,23 @@ docker_install_rpm() {
   info "Installing Docker CE from ${#rpms[@]} bundled RPM packages..."
   echo ""
   # dnf names what the host lacks ("nothing provides <capability> needed by <package>").
-  # Base-OS dependencies a minimal host may miss (container-selinux, nftables and the
-  # libraries nftables needs) travel in optional/; only the bundled packages that
-  # provide a named capability are added, so a host that already has them never gets
-  # another distro's build. An added package can name its own missing dependency, so
-  # this repeats for up to three rounds.
-  local attempt_log round rc need file
+  # Base-OS dependencies a minimal host may miss (container-selinux, nftables,
+  # iptables-nft and the libraries they need) travel in optional/; only the bundled
+  # packages that provide a named capability are added, so a host that already has
+  # them never gets another distro's build. An added package can name its own missing
+  # dependency, so this repeats. It always ends: the providers come from optional/ alone,
+  # a file already in wanted or added is skipped, and a round continues only after
+  # adding at least one such new file, so wanted never exceeds the number of optional/
+  # packages and there are at most that many plus one dnf attempts. It also ends when dnf
+  # succeeds or names nothing the bundle can still supply. A host lacking the whole
+  # iptables-nft closure takes five attempts (docker-ce -> iptables-nft -> iptables-libs
+  # -> libnetfilter_conntrack -> libnfnetlink), which a fixed cap of four cannot reach.
+  # Do not add a "stop when everything is already added" test before the attempt: the
+  # last attempt is the one that can succeed.
+  local attempt_log rc need file known already new message
   local -a wanted=() added=() missing=() providers=() unresolved=()
   attempt_log="$(mktemp)" || die "Cannot create a temporary file"
-  for round in 0 1 2 3; do
+  while true; do
     rc=0
     # dnf's stderr goes to the file and is printed after dnf has exited, so the
     # file is complete when it is read (a process substitution would race it).
@@ -4545,35 +4648,31 @@ docker_install_rpm() {
       rm -f "$attempt_log"
       return 0
     fi
-    (( round < 3 )) || break
     mapfile -t missing < <(rpm_missing_capabilities "$attempt_log")
     added=()
     unresolved=()
     for need in "${missing[@]}"; do
       mapfile -t providers < <(rpm_providers_of "$need" "${optional[@]}")
-      if [[ ${#providers[@]} -eq 0 ]]; then
-        unresolved+=("$need")
-        continue
-      fi
+      new=false
       for file in "${providers[@]}"; do
-        local known already=false
+        already=false
         for known in "${wanted[@]}" "${added[@]}"; do [[ "$known" == "$file" ]] && already=true; done
-        $already || added+=("$file")
+        if ! $already; then
+          added+=("$file")
+          new=true
+        fi
       done
+      $new || unresolved+=("$need")
     done
     [[ ${#added[@]} -gt 0 ]] || break
     echo ""
     info "Adding the bundled dependencies this host lacks: ${added[*]##*/}"
     wanted+=("${added[@]}")
   done
+  message="$(rpm_failure_message "$attempt_log" "${wanted[*]##*/}" "${unresolved[@]}")"
   rm -f "$attempt_log"
-  if [[ ${#wanted[@]} -eq 0 ]]; then
-    die "Offline install failed: this host lacks ${missing[*]:-a dependency dnf did not name}, and the bundle has no package for it.
-Install it from your RHEL media or Satellite, then re-run: krate docker-install"
-  fi
-  die "Offline install failed even with the bundled dependencies (${wanted[*]##*/})${unresolved[*]:+; no bundled package provides ${unresolved[*]}}.
-container-selinux must match this host's selinux-policy build; install it from your
-RHEL media or Satellite (dnf install container-selinux), then re-run: krate docker-install"
+  die "$message
+Then re-run: krate docker-install"
 }
 
 # Debian/Ubuntu. dpkg does not resolve dependencies, so install in dependency

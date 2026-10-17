@@ -213,7 +213,7 @@ jobs:
           cat > release-notes.md <<NOTES
           Offline install package for the $EDITION edition (not broker images), built by the package release workflow from \`${SOURCE_SHA:0:7}\`.
 
-          Includes the brokers, Kafbat UI with shared login and SSO, Keycloak and PostgreSQL (optional \`sso\` profile) and monitoring. Download the package for your VM's processor and follow its install steps below.
+          Includes the brokers, Kafbat UI with the shared login or Keycloak SSO, Keycloak and PostgreSQL (optional \`sso\` profile) and monitoring. Download the package for your VM's processor and follow its install steps below.
 
           SSO setup guides are in \`docs/\` inside the package; start with \`docs/dual-login.md\`. SSO needs Docker Compose 2.20.2 or newer and a site acceptance test against your identity provider.
 

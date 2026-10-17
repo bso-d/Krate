@@ -20,7 +20,9 @@ directories wholesale (Grafana provisioning and dashboards, the Perses dashboard
 Python modules beside the sso scripts).  A regular file or symlink in those directories
 that the candidate does not ship is therefore a mismatch too; `docs/`, which the bundle
 ships, is scanned the same way.  A scanned directory the running user cannot list makes
-the comparison fail (exit 2), except a `__pycache__` directory.
+the comparison fail (exit 2), except a `__pycache__` directory: run it as root (the runner on a
+VM does), because a skipped `__pycache__` and the bytecode in it are not compared, and Python can
+load an unchecked hash-based `.pyc` without comparing it with its source.
 
 Not compared: file modes other than `krate`'s executable bit, `.bundle-arch`, the image
 archives under `images/`, `docker-offline/`, the lock columns after `image_id`
@@ -33,8 +35,10 @@ inventory files).  The image id comparison assumes the build host and this host 
 same Docker image store; with different stores the ids differ and the run is refused.
 
 Output: a first line `PRODUCT_BINDING files=N mismatches=M ...`, then one `MISMATCH`
-line per difference.  Exit codes: 0 everything matches, 1 at least one mismatch, 2 the
-comparison could not run.  Python 3.9 compatible.
+line per difference, then any `NOTE` lines: an explanation of the differences above (for
+example a different Docker image store), not a difference and not counted in M.  Exit codes:
+0 everything matches, 1 at least one mismatch, 2 the comparison could not run.  Python 3.9
+compatible.
 """
 import argparse
 import fnmatch
@@ -228,15 +232,18 @@ def lock_problems(header, rows: Dict[str, Tuple[str, str]], pinned: Iterable[str
     return problems
 
 
-def image_problems(rows: Dict[str, Tuple[str, str]]) -> List[str]:
-    """The image Docker holds under each runtime tag must carry the lock's image id.  Rows the
-    lock check refused are not asked about; a daemon that cannot be reached is an error
-    (not comparable), not a list of missing images."""
+def image_problems(rows: Dict[str, Tuple[str, str]]) -> Tuple[List[str], List[str]]:
+    """(differences, notes).  The image Docker holds under each runtime tag must carry the lock's image
+    id; each tag that does not is a difference.  Rows the lock check refused are not asked about; a daemon
+    that cannot be reached is an error (not comparable), not a list of missing images.  A note explains the
+    differences, it is not one: it is returned apart so that it is not counted as a mismatch."""
     info = subprocess.run(['docker', 'info', '--format', '{{.ServerVersion}}'],
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     if info.returncode != 0:
         raise RuntimeError('the Docker daemon cannot be reached (docker info rc %d)' % info.returncode)
     problems = []
+    notes = []
+    held_ids = differing = absent = 0
     for image in sorted(rows):
         runtime, image_id = rows[image]
         if not IMAGE_ID.match(image_id) or runtime != RUNTIME_PREFIX + image_id[len('sha256:'):]:
@@ -246,9 +253,21 @@ def image_problems(rows: Dict[str, Tuple[str, str]]) -> List[str]:
         held = proc.stdout.decode('utf-8', 'replace').strip()
         if proc.returncode != 0:
             problems.append('%s: no image under %s' % (image, runtime))
-        elif held != image_id:
+            absent += 1
+            continue
+        if held != image_id:
             problems.append('%s: %s holds %s, the lock says %s' % (image, runtime, held, image_id))
-    return problems
+        if IMAGE_ID.match(held):  # only a well-formed id can point at the store; an empty answer cannot
+            held_ids += 1
+            differing += int(held != image_id)
+    if held_ids > 1 and differing == held_ids:
+        # A containerd image store reports the manifest digest as the image id, the classic store the
+        # config digest: when every id differs, the likely cause is not the bundle but the store.
+        notes.append('image store: every image this host holds under a runtime tag (%d) has an id that differs from the '
+                     'lock; the likely cause is a different Docker image store on the build host and on this host '
+                     '(containerd versus classic), which reinstalling the bundle does not change%s'
+                     % (held_ids, '; a tag with no image is a separate problem' if absent else ''))
+    return problems, notes
 
 
 def _unlistable(error: OSError) -> None:
@@ -279,8 +298,10 @@ def extra_files(installed: str, items: Dict[str, str]) -> List[str]:
 
 
 def compare_installed(repo: str, candidate: str, installed: str, edition: str,
-                      check_images: bool = False) -> Tuple[int, List[Mismatch]]:
-    """(files compared, mismatches as (installed path, repository path, what differs))."""
+                      check_images: bool = False,
+                      notes: Optional[List[str]] = None) -> Tuple[int, List[Mismatch]]:
+    """(files compared, mismatches as (installed path, repository path, what differs)).  Explanations of the
+    mismatches (not mismatches themselves) are appended to `notes` when a list is passed."""
     items = inventory(repo, candidate, edition)
     blobs = candidate_blobs(repo, candidate, sorted(set(items.values())))
     header, rows = read_lock(installed)
@@ -292,7 +313,10 @@ def compare_installed(repo: str, candidate: str, installed: str, edition: str,
     lock_source = '%s/.env.template + monitoring/.env.template' % edition
     mismatches = [(LOCK, lock_source, 'lock: ' + problem) for problem in lock_problems(header, rows, pinned)]
     if check_images and rows:
-        mismatches += [(LOCK, lock_source, 'image: ' + problem) for problem in image_problems(rows)]
+        image_differences, image_notes = image_problems(rows)
+        mismatches += [(LOCK, lock_source, 'image: ' + problem) for problem in image_differences]
+        if notes is not None:
+            notes.extend(image_notes)
     replay_map = {}  # type: Dict[str, str]
     if header and len(header) > 1:
         replay_map[header[0]] = header[1]  # awk reads the header line into its map first
@@ -340,7 +364,8 @@ def main(argv=None) -> int:
         commit = resolve_commit(args.repo, args.candidate)
         if not os.path.isdir(args.installed):
             raise RuntimeError('installed edition directory %s does not exist' % args.installed)
-        count, mismatches = compare_installed(args.repo, commit, args.installed, args.edition, args.check_images)
+        notes = []  # type: List[str]
+        count, mismatches = compare_installed(args.repo, commit, args.installed, args.edition, args.check_images, notes)
     except Exception as error:  # noqa: BLE001 - any failure means "not comparable" (exit 2), never a traceback
         print('PRODUCT_BINDING error: %s: %s' % (type(error).__name__, error))
         return 2
@@ -350,6 +375,8 @@ def main(argv=None) -> int:
              '; image ids under the runtime tags' if args.check_images else '', LOCK))
     for installed_rel, source, what in mismatches:
         print('MISMATCH %s <- %s: %s' % (installed_rel, source, what))
+    for note in notes:
+        print('NOTE %s' % note)
     return 1 if mismatches else 0
 
 

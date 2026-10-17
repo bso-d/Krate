@@ -84,11 +84,11 @@ UI_ATTRIBUTE_KEYS = {'pkce.code.challenge.method', 'post.logout.redirect.uris', 
                      'backchannel.logout.session.required', 'backchannel.logout.revoke.offline.tokens'}
 # Kafbat RBAC resources a viewer may only `view`; topics add analysis_view (and messages_read on opt-in); ksql never.
 VIEW_RESOURCES = ('applicationconfig', 'clusterconfig', 'topic', 'consumer', 'schema', 'connect', 'connector', 'acl', 'audit', 'client_quotas')
-# The viewer never sees applicationconfig: its view renders the running configuration, client secret included.
+# The viewer never sees applicationconfig: with dynamic configuration on, its view returns the running configuration, client secret included.
 VIEWER_RESOURCES = tuple(resource for resource in VIEW_RESOURCES if resource != 'applicationconfig')
 CLUSTERS = ['cluster-a', 'cluster-b.2']
 # Site keys configure-dual.py no longer reads (they moved to .env): the example must not carry them.
-MOVED_SITE_KEYS = ('viewer_messages', 'session_idle_minutes')
+MOVED_SITE_KEYS = ('viewer_messages', 'session_idle_minutes', 'session_max_hours')
 
 # kraft/epc parity: every hunk between the two CLIs must be one of the known edition differences.
 FORBIDDEN_IN_HUNK = re.compile(r'identity|keycloak|kcadm', re.IGNORECASE)
@@ -249,6 +249,8 @@ def check_runtime_contract(checks):
         e(client.get(key) == expected, f'client {key} must be {expected!r}; got {client.get(key)!r}')
     session = data['server']['reactive']['session']
     e(session.get('timeout') == '11m', f'session timeout must be KEYCLOAK_SESSION_IDLE_MINUTES (11m); got {session.get("timeout")!r}')
+    e(oauth.get('max-session-lifetime') == '3h',
+      f'auth.oauth2.max-session-lifetime must be KEYCLOAK_SESSION_MAX_HOURS (3h); got {oauth.get("max-session-lifetime")!r}')
     e(session.get('cookie') == {'name': 'SESSION', 'secure': True, 'http-only': True, 'same-site': 'lax'},
       f'session cookie must be SESSION, secure, http-only, same-site lax; got {session.get("cookie")!r}')
     e('spring' not in data and 'configtree' not in text, 'no spring.config.import (the secret comes from the container environment)')
@@ -574,7 +576,19 @@ def check_exposure(checks):
                         ('handler.setLogoutUri("http://127.0.0.1:"', 'the back-channel handler posts to its own listener'),
                         ('csrfRepository.setCookieCustomizer(cookie -> cookie.secure(true));', 'the XSRF-TOKEN cookie is Secure'),
                         ('csrfRepository.saveToken(webFilterExchange.getExchange(), null)', 'the CSRF token rotates at login'),
-                        ('oidcSessionRegistry.removeSessionInformation(session.getId())', 'a local logout forgets the OIDC session')):
+                        ('oidcSessionRegistry.removeSessionInformation(session.getId())', 'a local logout forgets the OIDC session'),
+                        ('MAX_SESSION_LIFETIME = "auth.oauth2.max-session-lifetime"', 'the fork reads the absolute session lifetime from auth.oauth2.max-session-lifetime'),
+                        ('Duration.between(session.getCreationTime(), Instant.now()).compareTo(maximum) >= 0', 'a session older than the maximum ends however recently it was used'),
+                        ('return session.invalidate().then(Mono.defer(() -> {', 'the session that reached the maximum is invalidated and its request restarts'),
+                        ('            ? restartRequest(exchange, session, maximum)', 'after the invalidation the exchange is answered with the restart, so no session write lands in the invalidated-session reference'),
+                        ('builder.addFilterBefore(sessionLifetimeLimit(maxSessionLifetime), SecurityWebFiltersOrder.REACTOR_CONTEXT);', 'the lifetime filter runs before the SecurityContext is read'),
+                        ('response.setStatusCode(HttpStatus.FOUND);', 'the restart answers 302 at the same request URI (the expired SESSION cookie is written at the response commit)'),
+                        ('String location = uri.getRawPath() + (uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery());', 'the bounce location is the request path and query, relative so the browser resolves scheme and host itself'),
+                        ('ServerWebExchangeMatchers.pathMatchers(HttpMethod.POST, "/logout")', 'a POST /logout is left to the logout filter, whose success handler needs the authentication'),
+                        ('DEFAULT_MAX_SESSION_LIFETIME = Duration.ofHours(8);', 'the built-in maximum is 8 hours (owner decision G4) when the property is absent'),
+                        ('DurationStyle.detectAndParse(configured.strip(), ChronoUnit.SECONDS)', 'a bare number is seconds, like server.reactive.session.timeout'),
+                        ('if (lifetime.isPositive()) {', 'zero and negative values refuse to start'),
+                        ('.flatMap(isLogout -> isLogout\n+            ? chain.filter(exchange)\n+            : continueOrRestart(exchange, maximum, chain)', 'only a POST /logout skips the check, every other request is checked')):
         e(needle in patch, f'kafbat-ui/native-auth.patch: {why} (missing {needle[:50]!r})')
     # PR #39 review threads: lifecycle lock during bootstrap, temp-admin listing in the parent shell, group before user,
     # rotate --value reuse, passphrase minimum from the environment, restore reconciles the UI client.
@@ -591,16 +605,23 @@ def check_exposure(checks):
         e('identity_reconcile_ui_urls restore' in restore and restore.index('identity_reconcile_ui_urls restore') < restore.index('identity_journal restore ok'),
           f'{edition}/krate: restore must reconcile the krate-ui client with this host before reporting success')
     build = (ROOT / 'kafbat-ui/build.py').read_text()
-    e("IMAGE = 'krate/kafka-ui:1.5.0-sso.7'" in build, 'kafbat-ui/build.py must build sso.7 (the templates pin it)')
+    e("IMAGE = 'krate/kafka-ui:1.5.0-sso.9'" in build, 'kafbat-ui/build.py must build sso.9 (the templates pin it)')
+    e("VITE_TAG='v1.5.0-sso.9'" in build, 'kafbat-ui/build.py must stamp the frontend with the same sso.9 tag')
+    for edition in EDITIONS:
+        pin = identity.read_env(ROOT / edition / '.env.template').get('KAFKA_UI_IMAGE', '')
+        e(re.fullmatch(r'krate/kafka-ui:1\.5\.0-sso\.9@sha256:[a-f0-9]{64}', pin) is not None,
+          f'{edition}/.env.template: KAFKA_UI_IMAGE must pin the sso.9 image that build.py builds; got {pin[:60]!r}')
 
 
 def check_gate_scripts(checks):
     """The gate helpers import and their pure helpers behave; --help works under python3 -I (a self-recursive helper once passed every static tool)."""
     import types
     e = lambda cond, msg: checks.expect(cond, 'gate scripts: ' + msg)  # noqa: E731
-    for name in ('scripts/gate/phase2_kafbat.py', 'scripts/gate/keycloak_login_flow.py'):
+    for name in ('scripts/gate/phase2_kafbat.py', 'scripts/gate/keycloak_login_flow.py', 'scripts/gate/phase4_kafbat.py'):
         result = subprocess.run([sys.executable, '-I', str(ROOT / name), '--help'], text=True, capture_output=True)
         e(result.returncode == 0 and 'usage' in result.stdout.lower(), f'{name} --help must exit 0; got {result.returncode}: {result.stderr.strip()[:120]}')
+    k37 = subprocess.run([sys.executable, '-I', str(ROOT / 'scripts/gate/phase4_kafbat.py'), '--selftest'], text=True, capture_output=True)
+    e(k37.returncode == 0 and 'selftest ok' in k37.stdout, f'phase4_kafbat.py --selftest (the K37 windows) must pass; got {k37.returncode}: {k37.stderr.strip()[:120]}')
     spec = importlib.util.spec_from_file_location('phase2_kafbat', ROOT / 'scripts/gate/phase2_kafbat.py')
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -820,6 +841,38 @@ def check_gate_scripts(checks):
       'interval; got %s keeps in %.0f s' % (u9_keeps, u9_now[0] - 1000.0))
 
 
+def check_k37_wiring(checks):
+    """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""
+    e = lambda cond, msg: checks.expect(cond, 'gate row K37: ' + msg)  # noqa: E731
+    if str(ROOT / 'scripts/gate') not in sys.path:
+        sys.path.insert(0, str(ROOT / 'scripts/gate'))
+    kafbat = __import__('phase4_kafbat')
+    phase2 = __import__('phase2_kafbat')
+    e(kafbat.CASES == ['K37'] and kafbat.Gate.CASES == ['K37'] and kafbat.Gate.SLICE == '4a',
+      f'phase4_kafbat.py owns exactly K37 in slice 4a; got {kafbat.CASES} / {kafbat.Gate.SLICE}')
+    e('K37' not in phase2.CASES, 'phase2_kafbat.CASES must not print K37 (it would be ingested into every Phase 2 receipt as a NOT_RUN row)')
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e(re.search(r'^SESSION_P4A=\(U27 K37\)$', runner, re.M) is not None, 'the 4a companion inventory SESSION_P4A must be (U27 K37)')
+    e(re.search(r'^SESSION_P4B=\(U27 V23\)$', runner, re.M) is not None, 'the 4b companion inventory SESSION_P4B must stay (U27 V23): K37 runs once per host, in 4a')
+    e(re.search(r'^REQUIRED_P(?:2|4[ABC])=\(.*\bK37\b', runner, re.M) is None, 'K37 belongs to no default inventory, only to the companion')
+    e('4a) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U" "$GATE_DIR/phase4_kafbat.py K37 K") ;;' in runner,
+      'the 4a companion must run phase4_kafbat.py --only K37 beside U27')
+    e('4a) prep_helpers=("$GATE_DIR/phase4_grafana.py" "$GATE_DIR/phase4_kafbat.py") ;;' in runner,
+      'the 4a companion must prepare the K37 viewer after the Grafana preparation')
+    e('phase4_kafbat' not in runner[runner.index('4b) helper_jobs=("$GATE_DIR/phase4_grafana.py U27 U"'):].split('\n', 1)[0],
+      'the 4b companion must not run K37')
+    guide = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    for row in ('U27', 'V23', 'K37'):
+        e(re.search(r'^\| %s \|' % row, guide, re.M) is not None, f'identity-gate.md must have a row for the companion row {row}')
+    k37_row = next((line for line in guide.splitlines() if line.startswith('| K37 |')), '')
+    for probe in kafbat.PROBES:
+        e(f'`{probe}`' in k37_row, f'the identity-gate.md K37 row must describe the probe {probe}')
+    e('Ended a session that reached its maximum lifetime of PT<N>H' in k37_row and 'Absolute session lifetime: PT<N>H' in k37_row,
+      'the identity-gate.md K37 row must name the two Kafbat log lines the row reads')
+    e('gate row K37' in (ROOT / 'sso/guides/dual-login.md').read_text(),
+      'dual-login.md must cite gate row K37 where it states the absolute session lifetime')
+
+
 def check_phase4_monitor_paths(checks):
     """The Phase IV gate must find monitoring in both source and offline bundle layouts."""
     from unittest.mock import patch
@@ -829,6 +882,7 @@ def check_phase4_monitor_paths(checks):
     sys.path.insert(0, str(ROOT / 'scripts/gate'))
     grafana = __import__('phase4_grafana')
     perses = __import__('phase4_perses')
+    kafbat = __import__('phase4_kafbat')
     phase2 = __import__('phase2_kafbat')
     runner = (ROOT / 'scripts/gate-identity.sh').read_text()
     start = runner.index('MON_DIR="$ED/monitoring"')
@@ -836,7 +890,7 @@ def check_phase4_monitor_paths(checks):
     select_shell = runner[start:stop]
 
     def check_case(edition, expected):
-        for module in (grafana, perses):
+        for module in (grafana, perses, kafbat):
             gate = object.__new__(module.Gate)
             gate.edition = str(edition)
             e(gate.mon_dir() == str(expected),
@@ -874,7 +928,7 @@ def check_phase4_monitor_paths(checks):
         expected = base / 'monitoring'
         check_case(missing_edition, expected)
         e(not (expected / '.env').is_file(), 'missing monitoring/.env fixture must have no false positive')
-        for module in (grafana, perses):
+        for module in (grafana, perses, kafbat):
             gate = object.__new__(module.Gate)
             gate.edition = str(missing_edition)
             gate.project = 'path-contract'
@@ -1997,6 +2051,10 @@ def check_runtime_refusals(checks, edition, site, env, rendered):
          lambda d: d['auth']['oauth2']['client']['keycloak'].__setitem__('issuer-uri', 'https://evil.example.test/identity/realms/krate')),
         ('session timeout differs from KEYCLOAK_SESSION_IDLE_MINUTES', 'differs from the Krate plan',
          lambda d: d['server']['reactive']['session'].__setitem__('timeout', '240m')),
+        ('session maximum differs from KEYCLOAK_SESSION_MAX_HOURS', 'differs from the Krate plan',
+         lambda d: d['auth']['oauth2'].__setitem__('max-session-lifetime', '240h')),
+        ('session maximum removed (an active Kafbat session would have no absolute bound)', 'differs from the Krate plan',
+         lambda d: d['auth']['oauth2'].pop('max-session-lifetime')),
         ('user name attribute is not sub', 'user-name-attribute',
          lambda d: d['auth']['oauth2']['client']['keycloak'].__setitem__('user-name-attribute', 'preferred_username')),
     )
@@ -2530,7 +2588,10 @@ def rpm_fixture(directory):
                  'docker-ce-cli-29.0.0-1.el9.x86_64.rpm', 'docker-ce-rootless-extras-29.0.0-1.el9.x86_64.rpm'):
         (bundle / name).write_text('rpm\n')
     for name in ('container-selinux-2.229.0-1.el9.noarch.rpm', 'nftables-1.0.9-3.el9.x86_64.rpm', 'libnftnl-1.2.6-4.el9.x86_64.rpm',
-                 'jansson-2.14-1.el9.x86_64.rpm', 'libmnl-1.0.4-16.el9.x86_64.rpm', 'unrelated-tool-1.0-1.el9.x86_64.rpm'):
+                 'jansson-2.14-1.el9.x86_64.rpm', 'libmnl-1.0.4-16.el9.x86_64.rpm', 'unrelated-tool-1.0-1.el9.x86_64.rpm',
+                 'iptables-nft-1.8.10-11.el9_5.x86_64.rpm', 'iptables-libs-1.8.10-11.el9_5.x86_64.rpm',
+                 'libnetfilter_conntrack-1.0.9-1.el9.x86_64.rpm', 'libnfnetlink-1.0.1-23.el9_5.x86_64.rpm',
+                 'iptables-legacy-1.8.4-1.el9.x86_64.rpm'):
         (bundle / 'optional' / name).write_text('rpm\n')
     write_tool(bin_dir, 'sudo', 'exec "$@"\n')
     write_tool(bin_dir, 'systemctl', 'exit 0\n')
@@ -2539,9 +2600,13 @@ def rpm_fixture(directory):
     # dnf fails like dnf 4 on RHEL 9 until every requirement is in the transaction, writing its problem
     # lines only after a pause: the caller must read a complete file, not a file still being written.
     write_tool(bin_dir, 'dnf', r'''echo "dnf $*" >> "$FAKE_LOG"
-names=" ${FAKE_HOST_HAS:-} "
-for a in "$@"; do case "$a" in *.rpm) b="${a##*/}"; names+="${b%%-[0-9]*} " ;; esac; done
+# The host has the iptables-nft closure (as on a RHEL server with firewalld) unless FAKE_NO_IPTABLES is set;
+# FAKE_HOST_HAS lists further packages the host has. "has" is host or transaction, "intx" the transaction only.
+if [[ -n "${FAKE_NO_IPTABLES:-}" ]]; then names=" ${FAKE_HOST_HAS:-} "; else names=" iptables-nft iptables-libs libnetfilter_conntrack libnfnetlink ${FAKE_HOST_HAS:-} "; fi
+txn=" "
+for a in "$@"; do case "$a" in *.rpm) b="${a##*/}"; names+="${b%%-[0-9]*} "; txn+="${b%%-[0-9]*} " ;; esac; done
 has() { [[ "$names" == *" $1 "* ]]; }
+intx() { [[ "$txn" == *" $1 "* ]]; }
 problems=()
 has nftables || problems+=("nothing provides nftables >= 1:1.0.5 needed by docker-ce-3:29.0.0-1.el9.x86_64 from @commandline"
                             "nothing provides /usr/sbin/nft needed by docker-ce-rootless-extras-29.0.0-1.el9.x86_64 from @commandline")
@@ -2550,7 +2615,18 @@ if has nftables; then
   has jansson || problems+=("nothing provides libjansson.so.4()(64bit) needed by nftables-1:1.0.9-3.el9.x86_64 from @commandline")
 fi
 if has libnftnl; then has libmnl || problems+=("nothing provides libmnl.so.0()(64bit) needed by libnftnl-1.2.6-4.el9.x86_64 from @commandline"); fi
-[[ -z "${FAKE_EXTRA:-}" ]] || problems+=("nothing provides $FAKE_EXTRA needed by docker-ce-3:29.0.0-1.el9.x86_64 from @commandline")
+# docker-ce 29 requires the rich dependency (iptables-nft or iptables); iptables-nft requires iptables-libs of its own
+# version, libnftnl and libmnl; iptables-libs requires libnetfilter_conntrack, which requires libnfnetlink.
+has iptables-nft || problems+=("nothing provides (iptables-nft or iptables) needed by docker-ce-3:29.0.0-1.el9.x86_64 from @commandline")
+if intx iptables-nft; then
+  has iptables-libs || problems+=("nothing provides iptables-libs(x86-64) = 1.8.10-11.el9_5 needed by iptables-nft-1.8.10-11.el9_5.x86_64 from @commandline")
+  has libnftnl || problems+=("nothing provides libnftnl.so.11()(64bit) needed by iptables-nft-1.8.10-11.el9_5.x86_64 from @commandline")
+  has libmnl || problems+=("nothing provides libmnl.so.0()(64bit) needed by iptables-nft-1.8.10-11.el9_5.x86_64 from @commandline")
+fi
+if intx iptables-libs; then has libnetfilter_conntrack || problems+=("nothing provides libnetfilter_conntrack.so.3()(64bit) needed by iptables-libs-1.8.10-11.el9_5.x86_64 from @commandline"); fi
+if intx libnetfilter_conntrack; then has libnfnetlink || problems+=("nothing provides libnfnetlink.so.0()(64bit) needed by libnetfilter_conntrack-1.0.9-1.el9.x86_64 from @commandline"); fi
+# FAKE_EXTRA is a capability nothing on the host provides, needed by FAKE_EXTRA_NEEDER, until package FAKE_EXTRA_BY joins the transaction.
+[[ -z "${FAKE_EXTRA:-}" ]] || intx "${FAKE_EXTRA_BY:-never}" || problems+=("nothing provides $FAKE_EXTRA needed by ${FAKE_EXTRA_NEEDER:-docker-ce-3:29.0.0-1.el9.x86_64} from @commandline")
 if (( ${#problems[@]} )); then
   echo "Error: " >&2
   sleep 0.3
@@ -2568,6 +2644,11 @@ echo "Complete!"
          jansson) printf 'libjansson.so.4()(64bit)\njansson = 2.14-1.el9\n' ;;
          libmnl) printf 'libmnl.so.0()(64bit)\nlibmnl = 1.0.4-16.el9\n' ;;
          container-selinux) printf 'container-selinux = 2:2.229.0-1.el9\ndocker-selinux = 2:2.229.0-1.el9\n' ;;
+         iptables-nft) printf 'arptables\narptables-helper\nebtables\niptables\niptables-nft = 1.8.10-11.el9_5\niptables-nft(x86-64) = 1.8.10-11.el9_5\n' ;;
+         iptables-libs) printf 'libxtables.so.12()(64bit)\niptables-libs = 1.8.10-11.el9_5\niptables-libs(x86-64) = 1.8.10-11.el9_5\n' ;;
+         libnetfilter_conntrack) printf 'libnetfilter_conntrack.so.3()(64bit)\nlibnetfilter_conntrack = 1.0.9-1.el9\n' ;;
+         libnfnetlink) printf 'libnfnetlink.so.0()(64bit)\nlibnfnetlink = 1.0.1-23.el9_5\n' ;;
+         iptables-legacy) printf 'iptables\niptables-legacy = 1.8.4-1.el9\n' ;;
          *) echo "$n = 1.0-1.el9" ;;
        esac ;;
   -qpl) case "${2##*/}" in nftables-*) printf '/etc/nftables\n/usr/sbin/nft\n' ;; esac ;;
@@ -2586,6 +2667,66 @@ def makefile_rpm_installer():
     return raw, raw.replace('$$', '$')
 
 
+def check_rpm_capability_parsing(e):
+    """The installers read dnf's "nothing provides" lines: plain capabilities, sonames, file paths and rich dependencies "(A or B)"."""
+    source = bash_functions(ROOT / 'epc/krate', 'rpm_missing_capabilities', 'rpm_capability_alternatives', 'rpm_providers_of', 'rpm_failure_message')
+    dnf_output = """Error:
+ Problem 1: conflicting requests
+  - nothing provides container-selinux >= 2:2.74 needed by docker-ce-3:29.9.0-1.el9.aarch64 from @commandline
+ Problem 2: package docker-ce-rootless-extras-29.9.0-1.el9.aarch64 from @commandline requires docker-ce, but none of the providers can be installed
+  - conflicting requests
+  - nothing provides (iptables-nft or iptables) needed by docker-ce-3:29.9.0-1.el9.aarch64 from @commandline
+  - nothing provides libnftnl.so.11()(64bit) needed by nftables-1.0.9-9.el9_8.aarch64 from @commandline
+  - nothing provides /usr/sbin/nft needed by docker-ce-rootless-extras-29.9.0-1.el9.aarch64 from @commandline
+  - nothing provides selinux-policy-base >= 38.1.75-2.el9_8 needed by container-selinux-4:2.247.0-1.el9_8.noarch from @commandline
+  - nothing provides policycoreutils needed by container-selinux-4:2.247.0-1.el9_8.noarch from @commandline
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        log = Path(tmp) / 'dnf.log'
+        log.write_text(dnf_output)
+        result = run_bash(BASH_STUBS + source + '\nrpm_missing_capabilities "$1"\n', log)
+        e(result.returncode == 0 and set(result.stdout.splitlines()) == {
+            'container-selinux', '(iptables-nft or iptables)', 'libnftnl.so.11()(64bit)', '/usr/sbin/nft', 'selinux-policy-base', 'policycoreutils'},
+          f'rpm_missing_capabilities must read plain names (version dropped), sonames, file paths and whole rich dependencies; got {result.stdout.splitlines()}')
+        for dependency, alternatives in (('(iptables-nft or iptables)', ['iptables-nft', 'iptables']),
+                                         ('(foo >= 1.0 or bar or baz)', ['foo', 'bar', 'baz']),
+                                         ('(libfoo.so.1()(64bit) or bar)', ['libfoo.so.1()(64bit)', 'bar']),
+                                         ('libnftnl.so.11()(64bit)', ['libnftnl.so.11()(64bit)']),
+                                         ('/usr/sbin/nft', ['/usr/sbin/nft']),
+                                         ('container-selinux', ['container-selinux']),
+                                         ('(foo and bar)', ['(foo and bar)']),
+                                         ('(foo if bar)', ['(foo if bar)']),
+                                         ('(foo or (bar and baz))', ['(foo or (bar and baz))']),
+                                         ('(foo or (bar or baz))', ['(foo or (bar or baz))'])):
+            result = run_bash(BASH_STUBS + source + '\nrpm_capability_alternatives "$1"\n', dependency)
+            e(result.returncode == 0 and result.stdout.splitlines() == alternatives,
+              f'rpm_capability_alternatives {dependency!r}: want {alternatives}; got {result.stdout.splitlines()}')
+        bin_dir, bundle = rpm_fixture(tmp)
+        optional = sorted(str(f) for f in (bundle / 'optional').glob('*.rpm'))
+        for need, wanted in (('(iptables-nft or iptables)', ['iptables-nft-1.8.10']), ('(libabsent or iptables-legacy)', ['iptables-legacy-1.8.4']),
+                             ('(libabsent or libgone)', []), ('/usr/sbin/nft', ['nftables-1.0.9']), ('iptables-libs(x86-64)', ['iptables-libs-1.8.10']),
+                             ('libnftnl.so.11()(64bit)', ['libnftnl-1.2.6'])):
+            result = run_bash(BASH_STUBS + source + '\nrpm_providers_of "$@"\n', need, *optional, path_dir=bin_dir)
+            found = [Path(line).name for line in result.stdout.splitlines()]
+            e(result.returncode == 0 and len(found) == len(wanted) and all(f.startswith(w) for f, w in zip(found, wanted)),
+              f'rpm_providers_of {need!r}: want {wanted}; got {found}')
+        for added, capabilities, selinux, texts in (
+                ('', ['(libfoo or libbar)'], False, ['lacks (libfoo or libbar), and the bundle has no package', 'Install (libfoo or libbar) from your RHEL media']),
+                ('nftables-1.rpm libnftnl-1.rpm', ['(iptables-nft or iptables)'], False,
+                 ['bundled dependencies (nftables-1.rpm libnftnl-1.rpm); the bundle cannot supply (iptables-nft or iptables)', 'Install (iptables-nft or iptables) from your RHEL media']),
+                ('', ['container-selinux'], True, ['lacks container-selinux', 'dnf install container-selinux']),
+                ('container-selinux-1.rpm', ['selinux-policy-base'], True, ['cannot supply selinux-policy-base', 'dnf install container-selinux']),
+                ('container-selinux-1.rpm', ['policycoreutils'], False, ['cannot supply policycoreutils', 'Install policycoreutils from your RHEL media']),
+                ('nftables-1.rpm', ['libfoo.so.1()(64bit)', 'selinux-policy-base'], True,
+                 ['cannot supply libfoo.so.1()(64bit), selinux-policy-base', 'Install libfoo.so.1()(64bit) from your RHEL media', 'dnf install container-selinux']),
+                ('nftables-1.rpm', [], False, ["dnf's output above names the cause"])):
+            result = run_bash(BASH_STUBS + source + '\nrpm_failure_message "$@"\n', Path(tmp) / 'dnf.log', added, *capabilities)
+            e(result.returncode == 0 and all(text in result.stdout for text in texts)
+              and (('container-selinux must match' in result.stdout) == selinux)
+              and (selinux or 'dnf install container-selinux' not in result.stdout),
+              f'rpm_failure_message {added!r} {capabilities}: want {texts} and container-selinux advice {selinux}; got {result.stdout!r}')
+
+
 def check_rpm_install(checks):
     """S3-S6: dnf's errors are read after dnf exits, capabilities map to bundled RPMs over several rounds, both installers agree, the builder is pinned."""
     e = checks.expect
@@ -2594,20 +2735,31 @@ def check_rpm_install(checks):
     e('>(' not in install and '2>"$attempt_log"' in install, 'epc/krate: docker_install_rpm must write dnf stderr to the file synchronously (no process substitution)')
     makefile = (ROOT / 'Makefile').read_text()
     optional = re.search(r'^DOCKER_RPM_OPTIONAL := (.*)$', makefile, re.M)
-    e(optional is not None and {'container-selinux', 'nftables', 'libnftnl', 'jansson', 'libmnl'} <= set(optional.group(1).split()),
-      'Makefile: DOCKER_RPM_OPTIONAL must bundle container-selinux, nftables, libnftnl, jansson and libmnl')
+    e(optional is not None and {'container-selinux', 'nftables', 'libnftnl', 'jansson', 'libmnl',
+                                'iptables-nft', 'iptables-libs', 'libnetfilter_conntrack', 'libnfnetlink'} <= set(optional.group(1).split()),
+      'Makefile: DOCKER_RPM_OPTIONAL must bundle container-selinux, nftables, libnftnl, jansson, libmnl and the iptables-nft closure '
+      '(iptables-nft, iptables-libs, libnetfilter_conntrack, libnfnetlink): docker-ce requires (iptables-nft or iptables)')
+    builder_recipe = makefile[makefile.index('docker-rpms:\n'):makefile.index('INSTALL_RPM\n')]
+    e(re.search(r'dnf install -y -q [^\n]*\b(iptables-nft|nftables)\b', builder_recipe) is None,
+      'Makefile docker-rpms: the builder must not install iptables-nft or nftables as if every RHEL host had them (they are optional/ downloads)')
+    flat_recipe = re.sub(r'\\\n>?', ' ', builder_recipe)
+    download_lines = [line for line in flat_recipe.splitlines() if 'dnf download' in line and not line.lstrip('>').lstrip().startswith('#')]
+    e(len(download_lines) == 2 and not any(flag in line for line in download_lines for flag in ('--resolve', '--alldeps')),
+      'Makefile docker-rpms: the main set and optional/ are named `dnf download` lists, never --resolve/--alldeps (the main set is exactly the Docker packages)')
     e(re.search(r'^RHEL_BUILDER_IMAGE \?= rockylinux/rockylinux:9@sha256:[0-9a-f]{64}$', makefile, re.M) is not None,
       "Makefile: RHEL_BUILDER_IMAGE must default to Rocky's maintained image rockylinux/rockylinux:9, pinned by digest")
     e('AlmaLinux' not in makefile, 'Makefile: no stale AlmaLinux builder wording')
     raw, standalone = makefile_rpm_installer()
     e(re.search(r'(?<!\$)\$(?!\$)', raw) is None, 'Makefile: every $ in the install-docker.sh heredoc must be escaped as $$')
-    for name in ('rpm_missing_capabilities', 'rpm_providers_of'):
+    for name in ('rpm_missing_capabilities', 'rpm_capability_alternatives', 'rpm_providers_of', 'rpm_failure_message'):
         source = bash_functions(ROOT / 'epc/krate', name)
         e(source in standalone, f'Makefile install-docker.sh: {name} must be identical to its epc/krate copy')
     e('>(' not in standalone and '2>"$attempt_log"' in standalone, 'Makefile install-docker.sh: dnf stderr must be written to the file synchronously')
     if bash_binary() is None:
         return
-    krate_script = BASH_STUBS + bash_functions(ROOT / 'epc/krate', 'rpm_missing_capabilities', 'rpm_providers_of', 'docker_install_rpm') + '\ndocker_install_rpm "$1"\n'
+    krate_script = BASH_STUBS + bash_functions(ROOT / 'epc/krate', 'rpm_missing_capabilities', 'rpm_capability_alternatives', 'rpm_providers_of',
+                                               'rpm_failure_message', 'docker_install_rpm') + '\ndocker_install_rpm "$1"\n'
+    check_rpm_capability_parsing(e)
     wanted = ['nftables-1.0.9-3.el9.x86_64.rpm', 'libnftnl-1.2.6-4.el9.x86_64.rpm', 'jansson-2.14-1.el9.x86_64.rpm', 'libmnl-1.0.4-16.el9.x86_64.rpm']
     for label, run in (('epc/krate docker-install', lambda where, variables, tools: run_bash(krate_script, where, env=variables, path_dir=tools)),
                        ('Makefile install-docker.sh', None)):
@@ -2638,6 +2790,50 @@ def check_rpm_install(checks):
             calls = log.read_text().splitlines() if log.exists() else []
             e(result.returncode == 1 and 'lacks libfoo.so.1()(64bit)' in result.stderr and len(calls) == 1,
               f'{label}: with nothing bundled to add, it stops after the first attempt naming the missing capability; got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-200:]}')
+
+            def scenario(**variables):
+                assert run is not None
+                log.unlink(missing_ok=True)
+                outcome = run(bundle, dict(env, **variables), bin_dir)
+                return outcome, (log.read_text().splitlines() if log.exists() else [])
+
+            cloud = 'iptables-libs libnetfilter_conntrack libnfnetlink jansson libmnl'
+            nft_ready = 'nftables libnftnl jansson libmnl'
+            result, calls = scenario()
+            e(result.returncode == 0 and not any(n in calls[-1] for n in ('iptables-nft', 'iptables-libs', 'libnetfilter_conntrack', 'libnfnetlink', 'iptables-legacy')),
+              f'{label}: a host that has iptables-nft (firewalld) never gets the bundled iptables-nft closure; got {result.returncode}: {calls[-1][-200:] if calls else ""!r}')
+            # Rocky GenericCloud (observed 2026-10-16): no iptables-nft, nftables, libnftnl; iptables-libs, libnetfilter_conntrack, libnfnetlink present.
+            result, calls = scenario(FAKE_NO_IPTABLES='1', FAKE_HOST_HAS=cloud)
+            last = calls[-1] if calls else ''
+            e(result.returncode == 0 and len(calls) == 3,
+              f'{label}: dnf names the rich dependency (iptables-nft or iptables): iptables-nft is added with nftables, then libnftnl; got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-300:]}')
+            e(all(n in last for n in ('nftables-1.0.9', 'iptables-nft-1.8.10', 'libnftnl-1.2.6'))
+              and not any(n in last for n in ('iptables-libs', 'libnetfilter_conntrack', 'libnfnetlink', 'jansson', 'libmnl', 'iptables-legacy', 'container-selinux')),
+              f'{label}: only the iptables-nft, nftables and libnftnl are added there (iptables-legacy also provides iptables but is not the first alternative); got {last[-300:]!r}')
+            # A host without the whole closure: iptables-nft -> iptables-libs -> libnetfilter_conntrack -> libnfnetlink is five attempts.
+            result, calls = scenario(FAKE_NO_IPTABLES='1')
+            last = calls[-1] if calls else ''
+            e(result.returncode == 0 and len(calls) == 5,
+              f'{label}: a host lacking the whole iptables-nft closure needs five dnf attempts, not a fixed three rounds; got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-300:]}')
+            e(all(n in last for n in ('iptables-nft-1.8.10', 'iptables-libs-1.8.10', 'libnetfilter_conntrack-1.0.9', 'libnfnetlink-1.0.1', 'libnftnl-1.2.6', 'libmnl-1.0.4'))
+              and 'iptables-legacy' not in last,
+              f'{label}: the final transaction carries the whole closure; got {last[-400:]!r}')
+            result, calls = scenario(FAKE_EXTRA='(libabsent or iptables-legacy)', FAKE_EXTRA_BY='iptables-legacy', FAKE_HOST_HAS=nft_ready)
+            e(result.returncode == 0 and len(calls) == 2 and 'iptables-legacy' in calls[-1],
+              f'{label}: a rich dependency is satisfied by the first alternative a bundled package provides (here the second); got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-200:]}')
+            result, calls = scenario(FAKE_EXTRA='(libfoo or libbar)', FAKE_HOST_HAS=nft_ready)
+            e(result.returncode == 1 and 'lacks (libfoo or libbar)' in result.stderr and 'container-selinux must match' not in result.stderr,
+              f'{label}: an unresolved rich dependency is named whole, without the container-selinux advice; got {result.returncode}: {result.stderr.strip()[-250:]}')
+            result, calls = scenario(FAKE_EXTRA='libfoo.so.1()(64bit)', FAKE_NO_IPTABLES='1', FAKE_HOST_HAS=cloud)
+            e(result.returncode == 1 and 'bundled dependencies (' in result.stderr and 'cannot supply libfoo.so.1()(64bit)' in result.stderr
+              and 'Install libfoo.so.1()(64bit) from your RHEL media' in result.stderr and 'container-selinux must match' not in result.stderr,
+              f'{label}: after adding bundled packages, the capability that stayed unresolved is named and the container-selinux advice is absent; got {result.returncode}: {result.stderr.strip()[-350:]}')
+            result, calls = scenario(FAKE_EXTRA='container-selinux >= 2:9.9', FAKE_HOST_HAS=nft_ready)
+            e(result.returncode == 1 and len(calls) == 2 and 'cannot supply container-selinux' in result.stderr and 'container-selinux must match this host' in result.stderr,
+              f'{label}: a capability dnf still names after its bundled provider was added (its version constraint is not met) is unresolved, with the container-selinux advice; got {result.returncode}, {len(calls)} calls: {result.stderr.strip()[-300:]}')
+            result, calls = scenario(FAKE_EXTRA='selinux-policy-base >= 38.1.75-2.el9_8', FAKE_EXTRA_NEEDER='container-selinux-4:2.247.0-1.el9_8.noarch', FAKE_HOST_HAS=nft_ready)
+            e(result.returncode == 1 and 'selinux-policy-base' in result.stderr and 'container-selinux must match this host' in result.stderr,
+              f'{label}: a capability needed by container-selinux (the host selinux-policy) gets the container-selinux advice; got {result.returncode}: {result.stderr.strip()[-300:]}')
 
 
 def check_gen_cert_ip(checks):
@@ -3885,6 +4081,41 @@ LOKI_GATEWAY_METHODS = {
 }
 
 
+def go_flag_value(args, name):
+    """The value Go's flag package gives `name` for the argument list `args`, or None when it is not set.
+
+    -name=x, --name=x and (for a non-boolean flag) -name x are the same flag; Set runs once per occurrence,
+    in command-line order, so the last occurrence wins; parsing ends before the first non-flag argument
+    ("-" is one) and after "--" (Context7 /websites/pkg_go_dev_go1_25_3, package flag). Any other flag written
+    without "=" may be boolean (-name alone) or take the next argument, which the argument list does not say, so
+    the answer is None (not set) rather than a guess: the caller refuses what it cannot decide.
+    """
+    value = None
+    args = list(args or [])
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg == '-' or arg == '--' or not arg.startswith('-'):
+            break
+        flag = arg[2:] if arg.startswith('--') else arg[1:]
+        flag_name, has_value, flag_value = flag.partition('=')
+        if not flag_name or flag_name.startswith('-'):
+            return None
+        if flag_name != name:
+            if has_value:
+                continue
+            return None
+        if has_value:
+            value = flag_value
+        elif i < len(args):
+            value = args[i]
+            i += 1
+        else:
+            return None
+    return value
+
+
 def check_loki_gateway(checks):
     """Phase 4 commit 3: Grafana reaches Loki only through the read-only gateway; the log write path stays direct."""
     e = checks.expect
@@ -3944,7 +4175,10 @@ def check_loki_gateway(checks):
       f'monitoring/loki-gateway must be on the monitoring network only; got {list(service.get("networks") or {})}')
     e(list(service.get('depends_on') or {}) == ['loki'], f'monitoring/loki-gateway must depend on loki; got {service.get("depends_on")}')
     loki = json.loads(result.stdout)['services'].get('loki') or {}
-    e('-server.grpc-listen-address=127.0.0.1' in (loki.get('command') or []),
+    # The effective value is what Go's flag package leaves after the whole command (go_flag_value): the last
+    # occurrence in any spelling decides, so a later --server.grpc-listen-address=0.0.0.0 or a later
+    # two-argument form is seen, not only the single-dash =value form.
+    e(go_flag_value(loki.get('command'), 'server.grpc-listen-address') == '127.0.0.1',
       'monitoring/loki must bind its gRPC listener to 127.0.0.1 (-server.grpc-listen-address=127.0.0.1): it is used '
       f'in-process only, and a peer reaching loki:9096 is a residual Table 2 does not list (W4); got {loki.get("command")}')
     volumes = [(volume.get('source', ''), volume.get('target'), volume.get('read_only')) for volume in service.get('volumes') or []]
@@ -4890,6 +5124,85 @@ def check_monitoring_tables(checks):
           f'{edition}/krate: monitor_prepare must warn when PROM_BIND or LOKI_BIND is not 127.0.0.1')
 
 
+def check_airgap_rows(checks):
+    """The air-gap rows AG1-AG5 (scripts/gate/phase4_airgap.py): the pure helpers behave, a probe that cannot run is FAIL on a bundle
+    host and NOT_RUN on the Mac and on a checkout (never PASS), nothing is left running, and the runner calls the steps where
+    sso/guides/identity-gate.md says."""
+    e = lambda cond, msg: checks.expect(cond, 'air-gap rows: ' + msg)  # noqa: E731
+    helper = ROOT / 'scripts/gate/phase4_airgap.py'
+    spec = importlib.util.spec_from_file_location('phase4_airgap', helper)
+    assert spec is not None and spec.loader is not None
+    m = importlib.util.module_from_spec(spec)
+    keep = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True  # no bytecode next to the helper from a static check
+    try:
+        spec.loader.exec_module(m)
+    finally:
+        sys.dont_write_bytecode = keep
+    e([m.classify_curl(rc)[0] for rc in (0, 7, 28, 56, 127)] == ['leak', 'blocked', 'blocked', 'cannot', 'cannot'],
+      'curl rc 0 is a leak, 7 and 28 are blocked, anything else (a connection may exist, or curl did not run) is not proven')
+    e([m.classify_getent(rc, '')[0] for rc in (0, 2, 1, 127)] == ['leak', 'blocked', 'cannot', 'cannot'], 'getent: 0 leak, 2 blocked, else not proven')
+    e([m.classify_sentinel(rc, out)[0] for rc, out in ((3, 'AGPROBE blocked errno=111'), (0, 'AGPROBE reached'), (1, 'Traceback'), (0, ''))]
+      == ['blocked', 'leak', 'cannot', 'cannot'], 'a container probe is conclusive only through its AGPROBE sentinel line')
+    rules = m.parse_rules('-A OUTPUT -d 192.168.5.2/32 -p udp -m udp --dport 53 -j KRATE-AIRGAP-OUT\n-A OUTPUT -j KRATE-AIRGAP-OUT\n'
+                          '-A KRATE-AIRGAP-OUT -j LOG --log-prefix "krate-airgap-out: "\n-A KRATE-AIRGAP-OUT -j REJECT --reject-with icmp-port-unreachable')
+    e(m.has_catchall(rules, 'OUTPUT', 'KRATE-AIRGAP-OUT') and not m.has_catchall(m.parse_rules('-A OUTPUT -p tcp -j KRATE-AIRGAP-OUT'), 'OUTPUT', 'KRATE-AIRGAP-OUT'),
+      'only a rule without a match is the catch-all jump')
+    e(m.covers(rules, 'OUTPUT', 'KRATE-AIRGAP-OUT', '192.168.5.2', 'udp') and not m.covers(rules, 'OUTPUT', 'KRATE-AIRGAP-OUT', '192.168.5.2', 'tcp'),
+      'a resolver is covered per protocol')
+    e(m.last_target(rules, 'KRATE-AIRGAP-OUT') == 'REJECT', 'a reject chain ends in REJECT')
+    e([m.forward_jump_state(m.parse_rules(text)) for text in ('-A FORWARD -j DOCKER-USER\n-A FORWARD -j DOCKER-FORWARD', '-A FORWARD -j DOCKER-FORWARD',
+                                                              '-A FORWARD -j DOCKER-FORWARD\n-A FORWARD -j DOCKER-USER')] == ['ok', 'missing', 'late'],
+      'FORWARD must jump to DOCKER-USER, and before DOCKER-FORWARD')
+    lines = ['dockerd[1]: msg="[resolver] failed to query external DNS server" question=";config.liquibase.com.\\tIN\\t A"',
+             'dockerd[1]: msg="[resolver] failed to query external DNS server" question=";loki.\\tIN\\t AAAA"',
+             'dockerd[1]: msg="[resolver] failed to query external DNS server" question=";loki.lima.internal.\\tIN\\t A"']
+    public, single = m.split_lookups(m.lookup_names(lines), ['lima.internal'])
+    e(public == {'config.liquibase.com.': 1} and single == {'loki.': 1, 'loki.lima.internal.': 1},
+      'dockerd lookups: a name of two labels is public-looking, a single label (alone or with a search domain) is a service name')
+    e(m.parse_counters('Chain X (1 references)\n pkts bytes target\n  12 960 REJECT all -- * *\n') == {'REJECT': 12} and m.parse_counters('') is None,
+      'unreadable counters are None, never zero')
+    stream = ('{"Type":"volume","Action":"create","Actor":{"ID":"v","Attributes":{}},"timeNano":5}\n{"Type":"volume","Action":"create","Actor":{"ID":"v","Attributes":{}},"timeNano":5}\n'
+              '{"Type":"airgap","Action":"attach","n":2,"ring":7}\n')
+    events, markers, bad = m.parse_stream(stream)
+    e(len(events) == 1 and len(markers) == 1 and bad == 0, 're-attached streams are de-duplicated and the supervisor markers are kept apart')
+    e(m.GETENT_SECONDS <= 6 and m.CONTAINER_PROBE_SECONDS <= 15 and m.DNS_SECONDS <= 6 and m.RING_LIMIT == 256, 'probe bounds and the ring limit')
+    fixture_root = ROOT / 'harness' / 'phase4' / 'path-contract'
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=fixture_root) as tmp:
+        base = Path(tmp)
+        common = ['--state', str(base / 'state'), '--edition-dir', str(base), '--mon-dir', str(base), '--record', str(base / 'none.json'),
+                  '--script', str(base / 'none'), '--boot-id-file', str(base / 'none'), '--resolv-conf', str(base / 'none')]
+        for kind, want in (('bundle', 'FAIL'), ('darwin', 'NOT_RUN'), ('checkout', 'NOT_RUN')):
+            for step, ids in (('before', ('AG1', 'AG4')), ('after', ('AG2', 'AG3', 'AG5'))):
+                proc = subprocess.run([sys.executable, '-I', '-B', str(helper), step, '--host-kind', kind] + common, text=True, capture_output=True, env={'PATH': ''})
+                got = {line.split('\t')[0]: line.split('\t')[1] for line in proc.stdout.splitlines() if line.count('\t') == 2}
+                e(got == {i: want for i in ids}, f'{step} on a {kind} host with no tool must give {want} rows {ids}; got {got}')
+        watcher = base / 'state' / 'watcher.json'
+        if watcher.is_file():  # a step that could not attach must not leave its supervisor running
+            try:
+                os.kill(int(json.loads(watcher.read_text()).get('pid') or 0), 0)
+                e(False, 'a helper step with no tool left its watcher supervisor running')
+            except (OSError, ValueError):
+                pass
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text().splitlines()
+
+    def at(exact):
+        found = [i for i, line in enumerate(runner) if line == exact]
+        e(len(found) == 1, f'the runner must hold exactly one line {exact!r}; found {len(found)}')
+        return found[0] if found else -1
+    e(at('trap on_exit EXIT') < at('airgap_before_rows') < at('run_static'), 'airgap_before_rows runs after the traps and before the first row')
+    esac = max(i for i, line in enumerate(runner) if line == 'esac')
+    e(at('airgap_after_rows') == esac + 1 and runner[esac + 2] == 'FINISHED=true', 'airgap_after_rows runs right after the last slice row, before the teardown')
+    finish = at('finish() {')
+    e(finish >= 0 and runner[finish + 1].strip().startswith('airgap_after_rows exit-path'), 'finish() runs airgap_after_rows exit-path first (a run that ended early)')
+    e(finish >= 0 and runner[finish + 2].strip().startswith('airgap_fill AG1 AG4 AG2 AG3 AG5'), 'finish() then fills the rows an interrupted after step left unrecorded')
+    guide = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    for row in ('AG1', 'AG2', 'AG3', 'AG4', 'AG5'):
+        e(f'| {row} |' in guide, f'sso/guides/identity-gate.md must list {row} in its air-gap table')
+    e('AG1 AG2 AG3 AG4 AG5' in '\n'.join(runner), 'required_ids must hold AG1-AG5 for a bundle host')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
@@ -4897,7 +5210,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_phase4_monitor_paths,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
