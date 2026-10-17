@@ -414,6 +414,12 @@ the agent are a later batch. The guest may ask the Mac agent for a planned row w
 arguments, the pinned certificate (`certs/server.crt`), the wall-clock budget,
 one `limactl shell` command per guest read, one `limactl copy --backend=scp -r`
 delivery, and a Mac-held `agent-manifest.tsv` it compares at harvest; the
+rendezvous directory itself lives in the guest (the VM has no mount): the agent
+lists, claims (`mv` to `<name>.claimed-<pid>`), reads and removes through one
+`limactl shell` command each and puts its hello and every response with a
+`limactl copy --backend=scp` into a dot-temp plus one guest `mv -f`, and only
+validated guest paths (`^/[A-Za-z0-9._/-]+$`, normalized, the rendezvous under
+`--guest-root`) and request ids from 1 to 9999 reach those commands; the
 runner's preflight requires a fresh hello (≤ 60 s, nonce-bound, skew ≤ 10 s, a
 `mac_src_ip` inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16, and gate-file digests equal to its own copies). W5–W7 run
 only under this vantage and leave the inventory otherwise (the J7/W3 pattern;

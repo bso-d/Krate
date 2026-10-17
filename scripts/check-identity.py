@@ -1264,6 +1264,12 @@ def check_topofix2(checks):
       and 'export async function launchGateBrowserMac(chromium, { host, resolveTo, outDir, viewport = { width: 1440, height: 900 } }) {' in launch_lines,
       'browser-launch.mjs: the container launch destructures only host and resolveTo (its viewport was unused); the Mac launch keeps its viewport (N)')
 
+    # PRE-0 (guide): the Mac vantage paragraph says where the rendezvous lives and how the agent reaches it.
+    e('the rendezvous directory itself lives in the guest (the VM has no mount)' in guide_flat
+      and 'puts its hello and every response with a `limactl copy --backend=scp` into a dot-temp plus one guest `mv -f`' in guide_flat
+      and 'request ids from 1 to 9999' in guide_flat,
+      'the guide says the rendezvous lives in the guest and how the agent lists, claims, reads, removes and puts (PRE-0)')
+
 
 def check_k37_wiring(checks):
     """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""
