@@ -3692,30 +3692,42 @@ for user in json.load(sys.stdin):
   done
 }
 
+# Grafana's address: with Krate sign-in (GRAFANA_AUTH_CONFIG=realm.ini) the cluster proxy
+# serves it over TLS at /grafana/, and Grafana's own port is on the loopback interface.
+grafana_address() {
+  if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini && -n "$(public_url_host)" ]]; then
+    printf 'https://%s/grafana/\n' "$(public_url_authority)"
+  else
+    printf 'http://%s:%s\n' "$(hostname -f 2>/dev/null || hostname)" "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+  fi
+}
+
 # Perses' address. With the Krate realm (PERSES_IDP=krate) only the public name works:
 # the realm client's redirect URI is built from it (monitoring/render.py realm_site
 # public_url), so the host name of this machine would not sign in.
 perses_address() {
   local port host
   port="$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
-  if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]]; then
-    host="$(public_url_host)"
-  else
-    host="$(hostname -f 2>/dev/null || hostname)"
-  fi
+  [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]] && host="$(public_url_host)"
+  # Without a public name (KEYCLOAK_PUBLIC_URL unset) only the host name is left to print.
+  [[ -n "${host:-}" ]] || host="$(hostname -f 2>/dev/null || hostname)"
   printf 'https://%s:%s\n' "$host" "$port"
 }
 
 # Grafana and Perses addresses and logins.
 monitor_logins() {
-  local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
-  echo "Grafana:  http://$(hostname -f 2>/dev/null || hostname):${port}"
+  echo "Grafana:  $(grafana_address)"
+  if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
+    echo "Sign-in:  Krate sign-in (realm $IDENTITY_REALM); the user below is Grafana's own login, kept for the rollback on this host"
+  fi
   echo "User:     $(env_value_file "$MONITOR_DIR/.env" GRAFANA_USER admin)"
   echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
   echo "Perses:   $(perses_address)"
   if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
     echo "User:     $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_USER admin)"
     echo "Password: $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_PASSWORD)"
+  elif [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]]; then
+    echo "Sign-in:  Krate sign-in (realm $IDENTITY_REALM)"
   else
     echo "Sign-in:  company SSO ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) mode)"
   fi
@@ -3809,13 +3821,9 @@ cmd_monitor() {
       fi
       python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
       echo ""
-      if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
-        # Realm mode: the cluster proxy serves Grafana over TLS at /grafana/, and its
-        # own port is on the loopback interface (use it for the local login rollback).
-        ok "Grafana:    https://$(public_url_authority)/grafana/"
-      else
-        ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
-      fi
+      # Realm mode: the cluster proxy serves Grafana over TLS at /grafana/, and its own
+      # port is on the loopback interface (use it for the local login rollback).
+      ok "Grafana:    $(grafana_address)"
       # Prometheus (and Loki) answer on PROM_BIND/LOKI_BIND only, 127.0.0.1 by
       # default: the address printed is the one that works.
       local prom_bind prom_host

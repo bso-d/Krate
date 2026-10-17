@@ -4876,6 +4876,76 @@ def check_grafana_realm_plan(checks):
         e(identity.client_differs(client, dict(same, **{field: flipped})) is True,
           f'client_differs: a changed {field} is a difference (the client-mode fields take part in the verdict)')
 
+def check_monitor_logins(checks):
+    """`krate credentials` and `monitor ui` (monitor_logins) print the Grafana and Perses addresses and sign-ins
+    that work: with Krate sign-in Grafana is at https://<public authority>/grafana/ and both UIs say "Krate sign-in";
+    a company site file keeps "company SSO". Before, monitor_logins printed http://<host>:3000 and "company SSO"
+    in realm mode (a 2026-10-17 wiki review of the credentials output)."""
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        e(cli.count('ok "Grafana:    $(grafana_address)"') == 1, f'{edition}/krate: monitor up must print grafana_address')
+        e('echo "Grafana:  $(grafana_address)"' in function_body(cli, 'monitor_logins'),
+          f'{edition}/krate: monitor_logins must print grafana_address')
+    if bash_binary() is None:
+        return
+    for edition in EDITIONS:
+        script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'env_value', 'env_value_file', 'public_url_host',
+                                             'public_url_authority', 'grafana_address', 'perses_address',
+                                             'monitor_logins') + r"""
+ENV_FILE="$1/.env"; MONITOR_DIR="$1/monitoring"; IDENTITY_REALM=krate
+hostname() { echo build-host.local; }
+monitor_logins | grep -E '^(Grafana|Perses|Sign-in):'
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp)
+            (site / 'monitoring').mkdir()
+            cases = (
+                ({'GRAFANA_AUTH_CONFIG': 'realm.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': 'krate'},
+                 'https://krate.example.com/identity',
+                 ['Grafana:  https://krate.example.com/grafana/',
+                  "Sign-in:  Krate sign-in (realm krate); the user below is Grafana's own login, kept for the rollback on this host",
+                  'Perses:   https://krate.example.com:3443', 'Sign-in:  Krate sign-in (realm krate)']),
+                ({'GRAFANA_AUTH_CONFIG': 'realm.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': 'krate'},
+                 'https://krate.example.com:8443/identity',
+                 ['Grafana:  https://krate.example.com:8443/grafana/',
+                  "Sign-in:  Krate sign-in (realm krate); the user below is Grafana's own login, kept for the rollback on this host",
+                  'Perses:   https://krate.example.com:3443', 'Sign-in:  Krate sign-in (realm krate)']),
+                ({'GRAFANA_AUTH_CONFIG': 'local.ini', 'PERSES_AUTH_MODE': 'local'},
+                 'https://krate.example.com/identity',
+                 ['Grafana:  http://build-host.local:3000', 'Perses:   https://build-host.local:3443']),
+                ({'GRAFANA_AUTH_CONFIG': 'local.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': ''},
+                 'https://krate.example.com/identity',
+                 ['Grafana:  http://build-host.local:3000', 'Perses:   https://build-host.local:3443',
+                  'Sign-in:  company SSO (native mode)']),
+                ({'GRAFANA_AUTH_CONFIG': 'realm.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': 'krate'}, '',
+                 ['Grafana:  http://build-host.local:3000',
+                  "Sign-in:  Krate sign-in (realm krate); the user below is Grafana's own login, kept for the rollback on this host",
+                  'Perses:   https://build-host.local:3443', 'Sign-in:  Krate sign-in (realm krate)']),
+            )
+            for monitor_env, url, expected in cases:
+                write_env(site, {'KEYCLOAK_PUBLIC_URL': url})
+                write_env(site / 'monitoring', dict(monitor_env, GRAFANA_PASSWORD='not-a-secret-in-this-test',
+                                                    PERSES_ADMIN_PASSWORD='not-a-secret-in-this-test'))
+                out = run_bash(script, site)
+                got = out.stdout.strip().splitlines()
+                e(out.returncode == 0 and got == expected,
+                  f'{edition}/krate monitor_logins ({monitor_env}, {url}): expected {expected}; got {out.returncode} {got} {out.stderr.strip()[:120]}')
+            # The two `monitor up` summary lines themselves, run as written.
+            cli = (ROOT / edition / 'krate').read_text()
+            up_lines = [line.strip() for line in cli.splitlines() if line.strip().startswith(('ok "Grafana:', 'ok "Perses:'))]
+            e(len(up_lines) == 2, f'{edition}/krate: monitor up prints exactly one Grafana and one Perses line; got {up_lines}')
+            up_script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'env_value', 'env_value_file', 'public_url_host',
+                                                    'public_url_authority', 'grafana_address', 'perses_address') + (
+                '\nENV_FILE="$1/.env"; MONITOR_DIR="$1/monitoring"\nhostname() { echo build-host.local; }\n' + '\n'.join(up_lines) + '\n')
+            write_env(site, {'KEYCLOAK_PUBLIC_URL': 'https://krate.example.com/identity'})
+            write_env(site / 'monitoring', {'GRAFANA_AUTH_CONFIG': 'realm.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': 'krate'})
+            out = run_bash(up_script, site)
+            want = ['  ok Grafana:    https://krate.example.com/grafana/', '  ok Perses:     https://krate.example.com:3443 (native sign-in)']
+            e(out.returncode == 0 and out.stdout.splitlines() == want,
+              f'{edition}/krate monitor up summary (realm): expected {want}; got {out.returncode} {out.stdout.splitlines()} {out.stderr.strip()[:120]}')
+
+
 def check_perses_address(checks):
     """monitor up and monitor logins print the Perses address that signs in: the public name with the
     Krate realm (PERSES_IDP=krate), this machine's host name otherwise. Realm mode printed the host
@@ -4900,15 +4970,17 @@ perses_address
         with tempfile.TemporaryDirectory() as tmp:
             site = Path(tmp)
             (site / 'monitoring').mkdir()
-            for idp, url, port, expected in (
-                    ('krate', 'https://Krate.Example.COM/identity', '3443', 'https://krate.example.com:3443'),
-                    ('krate', 'https://[FD00::5]:8443/identity', '4443', 'https://[fd00::5]:4443'),
-                    ('', 'https://krate.example.com/identity', '3443', 'https://build-host.local:3443')):
+            for idp, perses_mode, url, port, expected in (
+                    ('krate', 'native', 'https://Krate.Example.COM/identity', '3443', 'https://krate.example.com:3443'),
+                    ('krate', 'native', 'https://[FD00::5]:8443/identity', '4443', 'https://[fd00::5]:4443'),
+                    ('', 'native', 'https://krate.example.com/identity', '3443', 'https://build-host.local:3443'),
+                    ('', 'local', 'https://krate.example.com/identity', '3443', 'https://build-host.local:3443'),
+                    ('krate', 'native', '', '3443', 'https://build-host.local:3443')):
                 write_env(site, {'KEYCLOAK_PUBLIC_URL': url})
-                write_env(site / 'monitoring', {'PERSES_IDP': idp, 'PERSES_PORT': port})
+                write_env(site / 'monitoring', {'PERSES_IDP': idp, 'PERSES_AUTH_MODE': perses_mode, 'PERSES_PORT': port})
                 out = run_bash(script, site)
                 e(out.returncode == 0 and out.stdout.strip() == expected,
-                  f'{edition}/krate perses_address (PERSES_IDP={idp or "empty"}, {url}): expected {expected}; '
+                  f'{edition}/krate perses_address (PERSES_IDP={idp or "empty"}, {perses_mode}, {url or "no public URL"}): expected {expected}; '
                   f'got {out.returncode} {out.stdout.strip()!r} {out.stderr.strip()[:120]}')
 
 
@@ -5131,6 +5203,8 @@ def check_render_writes(checks):
     site_conf = mod.perses_config('native', {k: v for k, v in ipv6_site.items() if k != 'display_name'})
     e('name: "Company sign-in"' in site_conf,
       'a Perses site without display_name must keep the "Company sign-in" default')
+    named_conf = mod.perses_config('native', dict(ipv6_site, display_name='Acme sign-in'))
+    e('name: "Acme sign-in"' in named_conf, 'a Perses site file keeps its own display_name')
 
     chmods, chowns, opens = [], [], []
     real_chmod, real_chown, real_open = os.chmod, os.chown, os.open
@@ -5373,7 +5447,7 @@ def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address,
+                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
