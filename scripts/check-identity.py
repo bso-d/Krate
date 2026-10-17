@@ -1255,6 +1255,15 @@ def check_topofix2(checks):
       and 'adds a `vmip` row at the end (the fixture\'s NIC address must still be the hello\'s — a change voids the binding) and a receipt `browser vantage` row' not in guide_flat,
       'the guide says the browser vantage row is in every receipt and only vmip is agent-only, and its field table lists the row (F6)')
 
+    # N: two lint findings of the first read. __doc__ is None under python -OO, so main() prints (__doc__ or "").strip(); the
+    # container launch never used the viewport it destructured (the stories size their own context).
+    e('print((__doc__ or "").strip())' in remote_lines and 'print(__doc__.strip())' not in remote_lines,
+      'browser_remote.py prints (__doc__ or "").strip() in its usage path (N: Pyright reportOptionalMemberAccess)')
+    launch_lines = js_lines((ROOT / 'scripts/gate/browser-launch.mjs').read_text())
+    e('export async function launchGateBrowserContainer(chromium, { host, resolveTo }) {' in launch_lines
+      and 'export async function launchGateBrowserMac(chromium, { host, resolveTo, outDir, viewport = { width: 1440, height: 900 } }) {' in launch_lines,
+      'browser-launch.mjs: the container launch destructures only host and resolveTo (its viewport was unused); the Mac launch keeps its viewport (N)')
+
 
 def check_k37_wiring(checks):
     """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""

@@ -135,7 +135,7 @@ def cmd_request(rendezvous, nonce, row, timeout):
 def main():
     argv = sys.argv[1:]
     if not argv:
-        print(__doc__.strip())
+        print((__doc__ or "").strip())
         return 1
     cmd = argv[0]
     opts = {"--rendezvous": None, "--nonce": "", "--row": None, "--timeout": "1500", "--max-age": "60"}

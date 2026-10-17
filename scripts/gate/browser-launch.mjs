@@ -196,7 +196,7 @@ export async function launchGateBrowserMac(chromium, { host, resolveTo, outDir, 
 
 // The container launch: byte-for-byte the stories' walked shape. Nothing in this branch is
 // new; the stories only moved their old three lines here.
-export async function launchGateBrowserContainer(chromium, { host, resolveTo, viewport = { width: 1440, height: 900 } }) {
+export async function launchGateBrowserContainer(chromium, { host, resolveTo }) {
   const args = resolveTo ? [`--host-resolver-rules=MAP ${host} ${resolveTo}`] : [];
   const browser = await chromium.launch({ args });
   return { browser, page: null, mode: 'container', profileDir: null, rules: resolveTo ? `MAP ${host} ${resolveTo}` : null, headless: true, close: () => browser.close() };
