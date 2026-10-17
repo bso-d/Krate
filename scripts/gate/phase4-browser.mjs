@@ -184,7 +184,7 @@ try {
     if (!mr) throw new Error('no main-document response captured for the vantage assertion');
     served_from = (await assertServedFrom(mr, resolveTo, 'main document')) + '; ' + (await assertServedCertificate(mr, PIN, 'main document'));
     step('vantage evidence', { served_from });
-    ext.assertClean();
+    await ext.assertClean();
   }
 } catch (e) {
   recordFailure('probe ended', e);
@@ -199,7 +199,8 @@ try {
     recordFailure('browser evidence failed', e);
   }
   try {
-    await browser.close();
+    if (ext) await ext.closeOwnedBrowser(() => browser.close());
+    else await browser.close();
   } catch (e) {
     recordFailure('browser cleanup failed', e);
   }
@@ -215,7 +216,7 @@ try {
   // Persist after teardown so cleanup failures are in the receipts as well.
   // An unavailable live capture is explicit; it is never substituted by invented proof.
   try {
-    writeFileSync(`${OUT}/browser.json`, JSON.stringify({ ...(browserReceipt || { story: 'U15/U7 phase4-browser', evidenceFailed }), failures }, null, 2));
+    writeFileSync(`${OUT}/browser.json`, JSON.stringify({ ...(browserReceipt || { story: 'U15/U7 phase4-browser', evidenceFailed }), networkGuard: ext ? ext.evidence() : null, failures }, null, 2));
     chmodSync(`${OUT}/browser.json`, 0o644);
   } catch (e) {
     recordFailure('browser.json not written', e);
@@ -229,6 +230,7 @@ try {
     consoleErrors: result.console.filter(c => c.type === 'error'),
     servedFrom: served_from,
     externalAttempts: MAC && ext ? ext.list : null,
+    networkGuard: ext ? ext.evidence() : null,
     storyFailed: failures[0]?.error || null,
     failures,
   };

@@ -94,8 +94,6 @@ const serve = MAC ? attachServeTracker(page) : null;
 // Mac vantage (F3): every failed request whose host is not the gate host is an external
 // attempt; the row fails on any that is not Chrome-internal (chrome://, devtools://).
 const ext = MAC ? externalAttemptsTracker('localhost') : null;
-// Review T07/T21: the guard is context-wide and installed before the first navigation.
-if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }
 const account = `${BASE}/identity/realms/krate/account`;
 
 async function openLogin() {
@@ -105,7 +103,9 @@ async function openLogin() {
   await page.waitForSelector('#kc-form-login');
 }
 
+let storySucceeded = false;
 try {
+  if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }
   // Mac vantage gate: the trust-nothing profile must see and pass Chrome's own certificate
   // interstitial first (M0 points 2-3; M5 run 2 for the render-after-reject order); one
   // Advanced+Proceed decision covers this host for the whole story. The code proves only that
@@ -208,31 +208,45 @@ try {
   }
   // Mac vantage (F3): no external host may have been attempted; the fingerprint a violation
   // would show is net::ERR_NAME_NOT_RESOLVED (M5 run 3).
-  if (ext) ext.assertClean();
+  if (ext) await ext.assertClean();
   // S2 (review): X1 asserts its own exact count in both vantages, the way X3/X4 do — 11 in the
   // walked container vantage, 12 with the one certificate-interstitial shot in the Mac vantage.
   const SHOTS_EXPECTED = MAC ? 12 : 11;
   if (manifest.length !== SHOTS_EXPECTED) throw new Error(`expected exactly ${SHOTS_EXPECTED} screenshots, wrote ${manifest.length}`);
   writeFileSync(`${OUT}/manifest.json`, JSON.stringify(manifest, null, 2));
   chmodSync(`${OUT}/manifest.json`, 0o644);
-  console.log(`STORY OK: ${manifest.reduce((k, m) => k + m.asserted.length, 0)} assertions over ${manifest.length} screenshots`);
+  storySucceeded = true;
 } catch (e) {
   await shot(page, 'failure', `Story failed: ${String(e.message || e).slice(0, 160)}`);
   writeFileSync(`${OUT}/manifest.json`, JSON.stringify(manifest, null, 2));
   console.error('STORY FAILED: ' + String(e.message || e).slice(0, 400));
   process.exitCode = 1;
 } finally {
-  // PRE-5: the browser evidence is read from the LIVE page; after browser.close() page.evaluate throws,
-  // userAgent became '' and the HeadlessChrome refusal in browserEvidence could never fire.
+  // Capture from the live page; publish guard status only after owned-browser shutdown.
+  let browserReceipt = null;
+  let evidenceFailed = null;
   try {
-    const ev = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'X1', certDecision, externalAttempts: ext ? ext.list : null } });
-    writeFileSync(`${OUT}/browser.json`, JSON.stringify(ev, null, 2));
+    browserReceipt = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'X1', certDecision, externalAttempts: ext ? ext.list : null } });
+  } catch (e) {
+    evidenceFailed = String(e.message || e).slice(0, 160);
+    console.error('browser evidence failed: ' + evidenceFailed);
+    if (MAC) process.exitCode = 1;
+  }
+  try {
+    if (ext) await ext.closeOwnedBrowser(() => browser.close());
+    else await browser.close();
+  } catch (e) {
+    console.error('STORY FAILED: browser shutdown: ' + String(e.message || e).slice(0, 400));
+    process.exitCode = 1;
+  }
+  try {
+    writeFileSync(`${OUT}/browser.json`, JSON.stringify({ ...(browserReceipt || { story: 'X1', evidenceFailed }), networkGuard: ext ? ext.evidence() : null }, null, 2));
     chmodSync(`${OUT}/browser.json`, 0o644);
   } catch (e) {
     console.error('browser.json not written: ' + String(e.message || e).slice(0, 160));
-    if (MAC) process.exitCode = 1;
+    process.exitCode = 1;
   }
-  await browser.close();
   if (MAC) cleanProfile(launch.profileDir, process.exitCode === 1);
 }
+if (storySucceeded && process.exitCode !== 1) console.log(`STORY OK: ${manifest.reduce((k, m) => k + m.asserted.length, 0)} assertions over ${manifest.length} screenshots`);
 console.log('X1 vantage: ' + (MAC ? 'Mac: installed Chrome, fresh profile, pinned certificate, interstitial + Proceed, external attempts tracked' : 'container: walked harness image shape'));

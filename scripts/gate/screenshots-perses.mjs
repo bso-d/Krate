@@ -204,6 +204,7 @@ let page = null;
 // Mac vantage trackers: serve (per-shot main-document evidence) and ext (F3 external attempts).
 const serve = MAC ? attachServeTracker(null) : null;
 const ext = MAC ? externalAttemptsTracker(HOST) : null;
+let storySucceeded = false;
 try {
   const ctx = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
   page = MAC ? (ctx.pages()[0] || await ctx.newPage()) : await ctx.newPage();
@@ -344,11 +345,10 @@ try {
   await shot(page, 'nogroup-user-refused', `User ${NOGROUP} without a realm group: the gateway refuses the callback and Perses issues no session`);
 
   writeManifest();
-  const total = manifest.reduce((k, m) => k + m.asserted.length, 0);
   // Mac vantage (F3): no external host may have been attempted (fingerprint at rest: M5 run 3).
-  if (ext) ext.assertClean();
+  if (ext) await ext.assertClean();
   if (manifest.length !== SHOTS_EXPECTED) throw new Error(`expected exactly ${SHOTS_EXPECTED} screenshots, wrote ${manifest.length}`);
-  console.log(`STORY OK: ${total} assertions over ${manifest.length} screenshots`);
+  storySucceeded = true;
 } catch (e) {
   // The failure capture bypasses the assertion-before-shot rule (it documents where
   // the story stopped); the expected-count check of the runner then fails the row.
@@ -357,17 +357,31 @@ try {
   console.error('STORY FAILED: ' + String(e.message || e).slice(0, 400));
   process.exitCode = 1;
 } finally {
-  // PRE-5: the browser evidence is read from the LIVE page; after browser.close() page.evaluate throws,
-  // userAgent became '' and the HeadlessChrome refusal in browserEvidence could never fire.
+  // Capture from the live page; publish guard status only after owned-browser shutdown.
+  let browserReceipt = null;
+  let evidenceFailed = null;
   try {
-    const ev = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'X4', certDecision, externalAttempts: ext ? ext.list : null, shotsExpected: SHOTS_EXPECTED, persesPortPin: PINPERS ? { port: PINPERS_PORT, authorized: PINPERS.authorized, protocol: PINPERS.protocol, sha256: PINPERS.sha256 } : null } });
-    writeFileSync(`${OUT}/browser.json`, JSON.stringify(ev, null, 2));
-    chmodSync(`${OUT}/browser.json`, 0o644);
-  } catch (e2) {
-    console.error('browser.json not written: ' + String(e2.message || e2).slice(0, 160));
+    browserReceipt = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'X4', certDecision, externalAttempts: ext ? ext.list : null, shotsExpected: SHOTS_EXPECTED, persesPortPin: PINPERS ? { port: PINPERS_PORT, authorized: PINPERS.authorized, protocol: PINPERS.protocol, sha256: PINPERS.sha256 } : null } });
+  } catch (e) {
+    evidenceFailed = String(e.message || e).slice(0, 160);
+    console.error('browser evidence failed: ' + evidenceFailed);
     if (MAC) process.exitCode = 1;
   }
-  await browser.close();
+  try {
+    if (ext) await ext.closeOwnedBrowser(() => browser.close());
+    else await browser.close();
+  } catch (e) {
+    console.error('STORY FAILED: browser shutdown: ' + String(e.message || e).slice(0, 400));
+    process.exitCode = 1;
+  }
+  try {
+    writeFileSync(`${OUT}/browser.json`, JSON.stringify({ ...(browserReceipt || { story: 'X4', evidenceFailed }), networkGuard: ext ? ext.evidence() : null }, null, 2));
+    chmodSync(`${OUT}/browser.json`, 0o644);
+  } catch (e) {
+    console.error('browser.json not written: ' + String(e.message || e).slice(0, 160));
+    process.exitCode = 1;
+  }
   if (MAC) cleanProfile(launch.profileDir, process.exitCode === 1);
 }
+if (storySucceeded && process.exitCode !== 1) console.log(`STORY OK: ${manifest.reduce((k, m) => k + m.asserted.length, 0)} assertions over ${manifest.length} screenshots`);
 console.log('X4 vantage: ' + (MAC ? 'Mac: installed Chrome, fresh profile, pinned certificate (HTTPS + Perses ports), interstitial + Proceed, external attempts tracked' : 'container: walked harness image shape'));

@@ -51,39 +51,107 @@ function exit2(msg) { console.error(msg); process.exit(2); }
 // URL` — an attempt would appear as ERR_NAME_NOT_RESOLVED under MAP * ~NOTFOUND.
 export function externalAttemptsTracker(host) {
   const list = [];
-  const entries = new Map();   // request -> its list entry (the `request` event fires before the route handler: one entry per attempt)
+  const errors = [];
+  const pending = new Set();
+  let context; let owner; let session; let closePromise;
+  let phase = 'new'; let enabled = false; let closed = false;
   const NON_NETWORK = new Set(['data:', 'blob:', 'about:', 'chrome:', 'chrome-error:', 'devtools:', 'chrome-extension:']);
   const urlOf = (obj) => { try { return new URL(obj.url()); } catch { return null; } };   // host and scheme only are ever recorded, never the path or query
   const note = (u, how, error) => { const entry = { host: u.hostname, scheme: u.protocol.replace(':', ''), how, error: error || '' }; list.push(entry); return entry; };
-  return {
+  // Protocol errors may contain complete request URLs. Persist fixed stage names only.
+  const fail = (stage) => { if (!errors.some(e => e.stage === stage)) errors.push({ stage, error: 'HTTP guard integrity failed' }); };
+  const command = async (method, params) => {
+    let timer;
+    try {
+      return await Promise.race([
+        session.send(method, params),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('HTTP guard command timed out')), 5000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  };
+  const settle = async () => { while (pending.size) await Promise.allSettled([...pending]); };
+  const shutdown = () => { void api.closeOwnedBrowser(() => context.close()).catch(() => {}); };
+  const onClose = () => {
+    if (phase === 'closed') return;
+    if (phase === 'closing') {
+      // Starting close is not proof that the browser stopped networking. An independent
+      // root-session loss can release paused requests while the close RPC is still pending.
+      if (owner?.isConnected()) fail('CDP session closed before owning browser disconnected');
+      return;
+    }
+    fail('CDP session closed before browser shutdown');
+    shutdown();
+  };
+  const onPaused = (event) => {
+    // The record precedes the first await, including for a redirect's new requestId.
+    const work = (async () => {
+      let u;
+      try { u = new URL(event.request.url); } catch { fail('invalid paused request'); }
+      if (event.responseStatusCode !== undefined || event.responseErrorReason !== undefined) {
+        fail('unexpected response-stage pause');
+        u = null;
+      }
+      const allowed = u && (NON_NETWORK.has(u.protocol) || u.hostname === host);
+      const entry = u && !allowed ? note(u, 'http-block-pending') : null;
+      if (allowed) await command('Fetch.continueRequest', { requestId: event.requestId });
+      else {
+        await command('Fetch.failRequest', { requestId: event.requestId, errorReason: 'BlockedByClient' });
+        if (entry) entry.how = 'http-blocked';
+      }
+    })().catch(() => { fail('paused request decision failed'); shutdown(); }).finally(() => pending.delete(work));
+    pending.add(work);
+  };
+  const api = {
     list,
-    // Review T07: `requestfailed` alone proves nothing: a SUCCESSFUL external request never fails, an IP-literal URL bypasses the
-    // resolver rules, and a tracker attached after the first navigation misses that page load. The guard is CONTEXT-wide (every
-    // page, popups and pages opened later included) and is installed before the first navigation: a route aborts every network
-    // request whose host is not the gate host BEFORE it is dispatched and records it; the context's `request` event records
-    // everything the route cannot stop (redirect hops); non-gate websockets are intercepted and closed (they bypass route()).
-    async guard(context) {
-      await context.route(/.*/, async (route) => {
-        const request = route.request();
-        const u = urlOf(request);
-        try {
-          if (!u || NON_NETWORK.has(u.protocol) || u.hostname === host) return await route.continue();
-          (entries.get(request) || note(u, 'blocked')).how = 'blocked';
-          return await route.abort('blockedbyclient');
-        } catch { /* the page went away while the request was pending */ }
-      });
-      context.on('request', (request) => {
-        const u = urlOf(request);
-        if (u && !NON_NETWORK.has(u.protocol) && u.hostname !== host) entries.set(request, note(u, 'request'));
-      });
-      // A websocket never passes through route(): routeWebSocket takes every one whose host is not the gate host (a predicate, so
-      // the gate's own websockets, Grafana's live tail among them, are not routed at all) and closes it unconnected.
-      await context.routeWebSocket((url) => url.hostname !== host, (ws) => {
-        const u = urlOf(ws);
-        if (u) note(u, 'websocket-blocked');
-        return ws.close({ code: 1008, reason: 'blocked: not the gate host' });
-      });
-      return this;
+    // Browser-root Request Fetch checks every HTTP redirect hop before dispatch. Install on the
+    // fresh story-owned browser before its first navigation; this is not retroactive interception.
+    async guard(ownedContext) {
+      if (phase !== 'new') throw new Error('HTTP guard was already installed');
+      context = ownedContext; phase = 'arming';
+      try {
+        owner = context.browser();
+        if (!owner) throw new Error('missing owning browser');
+        session = await owner.newBrowserCDPSession();
+        session.on('Fetch.requestPaused', onPaused);
+        session.on('close', onClose);
+        await command('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+        if (phase !== 'arming') throw new Error('HTTP guard closed during setup');
+        enabled = true; phase = 'armed';
+        // Keep the existing page-WebSocket guard. Worker WebSockets are a separate, unresolved
+        // boundary; browser-root Fetch here enforces HTTP(S), including replacement redirects.
+        await context.routeWebSocket((url) => url.hostname !== host, (ws) => {
+          const u = urlOf(ws);
+          if (u) note(u, 'websocket-blocked');
+          return ws.close({ code: 1008, reason: 'blocked: not the gate host' });
+        });
+        return this;
+      } catch {
+        fail('HTTP guard setup failed');
+        throw new Error('HTTP guard could not be installed before navigation');
+      }
+    },
+    evidence() { return { http: 'browser-root Fetch Request', enabled, closed, phase, errors: errors.map(e => ({ ...e })) }; },
+    // Disabling/detaching Fetch releases paused requests in Chrome. Keep it armed until the
+    // owned browser has actually closed, then settle all handler failures before publishing.
+    closeOwnedBrowser(closeBrowser) {
+      if (closePromise) return closePromise;
+      phase = 'closing';
+      closePromise = (async () => {
+        try { await closeBrowser(); }
+        catch { fail('owned browser close failed'); throw new Error('HTTP guard: owned browser close failed; interception retained'); }
+        if (owner && owner.isConnected()) {
+          fail('owning browser remained connected');
+          throw new Error('HTTP guard: owning browser remained connected; interception retained');
+        }
+        closed = true;
+        await settle();
+        phase = 'closed';
+        session?.off('Fetch.requestPaused', onPaused);
+        session?.off('close', onClose);
+        await this.assertClean();
+        return this.evidence();
+      })();
+      return closePromise;
     },
     attach(page) { page.on('requestfailed', (r) => this.onFailed(r)); return this; },
     onFailed(r) {
@@ -99,12 +167,15 @@ export function externalAttemptsTracker(host) {
     // chrome:// and devtools:// targets are Chrome's own; everything else that failed must
     // not have been attempted at all (the resolver rule makes them NAME failures, hence the
     // ERR_NAME_NOT_RESOLVED fingerprint TOPOFIX-M5 records).
-    assertClean() {
+    async assertClean() {
+      await settle();
+      if (!enabled || errors.length) throw new Error(`HTTP guard integrity: ${JSON.stringify(errors)}`);
       const external = list.filter((e) => e.scheme !== 'chrome' && e.scheme !== 'devtools');
       if (external.length) throw new Error(`external attempts from the page: ${JSON.stringify(external)}`);
       return external;
     },
   };
+  return api;
 }
 
 // Build `--host-resolver-rules`. The two vantages build different values, and this is the

@@ -1461,6 +1461,295 @@ process.exitCode = report.failures ? 1 : 0;
         checks.expect(run.returncode == 0, f'Browser certificate/current-main-frame/cleanup/tracker regressions: rc={run.returncode}, stdout={run.stdout!r}, stderr={run.stderr!r}')
 
 
+def check_browser_http_guard(checks):
+    """HTTP redirect decisions use the shipped browser-root guard; this does not prove worker WebSockets."""
+    node = shutil.which('node')
+    if not node:
+        print('check_browser_http_guard: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    program = r"""import { EventEmitter } from 'node:events';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+const file = resolve(process.argv[2] || 'scripts/gate/browser-launch.mjs');
+const { externalAttemptsTracker } = await import(pathToFileURL(file).href);
+const pause = () => new Promise(resolve => setImmediate(resolve));
+const cases = ['allowed', 'redirect', 'malformed', 'missing-owner', 'enable-failure', 'decision-failure', 'session-loss', 'late-attempt', 'close-failure', 'missing-api', 'attach-failure', 'websocket-setup-failure', 'continue-failure', 'response-pause', 'still-connected', 'close-during-enable', 'delayed-decision', 'duplicate-close', 'session-loss-during-close', 'allowed-page-websocket', 'external-page-websocket'];
+let failures = 0;
+for (const condition of cases) {
+  const events = []; const sent = []; const errors = [];
+  let connected = true; let enabled = false; let closeCalls = 0;
+  let websocketPredicate; let websocketHandler; const websocketCloses = [];
+  const session = new EventEmitter();
+  session.send = async (method, params) => {
+    sent.push({method,params}); events.push(method);
+    if (method === 'Fetch.enable') { if (session.listenerCount('Fetch.requestPaused') !== 1) errors.push('enable preceded pause listener'); if (condition === 'enable-failure') throw new Error('synthetic enable failure'); if (condition === 'close-during-enable') session.emit('close'); enabled = true; }
+    if (method === 'Fetch.failRequest' && condition === 'decision-failure') throw new Error('synthetic fail rejection');
+    if (method === 'Fetch.continueRequest' && condition === 'continue-failure') throw new Error('synthetic continue rejection');
+    if (method === 'Fetch.failRequest' && condition === 'delayed-decision') { await pause(); await pause(); events.push('decision-ack'); }
+    return {};
+  };
+  session.detach = async () => { events.push('detach'); };
+  const owner = { newBrowserCDPSession: condition === 'missing-api' ? undefined : async () => { if (condition === 'attach-failure') throw new Error('synthetic attach rejection'); return session; }, isConnected: () => connected };
+  const context = new EventEmitter();
+  context.browser = () => condition === 'missing-owner' ? null : owner;
+  context.route = async () => {}; context.routeWebSocket = async (predicate, handler) => { websocketPredicate = predicate; websocketHandler = handler; if (condition === 'websocket-setup-failure') throw new Error('synthetic websocket setup rejection'); };
+  context.close = async () => {
+    closeCalls++; events.push('browser-close');
+    if (condition === 'late-attempt') session.emit('Fetch.requestPaused', {requestId:'late',request:{url:'http://127.0.0.1:9/path?secret=value'}});
+    if (condition === 'session-loss-during-close') { session.emit('close'); await pause(); await pause(); }
+    if (condition === 'close-failure') throw new Error('synthetic close rejection');
+    connected = condition === 'still-connected'; session.emit('close'); context.emit('close');
+  };
+  const tracker = externalAttemptsTracker('gate.test');
+  let setupFailed = false;
+  try { await tracker.guard(context); } catch { setupFailed = true; }
+  const expectedSetupFailure = ['missing-owner','enable-failure','missing-api','attach-failure','websocket-setup-failure','close-during-enable'].includes(condition);
+  const check = (yes, message) => { if (!yes) errors.push(message); };
+  check(setupFailed === expectedSetupFailure, 'setup verdict');
+  if (!expectedSetupFailure) {
+    check(enabled && session.listenerCount('Fetch.requestPaused') === 1, 'root Fetch armed with listener');
+    check(sent.some(x=>x.method==='Fetch.enable'&&JSON.stringify(x.params)===JSON.stringify({patterns:[{urlPattern:'*',requestStage:'Request'}]})), 'all requests intercepted at Request stage');
+    if (['allowed','continue-failure','duplicate-close'].includes(condition)) session.emit('Fetch.requestPaused',{requestId:'a',request:{url:'https://gate.test:3443/api'}});
+    if (['redirect','decision-failure','delayed-decision'].includes(condition)) {
+      session.emit('Fetch.requestPaused',{requestId:'a',request:{url:'https://gate.test/start'}});
+      session.emit('Fetch.requestPaused',{requestId:'b',redirectedRequestId:'a',request:{url:'http://127.0.0.1:9/outside?secret=value'}});
+    }
+    if (['allowed-page-websocket', 'external-page-websocket'].includes(condition)) {
+      const external = condition === 'external-page-websocket';
+      const url = new URL(external ? 'wss://127.0.0.1:9/outside?secret=value' : 'wss://gate.test:3443/live?secret=value');
+      const intercepted = typeof websocketPredicate === 'function' && websocketPredicate(url);
+      check(intercepted === external, 'page WebSocket gate-host predicate');
+      if (intercepted && typeof websocketHandler === 'function') await websocketHandler({ url: () => url.href, close: async options => { websocketCloses.push(options); } });
+      if (external) {
+        check(websocketCloses.length === 1 && websocketCloses[0].code === 1008, 'external page WebSocket closed with policy code');
+        check(websocketCloses[0]?.reason === 'blocked: not the gate host', 'external page WebSocket fixed close reason');
+        check(tracker.list.some(e => e.host === '127.0.0.1' && e.scheme === 'wss' && e.how === 'websocket-blocked'), 'external page WebSocket sanitized attempt retained');
+      } else check(websocketCloses.length === 0 && tracker.list.length === 0, 'allowed gate WebSocket bypasses handler');
+    }
+    if (condition === 'malformed') session.emit('Fetch.requestPaused',{requestId:'bad',request:{url:'%%%' }});
+    if (condition === 'response-pause') session.emit('Fetch.requestPaused',{requestId:'response',responseStatusCode:200,request:{url:'https://gate.test/'}});
+    if (condition === 'session-loss') session.emit('close');
+    if (condition !== 'delayed-decision') { await pause(); await pause(); }
+  }
+  let terminalFailed = false;
+  try {
+    if (typeof tracker.closeOwnedBrowser !== 'function') throw new Error('missing close lifecycle');
+    await tracker.closeOwnedBrowser(() => context.close());
+  } catch { terminalFailed = true; }
+  if (condition === 'duplicate-close') { try { await tracker.closeOwnedBrowser(() => context.close()); } catch { errors.push('duplicate-close unexpectedly failed'); } }
+  const bad = !['allowed','duplicate-close','allowed-page-websocket'].includes(condition);
+  check(terminalFailed === bad, 'terminal verdict');
+  check(closeCalls === 1, 'owned browser close exactly once');
+  const commands = sent.filter(x=>x.method==='Fetch.continueRequest'||x.method==='Fetch.failRequest');
+  if (condition==='allowed') check(commands.some(x=>x.method==='Fetch.continueRequest'&&x.params.requestId==='a'&&Object.keys(x.params).length===1), 'allowed request unchanged');
+  if (['redirect','decision-failure','late-attempt'].includes(condition)) check(commands.some(x=>x.method==='Fetch.failRequest'&&x.params.requestId===(condition==='late-attempt'?'late':'b')&&x.params.errorReason==='BlockedByClient'), 'external hop failed');
+  if (condition==='malformed') check(commands.some(x=>x.method==='Fetch.failRequest'&&x.params.requestId==='bad'), 'malformed request refused');
+  check(!events.includes('Fetch.disable') && (!events.includes('detach') || events.indexOf('detach')>events.indexOf('browser-close')), 'no guard release before browser close');
+  const evidence = typeof tracker.evidence==='function' ? tracker.evidence() : null;
+  check(evidence && evidence.closed === (!['close-failure','still-connected'].includes(condition)), 'terminal evidence');
+  if (!['allowed','duplicate-close','allowed-page-websocket','external-page-websocket','redirect','late-attempt','delayed-decision'].includes(condition)) check(evidence?.errors?.length>0, 'integrity failure retained');
+  if (['redirect','decision-failure','late-attempt'].includes(condition)) check(tracker.list.some(x=>x.host==='127.0.0.1'), 'sanitized attempt retained');
+  check(!JSON.stringify({evidence,list:tracker.list}).includes('secret=value'), 'sensitive URL absent');
+  if (condition === 'response-pause') check(commands.some(x=>x.method==='Fetch.failRequest'&&x.params.requestId==='response'), 'response-stage pause refused');
+  if (condition === 'delayed-decision') check(events.includes('decision-ack')&&tracker.list.some(x=>x.how==='http-blocked'), 'terminal waits for decision acknowledgement');
+  if (evidence?.closed) check(session.listenerCount('Fetch.requestPaused')===0, 'owned listener removed only after closure');
+  failures += errors.length;
+  console.log(JSON.stringify({condition,errors,events,sent,evidence,list:tracker.list,websocketCloses}));
+}
+console.log(JSON.stringify({cases:cases.length,failedAssertions:failures,sourceSha256:createHash('sha256').update(readFileSync(file)).digest('hex')}));
+process.exitCode=failures?1:0;
+"""
+    result = subprocess.run([node, '--input-type=module', '-e', program, 'canonical-http-guard',
+                             str(ROOT / 'scripts/gate/browser-launch.mjs')], capture_output=True, text=True, timeout=45)
+    try:
+        summary = json.loads(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        summary = {}
+    checks.expect(result.returncode == 0 and summary.get('cases') == 21 and summary.get('failedAssertions') == 0,
+                  'check_browser_http_guard: shipped guard decisions failed: ' + result.stdout[-2400:] + result.stderr[-600:])
+
+
+def check_browser_http_callers(checks):
+    """Exercise shipped terminal fragments and full setup-failure modules, not actual UI behavior."""
+    node = shutil.which('node')
+    if not node:
+        print('check_browser_http_callers: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    payloads = (
+        (15, r"""// Execute the shipped finalizer and following verdict unchanged, in a controlled scope.
+// This checks terminal receipt propagation, not DOM/login correctness or real Chrome exit.
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import vm from 'node:vm';
+import { resolve } from 'node:path';
+
+const root = resolve(process.argv[2] || '.');
+let failures = 0;
+for (const file of ['screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs']) {
+  const source = readFileSync(`${root}/scripts/gate/${file}`, 'utf8');
+  const finalizers = [...source.matchAll(/^\} finally \{$/gm)];
+  if (finalizers.length !== 1) throw new Error(`ambiguous finalizer: ${file}`);
+  const tail = source.slice(finalizers[0].index + 2);
+  for (const condition of ['positive', 'evidence', 'close', 'terminal-attempt', 'browser-write']) {
+    const events = [], logs = [], files = new Map();
+    let closed = false;
+    const process = { exitCode: undefined };
+    const guard = { closed: false, errors: [] };
+    const ext = {
+      list: [], evidence: () => ({ ...guard, errors: [...guard.errors] }),
+      async closeOwnedBrowser(close) {
+        events.push('guard-close');
+        await close();
+        guard.closed = true;
+        if (condition === 'terminal-attempt') {
+          ext.list.push({ host: 'outside.invalid', scheme: 'http', how: 'http-blocked' });
+          guard.errors.push({ stage: 'synthetic terminal attempt' });
+          throw new Error('injected terminal-attempt');
+        }
+      },
+    };
+    const scope = vm.createContext({
+      URL, process, MAC: true, OUT: '/synthetic', PIN: {}, PINPERS: {}, PINPERS_PORT: 3443,
+      page: {}, certDecision: {}, SHOTS_EXPECTED: 1, storySucceeded: true,
+      manifest: [{ asserted: ['controlled prerequisite'] }],
+      browser: { async close() {
+        events.push('browser-close');
+        if (condition === 'close') throw new Error('injected close');
+        closed = true;
+      } },
+      launch: { mode: 'mac', profileDir: '/synthetic-profile', headless: false },
+      ext,
+      async browserEvidence() {
+        events.push('evidence');
+        if (closed) throw new Error('evidence sampled after close');
+        if (condition === 'evidence') throw new Error('injected evidence');
+        return { observedBy: 'controlled-live-boundary' };
+      },
+      writeFileSync(path, data) {
+        const name = path.split('/').pop(); events.push(`write:${name}`);
+        if (condition === 'browser-write') throw new Error('injected browser-write');
+        files.set(name, JSON.parse(data));
+      },
+      chmodSync() {}, cleanProfile(_path, keep) { events.push(`profile:${keep}`); return !keep; },
+      console: { log: (value) => logs.push(String(value)), error: (value) => logs.push(String(value)) },
+    });
+    const module = new vm.SourceTextModule(`try {} ${tail}`, { context: scope });
+    await module.link(() => { throw new Error('unexpected finalizer import'); });
+    let escaped = null;
+    try { await module.evaluate({ timeout: 2000 }); } catch (error) { escaped = String(error); }
+    const errors = [], expect = (ok, message) => { if (!ok) errors.push(message); };
+    expect(escaped === null, 'finalization escaped');
+    expect(events.filter(e => e === 'guard-close').length === 1, 'guard close not exactly once');
+    expect(events.filter(e => e === 'browser-close').length === 1, 'owned close not exactly once');
+    expect(events.indexOf('evidence') < events.indexOf('browser-close'), 'evidence not sampled live');
+    expect(events.indexOf('browser-close') < events.indexOf('write:browser.json'), 'receipt preceded close');
+    const receipt = files.get('browser.json');
+    if (condition !== 'browser-write') {
+      expect(receipt?.networkGuard?.closed === (condition !== 'close'), 'terminal guard state missing');
+      if (condition === 'terminal-attempt') {
+        expect(receipt?.networkGuard?.errors?.length === 1, 'late guard failure absent');
+        // The live receipt extra/list is a reference in production; the final guard status is decisive.
+      }
+    }
+    expect(condition === 'positive' ? process.exitCode !== 1 : process.exitCode === 1, 'terminal failure lost exit status');
+    expect(logs.some(line => line.startsWith('STORY OK:')) === (condition === 'positive'), 'premature/missing success verdict');
+    expect(events.includes(`profile:${condition !== 'positive'}`), 'failed profile retention flag lost');
+    if (condition === 'evidence') expect(receipt?.evidenceFailed && !receipt?.observedBy, 'missing evidence fabricated');
+    failures += errors.length;
+    console.log(JSON.stringify({ file, condition, errors, events, networkGuard: receipt?.networkGuard }));
+  }
+  console.log(JSON.stringify({ file, sourceSha256: createHash('sha256').update(source).digest('hex') }));
+}
+console.log(JSON.stringify({ cases: 15, failedAssertions: failures }));
+process.exitCode = failures ? 1 : 0;
+"""),
+        (3, r"""// Run complete shipped screenshot modules with guard setup failure injected before navigation.
+import { readFileSync } from 'node:fs';
+import { createHmac, createHash, randomInt } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+import { resolve } from 'node:path';
+import vm from 'node:vm';
+
+const root = resolve(process.argv[2] || '.');
+let failures = 0;
+for (const file of ['screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs']) {
+  const source = readFileSync(`${root}/scripts/gate/${file}`, 'utf8');
+  const events = [], files = new Map(), logs = [];
+  let closed = false;
+  const page = { url: () => 'about:blank', async screenshot() {}, async goto() { events.push('navigation'); } };
+  const browser = { pages: () => [page], async newPage() { return page; }, async close() { events.push('close'); closed = true; } };
+  const guard = {
+    list: [], async guard() { events.push('guard'); throw new Error('injected setup failure'); },
+    async assertClean() { throw new Error('injected setup failure'); },
+    async closeOwnedBrowser(close) { events.push('guard-close'); await close(); throw new Error('injected setup failure'); },
+    evidence() { return { closed, errors: [{ stage: 'injected setup failure' }] }; },
+  };
+  const api = {
+    macMode: () => true, requireCertFile: () => ({ pem: 'synthetic' }),
+    async pinGateCertificate() { return {}; },
+    async launchGateBrowser() { return { browser, mode: 'mac', profileDir: '/synthetic-profile' }; },
+    cleanProfile(_path, keep) { events.push(`profile:${keep}`); return !keep; },
+    attachServeTracker() { return { attachContext() {}, async record() {} }; },
+    externalAttemptsTracker: () => guard,
+    async acceptGateCertificate() { events.push('navigation'); throw new Error('navigation reached despite failed guard'); },
+    async browserEvidence() { events.push('evidence'); return { observedBy: 'controlled-live-boundary' }; },
+  };
+  const child = {
+    argv: ['node', file, '--base', 'https://localhost', '--host', 'localhost', '--out', '/synthetic',
+      '--user', 'viewer', '--viewer-user', 'viewer', '--admin-user', 'admin', '--disabled-user', 'disabled', '--nogroup-user', 'nogroup'],
+    env: Object.fromEntries(['GATE_TEMP_PASSWORD', 'GATE_DISABLED_PASSWORD', 'GATE_VIEWER_PASSWORD', 'GATE_ADMIN_PASSWORD',
+      'GATE_NOGROUP_PASSWORD', 'GATE_VIEWER_TOTP', 'GATE_ADMIN_TOTP', 'GATE_NOGROUP_TOTP'].map(name => [name, 'JBSWY3DPEHPK3PXP'])),
+    exitCode: undefined,
+    exit(code) { this.exitCode = code; throw new Error('unexpected process.exit'); },
+  };
+  const context = vm.createContext({ URL, Buffer, process: child,
+    console: { log: text => logs.push(String(text)), error: text => logs.push(String(text)) } });
+  const imports = {
+    './browser-launch.mjs': api,
+    'node:module': { createRequire: () => () => ({ chromium: {} }) },
+    'node:crypto': { createHmac, createHash, randomInt },
+    'node:fs': { mkdirSync() {}, chmodSync() {}, readFileSync: () => Buffer.from('synthetic screenshot bytes'),
+      writeFileSync(path, data) { const name = path.split('/').pop(); events.push(`write:${name}`); files.set(name, name.endsWith('.json') ? JSON.parse(data) : String(data)); } },
+  };
+  const module = new vm.SourceTextModule(source, { context, initializeImportMeta(meta) { meta.url = `file:///shipped/${file}`; } });
+  await module.link(async specifier => {
+    const bindings = imports[specifier];
+    if (!bindings) throw new Error(`unexpected import ${specifier}`);
+    return new vm.SyntheticModule(Object.keys(bindings), function () {
+      for (const [key, value] of Object.entries(bindings)) this.setExport(key, value);
+    }, { context });
+  });
+  let escaped = null;
+  try { await module.evaluate({ timeout: 2000 }); } catch (error) { escaped = String(error); }
+  const errors = [], expect = (ok, message) => { if (!ok) errors.push(message); };
+  expect(escaped === null, 'guard setup escaped protected lifecycle');
+  expect(!events.includes('navigation'), 'navigation reached after failed setup');
+  expect(events.filter(e => e === 'guard-close').length === 1 && events.filter(e => e === 'close').length === 1, 'owned browser not closed exactly once');
+  expect(events.indexOf('evidence') < events.indexOf('close'), 'evidence not sampled live');
+  expect(events.indexOf('close') < events.indexOf('write:browser.json'), 'receipt published before close');
+  expect(files.get('browser.json')?.networkGuard?.closed && files.get('browser.json')?.networkGuard?.errors?.length, 'setup failure absent from terminal receipt');
+  expect(child.exitCode === 1 && !logs.some(line => line.startsWith('STORY OK:')), 'setup failure accepted');
+  expect(events.includes('profile:true'), 'failed profile not retained');
+  failures += errors.length;
+  console.log(JSON.stringify({ file, errors, events, sourceSha256: createHash('sha256').update(source).digest('hex') }));
+}
+console.log(JSON.stringify({ cases: 3, failedAssertions: failures }));
+process.exitCode = failures ? 1 : 0;
+"""),
+    )
+    for count, program in payloads:
+        result = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-e', program,
+                                 'canonical-http-callers', str(ROOT)], capture_output=True, text=True, timeout=30)
+        try:
+            summary = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            summary = {}
+        checks.expect(result.returncode == 0 and summary.get('cases') == count and summary.get('failedAssertions') == 0,
+                      f'check_browser_http_callers: {count} shipped-caller cases failed: ' + result.stdout[-2400:] + result.stderr[-600:])
+
+
 def check_browser_story_ports(checks):
     """Configured HTTPS pin ports; execute complete shipped modules through API adapters."""
     node = shutil.which('node')
@@ -1563,7 +1852,7 @@ import { Buffer } from 'node:buffer';
 import vm from 'node:vm';
 
 const source = readFileSync(process.argv[1], 'utf8');
-const cases = ['positive', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write'];
+const cases = ['positive', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write', 'guard', 'terminal'];
 let failed = 0;
 for (const condition of cases) {
   const events = [], files = new Map(), logs = [];
@@ -1584,7 +1873,9 @@ for (const condition of cases) {
     cleanProfile(_path, keep) { events.push(`profile:${keep}`); return !keep; },
     attachServeTracker() { return { attachContext() {}, last: () => ({}) }; },
     externalAttemptsTracker() { return { list: condition === 'external' ? [{host: 'outside.invalid', scheme: 'ws'}] : [],
-      async guard() {}, assertClean() { reject('external'); } }; },
+      async guard() { reject('guard'); }, async assertClean() { reject('external'); },
+      async closeOwnedBrowser(close) { await close(); reject('external'); reject('terminal'); },
+      evidence() { return { closed: condition !== 'close', errors: condition === 'terminal' ? [{ stage: 'injected terminal' }] : [] }; } }; },
     async acceptGateCertificate() { return { decision: 'proceed' }; },
     async assertServedFrom() { reject('address'); return 'synthetic address proof'; },
     async assertServedCertificate() { reject('certificate'); return 'synthetic certificate proof'; },
@@ -1629,6 +1920,8 @@ for (const condition of cases) {
   if (condition === 'evidence') expect(!!browser?.evidenceFailed && !browser?.observedBy, 'missing evidence replaced by proof');
   if (condition === 'external') expect(summary?.externalAttempts?.[0]?.host === 'outside.invalid', 'external evidence lost');
   if (condition === 'close') expect(browser?.failures?.some((failure) => failure.stage === 'browser cleanup failed'), 'cleanup failure absent from browser receipt');
+  if (condition === 'positive') expect(browser?.networkGuard?.closed && summary?.networkGuard?.closed, 'terminal guard evidence absent from both receipts');
+  if (condition === 'terminal') expect(browser?.networkGuard?.errors?.length && summary?.networkGuard?.errors?.length, 'terminal guard failure absent from receipts');
   failed += errors.length;
   console.log(JSON.stringify({ condition, errors }));
 }
@@ -1889,22 +2182,10 @@ def check_topofix2(checks):
                 r"  --candidate <sha> --repo /home/<guest-user>/gate/repo ", guide_text, re.M) is not None,
       "the guide's launcher example states that the guest command carries --candidate and --repo (PRE-7 / F1)")
 
-    # PRE-5: browser.json is read from the LIVE page: browserEvidence runs before browser.close() in the three stories (their
-    # finally block) and in U15 (its closing block). After the close page.evaluate throws, userAgent is '' and the
-    # HeadlessChrome refusal can never fire.
-    for story_name in ('screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs'):
-        story_lines = js_lines((ROOT / 'scripts/gate' / story_name).read_text())
-        finally_at = max((i for i, ln in enumerate(story_lines) if ln == '} finally {'), default=-1)
-        tail = story_lines[finally_at:] if finally_at >= 0 else []
-        ev_at = next((i for i, ln in enumerate(tail) if ln.startswith('const ev = await browserEvidence(')), -1)
-        close_at = [i for i, ln in enumerate(tail) if ln == 'await browser.close();']
-        e(ev_at >= 0 and len(close_at) == 1 and ev_at < close_at[0],
-          f'{story_name} reads browserEvidence from the live page BEFORE browser.close() in its finally block (PRE-5)')
+    # PRE-5 is exercised against the shipped finalizers by check_browser_http_callers
+    # and against the complete U15 module by check_browser_probe_lifecycle. Those checks
+    # require live evidence before owned close and final guard receipts after close.
     u15_lines = js_lines((ROOT / 'scripts/gate/phase4-browser.mjs').read_text())
-    ev_lines = [i for i, ln in enumerate(u15_lines) if ln.startswith('browserReceipt = await browserEvidence(')]
-    close_lines = [i for i, ln in enumerate(u15_lines) if ln == 'await browser.close();']
-    e(len(ev_lines) == 1 and len(close_lines) == 1 and ev_lines[0] < close_lines[0],
-      'phase4-browser.mjs (U15) reads browserEvidence before its closing browser.close() (PRE-5; already so before TOPOFIX2, pinned now)')
 
     # G7: the no-interstitial step is persisted before the non-zero exit; the dead throw in onAssert is gone.
     e("result.steps.push({ t: new Date().toISOString(), name: 'no-interstitial', error: accepted.error });" in u15_lines,
@@ -2450,13 +2731,12 @@ def check_topofix2(checks):
     # T07 / T21 / T20: the external-request guard is context-wide and installed before the first navigation of every story (and U15,
     # whose interstitial acceptance is already a page load); no story registers a tracker late or page by page; a failed evidence
     # collection fails U15 in the Mac vantage.
-    for line in ('async guard(context) {',
-                 'await context.route(/.*/, async (route) => {',
-                 "return await route.abort('blockedbyclient');",
+    for line in ('async guard(ownedContext) {',
+                 "session.on('Fetch.requestPaused', onPaused);",
+                 "await command('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });",
                  'await context.routeWebSocket((url) => url.hostname !== host, (ws) => {',
-                 "context.on('request', (request) => {",
                  'attachContext(context) { for (const p of context.pages()) hook(p); context.on(\'page\', hook); return this; },'):
-        e(line in launch_lines, f'browser-launch.mjs must carry the code line {line!r} (T07/T21: the guard is context-wide, it aborts before dispatch and it takes websockets too)')
+        e(line in launch_lines, f'browser-launch.mjs must carry the code line {line!r} (T07/T21: browser-root HTTP interception and the existing page-WebSocket layer; worker WebSockets remain unproven)')
     for guarded, guard_line, ctx_name, first_nav in (
         ('screenshots.mjs', 'if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }', 'ctx', 'acceptGateCertificate('),
         ('screenshots-grafana.mjs', 'if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }', 'ctx', 'const decision = await acceptGateCertificate('),
@@ -2475,37 +2755,7 @@ def check_topofix2(checks):
       and "recordFailure('browser.json not written', e);" in u15_lines
       and 'process.exitCode = 1;' in u15_lines,
       'phase4-browser.mjs (U15) records failed live evidence and browser.json writes through its common nonzero failure path (T20; shipped lifecycle cases execute both)')
-    if node_binary:
-        guard_probe = (
-            "const lib = await import(process.argv[1]);\n"
-            "const handlers = {}; const events = {};\n"
-            "const context = { route: async (m, h) => { handlers.route = h; }, routeWebSocket: async (pred, h) => { handlers.pred = pred; handlers.ws = h; },\n"
-            "  on: (name, h) => { events[name] = h; }, pages: () => [] };\n"
-            "const tracker = lib.externalAttemptsTracker('krate-gate.test');\n"
-            "await tracker.guard(context);\n"
-            "const fake = (url) => { const calls = []; const request = { url: () => url }; return { calls, request: () => request, continue: async () => calls.push('continue'), abort: async (c) => calls.push('abort:' + c) }; };\n"
-            "const out = {};\n"
-            "const gate = fake('https://krate-gate.test:3443/api'); events.request(gate.request()); await handlers.route(gate); out.gate = gate.calls;\n"
-            "const ip = fake('http://127.0.0.1:9/x'); events.request(ip.request()); await handlers.route(ip); out.ipLiteral = ip.calls;\n"
-            "const data = fake('data:text/plain,hi'); await handlers.route(data); out.data = data.calls;\n"
-            "const bare = fake('https://203.0.113.9/y'); await handlers.route(bare); out.routeOnly = bare.calls;\n"
-            "out.websocketPredicate = [handlers.pred(new URL('wss://krate-gate.test/api/live')), handlers.pred(new URL('ws://127.0.0.1:1/ws'))];\n"
-            "const ws = { url: () => 'ws://127.0.0.1:1/ws', closed: null, close(o) { this.closed = o; } }; handlers.ws(ws); out.websocketClosed = ws.closed && ws.closed.code;\n"
-            "out.list = tracker.list.map((x) => x.how + ':' + x.host);\n"
-            "try { tracker.assertClean(); out.assertClean = 'clean'; } catch { out.assertClean = 'threw'; }\n"
-            "console.log(JSON.stringify(out));\n"
-        )
-        run_guard = subprocess.run([node_binary, '--input-type=module', '-e', guard_probe, str(ROOT / 'scripts/gate/browser-launch.mjs')], text=True, capture_output=True)
-        try:
-            guard_out = json.loads(run_guard.stdout.strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            guard_out = {}
-        e(run_guard.returncode == 0 and guard_out == {'gate': ['continue'], 'ipLiteral': ['abort:blockedbyclient'], 'data': ['continue'], 'routeOnly': ['abort:blockedbyclient'],
-                                                    'websocketPredicate': [False, True], 'websocketClosed': 1008,
-                                                    'list': ['blocked:127.0.0.1', 'blocked:203.0.113.9', 'websocket-blocked:127.0.0.1'], 'assertClean': 'threw'},
-          f'the external guard continues gate-host and non-network requests, aborts and records an IP-literal and a bare external request before dispatch, routes only non-gate websockets and closes them, and assertClean then throws; got rc {run_guard.returncode}: {run_guard.stderr.strip()[:200]!r} {guard_out!r} (T07)')
-
-    # R6: the rendezvous nonce binds the run and reaches no log. The agent's stdout and stderr are the Mac receipt's agent.log. Three pins: the
+    # The standalone check_browser_http_guard executes the actual shipped export and\n    # redirect pause/terminal lifecycle cases; context.route alone cannot check a redirect hop.\n\n    # R6: the rendezvous nonce binds the run and reaches no log. The agent's stdout and stderr are the Mac receipt's agent.log. Three pins: the
     # ready line is run with a known nonce in scope and must not print it; the agent code names the nonce in exactly four enumerated lines (its
     # definition, the hello, the request check, the response), so any new mention, in a log call or elsewhere, needs a conscious pin edit; and
     # no log call (console, die, throw) dumps a whole object that holds it (the hello, the response, the request, the parsed flags, argv).
@@ -8338,7 +8588,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_binding, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
