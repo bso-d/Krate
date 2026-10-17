@@ -133,7 +133,8 @@ import { launchGateBrowser, macMode, acceptGateCertificate, attachServeTracker, 
 const MAC = macMode();
 const SHOTS_EXPECTED = MAC ? SHOTS_EXPECTED_MAC : SHOTS_EXPECTED_CONTAINER;
 const CERT = MAC ? requireCertFile() : null;
-const PIN = MAC ? await pinGateCertificate({ host: HOST, port: 443, certPem: CERT.pem, connectHost: resolveTo }) : null;
+const PIN_PORT = Number(new URL(BASE).port || 443);
+const PIN = MAC ? await pinGateCertificate({ host: HOST, port: PIN_PORT, certPem: CERT.pem, connectHost: resolveTo }) : null;
 const launch = await launchGateBrowser(chromium, { host: HOST, resolveTo, outDir: OUT });
 const browser = launch.browser;
 let certDecision = null;

@@ -113,6 +113,23 @@ async function subSweep() {
     spot: [...spotOut.values()].sort((a, b) => a.port - b.port),
     positives: [],
   };
+  // A classified socket failure is not evidence that the port was closed. Keep the
+  // complete counts and a bounded diagnostic, and refuse the whole IPv4 result.
+  if (counts.other || counts.noRouteScope) {
+    const sample = [];
+    for (const [port, outcome] of all) {
+      if (!['open', 'refused', 'rejected', 'timeout'].includes(outcome)) {
+        sample.push({ port, outcome: outcome.slice(0, 80) });
+        if (sample.length === 8) break;
+      }
+    }
+    report.inconclusive = { count: counts.other + counts.noRouteScope, sample };
+    const j = JSON.stringify(report, null, 2);
+    writeFileSync(join(OUT, 'w5-result.json'), j + '\n');
+    writeFileSync(join(OUT, 'w5-result.sha256'), `${createHash('sha256').update(j + '\n').digest('hex')}  w5-result.json\n`);
+    console.log(`RESULT W5 rc=1 inconclusive=${report.inconclusive.count} other=${counts.other} no_route_or_scope=${counts.noRouteScope}`);
+    die(`W5: ${report.inconclusive.count} IPv4 ports were inconclusive; first ${sample.length}: ${sample.map((p) => `${p.port}=${p.outcome}`).join(', ')}`, 1);
+  }
   // The Node pin on the HTTPS port, when the agent passed the certificate (M4's probe: a
   // self-signed leaf accepted as its own CA, name check on; the fallback-to-no-verification
   // shape of phase2_kafbat.py:557 is deliberately NOT copied).
@@ -157,7 +174,7 @@ async function subSweep() {
   }
   const j = JSON.stringify(report, null, 2);
   writeFileSync(join(OUT, 'w5-result.json'), j + '\n');
-  writeFileSync(join(OUT, 'w5-result.sha256'), `${createHash('sha256').update(j).digest('hex')}  w5-result.json\n`);
+  writeFileSync(join(OUT, 'w5-result.sha256'), `${createHash('sha256').update(j + '\n').digest('hex')}  w5-result.json\n`);
   console.log(`RESULT W5 rc=0 open=${counts.open} refused=${counts.refused} rejected=${counts.rejected} timeout=${counts.timeout} seconds=${report.swept.seconds} tcp_only=true open_set=[${report.open.join(',')}]${report.v6 ? ` v6_open=[${report.v6.ports.filter((p) => p.outcome === 'open').map((p) => p.port).join(',')}]` : ' v6=not-run'}`);
 }
 

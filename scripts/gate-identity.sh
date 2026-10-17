@@ -1694,7 +1694,7 @@ phase4_screenshots_x4() {
     -e GATE_VIEWER_PASSWORD -e GATE_VIEWER_TOTP -e GATE_ADMIN_PASSWORD -e GATE_ADMIN_TOTP \
     -e GATE_DISABLED_PASSWORD -e GATE_NOGROUP_PASSWORD -e GATE_NOGROUP_TOTP -e PW_MODULES=/usr/lib/node_modules \
     krate-harness/playwright:1.60.0 node /gate/screenshots-perses.mjs \
-    --host "$BASE_HOST" --perses-base "https://${BASE_HOST}:${PERSES_GATE_PORT}" --out /out \
+    --base "$BASE" --host "$BASE_HOST" --perses-base "https://${BASE_HOST}:${PERSES_GATE_PORT}" --out /out \
     --viewer-user p4v --admin-user "$admin_user" --disabled-user p4dis --nogroup-user p4nogroup --resolve-to "$gateway"
   st=$?
 

@@ -12,7 +12,8 @@
 // https://NAME:PERSES_PORT reaches the published Perses gateway exactly as an end
 // user's browser on the host does.
 //
-//   node screenshots-perses.mjs --host krate-gate.test --perses-base https://krate-gate.test:13443 \
+//   node screenshots-perses.mjs --base https://krate-gate.test --host krate-gate.test \
+//        --perses-base https://krate-gate.test:13443 \
 //        --out /out/perses --viewer-user V --admin-user A --disabled-user D --nogroup-user N \
 //        --resolve-to 192.168.65.254
 // Credentials come from the environment only: GATE_VIEWER_PASSWORD, GATE_VIEWER_TOTP,
@@ -55,6 +56,8 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((acc, v, i, arr) =>
 }, []));
 const HOST = args.host || 'localhost';
 const PBASE = (args['perses-base'] || `https://${HOST}:3443`).replace(/\/$/, '');
+// --base is the public realm origin; its port can differ from the Perses gateway.
+const BASE = (args.base || `https://${HOST}`).replace(/\/$/, '');
 const OUT = args.out || '/out';
 const VIEWER = args['viewer-user'];
 const ADMIN = args['admin-user'];
@@ -153,7 +156,8 @@ const CERT = MAC ? requireCertFile() : null;
 // Pin both surfaces the story drives: the public HTTPS port (M4's probe) and the Perses
 // gateway port of this story's own entry URL. Both are the fixture's server.crt.
 const PERS_IP = resolveTo;
-const PIN = MAC ? await pinGateCertificate({ host: HOST, port: 443, certPem: CERT.pem, connectHost: resolveTo }) : null;
+const PIN_PORT = Number(new URL(BASE).port || 443);
+const PIN = MAC ? await pinGateCertificate({ host: HOST, port: PIN_PORT, certPem: CERT.pem, connectHost: resolveTo }) : null;
 const PINPERS_PORT = (new URL(PBASE).port ? Number(new URL(PBASE).port) : 443);
 const PINPERS = MAC ? await pinGateCertificate({ host: HOST, port: PINPERS_PORT, certPem: CERT.pem, connectHost: resolveTo }) : null;
 const launch = await launchGateBrowser(chromium, { host: HOST, resolveTo, outDir: OUT });

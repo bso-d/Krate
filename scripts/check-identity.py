@@ -1461,6 +1461,347 @@ process.exitCode = report.failures ? 1 : 0;
         checks.expect(run.returncode == 0, f'Browser certificate/current-main-frame/cleanup/tracker regressions: rc={run.returncode}, stdout={run.stdout!r}, stderr={run.stderr!r}')
 
 
+def check_browser_story_ports(checks):
+    """Configured HTTPS pin ports; execute complete shipped modules through API adapters."""
+    node = shutil.which('node')
+    if not node:
+        print('check_browser_story_ports: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    program = r"""import vm from 'node:vm';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+// Execute each complete shipped story through its actual argument and pin setup.
+// The browser boundary stops before launch; no browser, network, files or credentials.
+const storyDir = resolve(process.argv[1] || 'scripts/gate');
+const cases = [
+  { story: 'grafana', flags: ['--base', 'https://fixture.test:14443'], ports: [14443] },
+  { story: 'grafana', flags: [], ports: [443] },
+  { story: 'perses', flags: ['--base', 'https://fixture.test:14443', '--perses-base', 'https://fixture.test:13443'], ports: [14443, 13443] },
+  { story: 'perses', flags: [], ports: [443, 3443] },
+  { story: 'perses', flags: ['--perses-base', 'https://fixture.test:14443'], ports: [443, 14443] },
+];
+let failed = 0;
+for (const test of cases) {
+  const path = resolve(storyDir, `screenshots-${test.story}.mjs`);
+  const pins = []; let stopped = false; let error = null;
+  const context = vm.createContext({ URL, process: {
+    argv: ['node', path, '--host', 'fixture.test', '--resolve-to', '192.0.2.10', '--out', '/owned-output',
+      '--viewer-user', 'v', '--admin-user', 'a', '--disabled-user', 'd', '--nogroup-user', 'n', ...test.flags],
+    env: Object.fromEntries(['VIEWER_PASSWORD','VIEWER_TOTP','ADMIN_PASSWORD','ADMIN_TOTP','DISABLED_PASSWORD','NOGROUP_PASSWORD','NOGROUP_TOTP'].map(x=>['GATE_'+x,'synthetic'])),
+    exit() { throw new Error('unexpected preflight exit'); },
+  }, console });
+  const module = new vm.SourceTextModule(readFileSync(path,'utf8'), { context, identifier: pathToFileURL(path).href,
+    initializeImportMeta(meta) { meta.url = pathToFileURL(path).href; } });
+  await module.link(async specifier => {
+    let ns;
+    if (specifier === './browser-launch.mjs') ns = {
+      launchGateBrowser: async()=>{stopped=true;throw new Error('STOP_AT_BROWSER_BOUNDARY');}, macMode:()=>true,
+      requireCertFile:()=>({pem:'synthetic'}), pinGateCertificate:async x=>{pins.push({host:x.host,port:x.port,connectHost:x.connectHost});return {};},
+      acceptGateCertificate(){},attachServeTracker(){},browserEvidence(){},cleanProfile(){},externalAttemptsTracker(){},
+    };
+    else if (specifier === 'node:module') ns={createRequire:()=>()=>({chromium:{}})};
+    else { ns={...await import(specifier)}; if(specifier==='node:fs')ns.mkdirSync=()=>{}; }
+    const keys=Object.keys(ns);
+    return new vm.SyntheticModule(keys,function(){for(const k of keys)this.setExport(k,ns[k]);},{context});
+  });
+  try { await module.evaluate(); } catch(e) { if(e.message!=='STOP_AT_BROWSER_BOUNDARY') error=String(e); }
+  const ok=stopped && !error && JSON.stringify(pins.map(x=>x.port))===JSON.stringify(test.ports)
+    && pins.every(x=>x.host==='fixture.test'&&x.connectHost==='192.0.2.10');
+  if(!ok)failed++;
+  console.log(JSON.stringify({story:test.story,flags:test.flags,pins,expected:test.ports,ok,error}));
+}
+console.log(JSON.stringify({cases:cases.length,failed}));
+process.exitCode=failed?1:0;
+"""
+    result = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-e', program,
+                             str(ROOT / 'scripts/gate')], capture_output=True, text=True, timeout=30)
+    checks.expect(result.returncode == 0,
+                  'check_browser_story_ports: shipped module regression failed: ' + result.stdout[-1800:] + result.stderr[-600:])
+
+
+
+
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text()
+    scratch = ROOT / 'harness/check-identity'
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='perses-port-argv-', dir=str(scratch)) as temporary:
+        directory = Path(temporary)
+        (directory / 'p4').mkdir()
+        for user in ('p4v', 'p4both', 'p4dis', 'p4nogroup'):
+            (directory / 'p4' / ('kc-' + user + '.json')).write_text(json.dumps(
+                {'password': 'synthetic', 'totp': 'synthetic'}))
+        script = r"""
+STATE="$1"; OUT="$1/out"; ARGS="$1/argv"; BASE="$2"
+BASE_HOST=fixture.test; PERSES_GATE_PORT=13443; GATE_DIR=/synthetic-gate
+PG_IMAGE=synthetic-no-container; SCREENSHOTS=true; CAP=""
+docker() { if [[ "$1" == image ]]; then return 0; fi; printf '192.0.2.10\n'; }
+curl() { printf '302'; }
+add_secret() { :; }
+cap() { printf '%s\n' "$@" > "$ARGS"; return 1; }
+ok_if() { :; }
+""" + function_body(runner, 'phase4_screenshots_x4') + '\nphase4_screenshots_x4 synthetic\n'
+        for base in ('https://fixture.test:14443', 'https://fixture.test'):
+            result = run_bash(script, directory, base)
+            argv = (directory / 'argv').read_text().splitlines() if (directory / 'argv').exists() else []
+            checks.expect(result.returncode == 0 and '--base' in argv
+                          and argv[argv.index('--base') + 1] == base,
+                          f'Perses runner must pass configured realm base {base}; argv={argv}, err={result.stderr}')
+
+def check_browser_probe_lifecycle(checks):
+    """U15 assertions preserve evidence and teardown; execute complete shipped modules through API adapters."""
+    node = shutil.which('node')
+    if not node:
+        print('check_browser_probe_lifecycle: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    program = r"""// Standalone payload for the canonical Python checker. Pass only the shipped file
+// path as argv[2]; no ignored harness file is imported or needed at runtime.
+import { readFileSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+import vm from 'node:vm';
+
+const source = readFileSync(process.argv[1], 'utf8');
+const cases = ['positive', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write'];
+let failed = 0;
+for (const condition of cases) {
+  const events = [], files = new Map(), logs = [];
+  const reject = (stage) => { if (condition === stage) throw new Error(`injected ${stage}`); };
+  const page = {
+    url: () => 'https://gate.test/grafana/', on() {}, async goto() {},
+    getByRole() { return { first() { return this; }, async click() {} }; },
+    locator() { return { async count() { return 0; } }; },
+    async waitForSelector() {}, async fill() {}, async click() {}, async waitForURL() {},
+    async waitForLoadState() {}, async waitForTimeout() {}, async screenshot() {},
+  };
+  const context = { pages: () => [page], async newPage() { return page; },
+    async close() { events.push('close'); reject('close'); } };
+  const api = {
+    macMode: () => true, requireCertFile: () => ({ pem: 'synthetic-pin' }),
+    async pinGateCertificate() { return {}; },
+    async launchGateBrowser() { return { browser: context, mode: 'mac', profileDir: 'synthetic-profile', headless: false }; },
+    cleanProfile(_path, keep) { events.push(`profile:${keep}`); return !keep; },
+    attachServeTracker() { return { attachContext() {}, last: () => ({}) }; },
+    externalAttemptsTracker() { return { list: condition === 'external' ? [{host: 'outside.invalid', scheme: 'ws'}] : [],
+      async guard() {}, assertClean() { reject('external'); } }; },
+    async acceptGateCertificate() { return { decision: 'proceed' }; },
+    async assertServedFrom() { reject('address'); return 'synthetic address proof'; },
+    async assertServedCertificate() { reject('certificate'); return 'synthetic certificate proof'; },
+    async browserEvidence() { events.push('evidence'); reject('evidence'); return { observedBy: 'mock-api' }; },
+  };
+  const child = { argv: ['node', 'phase4-browser.mjs', '--base', 'https://gate.test', '--host', 'gate.test', '--out', '/synthetic'],
+    env: { UI15_PASSWORD: 'synthetic', UI15_TOTP: 'JBSWY3DPEHPK3PXP' }, exitCode: 0,
+    exit(code) { this.exitCode = code; throw new Error(`unexpected early exit ${code}`); } };
+  const global = vm.createContext({ URL, Buffer, process: child,
+    console: { log: (text) => logs.push(String(text)), error: (text) => logs.push(String(text)) } });
+  const imports = { './browser-launch.mjs': api, 'node:crypto': { createHmac },
+    'node:module': { createRequire: () => () => ({ chromium: {} }) },
+    'node:fs': { writeFileSync(path, data) { const file = path.split('/').pop(); events.push(`write:${file}`);
+      if ((condition === 'browser-write' && file === 'browser.json') || (condition === 'summary-write' && file === 'ui15-summary.json')) throw new Error(`injected ${condition}`);
+      files.set(file, JSON.parse(data)); }, chmodSync() {} } };
+  const module = new vm.SourceTextModule(source, { context: global, identifier: 'file:///shipped/phase4-browser.mjs',
+    initializeImportMeta(meta) { meta.url = 'file:///shipped/phase4-browser.mjs'; } });
+  await module.link(async (specifier) => {
+    const exports = imports[specifier];
+    if (!exports) throw new Error(`unexpected import ${specifier}`);
+    return new vm.SyntheticModule(Object.keys(exports), function () {
+      for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
+    }, { context: global });
+  });
+  let uncaught = null;
+  try { await module.evaluate({ timeout: 2000 }); } catch (error) { uncaught = String(error.message || error); }
+  const summary = files.get('ui15-summary.json'), browser = files.get('browser.json');
+  const stdout = logs.find((line) => line.startsWith('SUMMARY '));
+  const parsed = stdout ? JSON.parse(stdout.slice('SUMMARY '.length)) : null;
+  const errors = [], expect = (ok, message) => { if (!ok) errors.push(message); };
+  expect(uncaught === null, 'failure escaped lifecycle');
+  expect(condition === 'positive' ? child.exitCode === 0 : child.exitCode !== 0, 'incorrect exit status');
+  expect((!!summary || condition === 'summary-write') && (!!browser || condition === 'browser-write') && !!parsed, 'available summary/browser/stdout evidence missing');
+  expect(events.filter((event) => event === 'close').length === 1, 'close not attempted exactly once');
+  expect(events.includes('evidence') && events.indexOf('evidence') < events.indexOf('close'), 'live evidence not before close');
+  expect(events.indexOf('close') < events.indexOf('write:ui15-summary.json'), 'summary finalized before cleanup');
+  if (condition !== 'positive') {
+    if (condition !== 'summary-write') expect(summary?.failures?.some((failure) => failure.error.includes(`injected ${condition}`)), 'failure not retained in file');
+    expect(parsed?.storyFailed && parsed?.failures?.length > 0, 'failure not retained in stdout');
+    if (!['browser-write', 'summary-write'].includes(condition)) expect(events.includes('profile:true'), 'known failed profile not retained');
+  } else expect(!summary?.storyFailed && !(summary?.failures || []).length, 'positive control fabricated failure');
+  if (condition === 'evidence') expect(!!browser?.evidenceFailed && !browser?.observedBy, 'missing evidence replaced by proof');
+  if (condition === 'external') expect(summary?.externalAttempts?.[0]?.host === 'outside.invalid', 'external evidence lost');
+  if (condition === 'close') expect(browser?.failures?.some((failure) => failure.stage === 'browser cleanup failed'), 'cleanup failure absent from browser receipt');
+  failed += errors.length;
+  console.log(JSON.stringify({ condition, errors }));
+}
+console.log(JSON.stringify({ cases: cases.length, failedAssertions: failed }));
+process.exitCode = failed ? 1 : 0;
+"""
+    result = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-e', program,
+                             str(ROOT / 'scripts/gate/phase4-browser.mjs')], capture_output=True, text=True, timeout=30)
+    checks.expect(result.returncode == 0,
+                  'check_browser_probe_lifecycle: shipped module regression failed: ' + result.stdout[-1800:] + result.stderr[-600:])
+
+
+def check_browser_probe_consumer(checks):
+    """A retained diagnostic summary cannot pass or be erased by a retry."""
+    import ast
+    import types
+
+    tree = ast.parse((ROOT / 'scripts/gate/phase4_grafana.py').read_text())
+    original = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == 'Gate')
+    methods = {'_benign_404', '_network_flake', '_browser_attempt', 'run_browser_probe', 'browser_clean'}
+    members: list[ast.stmt] = [item for item in original.body if (
+        isinstance(item, ast.FunctionDef) and item.name in methods
+        or isinstance(item, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'NET_RETRY_ERRORS'
+                                               for target in item.targets))]
+    # Compile the shipped method ASTs without constructing a cluster-backed Gate.
+    selected = ast.ClassDef(name='ProbeConsumer', bases=[], keywords=[], body=members, decorator_list=[])
+    namespace = {'os': os, 'json': json, 'HERE': str(ROOT / 'scripts/gate'), 'log': lambda _message: None}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[selected], type_ignores=[])),
+                 'shipped-phase4-browser-consumer', 'exec'), namespace)
+    consumer = namespace['ProbeConsumer']()
+    consumer._benign_404 = lambda _item: False
+    clean = {'cspViolations': 0, 'pageErrors': 0, 'failedRequests': [], 'http4xx5xx': []}
+    network = dict(clean, failedRequests=[{'err': 'net::ERR_CONNECTION_RESET'}])
+    e = checks.expect
+    e(consumer.browser_clean(clean), 'clean browser summary must pass')
+    e(consumer._network_flake(network), 'successful child with network-only dirt retains one retry')
+    failure_fields = ({'storyFailed': 'certificate mismatch'},
+                      {'failures': [{'stage': 'browser cleanup failed', 'error': 'closed failed'}]},
+                      {'probeExitCode': 1}, {'probeExitCode': -9})
+    for fields in failure_fields:
+        e(not consumer.browser_clean(dict(clean, **fields)), f'browser_clean must reject {fields}')
+        e(not consumer._network_flake(dict(network, **fields)), f'retry must not erase {fields}')
+
+    consumer.base = 'https://fixture.test'
+    consumer.origin = types.SimpleNamespace(hostname='fixture.test')
+    consumer.totp_steps = types.SimpleNamespace(guard_external_signin=lambda _user: contextlib.nullcontext())
+    consumer.BROWSER_IMAGE = 'synthetic-no-container'
+    consumer.load_state = lambda _user: {'password': 'synthetic', 'totp': 'synthetic'}
+    scratch = ROOT / 'harness/check-identity'
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='browser-consumer-', dir=str(scratch)) as temporary:
+        consumer.scratch_dir = temporary
+        for rc in (0, 1, -9):
+            namespace['p2'] = types.SimpleNamespace(docker=lambda *args, **kwargs:
+                (rc, 'SUMMARY ' + json.dumps(dict(clean, probeExitCode=0)), ''))
+            summary, _steps = consumer._browser_attempt('viewer', 'dash', '192.0.2.10',
+                                                       consumer.load_state('viewer'), temporary)
+            e(summary.get('probeExitCode') == rc, f'actual child exit {rc} must overwrite summary claim')
+            e(consumer.browser_clean(summary) == (rc == 0), f'child exit {rc} must reach verdict')
+        for fields in failure_fields:
+            first = dict(network, **fields)
+            calls = []
+
+            def attempt(*_args):
+                calls.append(True)
+                return (first if len(calls) == 1 else clean), []
+
+            consumer._browser_attempt = attempt
+            summary, _steps, retried = consumer.run_browser_probe('viewer', 'dash', '192.0.2.10')
+            e(len(calls) == 1 and summary is first and retried is None,
+              f'first failure must survive without replacement: {fields}')
+        calls = []
+        consumer._browser_attempt = lambda *_args: (calls.append(True) or
+            ((network if len(calls) == 1 else clean), []))
+        summary, _steps, retried = consumer.run_browser_probe('viewer', 'dash', '192.0.2.10')
+        e(len(calls) == 2 and summary is clean and retried == network['failedRequests'],
+          'network-only successful-child control must retry once and retain first dirt')
+
+def check_mac_ipv4_outcomes(checks):
+    """Inconclusive ports fail; complete shipped sweep and exact report hashes."""
+    node = shutil.which('node')
+    if not node:
+        print('check_mac_ipv4_outcomes: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    program = r"""import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import vm from 'node:vm';
+
+// The whole shipped entrypoint runs unchanged; only sockets/files/process are boundary adapters.
+const sourcePath = resolve(process.argv[1] || 'scripts/gate/mac/probe.mjs');
+const source = readFileSync(sourcePath, 'utf8');
+const manual = process.argv.includes('--manual');
+const savePath = process.argv.find(a => a.startsWith('--save='))?.slice(7);
+const cases = manual ? [{ name: 'manual non-spot EMFILE', code: 'EMFILE', port: 32000, fail: true }] : [
+  ...['EMFILE', 'ENFILE', undefined, 'EADDRNOTAVAIL', 'ENOTSUP', 'EINVAL', 'ENXIO'].map(code =>
+    ({ name: `non-spot ${code || 'missing errno'}`, code, port: 32000, fail: true })),
+  { name: 'spot EMFILE', code: 'EMFILE', port: 111, fail: true },
+  { name: 'all inconclusive bounded sample', code: 'EMFILE', all: true, fail: true },
+  ...['ECONNREFUSED', 'EHOSTUNREACH', 'ETIMEDOUT', 'open'].map(code =>
+    ({ name: `conclusive ${code}`, code, port: 32000, fail: false })),
+];
+let failures = 0;
+for (const test of cases) {
+  const files = new Map(); const stdout = []; const stderr = []; const connected = [];
+  let rc = 0; let caught;
+  const context = vm.createContext({ process: {
+    argv: ['node', sourcePath, 'sweep', '--ip', '127.0.0.1', '--host', 'fixture.test', '--out', '/owned-output'],
+    stdout: { write(s) { stdout.push(s); } }, exit(n) { rc = n; const e = new Error('process exit'); e.exit = true; throw e; },
+  }, console: { log(s) { stdout.push(s); }, error(s) { stderr.push(s); } } });
+  const module = new vm.SourceTextModule(source, { context, identifier: pathToFileURL(sourcePath).href,
+    initializeImportMeta(meta) { meta.url = pathToFileURL(sourcePath).href; } });
+  const imported = new Map();
+  await module.link(async specifier => {
+    if (imported.has(specifier)) return imported.get(specifier);
+    const namespace = { ...await import(specifier) };
+    if (specifier === 'node:fs') {
+      namespace.mkdirSync = () => {};
+      namespace.writeFileSync = (path, data) => files.set(path, String(data));
+    }
+    if (specifier === 'node:net') namespace.default = { ...namespace.default, connect(options) {
+      connected.push(options.port);
+      const socket = new EventEmitter(); socket.destroy = () => socket;
+      socket.setTimeout = () => socket;
+      queueMicrotask(() => {
+        const selected = test.all || options.port === test.port;
+        if (selected && test.code === 'open') socket.emit('connect');
+        else socket.emit('error', { code: selected ? test.code : 'ECONNREFUSED' });
+      }); return socket;
+    } };
+    const keys = Object.keys(namespace);
+    const linked = new vm.SyntheticModule(keys, function () { for (const key of keys) this.setExport(key, namespace[key]); }, { context });
+    imported.set(specifier, linked); return linked;
+  });
+  try { await module.evaluate({ timeout: 10000 }); } catch (e) { if (!e.exit) caught = String(e.stack || e); }
+  if (savePath && ['non-spot EMFILE', 'conclusive ECONNREFUSED'].includes(test.name)) {
+    const dir = `${savePath}/${test.fail ? 'inconclusive' : 'conclusive'}`;
+    mkdirSync(dir, { recursive: true });
+    for (const [path, bytes] of files) writeFileSync(`${dir}/${path.split('/').pop()}`, bytes);
+  }
+  const raw = files.get('/owned-output/w5-result.json'); const report = raw ? JSON.parse(raw) : null;
+  const output = stdout.join('\n'); const errors = stderr.join('\n'); const problems = [];
+  const check = (yes, message) => { if (!yes) problems.push(message); };
+  if (!manual) {
+    check(!caught, 'unexpected module error: ' + caught);
+    check(rc === (test.fail ? 1 : 0), `exit ${rc}, expected ${test.fail ? 1 : 0}`);
+    check(connected.length === 65535 && new Set(connected).size === 65535, 'complete IPv4 sweep');
+    check(report && Object.values(report.counts).reduce((a,b) => a+b,0) === 65535, 'complete count report');
+    check(report && files.get('/owned-output/w5-result.sha256') === `${createHash('sha256').update(raw).digest('hex')}  w5-result.json\n`, 'report hash');
+    if (test.fail) {
+      check(!output.includes('RESULT W5 rc=0'), 'no success result');
+      check(output.includes('RESULT W5 rc=1'), 'explicit failed result');
+      check(report?.inconclusive?.count === (test.all ? 65535 : 1), 'all inconclusive counted');
+      check(report?.inconclusive?.sample?.length === (test.all ? 8 : 1), 'bounded sample');
+      check(report?.inconclusive?.sample?.[0]?.port === (test.all ? 1 : test.port), 'diagnostic names failing port');
+      check(errors.includes(String(test.all ? 65535 : 1)) && errors.length < 1500, 'bounded diagnostic total');
+    } else check(output.includes('RESULT W5 rc=0'), 'conclusive sweep success');
+  }
+  failures += problems.length;
+  console.log(JSON.stringify({ case: test.name, rc, counts: report?.counts, inconclusive: report?.inconclusive,
+    result: output.split('\n').filter(s => s.startsWith('RESULT')), stderr: errors, caught, problems }));
+}
+console.log(JSON.stringify({ cases: cases.length, failedAssertions: failures, sourceSha256: createHash('sha256').update(source).digest('hex') }));
+process.exitCode = failures ? 1 : 0;
+"""
+    result = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-e', program,
+                             str(ROOT / 'scripts/gate/mac/probe.mjs')], capture_output=True, text=True, timeout=30)
+    checks.expect(result.returncode == 0,
+                  'check_mac_ipv4_outcomes: shipped sweep regression failed: ' + result.stdout[-1800:] + result.stderr[-600:])
+
+
 def check_topofix2(checks):
     """TOPOFIX2 fix round (harness/phase4-completion/w2/TOPOFIX2-BRIEF.md): behaviour pins for the defects the first read of the
     Mac agent vantage found (PRE-0..PRE-7, F1-F8, G5-G7). Pins are whole-line matches on the code lines (js_lines) or
@@ -1560,7 +1901,7 @@ def check_topofix2(checks):
         e(ev_at >= 0 and len(close_at) == 1 and ev_at < close_at[0],
           f'{story_name} reads browserEvidence from the live page BEFORE browser.close() in its finally block (PRE-5)')
     u15_lines = js_lines((ROOT / 'scripts/gate/phase4-browser.mjs').read_text())
-    ev_lines = [i for i, ln in enumerate(u15_lines) if ln.startswith('const ev = await browserEvidence(')]
+    ev_lines = [i for i, ln in enumerate(u15_lines) if ln.startswith('browserReceipt = await browserEvidence(')]
     close_lines = [i for i, ln in enumerate(u15_lines) if ln == 'await browser.close();']
     e(len(ev_lines) == 1 and len(close_lines) == 1 and ev_lines[0] < close_lines[0],
       'phase4-browser.mjs (U15) reads browserEvidence before its closing browser.close() (PRE-5; already so before TOPOFIX2, pinned now)')
@@ -1570,10 +1911,11 @@ def check_topofix2(checks):
       'phase4-browser.mjs pushes the no-interstitial step when acceptGateCertificate returns no proceed decision (G7)')
     e(not any(ln.startswith('if (!d.seen) throw') for ln in u15_lines),
       'phase4-browser.mjs carries no `if (!d.seen) throw` in onAssert: the hook runs only when the interstitial was seen (G7: dead code)')
-    summary_at = [i for i, ln in enumerate(u15_lines) if ln.startswith('try { writeFileSync(`${OUT}/ui15-summary.json`, JSON.stringify({ steps: result.steps, storyFailed:')]
-    exit_at = [i for i, ln in enumerate(u15_lines) if ln == 'process.exit(2);']
-    e(len(summary_at) == 1 and bool(exit_at) and summary_at[0] < exit_at[0],
-      'phase4-browser.mjs writes ui15-summary.json (steps, no-interstitial included) BEFORE the non-zero exit of the story-failed path (G7)')
+    summary_at = [i for i, ln in enumerate(u15_lines) if ln.startswith('writeFileSync(`${OUT}/ui15-summary.json`, JSON.stringify({ steps: result.steps, ...summary }')]
+    launch_at = next((i for i, ln in enumerate(u15_lines) if ln.startswith('const launch = await launchGateBrowser(')), len(u15_lines))
+    e(len(summary_at) == 1 and not any(ln.startswith('process.exit(') for ln in u15_lines[launch_at:])
+      and "recordFailure('probe ended', e);" in u15_lines,
+      'phase4-browser.mjs retains no-interstitial and assertion failures through shared evidence/cleanup finalization, with no early exit after launch (G7)')
 
     # PRE-6 + G5: W5's IPv6 leg. The agent passes the guest's GLOBAL address without a zone (a zone only on fe80::/10) and
     # probe.mjs accepts that shape; the runner derives the docker-published set WITHOUT sshd's 22, the IPv6 rule fails only
@@ -2129,9 +2471,10 @@ def check_topofix2(checks):
           f'{guarded} installs the context-wide guard ({guard_line!r}) before its first navigation (T07, T21)')
         e('ext.onFailed' not in guarded_text and not re.search(r'serve\.attach\(', guarded_text) and not re.search(r"\.on\('requestfailed', \(r\) => ext", guarded_text),
           f'{guarded} registers no tracker page by page or after a navigation (T07, T21: the Admin and later pages are covered by the context)')
-    e(re.search(r"\} catch \(e2\) \{\n  // Review T20[^\n]*\n  console\.error\('STORY FAILED: browser\.json not written: [^\n]*\n  if \(MAC\) process\.exitCode = 1;\n\}\nawait browser\.close\(\);",
-                (ROOT / 'scripts/gate/phase4-browser.mjs').read_text()) is not None,
-      'phase4-browser.mjs (U15) fails the Mac probe when browser.json cannot be written (the HeadlessChrome refusal included), as X1/X3/X4 do (T20)')
+    e("recordFailure('browser evidence failed', e);" in u15_lines
+      and "recordFailure('browser.json not written', e);" in u15_lines
+      and 'process.exitCode = 1;' in u15_lines,
+      'phase4-browser.mjs (U15) records failed live evidence and browser.json writes through its common nonzero failure path (T20; shipped lifecycle cases execute both)')
     if node_binary:
         guard_probe = (
             "const lib = await import(process.argv[1]);\n"
@@ -7995,7 +8338,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_binding, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_binding, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
