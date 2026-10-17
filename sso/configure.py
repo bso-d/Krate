@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
-from identity import kafbat_role  # noqa: E402  (sibling module; explicit path keeps python -I working)
+from identity import kafbat_role, validate_mfa_filter  # noqa: E402  (sibling module; explicit path keeps python -I working)
 
 
 def text(settings, key):
@@ -32,7 +32,8 @@ def url(settings, key):
     return value
 
 
-def validate(settings, app):
+def validate(settings, app, broker=False):
+    """Validate a site file; `broker` is True only for the PingFederate broker plan (sso/configure-dual.py), the one consumer of the mfa_* keys."""
     if not isinstance(settings, dict):
         raise ValueError("settings must be a JSON object")
     if any("secret" in k.lower() or "password" in k.lower() for k in settings):
@@ -55,6 +56,30 @@ def validate(settings, app):
     idle = settings.get("session_idle_minutes", 30)
     if type(idle) is not int or not 1 <= idle <= 1440:
         raise ValueError("session_idle_minutes must be between 1 and 1440")
+    # The MFA stance (enforce-if-asserted) belongs to the PingFederate broker plan, the only place a
+    # Keycloak provider exists to carry the essential-claim filter. Every other generator (the native
+    # OIDC files of this program, Grafana's and Perses' site files) rejects the keys instead of ignoring them.
+    mfa_keys = [key for key in ("mfa_claim_name", "mfa_claim_value", "mfa_not_asserted") if key in settings]
+    if mfa_keys and not broker:
+        raise ValueError("mfa_claim_name, mfa_claim_value and mfa_not_asserted belong to the PingFederate broker plan"
+                         " (krate auth configure <site.json>); remove them from this settings file")
+    pair = [key for key in ("mfa_claim_name", "mfa_claim_value") if key in settings]
+    if pair:
+        if "mfa_not_asserted" in settings:
+            if type(settings["mfa_not_asserted"]) is not bool:
+                raise ValueError("mfa_not_asserted must be boolean")
+            if settings["mfa_not_asserted"]:
+                raise ValueError("mfa_not_asserted excludes mfa_claim_name/mfa_claim_value;"
+                                 " the site file carries exactly one of the two MFA stances")
+        if len(pair) != 2:
+            raise ValueError("mfa_claim_name and mfa_claim_value are set together or neither is set"
+                             " (the essential-claim filter needs both)")
+        text(settings, "mfa_claim_name")
+        text(settings, "mfa_claim_value")
+        # One validator for the site file and the plan (identity.validate_mfa_filter).
+        validate_mfa_filter(settings["mfa_claim_name"], settings["mfa_claim_value"])
+    elif "mfa_not_asserted" in settings and type(settings["mfa_not_asserted"]) is not bool:
+        raise ValueError("mfa_not_asserted must be boolean")
     if app == "kafbat":
         if urlsplit(public_url).path not in ("", "/"):
             raise ValueError("Kafbat public_url must use the root path")

@@ -16,6 +16,8 @@
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test --session-max-hours 1
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1
+#   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --phase 4c --public-host krate-oi.test \
+#     --browser agent --rendezvous ~/gate/rdv --rendezvous-nonce <launcher token>   # on a vzNAT VM, driven by scripts/gate/mac/run-vm-gate.sh
 #
 # The fixture directory is a disposable checkout or a fixture installation whose
 # .env, auth/keycloak, certs, journal and monitoring state the run creates and
@@ -58,6 +60,9 @@ CANDIDATE_ARG=""
 REPO_ARG=""
 PUBLIC_HOST=""          # Phase 4: the non-loopback public name (--public-host)
 SESSION_MAX_HOURS=""    # Phase 4a/4b companion runs: KEYCLOAK_SESSION_MAX_HOURS=N (--session-max-hours)
+BROWSER_MODE=container  # container (default, the walked shape) | agent (a Mac agent over the rendezvous, TOPOFIX F4)
+RENDEZVOUS=""           # --browser agent only: the guest directory shared with the Mac agent
+REND_NONCE=""           # --browser agent only: the run's rendezvous nonce from the Mac launcher (never printed)
 # Monitoring ports of the fixture (the defaults may be in use on a developer host);
 # fixture_env sets them and the curl() wrapper resolves the public name for them.
 GRAFANA_GATE_PORT=13000
@@ -96,6 +101,14 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
                    install without Makefile or git; its HEAD must be the --candidate commit, and the
                    installed product is compared with it (scripts/gate/candidate_binding.py)
   --stub-port N    Phase 3: the stand-in IdP's port on 127.0.0.1 (default $STUB_PORT; must be free)
+  --browser MODE   container (default: the walked krate-harness/playwright container vantage) or
+                   agent (the Mac agent over the rendezvous, for a vzNAT VM fixture: TOPOFIX F4; the
+                   agent carries W5/W6-W7's row plan, and X rows through it are a later batch)
+  --rendezvous DIR --browser agent only: the guest directory shared with the Mac agent
+                   (scripts/gate/mac/agent.mjs hello + {schema,id,row,nonce} requests)
+  --rendezvous-nonce TOKEN
+                   --browser agent only: the rendezvous nonce the Mac launcher generated
+                   (scripts/gate/mac/run-vm-gate.sh); every hello and response must carry it; never printed
   --wipe           remove an existing .env/auth/certs in that directory first (required when present)
   --keep           leave the fixture running at the end (no teardown)
   --no-screenshots skip the end-user screenshot story (X1/X3/X4 leave the required inventory)
@@ -116,6 +129,9 @@ while [[ $# -gt 0 ]]; do
     --stub-port) STUB_PORT="$2"; shift 2 ;;
     --public-host) PUBLIC_HOST="$2"; shift 2 ;;
     --session-max-hours) SESSION_MAX_HOURS="$2"; shift 2 ;;
+    --browser) BROWSER_MODE="$2"; shift 2 ;;
+    --rendezvous) RENDEZVOUS="$2"; shift 2 ;;
+    --rendezvous-nonce) REND_NONCE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --candidate) CANDIDATE_ARG="$2"; shift 2 ;;
     --repo) [[ -d "$2" ]] || { echo "--repo $2 is not a directory" >&2; exit 2; }; REPO_ARG="$(cd "$2" && pwd)"; shift 2 ;;
@@ -154,6 +170,100 @@ if [[ -n "$SESSION_MAX_HOURS" ]]; then
   [[ "$PHASE" == 4a || "$PHASE" == 4b ]] \
     || { echo "--session-max-hours runs with --phase 4a or 4b only (the session-maximum rows are U27, V23 and K37)" >&2; exit 2; }
 fi
+# ── browser vantage (TOPOFIX F3/F4/F9): the agent is the VM vantage; its preflight reads the
+# Mac agent's hello here, before anything is started, like the --repo checks above. ──
+case "$BROWSER_MODE" in container|agent) ;; *) echo "--browser must be container or agent: $BROWSER_MODE" >&2; exit 2 ;; esac
+agent_preflight() { # hello younger than 60 s, nonce-bound, skew <= 10 s, mac_src_ip inside 10/8, 172.16/12 or 192.168/16 (F7), and the
+  # gate_files digests of the Mac worktree must be exactly this runner's own copies (F4: the Mac
+  # runs the very bytes the receipt binds)
+  [[ -d "$RENDEZVOUS" ]] || { echo "--rendezvous $RENDEZVOUS is not a directory (scripts/gate/mac/agent.mjs writes agent-hello.json there)" >&2; exit 2; }
+  local parsed
+  parsed="$(python3 -I - "$RENDEZVOUS/agent-hello.json" "$REND_NONCE" "$GATE_DIR" <<'PYPREFLIGHT'
+import hashlib, ipaddress, json, os, sys, time
+hello_path, nonce, gate_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+def refuse(msg):
+    sys.stderr.write("agent hello refused: %s\n" % msg)
+    sys.exit(2)
+if not os.path.isfile(hello_path):
+    refuse("%s does not exist (is the Mac agent running?)" % hello_path)
+age = time.time() - os.stat(hello_path).st_mtime
+if age > 60:
+    refuse("the hello is %.1f s old (max 60 s; the agent rewrites it every 15 s)" % age)
+try:
+    hello = json.load(open(hello_path, "r", encoding="utf-8"))
+except ValueError as exc:
+    refuse("the hello is not strict JSON: %s" % exc)
+if hello.get("schema") != 1:
+    refuse("schema %r is not 1" % hello.get("schema"))
+if hello.get("nonce") != nonce:
+    refuse("the hello carries another run's nonce")
+skew = hello.get("clock_skew_ms")
+if not isinstance(skew, (int, float)) or abs(skew) > 10000:
+    refuse("clock skew %r ms is beyond the 10 s budget (TOTP has 30 s steps); the launcher sets the guest clock from the Mac" % skew)
+src = str(hello.get("mac_src_ip") or "")
+try:
+    addr = ipaddress.ip_address(src)
+except ValueError:
+    refuse("mac_src_ip %r is not an address" % src)
+# F7: network membership, not the stdlib's private-address flag (it is also set for 198.18.0.0/15, 192.0.2.0/24, 203.0.113.0/24 ...):
+# the air gap passes only these three private networks, so a Mac source outside them would be rejected there
+rfc1918 = [ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+if addr.version != 4 or not any(addr in net for net in rfc1918):
+    refuse("mac_src_ip %s is not inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16 (TOPOFIX2 F7: vmnet must give the Mac an RFC1918 address or replies would be rejected by the air gap)" % src)
+vm_ip = str(hello.get("vm_ip") or "")
+if not ipaddress.ip_address(vm_ip).version == 4:
+    refuse("vm_ip %r is not an IPv4 address" % vm_ip)
+mismatch = []
+for rel, digest in sorted((hello.get("gate_files") or {}).items()):
+    # the agent's own directory (agent/probe/package pins) is not copied into the guest: the
+    # skip MUST precede the digest read, else every agent run is refused here on the first
+    # scripts/gate/mac/* entry (review B1; the checker pins this order)
+    if os.path.relpath(rel, "scripts/gate").startswith("mac/"):
+        continue
+    local = os.path.join(gate_dir, os.path.relpath(rel, "scripts/gate"))
+    try:
+        actual = hashlib.sha256(open(local, "rb").read()).hexdigest()
+    except OSError as exc:
+        refuse("gate file %s is not readable in %s: %s" % (rel, gate_dir, exc))
+    if actual != digest:
+        mismatch.append(rel)
+if mismatch:
+    refuse("the Mac worktree's gate files differ from this runner's copies: %s (the Mac must run the very bytes the receipt binds, F4)" % ", ".join(mismatch[:6]))
+print("VM_IP=%s" % vm_ip)
+print("MAC_SRC_IP=%s" % src)
+print("VM_G6=%s" % str(hello.get("vm_g6") or ""))
+print("MAC_IFACE=%s" % str(hello.get("mac_iface") or ""))
+print("CLOCK_SKEW_MS=%d" % skew)
+print("HELLO_AGE=%d" % age)
+print("AGENT_PLAN=%s" % ",".join(sorted(str(x) for x in (hello.get("plan") or []))))
+PYPREFLIGHT
+  )"; local rc=$?
+  [[ $rc -eq 0 ]] || exit 2
+  VM_IP=""; MAC_SRC_IP=""; VM_G6=""; MAC_IFACE=""; CLOCK_SKEW_MS=""; HELLO_AGE=""; AGENT_PLAN=""
+  local k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      VM_IP) VM_IP="$v" ;; MAC_SRC_IP) MAC_SRC_IP="$v" ;; VM_G6) VM_G6="$v" ;;
+      MAC_IFACE) MAC_IFACE="$v" ;; CLOCK_SKEW_MS) CLOCK_SKEW_MS="$v" ;; HELLO_AGE) HELLO_AGE="$v" ;; AGENT_PLAN) AGENT_PLAN="$v" ;;
+    esac
+  done <<<"$parsed"
+  [[ -n "$VM_IP" && -n "$MAC_SRC_IP" && -n "$AGENT_PLAN" ]] || { echo "agent hello refused: the preflight emitted no VM_IP/MAC_SRC_IP/AGENT_PLAN" >&2; exit 2; }
+  echo >&2 "agent hello: vm_ip=$VM_IP mac_src_ip=$MAC_SRC_IP iface=${MAC_IFACE:-?} g6=${VM_G6:-none} skew=${CLOCK_SKEW_MS}ms age=${HELLO_AGE}s plan=$AGENT_PLAN (nonce-bound; the token is not printed)"
+}
+case "$BROWSER_MODE" in
+  agent)
+    [[ -n "$RENDEZVOUS" && -n "$REND_NONCE" ]] || { echo "--browser agent requires --rendezvous DIR and --rendezvous-nonce TOKEN (scripts/gate/mac/run-vm-gate.sh generates both)" >&2; exit 2; }
+    case "$PHASE" in
+      4a|4b|4c) ;;
+      *) echo "--browser agent is refused with --phase $PHASE: X1's story maps the name localhost, which no user points at a remote machine, so X1 stays a Mac-fixture row and the agent drives 4a/4b/4c only (TOPOFIX-REVIEW F9)" >&2; exit 2 ;;
+    esac
+    agent_preflight
+    ;;
+  container)
+    [[ -z "$RENDEZVOUS" && -z "$REND_NONCE" ]] \
+      || { echo "--rendezvous/--rendezvous-nonce belong to --browser agent (they name the shared guest directory and its run token)" >&2; exit 2; }
+    ;;
+esac
 
 ED="$EDITION_DIR"
 EDITION="$(basename "$ED")"
@@ -350,7 +460,7 @@ REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 G7 G8 A1 A
 as_root() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 if { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v logrotate >/dev/null 2>&1; then J7_REQUIRED=true; fi
 REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K31 K32 K33 K34 M1 M2 Z2)
-REQUIRED_P3=(P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 Z3)
+REQUIRED_P3=(P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P18 Z3)
 REQUIRED_X=(X1)
 # Phase 4 inventories (PHASE4-INSTRUCTIONS-v3.md section 5): a slice is REQUIRED_P1
 # plus its own rows, and it holds no Phase 2/3 ids (on an EPC edition directory the
@@ -359,7 +469,7 @@ REQUIRED_X=(X1)
 # runs and are not part of the default inventories.
 REQUIRED_P4A=(U1 U2 U3 U4 U5 U6 U7 U8 U9 U10 U11 U12 U13 U14 U15 U16 U17 U18 U19 U20 U21a U21b U22 U23 U24 U25 U26 U28 U29 X3 Z4a)
 REQUIRED_P4B=(V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15 V16 V17 V18 V19 V20 V21 V22 V24 X4 Z4b)
-REQUIRED_P4C=(W1 W2 W3 W4)
+REQUIRED_P4C=(W1 W2 W3 W4 W5 W6 W7)
 SESSION_P4A=(U27 K37)
 SESSION_P4B=(U27 V23)
 phase4_session_ids() { case "$1" in 4a) printf '%s\n' "${SESSION_P4A[@]}" ;; 4b) printf '%s\n' "${SESSION_P4B[@]}" ;; esac; }
@@ -373,6 +483,15 @@ if [[ "$PHASE" == 4c ]]; then
   elif { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v ip >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
     W3_REQUIRED=true
   fi
+fi
+# W5/W6/W7 are the network-path rows from the Mac vantage (TOPOFIX F6/F7): they test the
+# firewall and the published-port surface as a second machine experiences it, which needs the
+# Mac agent vantage (--browser agent) on a vzNAT VM fixture. They follow the J7 pattern too:
+# outside the inventory without that vantage (a Docker-machine fixture has no second-host
+# path to test), recorded NOT_RUN with the reason, decided by the VM receipt.
+W5W6W7_REQUIRED=false
+if [[ "$PHASE" == 4c && "$BROWSER_MODE" == agent ]]; then
+  W5W6W7_REQUIRED=true
 fi
 required_ids() { # the inventory that decides the verdict, given the flags
   local id
@@ -403,6 +522,7 @@ required_ids() { # the inventory that decides the verdict, given the flags
         for id in "${inv[@]}"; do
           if ! $SCREENSHOTS && [[ "$id" == X* ]]; then continue; fi
           if [[ "$id" == W3 ]] && ! $W3_REQUIRED; then continue; fi
+          if [[ "$id" == W5 || "$id" == W6 || "$id" == W7 ]] && ! $W5W6W7_REQUIRED; then continue; fi
           echo "$id"
         done
       fi ;;
@@ -612,8 +732,8 @@ run_static() {
   fi
   cap git -C "$TOPLEVEL" diff --check; st=$?; ok_if S2 static S "$st" "git diff --check clean"
   if docker image inspect koalaman/shellcheck:v0.9.0 >/dev/null 2>&1; then
-    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh scripts/gate/phase4_w3.sh; st=$?
-    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner, scripts/gate/stub_idp.sh and scripts/gate/phase4_w3.sh"
+    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh scripts/gate/phase4_w3.sh scripts/gate/mac/run-vm-gate.sh; st=$?
+    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner, scripts/gate/stub_idp.sh, scripts/gate/phase4_w3.sh and scripts/gate/mac/run-vm-gate.sh"
   else
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
@@ -1064,6 +1184,7 @@ realm_diffs() { printf '%s\n' "$1" | grep -E '^phase3_realm:' | sed 's/^phase3_r
 preflight_runtime() { compose config --format json 2>>"$RAW" | python3 -I "$SSO/preflight.py" --directory "$ED" --mode runtime.yml; }
 run_phase3() {
   local rc rc2 rc3 ev before after names id result evidence plan pem pem2 sha sha2 cluster a b c j kc1 kc2 kc3 local_pw reason
+  local refused stance user_uid events_before events_after pf_rc ap_rc rs_rc ad_rc wd_rc rs2_rc d e f g h w k l e2 jb  # P18's and P14's own variables (the MFA-stance row, P14's journal count)
   section "Phase 3 fixture: the Phase 2 stack + the stand-in IdP (stub_idp.sh, port $STUB_PORT) brokered into realm krate"
   if [[ "$EDITION" != kraft ]]; then
     for id in "${REQUIRED_P3[@]}"; do [[ "$id" == Z* ]] || record "$id" 3 P NOT_RUN "Phase 3 runtime fixture is KRaft on this runner (Phase 2's Kafbat stack); EPC runtime is covered by the Phase 1 receipt inside the Linux VM"; done
@@ -1151,15 +1272,89 @@ EOF
   [[ $rc -eq 0 && "$before" == error* && $rc2 -eq 0 && $a -eq 0 && $j -eq 0 && "$after" == ok* && "$after" == *"federated identities 1"* && "$(envv PING_KEYCLOAK_CLIENT_SECRET)" == "$(tr -d '\n' < "$STUB_DIR/.client-secret")" ]]; st=$?
   ok_if P16 3 P "$st" "stand-in secret rotated (exit $rc); before identity rotate the brokered sign-in fails at the realm: ${before%%; hops*}; identity rotate PING_KEYCLOAK_CLIENT_SECRET --value (stdin) exit $rc2, line 'Identity provider pingfederate: secret updated', journal 'rotate … applied to identity provider pingfederate', .env carries the new value; afterwards ping-viewer signs in again with its link kept: ${after%%; hops*}"
 
+  # ── P18: the MFA stance (enforce-if-asserted) ──
+  # NOT YET RUN ON A LIVE FIXTURE: the hand-walk observes the 502 page, the event pair and the provider update once
+  # before this row counts (owner rule 11). What the row asserts, from source (Keycloak 26.8.0) and the existing P16/P5
+  # machinery: the applied plan (the stand-in site file opted out, mfa_not_asserted: true, no claim filter) still brokers
+  # a sign-in; the preflight — the gate `auth apply` runs — refuses a plan whose site file stated neither stance; then
+  # Keycloak's "Verify essential claim" (filteredByClaim/claimFilterName/claimFilterValue on the provider's config; the
+  # claim is read from the ID token only, a missing claim and an unmatched value both fail, OIDCIdentityProvider.java
+  # 490-512) is applied for `amr` — a claim no stand-in token is expected to carry — through the plan and `auth apply`;
+  # a fresh stand-in user's sign-in then ends at the realm as `error` with status 502, no realm user exists before or
+  # after, and exactly one more IDENTITY_PROVIDER_LOGIN_ERROR event with error identity_provider_login_failure is
+  # stored (EventBuilder.error stores error events immediately; the realm plan's empty enabledEventTypes keeps every
+  # save-by-default type). The filter is withdrawn the way an operator withdraws it: the site switches to the opt-out,
+  # so the plan (P2's saved copy) no longer carries the three keys, and `auth apply` must UPDATE the live provider (not
+  # print "No changes"): the three keys are managed (identity.provider_differs), and the update replaces the provider's
+  # configuration (kcadm `update -f -` does not merge; IdentityProviderResource.updateIdpFromRep builds the model from
+  # the representation). The same user then signs in, and the brokered users' federated-identity links are untouched
+  # (the provider is updated in place, never removed). Every "absent" reading fails closed: a kcadm failure is a FAIL.
+  p18_user_ids() { kcadm_master get users -r krate -q username=ping-mfa -q exact=true --fields id --format csv --noquotes; }
+  p18_events() { local out; out="$(kcadm_master get events -r krate -q type=IDENTITY_PROVIDER_LOGIN_ERROR -q max=200 --fields type,error --format csv --noquotes)" || return 1
+    printf '%s\n' "$out" | grep -c 'identity_provider_login_failure' || true; }
+  p18_clean() { local json; json="$(kcadm_master get identity-provider/instances/pingfederate -r krate)" || return 1
+    [[ "$json" == *'"pingfederate"'* && "$json" != *filteredByClaim* && "$json" != *claimFilterName* && "$json" != *claimFilterValue* ]]; }
+  before="$(login_probe ping-viewer)"  # pre-filter positive control: the opted-out plan still signs in
+  [[ "$before" == ok* ]]; c=$?
+  python3 -I - "$plan" <<'EOF' >/dev/null 2>>"$RAW"
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data.pop('mfa_not_asserted', None)  # the stance refusal: neither the claim pair nor the opt-out marker
+open(path, 'w').write(json.dumps(data, indent=2) + '\n')
+EOF
+  cap preflight_runtime; pf_rc=$?
+  [[ $pf_rc -ne 0 && "$CAP" == *"no MFA stance"* && "$CAP" == *"mfa_claim_name"* && "$CAP" == *"mfa_not_asserted"* ]]; a=$?
+  stance="$(printf '%s' "$CAP" | grep -o -E 'states no MFA stance[^;]{0,140}' | head -1)"
+  python3 -I - "$plan" <<'EOF' >/dev/null 2>>"$RAW"
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data.pop('mfa_not_asserted', None)  # the filter keys are the stance; the marker must not ride beside them
+data['identityProviders'][0]['config']['filteredByClaim'] = 'true'
+data['identityProviders'][0]['config']['claimFilterName'] = 'amr'  # no stand-in client carries an amr mapper
+data['identityProviders'][0]['config']['claimFilterValue'] = 'otp'
+open(path, 'w').write(json.dumps(data, indent=2) + '\n')
+EOF
+  cap "$KRATE" auth apply; ap_rc=$?
+  cap realm_state --expect "$plan"; rs_rc=$?; ev="$(realm_diffs "$CAP")"
+  [[ $ap_rc -eq 0 && $rs_rc -eq 0 ]]; b=$?
+  cap "$STUB" add-user --project "$PROJECT" --out "$STUB_DIR" ping-mfa APP-KAFKA-VIEWERS; ad_rc=$?
+  [[ $ad_rc -eq 0 || "$CAP" == *"already exists"* ]]; d=$?
+  user_uid="$(p18_user_ids)"; e=$?
+  [[ $e -eq 0 ]] && ! grep -q -E '[0-9a-f-]{36}' <<< "$user_uid"; e=$?
+  events_before="$(p18_events)"; h=$?
+  refused="$(login_probe ping-mfa)"
+  sleep 2
+  events_after="$(p18_events)"; h=$((h + $?))
+  [[ $h -eq 0 && "$events_before" =~ ^[0-9]+$ && "$events_after" =~ ^[0-9]+$ && $events_before -lt 200 && $events_after -lt 200 && $((events_after - events_before)) -eq 1 ]]; h=$?
+  user_uid="$(p18_user_ids)"; f=$?
+  [[ $f -eq 0 ]] && ! grep -q -E '[0-9a-f-]{36}' <<< "$user_uid"; f=$?
+  [[ "$refused" == error* && "$refused" == *"502"* && "$refused" == *"/identity/realms/krate/"* ]]; g=$?
+  # Withdrawn the operator's way: the site switches to the opt-out (P2's saved plan: the marker, no claim keys), auth apply updates the provider.
+  cp "$STATE/plan.saved" "$plan"; chmod 644 "$plan"
+  cap "$KRATE" auth apply; wd_rc=$?
+  [[ $wd_rc -eq 0 ]] && grep -q 'provider updated' <<< "$CAP" && ! grep -q -E 'Identity provider pingfederate: No changes$' <<< "$CAP"; w=$?
+  cap realm_state --expect "$plan"; rs2_rc=$?
+  p18_clean; e2=$?
+  [[ $rs2_rc -eq 0 && $e2 -eq 0 ]]; k=$?
+  after="$(login_probe ping-mfa)"
+  [[ "$after" == ok* ]]; l=$?
+  user_uid="$(p18_user_ids | grep -o -E '[0-9a-f-]{36}' | head -1)"
+  [[ -n "$user_uid" ]] && kcadm_master delete "users/$user_uid" -r krate >/dev/null 2>&1
+  [[ $a -eq 0 && $b -eq 0 && $c -eq 0 && $d -eq 0 && $e -eq 0 && $f -eq 0 && $g -eq 0 && $h -eq 0 && $w -eq 0 && $k -eq 0 && $l -eq 0 ]]; st=$?
+  ok_if P18 3 P "$st" "MFA stance (enforce-if-asserted): the opted-out plan brokers ping-viewer (${before%%; hops*}; pre-filter control); preflight refused the plan that states no MFA stance (exit $pf_rc: ${stance:-not phrased}); the claim filter (filteredByClaim=true, claimFilterName amr, claimFilterValue otp) applied via auth apply (exit $ap_rc; realm vs plan exit $rs_rc: ${ev:-identical}); fresh stand-in user ping-mfa (no realm user before: exit $e) refused: ${refused%%; hops*} (no realm user after: exit $f), IDENTITY_PROVIDER_LOGIN_ERROR(identity_provider_login_failure) events ${events_before:-?} → ${events_after:-?} (+1 and both below the 200-event read cap: exit $h); filter withdrawn by switching the site to the opt-out: auth apply exit $wd_rc printed 'provider updated' and not 'No changes' (exit $w), realm matches the plan (exit $rs2_rc), the live provider carries none of the three keys (exit $e2; both together: exit $k); the same user signs in right after (${after%%; hops*}), its realm user removed afterwards. Mechanism asserted at the stand-in, not yet observed live; the tenant's assertion policy is site work (site mfa_not_asserted today: MFA enforced at Ping only)"
+
   # ── P14: the plan removed + auth apply → provider, mappers and flows gone, browser flow rebound, local login on the default path ──
+  jb="$(grep -c ' apply removed identity provider' "$JOURNAL" 2>/dev/null || true)"  # lines before P14's own apply: the term below needs a NEW line
   rm -f "$plan"
   cap "$KRATE" auth apply; rc=$?
   cap realm_state --expect-absent; rc2=$?; ev="$(realm_diffs "$CAP")"
-  journal_has ' apply removed identity provider'; j=$?
+  [[ "$(grep -c ' apply removed identity provider' "$JOURNAL")" -gt "${jb:-0}" ]]; j=$?
   before="$(curl -sk -o /dev/null -w '%{redirect_url}' --max-time 20 "$BASE/oauth2/authorization/keycloak")"
   after="$(curl -sk -o "$STATE/p14.html" -w '%{http_code}' --max-time 20 "$before")"; names="$(grep -c 'kc-form-login' "$STATE/p14.html")"; rm -f "$STATE/p14.html"
   [[ $rc -eq 0 && $rc2 -eq 0 && $j -eq 0 && "$after" == 200 && "$names" -ge 1 ]]; st=$?
-  ok_if P14 3 P "$st" "plan file removed; auth apply exit $rc; realm: ${ev:-provider gone, no krate flow, browserFlow browser}; journal 'apply removed identity provider'; Kafbat's default path → realm auth answers HTTP $after with the login form ($names form) instead of the broker redirect"
+  ok_if P14 3 P "$st" "plan file removed; auth apply exit $rc; realm: ${ev:-provider gone, no krate flow, browserFlow browser}; journal gained an 'apply removed identity provider' line (${jb:-0} before this apply); Kafbat's default path → realm auth answers HTTP $after with the login form ($names form) instead of the broker redirect"
 
   # ── P15: identity up on the existing realm reconciles CONFIGURE_TOTP default=false and re-applies the provider from the plan ──
   cp "$STATE/plan.saved" "$plan"; chmod 644 "$plan"
@@ -1499,7 +1694,7 @@ phase4_screenshots_x4() {
     -e GATE_VIEWER_PASSWORD -e GATE_VIEWER_TOTP -e GATE_ADMIN_PASSWORD -e GATE_ADMIN_TOTP \
     -e GATE_DISABLED_PASSWORD -e GATE_NOGROUP_PASSWORD -e GATE_NOGROUP_TOTP -e PW_MODULES=/usr/lib/node_modules \
     krate-harness/playwright:1.60.0 node /gate/screenshots-perses.mjs \
-    --host "$BASE_HOST" --perses-base "https://${BASE_HOST}:${PERSES_GATE_PORT}" --out /out \
+    --base "$BASE" --host "$BASE_HOST" --perses-base "https://${BASE_HOST}:${PERSES_GATE_PORT}" --out /out \
     --viewer-user p4v --admin-user "$admin_user" --disabled-user p4dis --nogroup-user p4nogroup --resolve-to "$gateway"
   st=$?
 
@@ -1898,6 +2093,401 @@ phase4_row_w3() {
     record W3 "$slice" W NOT_RUN "unsupported platform: $(uname -s)"
   fi
 }
+agent_request() { # row timeout_s: the runner's {schema,id,row,nonce} request to the Mac agent
+  # (TOPOFIX F4): the row table, the fixed arguments, the certificate and the budget are the
+  # agent's; this runner only names the row. CAP carries the response JSON. The response echoes
+  # the rendezvous nonce by protocol (it binds the run); the echo must NOT reach the raw log or
+  # the row's response copy, so it is redacted here before either store sees it (review S4).
+  # Review T01: browser_remote.py announces the request on stderr, also on success, so CAP takes ONLY its stdout (the response
+  # JSON) and the diagnostics go to CAP_ERR and the raw log, never into the saved response.
+  local rc err_file="$STATE/agent-request.err"
+  CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request --rendezvous "$RENDEZVOUS" --nonce "$REND_NONCE" --row "$1" --timeout "$2" 2>"$err_file")"; rc=$?
+  CAP_ERR="$(cat "$err_file" 2>/dev/null)"; rm -f "$err_file"
+  if [[ -n "$REND_NONCE" ]]; then CAP="${CAP//$REND_NONCE/<rendezvous-nonce-redacted>}"; CAP_ERR="${CAP_ERR//$REND_NONCE/<rendezvous-nonce-redacted>}"; fi
+  printf -- '--- agent request %s (exit %s)\n%s\n--- agent request %s stderr\n%s\n' "$1" "$rc" "$CAP" "$1" "$CAP_ERR" >> "$RAW"
+  return $rc
+}
+tail_chars() { # n text: the LAST n characters of text, behind `...` when it was cut (`${s: -n}` is empty when s is shorter than n)
+  local n="$1" s="$2"
+  if (( ${#s} > n )); then printf '...%s' "${s: -n}"; else printf '%s' "$s"; fi
+}
+agent_delivered_dir() { # row: the guest folder the agent copies the row's evidence into (one
+  # limactl copy --backend=scp -r invocation per response; M1 observed the flag)
+  printf '%s/agent-out/w%s' "$(dirname "$RENDEZVOUS")" "${1#W}"
+}
+
+w5_published_any_ports() { # prints `service=port` for every any-address published port of the running Compose projects
+  # Review T02: .Label is a `docker ps` formatting helper, not a method of the object `docker inspect` renders ("Label is not a
+  # method but has arguments"), so the service label is read from .Config.Labels, and a failed inspect (or no container at all)
+  # is an error (rc 1 and the reason on stdout), never a silently smaller derived set.
+  # shellcheck disable=SC2016  # the Go template is literal
+  local tpl='{{index .Config.Labels "com.docker.compose.service"}}|{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}}:{{.HostPort}} {{end}}{{end}}'
+  local cid line svc bind failed="" inspected=0
+  while IFS= read -r cid; do
+    [[ -z "$cid" ]] && continue
+    if ! line="$(docker inspect -f "$tpl" "$cid" 2>>"$RAW")"; then failed+="$cid "; continue; fi
+    inspected=$((inspected+1))
+    svc="${line%%|*}"
+    # shellcheck disable=SC2086  # the bind list is space-separated single tokens
+    for bind in ${line#*|}; do
+      case "$bind" in
+        0.0.0.0:* | "::":* | :*) printf '%s=%s\n' "$svc" "${bind##*:}" ;;
+      esac
+    done
+  done < <({ docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null
+             docker ps -aq --filter "label=com.docker.compose.project=$MON_PROJECT" 2>/dev/null; } | sort -u)
+  if [[ -n "$failed" ]] || (( inspected == 0 )); then
+    printf 'docker inspect failed for [%s] and %d container(s) were inspected (the error is in the raw log)\n' "${failed:-none}" "$inspected"
+    return 1
+  fi
+}
+w5_control_listener() { # port 111 must accept IPv4 connections addressed to lima0 before a refusal can prove filtering
+  local nic_info nic_addresses listeners endpoint address
+  if ! nic_info="$(ip -4 -o addr show dev lima0 2>>"$RAW")"; then
+    echo "cannot read lima0 IPv4 addresses for the port 111 control"; return 1
+  fi
+  nic_addresses="$(awk '$3 == "inet" {sub(/\/.*/, "", $4); print $4}' <<<"$nic_info")"
+  [[ -n "$nic_addresses" ]] || { echo "lima0 has no IPv4 address for the port 111 control"; return 1; }
+  if ! listeners="$(ss -4 -ltnH 'sport = :111' 2>>"$RAW")"; then
+    echo "cannot read IPv4 TCP listeners for the port 111 control"; return 1
+  fi
+  while read -r _ _ _ endpoint _; do
+    case "$endpoint" in
+      0.0.0.0:111 | \*:111) echo "port 111 IPv4 listener bound to $endpoint"; return 0 ;;
+    esac
+    while IFS= read -r address; do
+      if [[ "$endpoint" == "$address:111" ]]; then echo "port 111 IPv4 listener bound to lima0 $endpoint"; return 0; fi
+    done <<<"$nic_addresses"
+  done <<<"$listeners"
+  echo "port 111 has no IPv4 TCP listener bound to a wildcard or lima0 address (loopback-only or absent cannot prove filtering)"
+  return 1
+}
+phase4_row_w5() {
+  local slice="$1"
+  section "W5: published-port surface from the Mac over the fixture's NIC address (derived expected set, control port 111, three outcomes, TCP only)"
+  # The expected set is derived at run time from the fixture's own runtime state, never from
+  # README line numbers (TOPOFIX F6): the any-address published ports of the running Compose
+  # projects plus sshd's 22. Three outcomes (open / refused / rejected; M3 and the M4 sweep
+  # saw both refusal shapes), the control port 111, and the guest's ss tables beside it.
+  local derived svc port
+  local any_ports="" ports_svc=""
+  if ! derived="$(w5_published_any_ports)"; then
+    record W5 "$slice" W FAIL "the derived expected set cannot be built: $derived"
+    return
+  fi
+  while IFS='=' read -r svc port; do
+    [[ -n "$port" ]] || continue
+    any_ports+="$port "; ports_svc+="$svc=$port "
+  done <<<"$derived"
+  local expected_csv docker_csv
+  # shellcheck disable=SC2086  # the CSV is built from the split port words
+  expected_csv="$(printf '%s\n' $any_ports 22 | LC_ALL=C sort -n -u | paste -s -d, -)"
+  # TOPOFIX2 G5: the docker-published set alone, WITHOUT sshd's 22. The IPv4 open-set equality uses the set
+  # with 22; the IPv6 rule fails only a docker-published port that is open over IPv6, because sshd's own 22
+  # answers over IPv6 by design (M4 point 4) and is the positive control of that pass.
+  # shellcheck disable=SC2086  # the CSV is built from the split port words
+  docker_csv="$(printf '%s\n' $any_ports | LC_ALL=C sort -n -u | paste -s -d, -)"
+  local ss_listeners ss_udp fw_state
+  ss_listeners="$(ss -ltnH 2>/dev/null | awk '{print $4}' | tr '\n' ' ' | cut -c1-240)"
+  ss_udp="$(ss -lunH 2>/dev/null | awk '{print $4}' | tr '\n' ' ' | cut -c1-120)"
+  # shellcheck disable=SC2086
+  if ! fw_state="$( { sudo -n firewall-cmd --state 2>/dev/null || firewall-cmd --state 2>/dev/null; } | grep -E '^(running|not running)$' | head -1)"; then fw_state="firewalld not answerable"; fi
+  local control_listener="no firewall-effectiveness control required"
+  if [[ "$fw_state" == running && ",$expected_csv," != *,111,* ]]; then
+    if ! control_listener="$(w5_control_listener)"; then
+      record W5 "$slice" W FAIL "firewall-effectiveness control precondition: $control_listener"
+      return
+    fi
+  fi
+  # The Mac side: one {schema,id,row,nonce} request (F4); the agent owns the sweep's fixed
+  # arguments, the certificate and the budget, and delivers the result file back (one
+  # limactl copy --backend=scp -r invocation per response).
+  local agent_rc=0
+  agent_request W5 1500 || agent_rc=$?
+  if (( agent_rc != 0 )); then
+    record W5 "$slice" W FAIL "the W5 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): $(tail_chars 300 "$CAP_ERR")${CAP:+ | stdout: ${CAP:0:300}}"
+    return
+  fi
+  if [[ "$CAP" != *'"exit"'* ]]; then
+    record W5 "$slice" W FAIL "the agent response is not the expected JSON (browser_remote printed: ${CAP:0:200})"
+    return
+  fi
+  printf '%s\n' "$CAP" > "$STATE/w5-agent-response.json" && chmod 600 "$STATE/w5-agent-response.json"
+  local result_file evidence rc_eval breaches
+  result_file="$(agent_delivered_dir W5)/w5-result.json"
+  if [[ ! -f "$result_file" ]]; then
+    record W5 "$slice" W FAIL "the W5 result file did not arrive under $(agent_delivered_dir W5) (deliveries sit beside the rendezvous, nonce-bound)"
+    return
+  fi
+  rc_eval=0
+  evidence="$(W5_EXPECTED="$expected_csv" W5_DOCKER="$docker_csv" W5_VM_G6="${VM_G6:-}" python3 -I - "$result_file" "$fw_state" "$STATE/w5-agent-response.json" <<'PYW5' 2>>"$RAW"
+import hashlib, json, os, re, sys
+
+result_file, fw_state, response_file = sys.argv[1], sys.argv[2], sys.argv[3]
+bad = []
+note = []
+try:
+    result_bytes = open(result_file, "rb").read()   # one read: the bytes that are hashed are the bytes that are evaluated
+    r = json.loads(result_bytes.decode("utf-8"))
+except (OSError, ValueError) as exc:
+    sys.stderr.write("the W5 result file is not readable/JSON: %s\n" % exc)
+    sys.exit(1)
+try:
+    envelope = json.load(open(response_file, "r", encoding="utf-8"))
+except (OSError, ValueError) as exc:
+    sys.stderr.write("the saved W5 agent response is not readable/JSON: %s\n" % exc)
+    sys.exit(1)
+# Review R1: the result file on the guest must be the one THIS response delivered. The agent lists every file it delivered with its
+# sha256 (files[]) in the nonce-bound response; a file under the delivery folder that is not that listed one (an earlier run's result
+# that scp -r left in place, a foreign file) decides nothing: the row fails closed before any value of the file is evaluated.
+result_sha = hashlib.sha256(result_bytes).hexdigest()
+listed = [f for f in (envelope.get("files") or []) if isinstance(f, dict) and f.get("name") == "w5-result.json"]
+if len(listed) != 1 or listed[0].get("sha256") != result_sha:
+    if len(listed) != 1:
+        why = "the agent response lists %d w5-result.json entries in files[] (exactly one is required), so the delivered file cannot be tied to this run" % len(listed)
+    else:
+        why = "the delivered w5-result.json (sha256 %s) is not the file this agent response lists (sha256 %s): a stale or foreign result is not evaluated" % (result_sha[:12], str(listed[0].get("sha256"))[:12])
+    print("breaches=1")
+    print("BREACH %s" % why)
+    sys.exit(1)
+if not (r.get("swept") or {}).get("tcpOnly"):
+    bad.append("the sweep is not TCP-only as the row states")
+counts = r.get("counts") or {}
+open_set = sorted(int(p) for p in (r.get("open") or []) if str(p).isdigit())
+spot_by_port = {int(s["port"]): s for s in (r.get("spot") or []) if str(s.get("port", "")).isdigit()}
+cert = r.get("cert") or {}
+v6entries = (r.get("v6") or {}).get("ports") or []
+v6 = r.get("v6") or {}
+v6_addr = v6.get("address", "")
+v6_class = v6.get("addressClass", "")
+expected = sorted(int(p) for p in re.findall(r"\d+", os.environ.get("W5_EXPECTED", "")))
+docker_published = sorted(int(p) for p in re.findall(r"\d+", os.environ.get("W5_DOCKER", "")))
+vm_g6 = os.environ.get("W5_VM_G6", "")
+if open_set != expected:
+    bad.append("observed open set [%s] != derived set [%s]" % (",".join(map(str, open_set)), ",".join(map(str, expected))))
+else:
+    note.append("observed open set equals the derived set [%s]" % ",".join(map(str, open_set)))
+fw_running = fw_state == "running"
+if 111 in expected:
+    note.append("111 is in the derived set (an operator published it): no firewall control this run")
+else:
+    o111 = spot_by_port.get(111, {}).get("outcome", "not-swept")
+    if fw_running and o111 not in ("refused", "rejected"):
+        bad.append("control port 111 is %s with firewalld running (its zone is not applied to lima0; expected refused/rejected)" % o111)
+    elif not fw_running:
+        note.append("111=%s; no firewall control available (firewalld state: %s)" % (o111, fw_state))
+    else:
+        note.append("control port 111 refused/rejected as the zone requires (%s)" % o111)
+for port in sorted(spot_by_port):
+    if port in expected or port == 111:
+        continue
+    outcome = spot_by_port[port].get("outcome")
+    if outcome not in ("refused", "rejected", "timeout"):
+        bad.append("undocumented spot port %d is %s, expected refused/rejected/timeout" % (port, outcome))
+if not cert:
+    note.append("no TLS pin in the result (the agent must pass --cert for the 443 positive)")
+elif not cert.get("authorized"):
+    bad.append("the 443 TLS pin shows authorized=false (%s)" % cert.get("server"))
+else:
+    note.append("443 TLS authorized against the pinned certificate (%s, %s)" % (cert.get("protocol"), cert.get("sha256")))
+v6_outcome = {}
+for p in v6entries:
+    try:
+        port = int(p.get("port"))
+    except (TypeError, ValueError):
+        continue
+    v6_outcome[port] = p.get("outcome")
+    if p.get("outcome") not in ("open", "refused", "rejected", "timeout"):
+        bad.append("IPv6 probe of port %d was inconclusive (%s): an unroutable or unscoped probe proves no filtering" % (port, p.get("outcome")))
+    if port in docker_published and p.get("outcome") == "open":
+        bad.append("docker-published port %d is open over IPv6 (lab8 N11a and the M4 sweep observed the [::] docker-proxy path filtered by firewalld's zone)" % port)
+if vm_g6:
+    # sshd's 22 is the positive control: with a global address in the hello the IPv6 pass must reach the guest at all
+    if v6_outcome.get(22, "not-swept") != "open":
+        bad.append("IPv6 positive control: sshd's 22 did not answer over IPv6 (%s)" % v6_outcome.get(22, "not-swept"))
+    else:
+        note.append("22 answers over IPv6 (sshd; M4)")
+# Review T16: mac_leak_scan belongs to the agent's response envelope, not to w5-result.json (probe.mjs never writes it there);
+# a missing or malformed scan is a breach, a scan with hits too.
+leak = envelope.get("mac_leak_scan")
+if not (isinstance(leak, dict) and isinstance(leak.get("values"), int) and isinstance(leak.get("hits"), int) and isinstance(leak.get("stores"), list)):
+    bad.append("the agent response carries no valid mac_leak_scan {values, hits, stores}")
+    leak = {}
+elif leak.get("hits"):
+    bad.append("the agent's mac leak scan found %s hit(s) in %s" % (leak.get("hits"), leak.get("stores")))
+print("open=[%s]" % ",".join(map(str, open_set)))
+print("expected=[%s]" % ",".join(map(str, expected)))
+print("counts=%s" % counts)
+print("control=%s fw=%s" % (spot_by_port.get(111, {}).get("outcome", "not-swept"), fw_state))
+print("cert=%s" % (json.dumps({k: cert.get(k) for k in ("authorized", "protocol", "sha256")}) if cert else "none"))
+print("v6=%s" % ("%s %s open=[%s]" % (v6_class or "?", v6_addr or "?", ",".join(str(p.get("port")) for p in v6entries if p.get("outcome") == "open")) if v6entries else ("not-run (the result carries no IPv6 ports although the hello carries vm_g6)" if vm_g6 else "not-run (no guest IPv6 global address, vm_g6, in the hello)")))
+print("spot_not_open=[%s]" % (",".join(str(p) for p in sorted(spot_by_port) if spot_by_port[p].get("outcome") != "open") or "-"))
+print("leak=%s" % ("%s values, %s hits in %s" % (leak.get("values", "?"), leak.get("hits", "?"), ",".join(leak.get("stores", []))) if leak else "no scan in the response"))
+print("notes=%s" % (" | ".join(note) if note else "-"))
+print("breaches=%d" % len(bad))
+for b in bad:
+    print("BREACH %s" % b)
+sys.exit(1 if bad else 0)
+PYW5
+  )" || rc_eval=$?
+  breaches="$(printf '%s\n' "$evidence" | grep -c '^BREACH ' || true)"
+  if (( rc_eval != 0 || breaches > 0 )); then
+    record W5 "$slice" W FAIL "$evidence (eval exit=$rc_eval breaches=$breaches; TCP only; $control_listener; ss -ltnH: ${ss_listeners:-none})"
+  else
+    record W5 "$slice" W PASS "$evidence (TCP only; $control_listener; ss -ltnH: ${ss_listeners:-none}; ss -lunH: ${ss_udp:-none}; exposed binds: ${ports_svc:-none})"
+  fi
+}
+
+w6_response_fields() { # response.json: sets W6_STATUS, W6_UA, W6_ISSUER and W6_LEAK from the saved agent response
+  # Review T04: `read` consumes ONE line whatever IFS is, and the helper prints four, so every field is taken from its own line.
+  local parsed
+  parsed="$(python3 -I - "$1" <<'PYW6B' 2>>"$RAW"
+import json, re, sys
+r = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+tail = r.get("stdout_tail") or ""
+m = re.search(r"status=([0-9]{3})", tail)
+print(m.group(1) if m else "")
+m = re.search(r"ua=([A-Za-z0-9._-]+)", tail)
+print(m.group(1) if m else "")
+m = re.search(r"issuer=(\S+)", tail)
+print(m.group(1) if m else "")
+leak = r.get("mac_leak_scan") or {}
+print("%s values, %s hits" % (leak.get("values", "?"), leak.get("hits", "?")))
+PYW6B
+  )" || return 1
+  local -a fields
+  mapfile -t fields <<<"$parsed"
+  W6_STATUS="${fields[0]:-}"; W6_UA="${fields[1]:-}"; W6_ISSUER="${fields[2]:-}"; W6_LEAK="${fields[3]:-}"
+}
+phase4_row_w6() {
+  local slice="$1"
+  section "W6: the client address the proxy logs for a Mac request (IPv4 path; TOPOFIX W6, kept)"
+  # One Mac request with a forged X-Forwarded-For and a row User-Agent; the runner (in the
+  # guest) reads the proxy's log line and asserts the $remote_addr equals mac_src_ip (M4's
+  # observed shape), not the forged header and not a bridge gateway.
+  local agent_rc=0
+  agent_request W6 240 || agent_rc=$?
+  if (( agent_rc != 0 )); then
+    record W6 "$slice" W FAIL "the W6 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): $(tail_chars 300 "$CAP_ERR")${CAP:+ | stdout: ${CAP:0:300}}"
+    return
+  fi
+  printf '%s\n' "$CAP" > "$STATE/w6-agent-response.json" && chmod 600 "$STATE/w6-agent-response.json"
+  local status ua issuer leak
+  w6_response_fields "$STATE/w6-agent-response.json" || { record W6 "$slice" W FAIL "the W6 agent response could not be parsed (see run.log); response kept at $STATE/w6-agent-response.json"; return; }
+  status="$W6_STATUS"; ua="$W6_UA"; issuer="$W6_ISSUER"; leak="$W6_LEAK"
+  if [[ ! "$status" =~ ^[0-9]{3}$ || -z "$ua" ]]; then
+    record W6 "$slice" W FAIL "the agent response tail names no status/ua (the RESULT W6 line is in run.log)"
+    return
+  fi
+  local logline addr
+  logline="$(docker logs "$(cid proxy)" 2>>"$RAW" | grep -F "$ua" | head -1 || true)"
+  if [[ -z "$logline" ]]; then
+    record W6 "$slice" W FAIL "no proxy log line for User-Agent $ua (nginx log_format krate_identity logs this path, epc/nginx.conf)"
+    return
+  fi
+  addr="$(printf '%s\n' "$logline" | awk '{print $1}')"
+  if [[ "$addr" == "$MAC_SRC_IP" && "$status" == 200 ]]; then
+    record W6 "$slice" W PASS "requested the realm discovery document from the Mac with X-Forwarded-For 203.0.113.9 and User-Agent $ua: the proxy logged remote_addr=$addr == mac_src_ip ($MAC_SRC_IP) and answered HTTP $status (issuer $issuer; M4's observed shape); IPv4 path only (the IPv6 docker-proxy path is the lab8 N11a asymmetry, not asserted here); agent leak scan: $leak"
+  else
+    record W6 "$slice" W FAIL "the proxy logged remote_addr=$addr, expected mac_src_ip $MAC_SRC_IP (and HTTP 200, got $status); the forged 203.0.113.9 must not appear in the log (the same-host variants stay with G6/G7)"
+  fi
+}
+
+w7_os_family() { # [os-release file]: rhel | debian | unknown, from ID and ID_LIKE (review T05). The file is an argument, never an environment variable: the operator's environment must not choose the OS branch W7 takes (R7)
+  local file="${1:-/etc/os-release}" ids
+  ids="$(sed -n -E 's/^(ID|ID_LIKE)=//p' "$file" 2>/dev/null | tr -d "\"'" | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
+  case " $ids " in
+    *" rhel "* | *" fedora "* | *" centos "* | *" rocky "* | *" almalinux "*) echo rhel ;;
+    *" debian "* | *" ubuntu "*) echo debian ;;
+    *) echo unknown ;;
+  esac
+}
+phase4_row_w7() {
+  local slice="$1" st=0 ev=""
+  section "W7: firewalld/ufw state as the fixture itself sees it (zone of lima0, no runtime-only edit, no rich rules, the doctor's line)"
+  # Review T05: the branch follows the fixture's OS, not the firewall that happens to be running, so a Rocky/RHEL fixture whose
+  # firewalld stopped FAILs here instead of falling into the Ubuntu/ufw shape and passing with no firewall at all.
+  local os_family fw_active=false
+  os_family="$(w7_os_family "${2:-/etc/os-release}")"   # the optional second argument exists for the checker; the row's one call site passes the slice only
+  if command -v firewall-cmd >/dev/null 2>&1 && [[ "$(systemctl is-active firewalld 2>/dev/null || true)" == active ]]; then fw_active=true; fi
+  if [[ "$os_family" == unknown ]]; then
+    st=1
+    ev+="unsupported fixture OS (/etc/os-release ID/ID_LIKE are neither RHEL-family nor Debian/Ubuntu): W7 supports RHEL-family hosts with a running firewalld and Debian/Ubuntu hosts with ufw"
+  elif [[ "$os_family" == rhel ]] && ! $fw_active; then
+    st=1
+    ev+="RHEL-family fixture without a running firewalld (firewall-cmd: $(command -v firewall-cmd || echo missing); systemctl is-active firewalld: $(systemctl is-active firewalld 2>/dev/null || echo unknown)): the supported fixture requires it running with lima0 in its default zone"
+  elif [[ "$os_family" == rhel ]]; then
+    local fwcmd def zone_lima0 zone_bridge docker_target bridge svc_rt svc_perm ports_rt ports_perm proto_rt proto_perm
+    local icmp_rt icmp_perm rich fwd policies doctor fw_read_rc fw_read_errors=""
+    # Review T06/R3: every firewall command whose output W7 reads runs under LC_ALL=C (ufw's status line is gettext-translated, so a
+    # guest with a translated catalogue would otherwise fail a correct fixture as "unreadable"); `env` inside sudo keeps it whatever
+    # sudo's env_reset does with the caller's locale.
+    fwcmd=(sudo -n env LC_ALL=C firewall-cmd)
+    sudo -n true 2>/dev/null || fwcmd=(env LC_ALL=C firewall-cmd)
+    def="$("${fwcmd[@]}" --get-default-zone 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --get-default-zone=$fw_read_rc"; }
+    zone_lima0="$("${fwcmd[@]}" --get-zone-of-interface=lima0 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --get-zone-of-interface=lima0=$fw_read_rc"; }
+    bridge=""
+    for netdev in /sys/class/net/docker* /sys/class/net/br-*; do
+      if [[ -e "$netdev" ]]; then bridge="$(basename "$netdev")"; break; fi
+    done
+    zone_bridge="$("${fwcmd[@]}" --get-zone-of-interface="${bridge:-none}" 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --get-zone-of-interface=${bridge:-none}=$fw_read_rc"; }
+    # Review T17: the docker zone must also be ACCEPT (a docker zone changed to DROP/REJECT changes the forwarding behaviour the row
+    # asserts). The query is the doctor's own (epc/krate: firewall-cmd --info-zone=docker); --get-target is a --permanent-only query
+    # (firewall-cmd(1): "--permanent [--zone=zone] --get-target") and the docker zone is runtime-managed.
+    docker_target="$("${fwcmd[@]}" --info-zone=docker 2>>"$RAW" | awk -F': ' '/target:/{print $2}' | tr -d '[:space:]')" || { fw_read_rc=$?; st=1; fw_read_errors+=" --info-zone=docker=$fw_read_rc"; }
+    svc_rt="$("${fwcmd[@]}" --zone="$def" --list-services 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" runtime --list-services=$fw_read_rc"; }
+    svc_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-services 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" permanent --list-services=$fw_read_rc"; }
+    ports_rt="$("${fwcmd[@]}" --zone="$def" --list-ports 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" runtime --list-ports=$fw_read_rc"; }
+    ports_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-ports 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" permanent --list-ports=$fw_read_rc"; }
+    proto_rt="$("${fwcmd[@]}" --zone="$def" --list-protocols 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" runtime --list-protocols=$fw_read_rc"; }
+    proto_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-protocols 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" permanent --list-protocols=$fw_read_rc"; }
+    icmp_rt="$("${fwcmd[@]}" --zone="$def" --list-icmp-blocks 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" runtime --list-icmp-blocks=$fw_read_rc"; }
+    icmp_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-icmp-blocks 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" permanent --list-icmp-blocks=$fw_read_rc"; }
+    rich="$("${fwcmd[@]}" --zone="$def" --list-rich-rules 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --list-rich-rules=$fw_read_rc"; }
+    fwd="$("${fwcmd[@]}" --zone="$def" --list-forward-ports 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --list-forward-ports=$fw_read_rc"; }
+    policies="$("${fwcmd[@]}" --get-policies 2>>"$RAW")" || { fw_read_rc=$?; st=1; fw_read_errors+=" --get-policies=$fw_read_rc"; }
+    doctor="$("$KRATE" doctor 2>>"$RAW" | grep -i firewall | head -2 | tr '\n' ' ' || true)"
+    [[ "$def" != "?" && "$zone_lima0" == "$def" ]] || st=1
+    [[ "$zone_bridge" == "docker" ]] || st=1
+    [[ "$docker_target" == ACCEPT ]] || st=1
+    [[ "$svc_rt" == "$svc_perm" && "$ports_rt" == "$ports_perm" && "$proto_rt" == "$proto_perm" && "$icmp_rt" == "$icmp_perm" ]] || st=1
+    [[ -z "${rich// /}" && -z "${fwd// /}" ]] || st=1
+    ev+="default zone $def: lima0 in it (M3), bridge ${bridge:-none} in zone $zone_bridge (docker, M4), docker zone target [${docker_target:-unknown}] (ACCEPT required);"
+    ev+=" runtime==permanent for services/ports/protocols/icmp-blocks (no runtime-only harness edit; docker's interface membership is runtime-managed by design),"
+    ev+=" services=[$svc_rt] ports=[$ports_rt];"
+    ev+=" rich rules [${rich:-none}] forward-ports [${fwd:-none}] empty;"
+    if [[ "$policies" == *"docker-forwarding"* ]]; then
+      ev+=" policies include docker-forwarding;"
+    else
+      ev+=" policies=${policies:-not supported by this firewalld} (docker-forwarding not named);"
+      st=1
+    fi
+    ev+=" doctor: ${doctor:-none printed}"
+    [[ -z "$fw_read_errors" ]] || ev+="; firewall queries failed (exit status):$fw_read_errors"
+  else
+    local ufw_state ufw_first ufw_reason="" ufw_status input_head doctor
+    ufw_state="$(systemctl is-active ufw 2>/dev/null || true)"   # evidence text only: ufw.service is a oneshot that reads `active` (exited) while `ufw status` says inactive (TOPOFIX2 PRE-4)
+    ufw_first="$( { sudo -n env LC_ALL=C ufw status 2>/dev/null || LC_ALL=C ufw status 2>/dev/null; } | head -1 || true)"   # fixed locale: the case below matches ufw's English status line (T06)
+    ufw_status="$( { sudo -n env LC_ALL=C ufw status verbose 2>/dev/null || LC_ALL=C ufw status verbose 2>/dev/null; } | head -4 | tr '\n' ' ' || true)"
+    input_head="$(sudo -n env LC_ALL=C iptables -S INPUT 2>/dev/null | head -1 || true)"
+    doctor="$("$KRATE" doctor 2>>"$RAW" | grep -i firewall | head -2 | tr '\n' ' ' || true)"
+    case "$ufw_first" in
+      "Status: inactive"*) ;;
+      "Status: active"*) st=1 ;; # the gate's standard fixture keeps ufw inactive (TOPOFIX 5.5; enabling it is an operator choice)
+      *) st=1; ufw_reason="ufw status unreadable (needs root or passwordless sudo)" ;;
+    esac
+    ev+="no active firewalld (Ubuntu shape, M6 pending on a re-created VM): ufw status first line [${ufw_first:-none}], ufw.service $ufw_state${ufw_status:+; status: }$ufw_status,"
+    [[ -z "$ufw_reason" ]] || ev+=" $ufw_reason,"
+    ev+=" INPUT head: ${input_head:-unavailable}; doctor: ${doctor:-none printed};"
+    ev+=" no firewall-effectiveness control available for W5 on this host (ufw ${ufw_first:-unreadable})"
+  fi
+  if (( st == 0 )); then
+    record W7 "$slice" W PASS "$ev"
+  else
+    record W7 "$slice" W FAIL "$ev"
+  fi
+}
+
 phase4_row_w4() {
   local slice="$1"
   section "W4: 5-source reachability census equal to Table 2 of monitoring/README.md"
@@ -2080,6 +2670,24 @@ run_phase4() { # slice: 4a|4b|4c
           fi
         fi
         in_inv W4 "${run_inv[@]}" && phase4_row_w4 "$slice"
+        # W5/W6/W7 (TOPOFIX F6/F7): the network path of a user's computer. They follow the
+        # J7 pattern: inside the inventory only under the Mac agent vantage (--browser agent
+        # on a vzNAT VM fixture; W5W6W7_REQUIRED), NOT_RUN elsewhere, decided by the VM receipt.
+        if in_inv W5 "${run_inv[@]}"; then
+          if $W5W6W7_REQUIRED; then phase4_row_w5 "$slice"; else
+            record W5 "$slice" W NOT_RUN "needs the Mac vantage (--browser agent on a vzNAT VM fixture): the row tests the fixture's surface from a second host's NIC address; decided by the VM receipt"
+          fi
+        fi
+        if in_inv W6 "${run_inv[@]}"; then
+          if $W5W6W7_REQUIRED; then phase4_row_w6 "$slice"; else
+            record W6 "$slice" W NOT_RUN "needs the Mac vantage (--browser agent on a vzNAT VM fixture): the row binds a Mac request to the proxy's logged client address; decided by the VM receipt"
+          fi
+        fi
+        if in_inv W7 "${run_inv[@]}"; then
+          if $W5W6W7_REQUIRED; then phase4_row_w7 "$slice"; else
+            record W7 "$slice" W NOT_RUN "needs the Mac vantage (--browser agent on a vzNAT VM fixture): the row asserts the fixture's firewall state on the VM the formal receipts run on; decided by the VM receipt"
+          fi
+        fi
         ;;
     esac
   fi
@@ -2268,11 +2876,21 @@ teardown() {
 finish() {
   airgap_after_rows exit-path  # a no-op when the run reached its normal end (it ran before the teardown)
   airgap_fill AG1 AG4 AG2 AG3 AG5  # a signal during the after step leaves rows unrecorded: a bundle host gets FAIL rows, never absent ones
-  local verdict=PASS missing=() id notrun_required=0
+  local verdict=PASS missing=() id notrun_required=0 vmip_now
   while IFS= read -r id; do
     [[ -n "${SEEN[$id]:-}" ]] || { missing+=("$id"); continue; }
     [[ "${SEEN_RESULT[$id]:-}" == NOT_RUN ]] && notrun_required=$((notrun_required+1))
   done < <(required_ids)
+  # TOPOFIX F7: with the agent vantage the fixture's lima0 address must still be the hello's
+  # at finish — a DHCP re-lease during the run would void the certificate and nonce binding.
+  if [[ "$BROWSER_MODE" == agent && "$PHASE" == 4* ]]; then
+    vmip_now="$(ip -4 -o addr show 2>/dev/null | awk '$2 == "lima0" {split($4, a, "/"); print a[1]; exit}')"
+    if [[ "$vmip_now" == "$VM_IP" ]]; then
+      record vmip "${PHASE}" W PASS "end-of-run (TOPOFIX F7): the fixture's lima0 address is still $VM_IP, so the certificate and rendezvous binding holds"
+    else
+      record vmip "${PHASE}" W FAIL "end-of-run: the fixture's lima0 address changed during the run ($VM_IP -> ${vmip_now:-gone}); the certificate and the rendezvous binding are void (F7: a DHCP re-lease)"
+    fi
+  fi
   (( FAILS == 0 )) || verdict=FAIL
   if (( notrun_required > 0 || ${#missing[@]} > 0 )) && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
   if ! $BOUND && [[ "$verdict" == PASS ]]; then verdict=INCOMPLETE; fi
@@ -2333,6 +2951,7 @@ PYEOF
       echo "| session maximum | KEYCLOAK_SESSION_MAX_HOURS=$SESSION_MAX_HOURS (--session-max-hours, set in .env before the realm was created); this companion run executes REQUIRED_P1 plus: $(phase4_session_ids "$PHASE" | tr '\n' ' ') |"
     fi
     echo "| host | $(uname -srm); Docker $(docker version -f '{{.Server.Version}}' 2>/dev/null); Compose $(docker compose version --short 2>/dev/null); $(python3 --version 2>&1); $(openssl version) |"
+    echo "| browser vantage | $BROWSER_MODE${RENDEZVOUS:+ (agent: rendezvous $(dirname "$RENDEZVOUS"), nonce-bound, vm_ip ${VM_IP:-unknown}, mac_src_ip ${MAC_SRC_IP:-unknown}, hello age ${HELLO_AGE:-unknown} s, clock skew ${CLOCK_SKEW_MS:-unknown} ms; the token is not printed)} |"
     echo "| images | $(grep -E '^[A-Z_]+_IMAGE=' "$ED/.env.template" | cut -d= -f2 | tr '\n' ' ') |"
     echo "| runner | $(basename "$RUNNER") v$GATE_VERSION sha256 $(sha256file "$RUNNER"); gate/ $gate_digest; runner repository commit $RUNNER_COMMIT${RUNNER_DIRTY:+ (dirty: $RUNNER_DIRTY)} |"
     echo "| started / finished (UTC) | $STAMP / $(date -u +%Y%m%dT%H%M%SZ) |"

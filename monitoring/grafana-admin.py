@@ -2,9 +2,10 @@
 """Host-side Grafana admin API helper for the krate CLI.
 
 `krate monitor realm`, `krate monitor grafana-user retire` and `krate monitor
-up` (seed-token renewal) call this program instead of curl: no password or
-token may ever appear on a command line, so every credential is read from the
-environment and nothing secret is accepted as an argument.
+up` (seed-token renewal, and ending the sessions a sign-in switch leaves
+behind) call this program instead of curl: no password or token may ever
+appear on a command line, so every credential is read from the environment
+and nothing secret is accepted as an argument.
 
 Environment (the only credential source; no defaults, no argv, no stdin):
 
@@ -86,6 +87,44 @@ Subcommands (the contract implemented for the krate Bash callers):
       accounts too, so the account is verified (GET /api/serviceaccounts/N)
       before an absence is believed.
 
+  end-sessions --scope {all,external} [--wait-seconds N]
+      {"scope": str, "users_in_scope": int, "users_ended": int,
+       "sessions_ended": int}
+      Ends the Grafana sessions (auth tokens) a sign-in switch leaves behind.
+      Grafana keeps them in its database, which survives the recreate that
+      applies a new GRAFANA_AUTH_CONFIG, so a browser that signed in before the
+      switch would stay signed in after it. `krate monitor up` calls this with
+      the local-mode Basic admin: scope `all` BEFORE the recreate that applies
+      realm.ini (all human users, including the local admin), scope `external`
+      right AFTER the recreate that returns to local.ini (users with any external
+      login, including Krate sign-in users). This classifies users, not current
+      realm ownership or the origin of each session. The
+      user endpoints it needs are server-admin endpoints: a service-account
+      token cannot call them and realm mode turns Basic off, which is why the
+      caller runs it in local mode.
+      GET /api/user (the caller's own id), GET /api/users (every user: Grafana's
+      list excludes service accounts in SQL, grafana-v12.2.0
+      pkg/services/user/userimpl/store.go:482-483, and an entry flagged
+      isServiceAccount is skipped as a second guard; a service account holds no
+      browser session, only API tokens, which this never touches), GET
+      /api/users/:id for isExternal (scope external only; pkg/api/user.go:87),
+      then per user GET /api/admin/users/:id/auth-tokens. A user with sessions
+      gets POST /api/admin/users/:id/logout, which revokes all of its auth
+      tokens (pkg/api/user_token.go:163); the caller's own user cannot use it
+      (400 "You cannot logout yourself", pkg/api/admin_users.go:370-372, and the
+      Basic admin's identity id is its numeric user id, pkg/services/authn/
+      clients/grafana.go:119), so its tokens go one by one through POST
+      /api/admin/users/:id/revoke-auth-token {"authTokenId": N}, which only
+      refuses an active session token (user_token.go:270-271) and Basic
+      authentication has none. The user's token list is read again and must be
+      empty: a user that still has a session fails the command, so the caller
+      can refuse to finish the switch. `sessions_ended` and `users_ended` count
+      what was listed before the revocation, users with no session are not
+      counted, and no login or e-mail is ever printed. --wait-seconds N first
+      polls GET /api/health until Grafana answers (it may be starting, or the
+      caller has just recreated it) and gives up once N seconds have passed:
+      a single attempt can itself take up to the 30 s request timeout.
+
 Python 3.9 (RHEL 9 host) compatible; standard library only.
 """
 
@@ -96,6 +135,7 @@ import json
 import os
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -105,6 +145,8 @@ TIMEOUT_SECONDS = 30
 SNAPSHOT_LIST_LIMIT = 1000
 USER_PAGE_SIZE = 1000
 SERVICE_ACCOUNT_PAGE_SIZE = 1000
+HEALTH_POLL_SECONDS = 2
+SESSION_SCOPES = ('all', 'external')
 TOKEN_NAME_PREFIX = 'krate-seed-'
 DEFAULT_EMAIL_SUFFIX = '+retired@invalid'
 ORG_ROLES = ('Viewer', 'Editor', 'Admin')
@@ -562,6 +604,126 @@ def cmd_token_delete(api, account_id, token_id):
     print_json({'deleted': token_id})
 
 
+def wait_for_grafana(api, seconds):
+    """Poll health with a `seconds` budget; an in-flight request can overrun it."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            api.request('GET', '/api/health')
+            return
+        except (HttpFailure, OperationError):
+            if time.monotonic() >= deadline:
+                raise OperationError('Grafana did not answer GET /api/health within %d seconds' % seconds)
+            time.sleep(HEALTH_POLL_SECONDS)
+
+
+def signed_in_user_id(api):
+    """The id of the user the credentials belong to; None for a service account.
+
+    GET /api/user answers 200 for a service account too, with id 0
+    (grafana-v12.2.0 pkg/api/user.go:33-43, the non-user identity branch), and
+    a 403/404 is treated the same: only the Basic admin is a user here, and it
+    is the one user whose own sessions the logout endpoint refuses to end.
+    """
+    try:
+        _, profile = api.request('GET', '/api/user')
+    except HttpFailure as failure:
+        if failure.status in (403, 404):
+            return None
+        raise
+    if isinstance(profile, dict) and profile.get('id'):
+        return as_int(profile['id'], 'user id')
+    return None
+
+
+def session_ids(api, user_id):
+    path = '/api/admin/users/%d/auth-tokens' % user_id
+    _, payload = api.request('GET', path)
+    if not isinstance(payload, list):
+        raise OperationError('unexpected response shape: GET ' + path)
+    ids = []
+    for token in payload:
+        if not isinstance(token, dict) or 'id' not in token:
+            raise OperationError('unexpected response shape: GET ' + path + ' entry')
+        ids.append(as_int(token['id'], 'token id'))
+    return ids
+
+
+def end_user_sessions(api, user_id, own_id):
+    """End every session of one user and return how many were listed.
+
+    The user's token list is read again afterwards and must be empty, so a
+    revocation that did not take effect fails instead of passing silently.
+    """
+    listed = session_ids(api, user_id)
+    if not listed:
+        return 0
+    if user_id == own_id:
+        # AdminLogoutUser refuses the caller's own user (grafana-v12.2.0
+        # pkg/api/admin_users.go:370-372); revoke-auth-token has no such rule
+        # while the caller has no session token of its own, which holds for
+        # Basic authentication (pkg/api/user_token.go:270-271).
+        for token_id in listed:
+            try:
+                api.request('POST', '/api/admin/users/%d/revoke-auth-token' % user_id,
+                            {'authTokenId': token_id})
+            except HttpFailure as failure:
+                # 404: the token is already gone (expired or revoked meanwhile),
+                # which is the state wanted; the re-read below decides.
+                if failure.status != 404:
+                    raise
+    else:
+        api.request('POST', '/api/admin/users/%d/logout' % user_id)
+    if session_ids(api, user_id):
+        raise OperationError('a Grafana user still has sessions after POST /api/admin/users/%d/%s'
+                             % (user_id, 'revoke-auth-token' if user_id == own_id else 'logout'))
+    return len(listed)
+
+
+def cmd_end_sessions(api, scope, wait_seconds):
+    if wait_seconds:
+        wait_for_grafana(api, wait_seconds)
+    own_id = signed_in_user_id(api)
+    in_scope = users_ended = sessions_ended = 0
+    for user in list_users(api):
+        if user.get('isServiceAccount'):
+            continue
+        user_id = as_int(user['id'], 'user id')
+        if scope == 'external':
+            _, profile = api.request('GET', '/api/users/%d' % user_id)
+            if not isinstance(profile, dict):
+                raise OperationError('unexpected response shape: GET /api/users/%d' % user_id)
+            # The profile endpoint defaults isExternal to false if its auth-info lookup
+            # fails (Grafana 12.2 user.go). Corroborate it with the independent list
+            # authLabels shape; disagreement is UNKNOWN, never a local-user exemption.
+            labels = user.get('authLabels')
+            external = profile.get('isExternal')
+            if (not isinstance(labels, list)
+                    or any(not isinstance(label, str) or not label.strip() for label in labels)
+                    or type(external) is not bool):
+                raise OperationError('unexpected Grafana authentication metadata for user %d'
+                                     % user_id)
+            if bool(labels) != external:
+                raise OperationError('conflicting Grafana authentication metadata for user %d'
+                                     % user_id)
+            if not external:
+                continue
+        in_scope += 1
+        ended = end_user_sessions(api, user_id, own_id)
+        if ended:
+            users_ended += 1
+            sessions_ended += ended
+    print_json({'scope': scope, 'users_in_scope': in_scope, 'users_ended': users_ended,
+                'sessions_ended': sessions_ended})
+
+
+def nonnegative_int(value):
+    number = int(value)  # argparse surfaces a clean error for non-integers
+    if number < 0:
+        raise argparse.ArgumentTypeError('must be >= 0')
+    return number
+
+
 def positive_int(value):
     number = int(value)  # argparse surfaces a clean error for non-integers
     if number < 1:
@@ -608,6 +770,13 @@ def build_parser():
     delete.add_argument('--account-id', required=True, type=int, help='service-account id')
     delete.add_argument('--token-id', required=True, type=int, help='token id to delete')
 
+    ending = add('end-sessions', 'end the Grafana sessions a sign-in switch leaves behind '
+                                 '(users only, never service accounts)')
+    ending.add_argument('--scope', required=True, choices=SESSION_SCOPES,
+                        help='all: every human user; external: users with any external login')
+    ending.add_argument('--wait-seconds', type=nonnegative_int, default=0,
+                        help='health-polling budget in seconds; requests may overrun it (default: %(default)s)')
+
     return parser
 
 
@@ -619,6 +788,7 @@ HANDLERS = {
     'token-create': lambda api, args: cmd_token_create(api, args.account_id, args.days),
     'token-list': lambda api, args: cmd_token_list(api, args.account_id),
     'token-delete': lambda api, args: cmd_token_delete(api, args.account_id, args.token_id),
+    'end-sessions': lambda api, args: cmd_end_sessions(api, args.scope, args.wait_seconds),
 }
 
 
