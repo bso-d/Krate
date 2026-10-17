@@ -2705,7 +2705,8 @@ def check_rpm_install(checks):
     builder_recipe = makefile[makefile.index('docker-rpms:\n'):makefile.index('INSTALL_RPM\n')]
     e(re.search(r'dnf install -y -q [^\n]*\b(iptables-nft|nftables)\b', builder_recipe) is None,
       'Makefile docker-rpms: the builder must not install iptables-nft or nftables as if every RHEL host had them (they are optional/ downloads)')
-    download_lines = [line for line in builder_recipe.splitlines() if 'dnf download' in line and not line.lstrip('>').lstrip().startswith('#')]
+    flat_recipe = re.sub(r'\\\n>?', ' ', builder_recipe)
+    download_lines = [line for line in flat_recipe.splitlines() if 'dnf download' in line and not line.lstrip('>').lstrip().startswith('#')]
     e(len(download_lines) == 2 and not any(flag in line for line in download_lines for flag in ('--resolve', '--alldeps')),
       'Makefile docker-rpms: the main set and optional/ are named `dnf download` lists, never --resolve/--alldeps (the main set is exactly the Docker packages)')
     e(re.search(r'^RHEL_BUILDER_IMAGE \?= rockylinux/rockylinux:9@sha256:[0-9a-f]{64}$', makefile, re.M) is not None,
