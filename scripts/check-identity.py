@@ -4878,51 +4878,110 @@ def check_grafana_realm_plan(checks):
 
 def check_build_certificate_hint(checks):
     """kafbat-ui/build.py and scripts/collect-sources.py turn a failed certificate verification anywhere in an
-    exception chain into the one-line remedy (a Python without a certificate store, e.g. the python.org installer
-    on macOS) instead of a traceback; every other failure still raises. Found by a wiki walk of `krate package`
-    on 2026-10-17 (CERTIFICATE_VERIFY_FAILED at the first Maven Central download)."""
+    exception chain into one line that names the cause and the remedy (a Python without a certificate store, e.g.
+    the python.org installer on macOS, or a proxy CA), instead of a traceback; every other failure still raises and
+    the exit codes stay. The collector, which records per-component failures as unresolved, prints the same line
+    after its totals. Found by a wiki walk of `krate package` on 2026-10-17 (CERTIFICATE_VERIFY_FAILED)."""
     import ast
     import ssl
+    import threading
     import urllib.error
     e = checks.expect
+    verify = ssl.SSLCertVerificationError(1, 'certificate verify failed: unable to get local issuer certificate')
+    verify.verify_message = 'unable to get local issuer certificate'
+
+    def explicit():
+        try:
+            raise urllib.error.URLError(verify)
+        except urllib.error.URLError as inner:
+            raise RuntimeError('download failed') from inner
+
+    def implicit():
+        try:
+            raise urllib.error.URLError(verify)
+        except urllib.error.URLError:
+            raise RuntimeError('download failed')  # only __context__ links the cause
+
+    def bare():
+        try:
+            raise verify  # http.client and ssl raise it unwrapped, without a URLError around it
+        except ssl.SSLCertVerificationError:
+            raise RuntimeError('download failed')
+
+    def cyclic():
+        a, b = RuntimeError('a'), RuntimeError('b')
+        a.__cause__, b.__cause__ = b, a
+        raise a
+
     for rel, prog in (('kafbat-ui/build.py', 'build.py'), ('scripts/collect-sources.py', 'collect-sources.py')):
         text = (ROOT / rel).read_text()
         tree = ast.parse(text)
-        wanted = [node for node in tree.body
-                  if (isinstance(node, ast.FunctionDef) and node.name == 'certificate_store_missing')
-                  or (isinstance(node, ast.Assign) and any(getattr(t, 'id', '') == 'CERTIFICATE_HINT' for t in node.targets))]
-        if not e(len(wanted) == 2, f'{rel}: defines certificate_store_missing and CERTIFICATE_HINT at top level'):
+        wanted: list[ast.stmt] = [node for node in tree.body
+                                  if (isinstance(node, ast.FunctionDef) and node.name == 'certificate_failure')
+                                  or (isinstance(node, ast.Assign)
+                                      and any(getattr(t, 'id', '') == 'CERTIFICATE_HINT' for t in node.targets))]
+        guard = [node for node in tree.body if isinstance(node, ast.If) and "__name__ == '__main__'" in ast.unparse(node.test)]
+        if not e(len(wanted) == 2 and len(guard) == 1,
+                 f'{rel}: defines certificate_failure, CERTIFICATE_HINT and one __main__ guard at top level'):
             continue
-        namespace = {'ssl': ssl}
+        namespace: dict = {'ssl': ssl}
         exec(compile(ast.Module(body=wanted, type_ignores=[]), rel, 'exec'), namespace)
-        missing, hint = namespace['certificate_store_missing'], namespace['CERTIFICATE_HINT']
-        verify = ssl.SSLCertVerificationError(1, 'certificate verify failed: unable to get local issuer certificate')
-        try:
+        failure, hint = namespace['certificate_failure'], namespace['CERTIFICATE_HINT']
+
+        def bounded(chain):
+            """certificate_failure(chain) in a daemon thread: a walk that a cycle never stops fails here in
+            seconds instead of hanging the whole check."""
+            answer = []
+            worker = threading.Thread(target=lambda: answer.append(failure(chain)), daemon=True)
+            worker.start()
+            worker.join(5)
+            return answer[0] if answer else 'no answer within 5 s'
+
+        for maker, expected in ((explicit, verify), (implicit, verify), (bare, verify), (cyclic, None)):
             try:
-                raise urllib.error.URLError(verify)
-            except urllib.error.URLError as inner:
-                raise RuntimeError('download failed') from inner
-        except RuntimeError as chained:
-            wrapped = chained
-        cases = ((urllib.error.URLError(verify), True), (verify, True), (wrapped, True),
-                 (urllib.error.URLError('timed out'), False), (ValueError('checksum mismatch'), False), (None, False))
-        for error, expected in cases:
-            e(missing(error) is expected, f'{rel}: certificate_store_missing({error!r}) must be {expected}')
-        message = hint % prog
-        e(message.startswith(prog + ': ') and 'SSL_CERT_FILE=/etc/ssl/cert.pem' in message
-          and 'Install Certificates.command' in message, f'{rel}: the hint names the program and both remedies; got {message!r}')
-        guard = text[text.index("if __name__ == '__main__':"):]
-        e('certificate_store_missing(failure)' in guard and "sys.exit(CERTIFICATE_HINT % '" + prog + "')" in guard
-          and guard.rstrip().endswith('raise'),
-          f'{rel}: the entry point exits with the hint for a certificate failure and re-raises everything else')
+                maker()
+            except RuntimeError as error:
+                got = bounded(error)
+            else:
+                got = 'no RuntimeError raised'
+            e(got is expected, f'{rel}: certificate_failure on the {maker.__name__} chain gives {got!r}')
+        e(bounded(verify) is verify, f'{rel}: certificate_failure returns the verification error itself')
+        e(failure(urllib.error.URLError('timed out')) is None and failure(ValueError('checksum mismatch')) is None
+          and failure(None) is None, f'{rel}: certificate_failure is None for unrelated errors')
+        message = hint % (prog, 'unable to get local issuer certificate')
+        e(message.startswith(prog + ': ') and 'unable to get local issuer certificate' in message
+          and 'Install Certificates.command' in message and '/etc/ssl/cert.pem' in message
+          and '/etc/ssl/certs/ca-certificates.crt' in message, f'{rel}: the hint names the cause and the remedies; got {message!r}')
+
+        def run_guard(stub_main: 'Callable[[], object]'):
+            """The file's own `if __name__ == '__main__':` block, run against a stub main()."""
+            body = ast.Module(body=guard[0].body, type_ignores=[])
+            scope: dict = {'main': stub_main, 'sys': sys, 'certificate_failure': failure, 'CERTIFICATE_HINT': hint}
+            try:
+                exec(compile(body, rel, 'exec'), scope)
+            except SystemExit as stop:
+                return 'exit', stop.code
+            except BaseException as raised:  # noqa: B036  # the guard must let these through unchanged
+                return 'raised', type(raised).__name__
+            return 'returned', None
+
+        cert = run_guard(explicit)
+        e(cert[0] == 'exit' and isinstance(cert[1], str) and cert[1].startswith(prog + ': ')
+          and 'unable to get local issuer certificate' in cert[1], f'{rel}: a certificate failure exits with the hint; got {cert}')
+        e(run_guard(lambda: (_ for _ in ()).throw(ValueError('x'))) == ('raised', 'ValueError'),
+          f'{rel}: any other failure still raises')
+        e(run_guard(lambda: (_ for _ in ()).throw(KeyboardInterrupt())) == ('raised', 'KeyboardInterrupt'),
+          f'{rel}: Ctrl-C still raises')
         if prog == 'collect-sources.py':
-            # Per-component failures are caught and reported as unresolved (they never reach the entry point),
-            # so the hint must also follow the totals when a reason names the certificate failure.
-            tail = text[text.index("log(f'{args.edition}: {manifest[\"totals\"]}')"):text.index('def certificate_store_missing')]
-            e("if any('CERTIFICATE_VERIFY_FAILED' in (c.reason or '') for c in comps):" in tail
-              and "print(CERTIFICATE_HINT % 'collect-sources.py', flush=True)" in tail
+            e(run_guard(lambda: 2) == ('exit', 2) and run_guard(lambda: 0) == ('exit', 0),
+              f'{rel}: the exit code of main() is kept (2 on unresolved sources)')
+            tail = text[text.index("log(f'{args.edition}: {manifest[\"totals\"]}')"):text.index('def certificate_failure')]
+            e("failed = sum('CERTIFICATE_VERIFY_FAILED' in (c.reason or '') for c in comps)" in tail
+              and 'file=sys.stderr' in tail[tail.index('CERTIFICATE_HINT'):tail.index('return 2')]
               and tail.index('CERTIFICATE_HINT') < tail.index('return 2'),
-              f'{rel}: the summary prints the hint when an unresolved reason is a certificate failure, before the exit code')
+              f'{rel}: the summary prints the hint on stderr, before the exit code, when a reason is a certificate failure')
+        else:
+            e(run_guard(lambda: None) == ('returned', None), f'{rel}: a successful build returns normally')
 
 
 def check_monitor_logins(checks):

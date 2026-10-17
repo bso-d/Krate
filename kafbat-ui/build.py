@@ -224,25 +224,31 @@ def main():
     print(f'Built {local_ref} ({args.arch}). Ready for the offline EPC and Krate bundles.', flush=True)
 
 
-def certificate_store_missing(error):
-    """True when an HTTPS download failed certificate verification anywhere in the chain."""
-    while error is not None:
-        if isinstance(error, ssl.SSLCertVerificationError) or isinstance(getattr(error, 'reason', None), ssl.SSLCertVerificationError):
-            return True
+def certificate_failure(error):
+    """The certificate-verification failure anywhere in an exception chain (cycles stopped), else None."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, ssl.SSLCertVerificationError):
+            return error
+        if isinstance(getattr(error, 'reason', None), ssl.SSLCertVerificationError):
+            return error.reason
         error = error.__cause__ or error.__context__
-    return False
+    return None
 
 
-CERTIFICATE_HINT = ('%s: Python could not verify an HTTPS certificate (CERTIFICATE_VERIFY_FAILED). A Python without a '
-                    'certificate store does this, for example the python.org installer on macOS: run "Install '
-                    'Certificates.command" in its Applications folder once, or run the build with '
-                    'SSL_CERT_FILE=/etc/ssl/cert.pem. Behind an HTTPS-inspecting proxy, add its CA to that file.')
+CERTIFICATE_HINT = ('%s: Python could not verify the HTTPS certificate of a download (%s). If this Python has no '
+                    'certificate store (the python.org installer on macOS, until "Install Certificates.command" in '
+                    '/Applications/Python 3.x/ has run), run that once, or point SSL_CERT_FILE at the system CA bundle '
+                    '(macOS /etc/ssl/cert.pem, Debian/Ubuntu /etc/ssl/certs/ca-certificates.crt). Behind an '
+                    "HTTPS-inspecting proxy, use a copy of that bundle with the proxy's CA appended.")
 
 
 if __name__ == '__main__':
     try:
         main()
-    except Exception as failure:  # the remedy instead of a traceback when the certificate store is missing
-        if certificate_store_missing(failure):
-            sys.exit(CERTIFICATE_HINT % 'build.py')
+    except Exception as failure:  # the remedy instead of a traceback when a certificate does not verify
+        cause = certificate_failure(failure)
+        if cause is not None:
+            sys.exit(CERTIFICATE_HINT % ('build.py', getattr(cause, 'verify_message', None) or cause))
         raise
