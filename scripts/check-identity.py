@@ -1330,6 +1330,7 @@ def check_topofix2(checks):
             "  cert: await lib.assertServedCertificate(good, { subject: 'CN=krate-oi.test', issuer: 'CN=Krate Test CA' }, 'x') };\n"
             "const refuse = async (fn) => { try { await fn(); return false; } catch { return true; } };\n"
             "out.loopbackRefused = await refuse(() => lib.assertServedFrom({ serverAddr: async () => ({ ipAddress: '127.0.0.1', port: 443 }) }, '192.168.64.2', 'x'));\n"
+            "out.loopbackRefusedWithoutExpectation = await refuse(() => lib.assertServedFrom({ serverAddr: async () => ({ ipAddress: '::1', port: 443 }) }, '', 'x'));\n"
             "out.emptyRefused = await refuse(() => lib.assertServedFrom({ serverAddr: async () => null }, '192.168.64.2', 'x'));\n"
             "out.certMismatchRefused = await refuse(() => lib.assertServedCertificate(good, { subject: 'CN=other.test', issuer: 'CN=Krate Test CA' }, 'x'));\n"
             "console.log(JSON.stringify(out));\n"
@@ -1340,7 +1341,8 @@ def check_topofix2(checks):
         except (ValueError, IndexError):
             node_out = {}
         e(run_node.returncode == 0 and 'served from 192.168.64.2:443' in node_out.get('from', '') and node_out.get('cert', '').startswith('TLS TLSv1.3')
-          and node_out.get('loopbackRefused') is True and node_out.get('emptyRefused') is True and node_out.get('certMismatchRefused') is True,
+          and node_out.get('loopbackRefused') is True and node_out.get('loopbackRefusedWithoutExpectation') is True
+          and node_out.get('emptyRefused') is True and node_out.get('certMismatchRefused') is True,
           f'the served-address and served-certificate assertions accept a valid asynchronous Response and refuse loopback, empty and mismatching ones; got rc {run_node.returncode}: {run_node.stderr.strip()[:200]!r} {node_out!r} (T08)')
 
     # T01 / T02 / T04: the runner's own functions run in bash against stubs. agent_request takes only the requester's stdout as the
@@ -1392,6 +1394,24 @@ def check_topofix2(checks):
                     parsed_cap = None
             return rc_text, parsed_cap, raw_text, nonce
 
+        def agent_request_nonce_leak_case():
+            with tempfile.TemporaryDirectory() as t01b_tmp:
+                base = Path(t01b_tmp)
+                (base / 'gate').mkdir()
+                (base / 'state').mkdir()
+                (base / 'gate/browser_remote.py').write_text(
+                    'import sys\nnonce = sys.argv[sys.argv.index("--nonce") + 1]\nsys.stderr.write("diagnostic naming " + nonce + "\\n")\nprint(\'{"exit": 0}\')\n')
+                script = ('RAW="$1"; STATE="$2"; RENDEZVOUS="$3"; REND_NONCE="$4"; GATE_DIR="$5"\n'
+                          + bash_function_source(runner_path, 'agent_request')
+                          + 'agent_request W6 5; printf "%s" "$CAP_ERR" > "$STATE/cap.err"\n')
+                subprocess.run([bash_t, '-c', script, 'bash', str(base / 'raw.log'), str(base / 'state'), str(base), 'topofix2-t01b-nonce', str(base / 'gate')], text=True, capture_output=True, timeout=30)
+                raw_text_b = (base / 'raw.log').read_text() if (base / 'raw.log').exists() else ''
+                err_text_b = (base / 'state/cap.err').read_text() if (base / 'state/cap.err').exists() else ''
+            return raw_text_b, err_text_b
+
+        t01b_raw, t01b_err = agent_request_nonce_leak_case()
+        e('diagnostic naming <rendezvous-nonce-redacted>' in t01b_err and 'topofix2-t01b-nonce' not in t01b_raw and 'topofix2-t01b-nonce' not in t01b_err,
+          f'a requester that names the nonce on stderr leaks it neither into CAP_ERR nor into the raw log; got {t01b_err!r} / {t01b_raw[:160]!r} (T01)')
         t01_rc, t01_cap, t01_raw, t01_nonce = agent_request_case()
         e(t01_rc == 'rc=0' and isinstance(t01_cap, dict) and t01_cap.get('row') == 'W6' and t01_cap.get('nonce') == '<rendezvous-nonce-redacted>',
           f"agent_request saves the requester's stdout alone: a JSON response (nonce redacted), not text prefixed by the stderr announcement; got {t01_rc!r} {t01_cap!r} (T01)")
@@ -1486,6 +1506,13 @@ def check_topofix2(checks):
                 run = subprocess.run([bash_t, '-c', script, 'bash', str(base / 'krate'), str(base / 'os-release')], env=env, text=True, capture_output=True)
             return (run.stdout + run.stderr).strip()
 
+        family_script = 'OS_RELEASE_FILE="$1"\n' + bash_function_source(runner_path, 'w7_os_family') + 'w7_os_family\n'
+        for id_only, wanted in (('ID=rhel', 'rhel'), ('ID="rocky"', 'rhel'), ('ID=almalinux', 'rhel'), ('ID=centos', 'rhel'), ('ID=fedora', 'rhel'), ('ID=ol\nID_LIKE="fedora"', 'rhel'),
+                                ('ID=ubuntu', 'debian'), ('ID=debian', 'debian'), ('ID=linuxmint\nID_LIKE="ubuntu debian"', 'debian'), ('ID=arch', 'unknown'), ('NAME=x', 'unknown')):
+            with tempfile.TemporaryDirectory() as fam_tmp:
+                (Path(fam_tmp) / 'os-release').write_text(id_only + '\n')
+                got_family = subprocess.run([bash_t, '-c', family_script, 'bash', str(Path(fam_tmp) / 'os-release')], text=True, capture_output=True).stdout.strip()
+            e(got_family == wanted, f'w7_os_family reads {id_only!r} as {wanted}; got {got_family!r} (T05)')
         e(w7_case('rocky').startswith('RECORD PASS|') and 'docker zone target [ACCEPT]' in w7_case('rocky'),
           f'W7 on a Rocky fixture with a running firewalld and the docker zone ACCEPT passes and records the target; got {w7_case("rocky")[:300]!r} (T17)')
         e(w7_case('alma').startswith('RECORD PASS|'), 'W7 treats AlmaLinux (ID_LIKE rhel) as the firewalld branch (T05)')
