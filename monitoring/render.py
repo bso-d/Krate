@@ -144,6 +144,10 @@ def realm_site(env):
         # so the logout redirect below may send the browser there.
         'logout_authority': parts.netloc,
         'group_proof_minutes': proof,
+        # The Perses sign-in button: the realm is Krate's own sign-in, so it carries
+        # Grafana's words (sso/identity.py GRAFANA_SIGNIN_NAME), not the "Company
+        # sign-in" default that names a company identity provider's site file.
+        'display_name': 'Krate sign-in',
     }
 
 

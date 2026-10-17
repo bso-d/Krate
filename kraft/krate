@@ -3692,13 +3692,27 @@ for user in json.load(sys.stdin):
   done
 }
 
+# Perses' address. With the Krate realm (PERSES_IDP=krate) only the public name works:
+# the realm client's redirect URI is built from it (monitoring/render.py realm_site
+# public_url), so the host name of this machine would not sign in.
+perses_address() {
+  local port host
+  port="$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
+  if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]]; then
+    host="$(public_url_host)"
+  else
+    host="$(hostname -f 2>/dev/null || hostname)"
+  fi
+  printf 'https://%s:%s\n' "$host" "$port"
+}
+
 # Grafana and Perses addresses and logins.
 monitor_logins() {
   local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
   echo "Grafana:  http://$(hostname -f 2>/dev/null || hostname):${port}"
   echo "User:     $(env_value_file "$MONITOR_DIR/.env" GRAFANA_USER admin)"
   echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
-  echo "Perses:   https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
+  echo "Perses:   $(perses_address)"
   if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
     echo "User:     $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_USER admin)"
     echo "Password: $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_PASSWORD)"
@@ -3812,7 +3826,7 @@ cmd_monitor() {
         prom_host="$prom_bind"
       fi
       ok "Prometheus: http://${prom_host}:$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)$([[ "$prom_bind" == 0.0.0.0 ]] || echo ' (this host only; PROM_BIND)')"
-      ok "Perses:     https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443) ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) sign-in)"
+      ok "Perses:     $(perses_address) ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) sign-in)"
       note_smtp
       ;;
     down)    require_compose; monitor_compose down "$@" ;;

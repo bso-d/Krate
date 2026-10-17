@@ -172,7 +172,7 @@ async function openPersesAtKeycloak(page) {
 }
 
 // lab7 (082): after the gateway sign-in Perses lands on /sign-in offering its native
-// provider button ("Sign in with Company sign-in"); clicking it runs the Perses OIDC
+// provider button ("Sign in with Krate sign-in"); clicking it runs the Perses OIDC
 // login (silent, on the existing Keycloak SSO session) and lands on the Perses home.
 async function persesSignIn(page) {
   await page.waitForLoadState('networkidle');

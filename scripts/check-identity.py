@@ -4876,6 +4876,42 @@ def check_grafana_realm_plan(checks):
         e(identity.client_differs(client, dict(same, **{field: flipped})) is True,
           f'client_differs: a changed {field} is a difference (the client-mode fields take part in the verdict)')
 
+def check_perses_address(checks):
+    """monitor up and monitor logins print the Perses address that signs in: the public name with the
+    Krate realm (PERSES_IDP=krate), this machine's host name otherwise. Realm mode printed the host
+    name before (a 2026-10-17 walk: `https://<mac>.local:3443`, where the realm client cannot sign in)."""
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        e('echo "Perses:   $(perses_address)"' in function_body(cli, 'monitor_logins'),
+          f'{edition}/krate: monitor_logins must print perses_address')
+        e(cli.count('ok "Perses:     $(perses_address) (') == 1, f'{edition}/krate: monitor up must print perses_address')
+        e(':$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)' not in cli,
+          f'{edition}/krate: no Perses address may be built outside perses_address')
+    if bash_binary() is None:
+        return
+    for edition in EDITIONS:
+        script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'env_value', 'env_value_file', 'public_url_host',
+                                             'perses_address') + r"""
+ENV_FILE="$1/.env"; MONITOR_DIR="$1/monitoring"
+hostname() { echo build-host.local; }
+perses_address
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp)
+            (site / 'monitoring').mkdir()
+            for idp, url, port, expected in (
+                    ('krate', 'https://Krate.Example.COM/identity', '3443', 'https://krate.example.com:3443'),
+                    ('krate', 'https://[FD00::5]:8443/identity', '4443', 'https://[fd00::5]:4443'),
+                    ('', 'https://krate.example.com/identity', '3443', 'https://build-host.local:3443')):
+                write_env(site, {'KEYCLOAK_PUBLIC_URL': url})
+                write_env(site / 'monitoring', {'PERSES_IDP': idp, 'PERSES_PORT': port})
+                out = run_bash(script, site)
+                e(out.returncode == 0 and out.stdout.strip() == expected,
+                  f'{edition}/krate perses_address (PERSES_IDP={idp or "empty"}, {url}): expected {expected}; '
+                  f'got {out.returncode} {out.stdout.strip()!r} {out.stderr.strip()[:120]}')
+
+
 def check_perses_clients(checks):
     """Phase 4 commit 8's generators, landed with the Grafana ones because they share groups_mapper,
     checked_origin and env_secret: the two Perses realm clients."""
@@ -5085,6 +5121,16 @@ def check_render_writes(checks):
     })
     e(ipv6_site['public_url'] == 'https://[2001:db8::10]:3443',
       f'realm Perses origin must retain IPv6 brackets; got {ipv6_site["public_url"]}')
+    # Realm mode is Krate's own sign-in: the Perses button says what Grafana's says, while a
+    # company site file keeps its own name or the "Company sign-in" default.
+    e(ipv6_site.get('display_name') == identity.GRAFANA_SIGNIN_NAME,
+      f'realm Perses provider must be named {identity.GRAFANA_SIGNIN_NAME!r}; got {ipv6_site.get("display_name")!r}')
+    realm_conf = mod.perses_config('native', ipv6_site)
+    e('name: "%s"' % identity.GRAFANA_SIGNIN_NAME in realm_conf,
+      'the rendered realm Perses config must name its provider "%s"' % identity.GRAFANA_SIGNIN_NAME)
+    site_conf = mod.perses_config('native', {k: v for k, v in ipv6_site.items() if k != 'display_name'})
+    e('name: "Company sign-in"' in site_conf,
+      'a Perses site without display_name must keep the "Company sign-in" default')
 
     chmods, chowns, opens = [], [], []
     real_chmod, real_chown, real_open = os.chmod, os.chown, os.open
@@ -5327,7 +5373,7 @@ def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
+                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
