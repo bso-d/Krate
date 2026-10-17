@@ -8845,6 +8845,81 @@ def check_perses_clients(checks):
       'client_differs: turning off the perses-sync service account is a difference')
 
 
+def check_perses_sync_scopes(checks):
+    """The repeated `krate-perses-sync: its scopes differ from the plan` warning: Keycloak 26.1.0+
+    assigns the realm scope `service_account` to every client with serviceAccountsEnabled
+    (ClientManager.enableServiceAccount, tag 26.8.0), so the readback of the sync client carries a
+    scope the plan did not list and the second `krate monitor up` (the first one creates the
+    clients and compares nothing) and every later one reported drift nobody made. The plan states
+    the scope for the service-account client; a real drift is still reported."""
+    e = checks.expect
+    origin, port = 'https://krate.example.test', '3443'
+    scope = identity.SERVICE_ACCOUNT_SCOPE
+    e(scope == 'service_account', f'identity.SERVICE_ACCOUNT_SCOPE must be Keycloak\'s realm scope name; got {scope!r}')
+
+    def verdict(name, current):
+        """The two verdict lines `identity.py perses-clients client-differs` prints, as the CLI reads them."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            identity.client_verdict(identity.perses_rep(name, origin, port), current)
+        return buffer.getvalue().split()
+
+    def readback(plan, default, optional=()):
+        """The shape Keycloak's GET clients/<id> returns: the plan, Keycloak's own additions, the
+        secret masked, the scope lists in an order of Keycloak's choosing (not the plan's)."""
+        return dict(plan, id='3f1c7a52-0b6d-4c1e-9d2a-5e8b4a7c6d10', surrogateAuthRequired=False, bearerOnly=False,
+                    consentRequired=False, alwaysDisplayInConsole=False, fullScopeAllowed=True,
+                    nodeReRegistrationTimeout=-1, access={'view': True, 'configure': True, 'manage': True},
+                    secret=identity.KEYCLOAK_SECRET_MASK, defaultClientScopes=list(default),
+                    optionalClientScopes=list(optional))
+
+    sync = identity.perses_rep('krate-perses-sync', origin, port)
+    main_client = identity.perses_rep('krate-perses', origin, port)
+    e(sync['serviceAccountsEnabled'] is True and scope in sync['defaultClientScopes']
+      and sync['defaultClientScopes'].count(scope) == 1
+      and sorted(sync['defaultClientScopes']) == sorted(identity.DEFAULT_SCOPES + [scope]),
+      f'the krate-perses-sync plan must list the scopes of the krate-perses client and {scope} once; got {sync["defaultClientScopes"]}')
+    e(identity.DEFAULT_SCOPES == ['profile', 'email', 'roles', 'web-origins', 'basic'],
+      'identity.DEFAULT_SCOPES is shared by every client plan: the service-account scope is added to the sync plan only')
+    e(main_client['serviceAccountsEnabled'] is False and scope not in main_client['defaultClientScopes'],
+      f'the krate-perses client has no service account, so Keycloak gives it no {scope} scope and its plan must not list it')
+    e(identity.perses_rep('krate-perses-sync', origin, port, False)['defaultClientScopes']
+      == identity.perses_rep('krate-perses-sync', origin, port)['defaultClientScopes'],
+      'the sync plan scopes must not depend on the secret flag')
+    # Every client plan the CLI compares (the verdict is reached from cmd_grafana_client and
+    # cmd_perses_clients only) must state what Keycloak does for it.
+    for plan in identity.perses_clients(origin, port) + [identity.grafana_client(origin)]:
+        has_scope = scope in plan['defaultClientScopes']
+        e(has_scope == bool(plan['serviceAccountsEnabled']),
+          f'{plan["clientId"]}: its plan lists {scope} exactly when serviceAccountsEnabled is true; got '
+          f'serviceAccountsEnabled={plan["serviceAccountsEnabled"]} scopes={plan["defaultClientScopes"]}')
+
+    # Keycloak's readback of the sync client right after Krate created it: the plan's scopes plus
+    # service_account, in an order of Keycloak's own.
+    live_order = [scope, 'web-origins', 'roles', 'basic', 'profile', 'email']
+    got = verdict('krate-perses-sync', readback(sync, live_order))
+    e(got == ['same'], f'the sync client as Keycloak reads it back (the plan plus {scope}) must compare as same; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, reversed(live_order)))
+    e(got == ['same'], f'the scope order of the readback must not matter; got {got}')
+    # Real drift is still reported.
+    without = [item for item in live_order if item != scope]
+    got = verdict('krate-perses-sync', readback(sync, without))
+    e(got == ['same', 'scopes-differ'], f'a sync client without {scope} is a real drift to report; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, live_order + ['offline_access']))
+    e(got == ['same', 'scopes-differ'], f'a sync client with an extra default scope is a real drift to report; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, live_order + ['phone']))
+    e(got == ['same', 'scopes-differ'], f'a sync client with an extra unrelated scope is a real drift to report; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, without, optional=[scope]))
+    e(got == ['same', 'scopes-differ'], f'{scope} as an optional scope instead of a default one is a real drift to report; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, live_order, optional=['offline_access']))
+    e(got == ['same', 'scopes-differ'], f'an extra optional scope on the sync client is a real drift to report; got {got}')
+    # The client without a service account: Keycloak adds nothing, so the scope appearing is drift.
+    got = verdict('krate-perses', readback(main_client, list(identity.DEFAULT_SCOPES)))
+    e(got == ['same'], f'the krate-perses readback with the plan scopes must compare as same; got {got}')
+    got = verdict('krate-perses', readback(main_client, list(identity.DEFAULT_SCOPES) + [scope]))
+    e(got == ['same', 'scopes-differ'], f'{scope} on a client without a service account is a real drift to report; got {got}')
+
+
 def load_grafana_admin():
     spec = importlib.util.spec_from_file_location('grafana_admin', ROOT / 'monitoring/grafana-admin.py')
     assert spec is not None and spec.loader is not None, 'monitoring/grafana-admin.py missing'
@@ -9274,7 +9349,7 @@ def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins, check_build_certificate_hint,
+                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,

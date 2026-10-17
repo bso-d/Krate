@@ -36,6 +36,12 @@ PLAN_PLACEHOLDER_KEYS = ('KEYCLOAK_CLI_CLIENT_SECRET', 'KEYCLOAK_KAFBAT_CLIENT_S
 GROUPS_CLAIM = 'groups'
 # Default client scopes without offline_access: no client may mint offline tokens.
 DEFAULT_SCOPES = ['profile', 'email', 'roles', 'web-origins', 'basic']
+# Keycloak 26.1.0 and later assigns this realm scope as a default scope to every client with
+# serviceAccountsEnabled (ClientManager.enableServiceAccount, tag 26.8.0, which Krate pins) and
+# removes it when the flag is cleared; the scope carries the client_id/clientHost/clientAddress
+# claims of the client_credentials grant. A client plan whose scopes are compared with Keycloak's
+# readback states it for each service-account client, or Krate reports drift Keycloak itself made.
+SERVICE_ACCOUNT_SCOPE = 'service_account'
 # Kafbat's side of the same client (auth/ui/runtime.yml): one OAuth2 registration
 # named `keycloak`, no form login, roles mapped from the realm groups only.
 UI_REGISTRATION = 'keycloak'
@@ -1383,7 +1389,13 @@ def perses_sync_client(with_secret=False):
     """The krate-perses-sync client representation: krate-cli's shape without the realm-management
     roles — the guard authenticates with its service account only and manages no users (verified
     live: lab2/kcadmin.py:90-101, lab2/results.md:34). The secret comes from the environment only
-    (PERSES_SYNC_CLIENT_SECRET, the key render.py reads for the perses-sync output)."""
+    (PERSES_SYNC_CLIENT_SECRET, the key render.py reads for the perses-sync output).
+
+    Its default scopes state SERVICE_ACCOUNT_SCOPE: Keycloak adds that scope to a client the
+    moment serviceAccountsEnabled is true, so the readback carries it, and a plan without it
+    would make every later `krate monitor up` report scopes-differ for a client nobody changed.
+    The scope is listed on create too: Keycloak's add is idempotent (JpaRealmProvider.addClientScopes
+    skips a scope the client already has)."""
     client = {
         'clientId': PERSES_SYNC_CLIENT, 'name': PERSES_SYNC_CLIENT_NAME, 'enabled': True,
         'protocol': 'openid-connect', 'publicClient': False,
@@ -1391,7 +1403,7 @@ def perses_sync_client(with_secret=False):
         'standardFlowEnabled': False, 'implicitFlowEnabled': False,
         'directAccessGrantsEnabled': False, 'serviceAccountsEnabled': True,
         'redirectUris': [], 'webOrigins': [],
-        'defaultClientScopes': list(DEFAULT_SCOPES),
+        'defaultClientScopes': DEFAULT_SCOPES + [SERVICE_ACCOUNT_SCOPE],
         'optionalClientScopes': [],
     }
     if with_secret:
