@@ -4383,7 +4383,7 @@ cmd_lag() {
     local raw
     raw=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
       --bootstrap-server "$BOOTSTRAP" \
-      --describe --group "$group" 2>&1) || die "Failed to describe group '$group'"
+      --describe --group "$group") || die "Failed to describe group '$group'"
 
     if echo "$raw" | grep -qiE "does not exist|group .* not found"; then
       die "Consumer group '$group' does not exist."
