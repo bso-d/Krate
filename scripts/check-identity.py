@@ -808,8 +808,9 @@ def check_gate_scripts(checks):
       and '.get("ll"' not in runner_text,
       'the W5 evidence reads the probe report\'s v6 address and addressClass, not the removed link-local "ll" key '
       '(TR2 G4; TOPOFIX2 G6: the exact assignments, so swapped keys fail)')
-    e('is_private' in runner_text and 'mac_src_ip' in runner_text,
-      'the agent preflight requires a private mac_src_ip (TOPOFIX F7)')
+    e('is_private' not in runner_text and 'rfc1918 = [ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]' in runner_text
+      and 'not any(addr in net for net in rfc1918)' in runner_text,
+      'the agent preflight requires mac_src_ip inside 10/8, 172.16/12 or 192.168/16 by network membership, not ipaddress.is_private (TOPOFIX F7; TOPOFIX2 F7)')
     e("the fixture's lima0 address is still" in runner_text,
       'the runner records the end-of-run vmip row (TOPOFIX F7)')
     s3_line = next((ln for ln in runner_text.splitlines() if 'koalaman/shellcheck:v0.9.0' in ln and 'kraft/krate' in ln), '')
@@ -1208,6 +1209,25 @@ def check_topofix2(checks):
       and 'that archive is no longer loaded into the guest at all' not in guide_flat
       and 'Only the rows W5 and W6 of slice 4c go through the agent' in guide_flat,
       'the guide says what the code does: a 4c agent run needs neither image, the 4a/4b stories keep the guest container vantage and need the archive, only W5/W6 go through the agent (F2)')
+
+    # F7: mac_src_ip must lie inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16 (network membership). The runner's own preflight
+    # Python runs on synthetic hellos; ipaddress.is_private would have accepted 198.18.0.1, 192.0.2.5 and 203.0.113.9.
+    preflight_py = re.search(r"<<'PYPREFLIGHT'\n(.*?)\nPYPREFLIGHT\n", topo_runner_text, re.S)
+    e(preflight_py is not None, 'the agent preflight keeps its Python in the PYPREFLIGHT heredoc (the F7 cases below run its real text)')
+    if preflight_py is not None:
+        def preflight_case(src):
+            with tempfile.TemporaryDirectory() as pf_tmp:
+                hello_path = Path(pf_tmp) / 'agent-hello.json'
+                hello_path.write_text(json.dumps({'schema': 1, 'nonce': 'n0nce', 'clock_skew_ms': 5, 'mac_src_ip': src, 'vm_ip': '192.168.64.2',
+                                                  'gate_files': {}, 'plan': ['W5', 'W6'], 'vm_g6': '', 'mac_iface': 'bridge100'}))
+                run = subprocess.run([sys.executable, '-I', '-', str(hello_path), 'n0nce', pf_tmp], input=preflight_py.group(1), text=True, capture_output=True)
+            return run.returncode, run.stdout, run.stderr
+        for ok_src in ('192.168.64.1', '10.0.0.1', '10.255.255.254', '172.16.0.1', '172.31.255.254', '192.168.255.254'):
+            rc_f7, out_f7, err_f7 = preflight_case(ok_src)
+            e(rc_f7 == 0 and f'MAC_SRC_IP={ok_src}' in out_f7, f'the preflight accepts mac_src_ip {ok_src} (inside 10/8, 172.16/12 or 192.168/16); got rc {rc_f7}: {err_f7.strip()[:120]!r} (F7)')
+        for bad_src in ('198.18.0.1', '192.0.2.5', '203.0.113.9', '169.254.10.1', '172.15.255.255', '172.32.0.1', '100.64.0.1', '127.0.0.1', 'fd00::1', 'not-an-address'):
+            rc_f7, out_f7, err_f7 = preflight_case(bad_src)
+            e(rc_f7 == 2 and 'mac_src_ip' in err_f7 and 'MAC_SRC_IP=' not in out_f7, f'the preflight refuses mac_src_ip {bad_src} (outside the three RFC1918 networks); got rc {rc_f7}: {err_f7.strip()[:120]!r} (F7)')
 
 
 def check_k37_wiring(checks):

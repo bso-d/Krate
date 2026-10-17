@@ -414,7 +414,7 @@ arguments, the pinned certificate (`certs/server.crt`), the wall-clock budget,
 one `limactl shell` command per guest read, one `limactl copy --backend=scp -r`
 delivery, and a Mac-held `agent-manifest.tsv` it compares at harvest; the
 runner's preflight requires a fresh hello (≤ 60 s, nonce-bound, skew ≤ 10 s, a
-private `mac_src_ip`, and gate-file digests equal to its own copies). W5–W7 run
+`mac_src_ip` inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16, and gate-file digests equal to its own copies). W5–W7 run
 only under this vantage and leave the inventory otherwise (the J7/W3 pattern;
 decided by the VM receipt). The container vantage keeps the walked behaviour
 unchanged. X1 is never driven through the agent: `--browser agent` is refused

@@ -205,9 +205,11 @@ try:
     addr = ipaddress.ip_address(src)
 except ValueError:
     refuse("mac_src_ip %r is not an address" % src)
-v4 = addr.version == 4 and (addr.is_private or src.startswith("169.254."))
-if not v4:
-    refuse("mac_src_ip %s is not an RFC1918 or link-local address (TOPOFIX F7: vmnet must give the Mac a private address or replies would be rejected)" % src)
+# F7: network membership, not the stdlib's private-address flag (it is also set for 198.18.0.0/15, 192.0.2.0/24, 203.0.113.0/24 ...):
+# the air gap passes only these three private networks, so a Mac source outside them would be rejected there
+rfc1918 = [ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+if addr.version != 4 or not any(addr in net for net in rfc1918):
+    refuse("mac_src_ip %s is not inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16 (TOPOFIX2 F7: vmnet must give the Mac an RFC1918 address or replies would be rejected by the air gap)" % src)
 vm_ip = str(hello.get("vm_ip") or "")
 if not ipaddress.ip_address(vm_ip).version == 4:
     refuse("vm_ip %r is not an IPv4 address" % vm_ip)
