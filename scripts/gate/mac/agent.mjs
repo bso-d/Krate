@@ -85,6 +85,12 @@ const ALLOWED_SCRIPTS = ['probe.mjs', 'screenshots.mjs', 'screenshots-grafana.mj
 for (const r of Object.values(ROWS)) {
   if (!ALLOWED_SCRIPTS.includes(r.script)) die(`agent: row script ${r.script} is not in ALLOWED_SCRIPTS`);
 }
+// Review T18: the selected --rows plan, not the whole table, bounds what the guest may ask for. A plan names rows of the table
+// once each; the hello and the ready line report the plan (a guest must not learn, or use, a row this run did not select).
+for (const planned of PLAN) {
+  if (!Object.hasOwn(ROWS, planned)) die(`--rows names ${JSON.stringify(planned)}, which is not a row of this agent: ${Object.keys(ROWS).join(', ')}`);
+}
+if (new Set(PLAN).size !== PLAN.length) die(`--rows names a row twice: ${PLAN.join(',')}`);
 const HELLO_INTERVAL_MS = 15000;
 const POLL_INTERVAL_MS = 3000;   // TOPOFIX-DESIGN 3.6: each poll is one `limactl shell` round trip into the guest
 const READ_CAP_BYTES = 65536; // one guest command per file read, 64 KiB cap (F4)
@@ -175,7 +181,7 @@ function writeHello(vmIp, srcIp, iface, g6) {
     macos: `${process.platform} ${process.arch}`, headless: false,
     vm: VM, vm_ip: vmIp, mac_src_ip: srcIp, mac_iface: iface,
     clock_skew_ms: clockSkewMs(), vm_g6: g6,   // the guest's lima0 GLOBAL address (fd61:.../64 in M1), not the link-local M4 probed (review S6)
-    public_host: PUBLIC_HOST, ports: PORTS, plan: Object.keys(ROWS),
+    public_host: PUBLIC_HOST, ports: PORTS, plan: PLAN,
   };
   guestPut('agent-hello.json', JSON.stringify(hello, null, 2) + '\n');
   return hello;
@@ -297,6 +303,7 @@ function appendManifest(m) {
 
 // ── request claim: the guest may say exactly {schema,id,row,nonce} ──
 const seenRequests = new Set();
+const servedRows = new Set();   // review T18: one request per planned row, whatever id it comes under
 let inFlight = false;
 function claimRequest(file) {
   const src = `${RDV}/${file}`;
@@ -321,14 +328,23 @@ function claimRequest(file) {
     dropClaimed(claimed);
     return { bad: 'refused: schema or rendezvous nonce mismatch' };
   }
-  // the id names the response file (resp-<4 digits>.json) and the row's scratch folder: only a small integer may do that
+  // the id names the response file (resp-<4 digits>.json) and the row's scratch folder: only a small integer may do that, and
+  // (review T11) it must be the id of the file the request came in (req-<4 digits>.json), checked before any path uses it
   if (!Number.isInteger(parsed.id) || parsed.id < 1 || parsed.id > 9999) {
     dropClaimed(claimed);
     return { bad: 'refused: the request id must be an integer from 1 to 9999 (it names resp-<4 digits>.json)' };
   }
-  if (!ROWS[parsed.row]) {
+  if (parsed.id !== Number(file.slice(4, 8))) {
     dropClaimed(claimed);
-    return { bad: `refused: row ${JSON.stringify(String(parsed.row))} is not in this run's plan: ${Object.keys(ROWS).join(', ')}` };
+    return { bad: `refused: the request id ${parsed.id} is not the id of its file ${file}` };
+  }
+  if (typeof parsed.row !== 'string' || !PLAN.includes(parsed.row)) {
+    dropClaimed(claimed);
+    return { bad: `refused: row ${JSON.stringify(String(parsed.row))} is not in this run's plan: ${PLAN.join(', ')}` };
+  }
+  if (servedRows.has(parsed.row)) {
+    dropClaimed(claimed);
+    return { bad: `refused: row ${parsed.row} was already served (one request per planned row)` };
   }
   if (seenRequests.has(parsed.id)) {
     dropClaimed(claimed);
@@ -348,6 +364,7 @@ function execute(claim) {
   const { req, claimedPath } = claim;
   inFlight = true;
   seenRequests.add(req.id);
+  servedRows.add(req.row);
   const t0 = new Date().toISOString();
   let res = { rc: 3, stdout: '', stderr: '', outDir: null };
   try { res = runRow(req); } catch (e) { res = { rc: 3, stdout: 'agent error: ' + String(e.message || e), stderr: '', outDir: null }; }
@@ -400,7 +417,7 @@ const CHROME = chromeFacts();
 try { writeHello(STATE.vmIp, srcIp, iface, g6); } catch (e) {
   die(`the first hello could not be put into the guest rendezvous ${RDV}: ${String(e.message || e).slice(0, 300)}`);
 }
-console.log(`agent: ready vm=${VM} vm_ip=${STATE.vmIp} mac_src_ip=${srcIp} iface=${iface} g6=${g6 || 'none'} plan=${Object.keys(ROWS).join(',')} nonce=bound`); // the nonce value is never printed (review N6)
+console.log(`agent: ready vm=${VM} vm_ip=${STATE.vmIp} mac_src_ip=${srcIp} iface=${iface} g6=${g6 || 'none'} plan=${PLAN.join(',')} nonce=bound`); // the nonce value is never printed (review N6)
 // The heartbeat keeps the process alive until the launcher stops it; the poll loop is unref'd
 // so an idle teardown does not hang on it.
 setInterval(() => {

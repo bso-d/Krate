@@ -1506,6 +1506,35 @@ def check_topofix2(checks):
     e('local os_family fw_active=false' in topo_runner_text and 'elif [[ "$os_family" == rhel ]] && ! $fw_active; then' in topo_runner_text
       and "docker_target=\"$(\"${fwcmd[@]}\" --info-zone=docker" in topo_runner_text and '[[ "$docker_target" == ACCEPT ]] || st=1' in topo_runner_text,
       'W7 selects its branch from the OS and checks the docker zone target (T05, T17)')
+
+    # T18 / T11: the agent serves only the selected plan, each row once, and trusts no id before it is an integer 1..9999 equal to
+    # the id of the request's own file name; all of that runs in claimRequest, before execute() and runRow() can use the id in a path.
+    for line in (
+        'for (const planned of PLAN) {',
+        'if (new Set(PLAN).size !== PLAN.length) die(`--rows names a row twice: ${PLAN.join(\',\')}`);',
+        'public_host: PUBLIC_HOST, ports: PORTS, plan: PLAN,',
+        "if (typeof parsed.row !== 'string' || !PLAN.includes(parsed.row)) {",
+        'if (servedRows.has(parsed.row)) {',
+        'servedRows.add(req.row);',
+        'if (parsed.id !== Number(file.slice(4, 8))) {',
+    ):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (T18/T11)')
+    e(any(ln.startswith('if (!Object.hasOwn(ROWS, planned)) die(') for ln in agent_lines) and 'ROWS[parsed.row]' not in agent_code,
+      'agent.mjs refuses a --rows entry that is not an own row of the table and no longer admits a request by ROWS[parsed.row] (T18: --rows W6 must not allow W5; "__proto__" is not a row)')
+    claim_start = agent_lines.index('function claimRequest(file) {') if 'function claimRequest(file) {' in agent_lines else -1
+    claim_end = next((i for i, ln in enumerate(agent_lines) if ln.startswith('return { req: parsed, claimedPath: claimed };')), -1)
+    claim_body = agent_lines[claim_start:claim_end] if 0 <= claim_start < claim_end else []
+    marks = [next((i for i, ln in enumerate(claim_body) if ln.startswith(token)), -1) for token in (
+        'if (!Number.isInteger(parsed.id) || parsed.id < 1 || parsed.id > 9999) {',
+        'if (parsed.id !== Number(file.slice(4, 8))) {',
+        "if (typeof parsed.row !== 'string' || !PLAN.includes(parsed.row)) {",
+        'if (servedRows.has(parsed.row)) {')]
+    e(all(m >= 0 for m in marks) and marks == sorted(marks),
+      'claimRequest validates the id (integer 1..9999, equal to its file name) and then the row (in the plan, not yet served) before it returns a request for execute() (T11, T18)')
+    id_path_uses = [ln for ln in agent_lines if re.search(r'\b(?:req|parsed)\.id\b', ln) and ('join(' in ln or '${' in ln or 'resp-' in ln) and not ln.startswith('return { bad:')]
+    e(len(id_path_uses) == 2 and any(ln.startswith('const outDir = join(TMP, `${req.id}-${sub}`);') for ln in id_path_uses)
+      and any(ln.startswith("guestPut(`resp-${String(req.id).padStart(4, '0')}.json`") for ln in id_path_uses),
+      f'the request id reaches a path in exactly two places, runRow\'s scratch folder and the response name, both after claimRequest validated it; found {id_path_uses!r} (T11)')
     e("agent_request" in topo_runner_text and 'CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request' in topo_runner_text
       and '2>&1)"; rc=$?\n  if [[ -n "$REND_NONCE" ]]' not in topo_runner_text,
       'agent_request no longer merges the requester stderr into CAP (T01)')
