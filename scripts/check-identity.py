@@ -1885,14 +1885,17 @@ console.log(JSON.stringify({ length: out.length, newline: out.includes('\n'), pa
                 (base / 'bin/limactl').chmod(0o755)
                 (base / 'rdv').mkdir()
                 results = {}
-                for name, guest_cmd in (('pass', 'true'), ('fail', 'cd /nonexistent-for-the-check && true')):
+                # `(exit 7)` fails with the same status in every sh; a failed `cd` is 1 in bash's sh but 2 in dash
+                # (Ubuntu's /bin/sh, as on the CI runner), so that case only has to record some non-zero status.
+                for name, guest_cmd in (('pass', 'true'), ('fail', '(exit 7)'), ('cd', 'cd /nonexistent-for-the-check && true')):
                     sub_rdv = base / name
                     sub_rdv.mkdir()
                     script = ('VM=fake; GUEST_ROOT="$1"; RDV="$2"; CANDIDATE=0123456789abcdef; GUEST_CMD="$3"\n' + launch_line.replace('nohup setsid sh', 'nohup sh') + '\n'
                               'for _ in $(seq 1 50); do [ -s "$RDV/runner.rc" ] && break; sleep 0.1; done; printf "%s|%s" "$(cat "$RDV/runner.rc" 2>/dev/null)" "$(test -s "$RDV/runner.pid" && echo pid)"\n')
                     run = subprocess.run([bash_t, '-c', script, 'bash', str(base), str(sub_rdv), guest_cmd], env=dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}'), text=True, capture_output=True, timeout=30)
                     results[name] = run.stdout.strip()
-            e(results == {'pass': '0|pid', 'fail': '1|pid'},
+            e(results.get('pass') == '0|pid' and results.get('fail') == '7|pid'
+              and re.fullmatch(r'[1-9][0-9]*\|pid', results.get('cd', '')) is not None,
               f"the launcher's detached guest command records the runner's exit status beside its pid (0 for a pass, the failure status otherwise); got {results!r} (T14)")
     e('RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d \'[:space:]\' || true)"' in launcher_lines, 'the launcher reads the runner exit status from the guest and survives a missing runner.rc (T14, R2)')
     # T12 (rest): the hello wait is for THIS run's nonce, not any non-empty file (a previous run's hello would pass `test -s`).
