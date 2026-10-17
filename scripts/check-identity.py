@@ -1270,6 +1270,52 @@ def check_topofix2(checks):
       and 'request ids from 1 to 9999' in guide_flat,
       'the guide says the rendezvous lives in the guest and how the agent lists, claims, reads, removes and puts (PRE-0)')
 
+    # T08 (review, P1): Response.serverAddr() and Response.securityDetails() return Promises in Playwright 1.60.0
+    # (playwright-core/types/types.d.ts), so the helpers that read them, the tracker's record() and every caller are async.
+    for line in ('export async function assertServedFrom(resp, expected, what) {',
+                 'export async function assertServedCertificate(resp, pinned, what) {',
+                 'asserted.push(await assertServedFrom(state.last, expectedIp, what));',
+                 'if (pinned) asserted.push(await assertServedCertificate(state.last, pinned, what));'):
+        e(line in launch_lines, f'browser-launch.mjs must carry the code line {line!r} (T08: the Response helpers are asynchronous)')
+    e(any(ln.startswith('try { addr = await resp.serverAddr(); }') for ln in launch_lines)
+      and any(ln.startswith('try { details = await resp.securityDetails(); }') for ln in launch_lines)
+      and any(ln.startswith('async record(expectedIp, pinned, what, asserted) {') for ln in launch_lines),
+      'browser-launch.mjs awaits Response.serverAddr() and Response.securityDetails() and its serve tracker record() is async (T08)')
+    for story_name in ('screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs'):
+        e('if (MAC && serve) await serve.record(' in '\n'.join(js_lines((ROOT / 'scripts/gate' / story_name).read_text())),
+          f'{story_name} awaits serve.record() (T08)')
+    e(any(ln.startswith("served_from = (await assertServedFrom(mr, resolveTo, 'main document')) + '; ' + (await assertServedCertificate(mr, PIN, 'main document'));") for ln in u15_lines),
+      'phase4-browser.mjs awaits both served-response assertions of its summary (T08)')
+    unawaited = []
+    for gate_js in sorted((ROOT / 'scripts/gate').rglob('*.mjs')):
+        for gate_line in js_lines(gate_js.read_text()):
+            for call in re.finditer(r'(\bawait\s+)?\b(?!Response\b)[a-z]\w*(?:\.\w+)*\.(?:serverAddr|securityDetails)\(\)', gate_line):
+                if not call.group(1):
+                    unawaited.append(f'{gate_js.name}: {gate_line[:80]}')
+    e(not unawaited, f'no gate script reads Response.serverAddr()/securityDetails() without await (T08); found {unawaited}')
+    node_binary = shutil.which('node')
+    if node_binary:
+        probe_src = (
+            "const lib = await import(process.argv[1]);\n"
+            "const good = { serverAddr: async () => ({ ipAddress: '192.168.64.2', port: 443 }),\n"
+            "  securityDetails: async () => ({ subjectName: 'krate-oi.test', issuer: 'Krate Test CA', protocol: 'TLSv1.3', validFrom: 1, validTo: 2 }) };\n"
+            "const out = { from: await lib.assertServedFrom(good, '192.168.64.2', 'x'),\n"
+            "  cert: await lib.assertServedCertificate(good, { subject: 'CN=krate-oi.test', issuer: 'CN=Krate Test CA' }, 'x') };\n"
+            "const refuse = async (fn) => { try { await fn(); return false; } catch { return true; } };\n"
+            "out.loopbackRefused = await refuse(() => lib.assertServedFrom({ serverAddr: async () => ({ ipAddress: '127.0.0.1', port: 443 }) }, '192.168.64.2', 'x'));\n"
+            "out.emptyRefused = await refuse(() => lib.assertServedFrom({ serverAddr: async () => null }, '192.168.64.2', 'x'));\n"
+            "out.certMismatchRefused = await refuse(() => lib.assertServedCertificate(good, { subject: 'CN=other.test', issuer: 'CN=Krate Test CA' }, 'x'));\n"
+            "console.log(JSON.stringify(out));\n"
+        )
+        run_node = subprocess.run([node_binary, '--input-type=module', '-e', probe_src, str(ROOT / 'scripts/gate/browser-launch.mjs')], text=True, capture_output=True)
+        try:
+            node_out = json.loads(run_node.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            node_out = {}
+        e(run_node.returncode == 0 and 'served from 192.168.64.2:443' in node_out.get('from', '') and node_out.get('cert', '').startswith('TLS TLSv1.3')
+          and node_out.get('loopbackRefused') is True and node_out.get('emptyRefused') is True and node_out.get('certMismatchRefused') is True,
+          f'the served-address and served-certificate assertions accept a valid asynchronous Response and refuse loopback, empty and mismatching ones; got rc {run_node.returncode}: {run_node.stderr.strip()[:200]!r} {node_out!r} (T08)')
+
 
 def check_k37_wiring(checks):
     """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""

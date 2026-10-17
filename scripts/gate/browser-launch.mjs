@@ -268,10 +268,10 @@ export function attachServeTracker(page) {
     count: () => state.count,
     last: () => state.last,
     attach(newPage) { hook(newPage); return this; },
-    record(expectedIp, pinned, what, asserted) {
+    async record(expectedIp, pinned, what, asserted) {   // async: Response.serverAddr()/securityDetails() are Promises (Playwright 1.60.0 types.d.ts, review T08)
       if (!state.last) return null;
-      asserted.push(assertServedFrom(state.last, expectedIp, what));
-      if (pinned) asserted.push(assertServedCertificate(state.last, pinned, what));
+      asserted.push(await assertServedFrom(state.last, expectedIp, what));
+      if (pinned) asserted.push(await assertServedCertificate(state.last, pinned, what));
       return true;
     },
   };
@@ -328,10 +328,10 @@ export async function acceptGateCertificate(page, url, { onAssert, onShot } = {}
 // TOPOFIX-DESIGN 3.5/F6: the shot's main document came from the VM's NIC address, never from
 // a host-agent forward (which would be 127.0.0.1/::1). Response.serverAddr() is Playwright's
 // {ipAddress, port}; M0 point 4 observed it filled under the resolver rule.
-export function assertServedFrom(resp, expected, what) {
+export async function assertServedFrom(resp, expected, what) {
   if (!resp) throw new Error(`${what}: no main-document response to assert the server address on`);
   let addr;
-  try { addr = resp.serverAddr(); } catch (e) { throw new Error(`${what}: Response.serverAddr() unavailable: ${String(e.message || e).slice(0, 120)}`); }
+  try { addr = await resp.serverAddr(); } catch (e) { throw new Error(`${what}: Response.serverAddr() unavailable: ${String(e.message || e).slice(0, 120)}`); }
   if (!addr || !addr.ipAddress) throw new Error(`${what}: Response.serverAddr() empty`);
   if (addr.ipAddress === '127.0.0.1' || addr.ipAddress === '::1') {
     throw new Error(`${what}: served from ${addr.ipAddress}:${addr.port || '?'} — that is a host-agent forward, not the VM address ${expected}`);
@@ -347,10 +347,10 @@ export function assertServedFrom(resp, expected, what) {
 // point 4 observed exactly those fields populated on the Mac. Equal subjectAnd issuer plus
 // the Node pin's fingerprint close the "what did Chrome actually receive" question without
 // CDP Network.getCertificate (M0 point 6: it has no certificates to give in Chrome 155).
-export function assertServedCertificate(resp, pinned, what) {
+export async function assertServedCertificate(resp, pinned, what) {
   if (!resp) throw new Error(`${what}: no main-document response to assert securityDetails on`);
   let details;
-  try { details = resp.securityDetails(); } catch (e) { throw new Error(`${what}: Response.securityDetails() unavailable: ${String(e.message || e).slice(0, 120)}`); }
+  try { details = await resp.securityDetails(); } catch (e) { throw new Error(`${what}: Response.securityDetails() unavailable: ${String(e.message || e).slice(0, 120)}`); }
   if (!details || !details.subjectName) throw new Error(`${what}: Response.securityDetails() empty (the story must be in mac mode against a fixture certificate)`);
   const wrong = [];
   if (details.subjectName && pinned.subject && !dnFold(pinned.subject).includes(dnFold(details.subjectName))) wrong.push(`subject ${details.subjectName}`);

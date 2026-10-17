@@ -189,7 +189,7 @@ if (MAC) {
     process.exitCode = 1;
     step('vantage missing', { error: 'no main-document response captured' });
   } else {
-    served_from = assertServedFrom(mr, resolveTo, 'main document') + '; ' + assertServedCertificate(mr, PIN, 'main document');
+    served_from = (await assertServedFrom(mr, resolveTo, 'main document')) + '; ' + (await assertServedCertificate(mr, PIN, 'main document'));
     step('vantage evidence', { served_from });
     ext.assertClean();
   }

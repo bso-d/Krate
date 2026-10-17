@@ -116,7 +116,7 @@ async function capture(page, slug, caption) {
   n += 1;
   // Mac vantage: bind the shot's main document to the VM address and the pinned certificate
   // (assertServedFrom/assertServedCertificate; the fields' behaviour observed in M0 point 4).
-  if (MAC && serve) serve.record(PERS_IP, PIN, slug, asserted);
+  if (MAC && serve) await serve.record(PERS_IP, PIN, slug, asserted);
   const file = `${String(n).padStart(2, '0')}-${slug}.png`;
   await page.screenshot({ path: `${OUT}/${file}`, fullPage: false });
   const bytes = readFileSync(`${OUT}/${file}`);
