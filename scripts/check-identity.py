@@ -579,14 +579,16 @@ def check_exposure(checks):
                         ('oidcSessionRegistry.removeSessionInformation(session.getId())', 'a local logout forgets the OIDC session'),
                         ('MAX_SESSION_LIFETIME = "auth.oauth2.max-session-lifetime"', 'the fork reads the absolute session lifetime from auth.oauth2.max-session-lifetime'),
                         ('Duration.between(session.getCreationTime(), Instant.now()).compareTo(maximum) >= 0', 'a session older than the maximum ends however recently it was used'),
-                        ('return session.invalidate();', 'the session that reached the maximum is invalidated'),
-                        ('endAfterMaximum(exchange, maximum).then(chain.filter(exchange))', 'the filter always continues the chain after the check (an empty result would end the exchange with 200)'),
+                        ('return session.invalidate().then(Mono.defer(() -> {', 'the session that reached the maximum is invalidated and its request restarts'),
+                        ('            ? restartRequest(exchange, session, maximum)', 'after the invalidation the exchange is answered with the restart, so no session write lands in the invalidated-session reference'),
                         ('builder.addFilterBefore(sessionLifetimeLimit(maxSessionLifetime), SecurityWebFiltersOrder.REACTOR_CONTEXT);', 'the lifetime filter runs before the SecurityContext is read'),
+                        ('response.setStatusCode(HttpStatus.FOUND);', 'the restart answers 302 at the same request URI (the expired SESSION cookie is written at the response commit)'),
+                        ('String location = uri.getRawPath() + (uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery());', 'the bounce location is the request path and query, relative so the browser resolves scheme and host itself'),
                         ('ServerWebExchangeMatchers.pathMatchers(HttpMethod.POST, "/logout")', 'a POST /logout is left to the logout filter, whose success handler needs the authentication'),
                         ('DEFAULT_MAX_SESSION_LIFETIME = Duration.ofHours(8);', 'the built-in maximum is 8 hours (owner decision G4) when the property is absent'),
                         ('DurationStyle.detectAndParse(configured.strip(), ChronoUnit.SECONDS)', 'a bare number is seconds, like server.reactive.session.timeout'),
                         ('if (lifetime.isPositive()) {', 'zero and negative values refuse to start'),
-                        ('.flatMap(isLogout -> isLogout\n+            ? chain.filter(exchange)\n+            : endAfterMaximum(exchange, maximum)', 'only a POST /logout skips the check, every other request is checked')):
+                        ('.flatMap(isLogout -> isLogout\n+            ? chain.filter(exchange)\n+            : continueOrRestart(exchange, maximum, chain)', 'only a POST /logout skips the check, every other request is checked')):
         e(needle in patch, f'kafbat-ui/native-auth.patch: {why} (missing {needle[:50]!r})')
     # PR #39 review threads: lifecycle lock during bootstrap, temp-admin listing in the parent shell, group before user,
     # rotate --value reuse, passphrase minimum from the environment, restore reconciles the UI client.
@@ -603,12 +605,12 @@ def check_exposure(checks):
         e('identity_reconcile_ui_urls restore' in restore and restore.index('identity_reconcile_ui_urls restore') < restore.index('identity_journal restore ok'),
           f'{edition}/krate: restore must reconcile the krate-ui client with this host before reporting success')
     build = (ROOT / 'kafbat-ui/build.py').read_text()
-    e("IMAGE = 'krate/kafka-ui:1.5.0-sso.8'" in build, 'kafbat-ui/build.py must build sso.8 (the templates pin it)')
-    e("VITE_TAG='v1.5.0-sso.8'" in build, 'kafbat-ui/build.py must stamp the frontend with the same sso.8 tag')
+    e("IMAGE = 'krate/kafka-ui:1.5.0-sso.9'" in build, 'kafbat-ui/build.py must build sso.9 (the templates pin it)')
+    e("VITE_TAG='v1.5.0-sso.9'" in build, 'kafbat-ui/build.py must stamp the frontend with the same sso.9 tag')
     for edition in EDITIONS:
         pin = identity.read_env(ROOT / edition / '.env.template').get('KAFKA_UI_IMAGE', '')
-        e(re.fullmatch(r'krate/kafka-ui:1\.5\.0-sso\.8@sha256:[a-f0-9]{64}', pin) is not None,
-          f'{edition}/.env.template: KAFKA_UI_IMAGE must pin the sso.8 image that build.py builds; got {pin[:60]!r}')
+        e(re.fullmatch(r'krate/kafka-ui:1\.5\.0-sso\.9@sha256:[a-f0-9]{64}', pin) is not None,
+          f'{edition}/.env.template: KAFKA_UI_IMAGE must pin the sso.9 image that build.py builds; got {pin[:60]!r}')
 
 
 def check_gate_scripts(checks):

@@ -70,7 +70,7 @@ verdict is at best INCOMPLETE; with `--repo`, a product byte mismatch refuses th
 run before anything starts, and the comparison is repeated at the end.
 
 Prerequisites: Docker with Compose ≥ 2.20.2, python3, openssl, curl; the
-candidate's images on the host (`krate/kafka-ui:1.5.0-sso.8` built with `make
+candidate's images on the host (`krate/kafka-ui:1.5.0-sso.9` built with `make
 kafbat-ui`); nothing else from Krate running on the host (the product allows
 one Keycloak deployment per Docker host: a second `keycloak_db_data` volume or
 the fixed `krate-proxy` name makes `identity up` refuse). The screenshot story
