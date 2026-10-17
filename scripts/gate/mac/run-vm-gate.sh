@@ -112,17 +112,27 @@ echo "run-vm-gate: vm_ip=$VM_IP via $IFACE; preflight ok"
 # ── agent + guest runner ──
 NONCE="$(openssl rand -hex 16)"
 RDV="$GUEST_ROOT/rdv"
-limactl shell "$VM" -- mkdir -p "$RDV" 2>/dev/null
+limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null   # agent-out: limactl copy -r cannot create a missing parent (PRE-3)
 TMPDIR="$OUT/agent-tmp" PW_MODULES="$PW_MODULES" node "$WT/scripts/gate/mac/agent.mjs" \
   --vm "$VM" --rendezvous "$RDV" --guest-root "$GUEST_ROOT" --public-host "$HOST" \
   --rows "$ROWS" --out "$OUT" --guest-cert "$EDITION_DIR/certs/server.crt" \
   --rendezvous-nonce "$NONCE" >"$OUT/agent.log" 2>&1 &
 AGENT_PID=$!
+# PRE-2: the guest runner's preflight reads the hello at argument-validation time, a fraction of a
+# second after it starts; wait until the agent's first hello is in the guest rendezvous (or the
+# agent died) before starting the runner.
+hello_seen=0
+for _ in $(seq 1 45); do
+  if limactl shell "$VM" -- test -s "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi
+  kill -0 "$AGENT_PID" 2>/dev/null || { echo "run-vm-gate: the agent exited before its hello reached $RDV (see $OUT/agent.log)" >&2; exit 2; }
+  sleep 2
+done
+(( hello_seen == 1 )) || { echo "run-vm-gate: no agent-hello.json in $RDV within 90 s (see $OUT/agent.log)" >&2; exit 2; }
 # S3 (review): the receipt path is passed explicitly, so the launcher harvests what the runner
 # actually wrote instead of scanning for a default path it would never match; a guest death
 # without a receipt must not exit rc=0.
 GUEST_RECEIPT="$GUEST_ROOT/receipt-${CANDIDATE:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
-GUEST_CMD="cd $GUEST_ROOT/repo && scripts/gate-identity.sh --edition-dir $EDITION_DIR --wipe --phase $PHASE --public-host $HOST --out $GUEST_RECEIPT --browser agent --rendezvous $RDV --rendezvous-nonce $NONCE"
+GUEST_CMD="cd $GUEST_ROOT/repo && scripts/gate-identity.sh --edition-dir $EDITION_DIR --wipe --phase $PHASE --public-host $HOST --out $GUEST_RECEIPT --browser agent --rendezvous $RDV --rendezvous-nonce $NONCE --candidate $CANDIDATE --repo $GUEST_ROOT/repo"   # PRE-7: the bound, full-inventory shape of a bundle host (identity-gate.md, the bundle-host invocation)
 limactl shell "$VM" -- sh -c "nohup setsid sh -c $(printf '%q' "$GUEST_CMD") > $GUEST_ROOT/run-${CANDIDATE:0:7}.log 2>&1 & echo \$! > $RDV/runner.pid"
 echo "run-vm-gate: guest runner detached (pid $(limactl shell "$VM" -- cat "$RDV/runner.pid" 2>/dev/null | tr -d '[:space:]')), tail $GUEST_ROOT/run-${CANDIDATE:0:7}.log"
 

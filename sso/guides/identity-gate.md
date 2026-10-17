@@ -39,7 +39,8 @@ scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> -
 scripts/gate/mac/run-vm-gate.sh --vm krate-p4-topo1 --phase 4c --public-host krate-oi.test \
   --guest-root /home/<guest-user>/gate --candidate <sha>     # the launcher starts the agent and the detached guest run
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --phase 4c --public-host krate-oi.test \
-  --browser agent --rendezvous /home/<guest-user>/gate/rdv --rendezvous-nonce <the launcher's token>   # the guest command it runs
+  --browser agent --rendezvous /home/<guest-user>/gate/rdv --rendezvous-nonce <the launcher's token> \
+  --candidate <sha> --repo /home/<guest-user>/gate/repo   # the guest command it runs: the launcher forwards its --candidate and the guest checkout (the bound, full-inventory shape of the bundle-host line above)
 ```
 
 Two invocations exist for a bundle host. The reduced one, `--no-static

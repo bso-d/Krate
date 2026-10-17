@@ -972,6 +972,16 @@ def js_lines(text):
     return out
 
 
+def sh_lines(text):
+    """The code lines of a shell script: stripped, comment-only lines and trailing `# ...` comments removed (see js_lines)."""
+    out = []
+    for raw in text.splitlines():
+        line = re.sub(r'\s+#(?:\s.*)?$', '', raw).strip()
+        if line and not line.startswith('#'):
+            out.append(line)
+    return out
+
+
 def check_topofix2(checks):
     """TOPOFIX2 fix round (harness/phase4-completion/w2/TOPOFIX2-BRIEF.md): behaviour pins for the defects the first read of the
     Mac agent vantage found (PRE-0..PRE-7, F1-F8, G5-G7). Pins are whole-line matches on the code lines (js_lines) or
@@ -1028,6 +1038,31 @@ def check_topofix2(checks):
     remote_lines = [ln.strip() for ln in remote_text.splitlines()]
     e('if resp.get("nonce") != nonce or resp.get("id") != int(req_id):' in remote_lines and 'resp.get("id") != req_id' not in remote_text,
       'browser_remote.py compares the response id with int(req_id): the request carries the int and the file name the padded string (PRE-1)')
+
+    # PRE-2 / PRE-3 / PRE-7: the launcher creates agent-out with the rendezvous, waits for the first hello IN THE GUEST
+    # before it starts the runner, and the guest command is the bound, full-inventory shape of a bundle host.
+    launcher_lines = sh_lines((ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text())
+    wait_lines = (
+        'for _ in $(seq 1 45); do',
+        'if limactl shell "$VM" -- test -s "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi',
+        'kill -0 "$AGENT_PID" 2>/dev/null || { echo "run-vm-gate: the agent exited before its hello reached $RDV (see $OUT/agent.log)" >&2; exit 2; }',
+        'sleep 2',
+        '(( hello_seen == 1 )) || { echo "run-vm-gate: no agent-hello.json in $RDV within 90 s (see $OUT/agent.log)" >&2; exit 2; }',
+    )
+    for line in ('limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null',) + wait_lines:
+        e(line in launcher_lines, f'run-vm-gate.sh must carry the code line {line!r} (PRE-2: wait up to 90 s for the hello in the guest, exit 2 when the agent died or nothing came; PRE-3: agent-out is created with the rendezvous)')
+    guest_cmd = next((ln for ln in launcher_lines if ln.startswith('GUEST_CMD="')), '')
+    if all(line in launcher_lines for line in wait_lines):
+        at = {name: launcher_lines.index(name) for name in ('AGENT_PID=$!', wait_lines[0])}
+        e(at['AGENT_PID=$!'] < at[wait_lines[0]] < launcher_lines.index(guest_cmd) if guest_cmd else False,
+          'run-vm-gate.sh waits for the hello after the agent starts and before the guest runner command is built (PRE-2)')
+    e(re.search(r' --browser agent --rendezvous \$RDV --rendezvous-nonce \$NONCE --candidate \$CANDIDATE --repo \$GUEST_ROOT/repo"$', guest_cmd) is not None,
+      'the launcher\'s guest command carries --candidate $CANDIDATE --repo $GUEST_ROOT/repo, the bound full-inventory shape the guide documents for a bundle host (PRE-7 / F1)')
+    guide_text = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    e(re.search(r"^scripts/gate-identity\.sh --edition-dir /opt/krate/epc --wipe --phase 4c --public-host krate-oi\.test \\\n"
+                r"  --browser agent --rendezvous /home/<guest-user>/gate/rdv --rendezvous-nonce <the launcher's token> \\\n"
+                r"  --candidate <sha> --repo /home/<guest-user>/gate/repo ", guide_text, re.M) is not None,
+      "the guide's launcher example states that the guest command carries --candidate and --repo (PRE-7 / F1)")
 
 
 def check_k37_wiring(checks):
