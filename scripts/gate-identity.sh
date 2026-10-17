@@ -2023,10 +2023,13 @@ agent_request() { # row timeout_s: the runner's {schema,id,row,nonce} request to
   # agent's; this runner only names the row. CAP carries the response JSON. The response echoes
   # the rendezvous nonce by protocol (it binds the run); the echo must NOT reach the raw log or
   # the row's response copy, so it is redacted here before either store sees it (review S4).
-  local rc
-  CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request --rendezvous "$RENDEZVOUS" --nonce "$REND_NONCE" --row "$1" --timeout "$2" 2>&1)"; rc=$?
-  if [[ -n "$REND_NONCE" ]]; then CAP="${CAP//$REND_NONCE/<rendezvous-nonce-redacted>}"; fi
-  printf -- '--- agent request %s (exit %s)\n%s\n' "$1" "$rc" "$CAP" >> "$RAW"
+  # Review T01: browser_remote.py announces the request on stderr, also on success, so CAP takes ONLY its stdout (the response
+  # JSON) and the diagnostics go to CAP_ERR and the raw log, never into the saved response.
+  local rc err_file="$STATE/agent-request.err"
+  CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request --rendezvous "$RENDEZVOUS" --nonce "$REND_NONCE" --row "$1" --timeout "$2" 2>"$err_file")"; rc=$?
+  CAP_ERR="$(cat "$err_file" 2>/dev/null)"; rm -f "$err_file"
+  if [[ -n "$REND_NONCE" ]]; then CAP="${CAP//$REND_NONCE/<rendezvous-nonce-redacted>}"; CAP_ERR="${CAP_ERR//$REND_NONCE/<rendezvous-nonce-redacted>}"; fi
+  printf -- '--- agent request %s (exit %s)\n%s\n--- agent request %s stderr\n%s\n' "$1" "$rc" "$CAP" "$1" "$CAP_ERR" >> "$RAW"
   return $rc
 }
 agent_delivered_dir() { # row: the guest folder the agent copies the row's evidence into (one
@@ -2034,6 +2037,31 @@ agent_delivered_dir() { # row: the guest folder the agent copies the row's evide
   printf '%s/agent-out/w%s' "$(dirname "$RENDEZVOUS")" "${1#W}"
 }
 
+w5_published_any_ports() { # prints `service=port` for every any-address published port of the running Compose projects
+  # Review T02: .Label is a `docker ps` formatting helper, not a method of the object `docker inspect` renders ("Label is not a
+  # method but has arguments"), so the service label is read from .Config.Labels, and a failed inspect (or no container at all)
+  # is an error (rc 1 and the reason on stdout), never a silently smaller derived set.
+  # shellcheck disable=SC2016  # the Go template is literal
+  local tpl='{{index .Config.Labels "com.docker.compose.service"}}|{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}}:{{.HostPort}} {{end}}{{end}}'
+  local cid line svc bind failed="" inspected=0
+  while IFS= read -r cid; do
+    [[ -z "$cid" ]] && continue
+    if ! line="$(docker inspect -f "$tpl" "$cid" 2>>"$RAW")"; then failed+="$cid "; continue; fi
+    inspected=$((inspected+1))
+    svc="${line%%|*}"
+    # shellcheck disable=SC2086  # the bind list is space-separated single tokens
+    for bind in ${line#*|}; do
+      case "$bind" in
+        0.0.0.0:* | "::":* | :*) printf '%s=%s\n' "$svc" "${bind##*:}" ;;
+      esac
+    done
+  done < <({ docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null
+             docker ps -aq --filter "label=com.docker.compose.project=$MON_PROJECT" 2>/dev/null; } | sort -u)
+  if [[ -n "$failed" ]] || (( inspected == 0 )); then
+    printf 'docker inspect failed for [%s] and %d container(s) were inspected (the error is in the raw log)\n' "${failed:-none}" "$inspected"
+    return 1
+  fi
+}
 phase4_row_w5() {
   local slice="$1"
   section "W5: published-port surface from the Mac over the fixture's NIC address (derived expected set, control port 111, three outcomes, TCP only)"
@@ -2041,22 +2069,16 @@ phase4_row_w5() {
   # README line numbers (TOPOFIX F6): the any-address published ports of the running Compose
   # projects plus sshd's 22. Three outcomes (open / refused / rejected; M3 and the M4 sweep
   # saw both refusal shapes), the control port 111, and the guest's ss tables beside it.
-  # shellcheck disable=SC2016  # the Go template is literal (the W1 census uses the same shape)
-  local inspect_tpl='{{.Label "com.docker.compose.service"}}|{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}}:{{.HostPort}} {{end}}{{end}}'
-  local cid line svc
+  local derived svc port
   local any_ports="" ports_svc=""
-  while IFS= read -r cid; do
-    [[ -z "$cid" ]] && continue
-    line="$(docker inspect -f "$inspect_tpl" "$cid" 2>>"$RAW" || true)"
-    svc="${line%%|*}"
-    # shellcheck disable=SC2086  # the bind list is space-separated single tokens
-    for line in ${line#*|}; do
-      case "$line" in
-        0.0.0.0:* | "::":* | :*) any_ports+="${line##*:} " ; ports_svc+="$svc=${line##*:} " ;;
-      esac
-    done
-  done < <({ docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null
-             docker ps -aq --filter "label=com.docker.compose.project=$MON_PROJECT" 2>/dev/null; } | sort -u)
+  if ! derived="$(w5_published_any_ports)"; then
+    record W5 "$slice" W FAIL "the derived expected set cannot be built: $derived"
+    return
+  fi
+  while IFS='=' read -r svc port; do
+    [[ -n "$port" ]] || continue
+    any_ports+="$port "; ports_svc+="$svc=$port "
+  done <<<"$derived"
   local expected_csv docker_csv
   # shellcheck disable=SC2086  # the CSV is built from the split port words
   expected_csv="$(printf '%s\n' $any_ports 22 | LC_ALL=C sort -n -u | paste -s -d, -)"
@@ -2076,7 +2098,7 @@ phase4_row_w5() {
   local agent_rc=0
   agent_request W5 1500 || agent_rc=$?
   if (( agent_rc != 0 )); then
-    record W5 "$slice" W FAIL "the W5 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): ${CAP:0:300}"
+    record W5 "$slice" W FAIL "the W5 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): ${CAP_ERR:0:300}${CAP:+ | stdout: ${CAP:0:300}}"
     return
   fi
   if [[ "$CAP" != *'"exit"'* ]]; then
@@ -2091,16 +2113,21 @@ phase4_row_w5() {
     return
   fi
   rc_eval=0
-  evidence="$(W5_EXPECTED="$expected_csv" W5_DOCKER="$docker_csv" W5_VM_G6="${VM_G6:-}" python3 -I - "$result_file" "$fw_state" <<'PYW5' 2>>"$RAW"
+  evidence="$(W5_EXPECTED="$expected_csv" W5_DOCKER="$docker_csv" W5_VM_G6="${VM_G6:-}" python3 -I - "$result_file" "$fw_state" "$STATE/w5-agent-response.json" <<'PYW5' 2>>"$RAW"
 import json, os, re, sys
 
-result_file, fw_state = sys.argv[1], sys.argv[2]
+result_file, fw_state, response_file = sys.argv[1], sys.argv[2], sys.argv[3]
 bad = []
 note = []
 try:
     r = json.load(open(result_file, "r", encoding="utf-8"))
 except (OSError, ValueError) as exc:
     sys.stderr.write("the W5 result file is not readable/JSON: %s\n" % exc)
+    sys.exit(1)
+try:
+    envelope = json.load(open(response_file, "r", encoding="utf-8"))
+except (OSError, ValueError) as exc:
+    sys.stderr.write("the saved W5 agent response is not readable/JSON: %s\n" % exc)
     sys.exit(1)
 if not (r.get("swept") or {}).get("tcpOnly"):
     bad.append("the sweep is not TCP-only as the row states")
@@ -2149,6 +2176,8 @@ for p in v6entries:
     except (TypeError, ValueError):
         continue
     v6_outcome[port] = p.get("outcome")
+    if p.get("outcome") not in ("open", "refused", "rejected", "timeout"):
+        bad.append("IPv6 probe of port %d was inconclusive (%s): an unroutable or unscoped probe proves no filtering" % (port, p.get("outcome")))
     if port in docker_published and p.get("outcome") == "open":
         bad.append("docker-published port %d is open over IPv6 (lab8 N11a and the M4 sweep observed the [::] docker-proxy path filtered by firewalld's zone)" % port)
 if vm_g6:
@@ -2157,8 +2186,13 @@ if vm_g6:
         bad.append("IPv6 positive control: sshd's 22 did not answer over IPv6 (%s)" % v6_outcome.get(22, "not-swept"))
     else:
         note.append("22 answers over IPv6 (sshd; M4)")
-leak = r.get("mac_leak_scan") or {}
-if leak.get("hits"):
+# Review T16: mac_leak_scan belongs to the agent's response envelope, not to w5-result.json (probe.mjs never writes it there);
+# a missing or malformed scan is a breach, a scan with hits too.
+leak = envelope.get("mac_leak_scan")
+if not (isinstance(leak, dict) and isinstance(leak.get("values"), int) and isinstance(leak.get("hits"), int) and isinstance(leak.get("stores"), list)):
+    bad.append("the agent response carries no valid mac_leak_scan {values, hits, stores}")
+    leak = {}
+elif leak.get("hits"):
     bad.append("the agent's mac leak scan found %s hit(s) in %s" % (leak.get("hits"), leak.get("stores")))
 print("open=[%s]" % ",".join(map(str, open_set)))
 print("expected=[%s]" % ",".join(map(str, expected)))
@@ -2183,21 +2217,10 @@ PYW5
   fi
 }
 
-phase4_row_w6() {
-  local slice="$1"
-  section "W6: the client address the proxy logs for a Mac request (IPv4 path; TOPOFIX W6, kept)"
-  # One Mac request with a forged X-Forwarded-For and a row User-Agent; the runner (in the
-  # guest) reads the proxy's log line and asserts the $remote_addr equals mac_src_ip (M4's
-  # observed shape), not the forged header and not a bridge gateway.
-  local agent_rc=0
-  agent_request W6 240 || agent_rc=$?
-  if (( agent_rc != 0 )); then
-    record W6 "$slice" W FAIL "the W6 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): ${CAP:0:300}"
-    return
-  fi
-  printf '%s\n' "$CAP" > "$STATE/w6-agent-response.json" && chmod 600 "$STATE/w6-agent-response.json"
-  local parsed status ua issuer leak
-  parsed="$(python3 -I - "$STATE/w6-agent-response.json" <<'PYW6B' 2>>"$RAW"
+w6_response_fields() { # response.json: sets W6_STATUS, W6_UA, W6_ISSUER and W6_LEAK from the saved agent response
+  # Review T04: `read` consumes ONE line whatever IFS is, and the helper prints four, so every field is taken from its own line.
+  local parsed
+  parsed="$(python3 -I - "$1" <<'PYW6B' 2>>"$RAW"
 import json, re, sys
 r = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 tail = r.get("stdout_tail") or ""
@@ -2210,8 +2233,27 @@ print(m.group(1) if m else "")
 leak = r.get("mac_leak_scan") or {}
 print("%s values, %s hits" % (leak.get("values", "?"), leak.get("hits", "?")))
 PYW6B
-  )" || { record W6 "$slice" W FAIL "the W6 agent response could not be parsed (see run.log); response kept at $STATE/w6-agent-response.json"; return; }
-  IFS=$'\n' read -r status ua issuer leak <<<"$parsed"
+  )" || return 1
+  local -a fields
+  mapfile -t fields <<<"$parsed"
+  W6_STATUS="${fields[0]:-}"; W6_UA="${fields[1]:-}"; W6_ISSUER="${fields[2]:-}"; W6_LEAK="${fields[3]:-}"
+}
+phase4_row_w6() {
+  local slice="$1"
+  section "W6: the client address the proxy logs for a Mac request (IPv4 path; TOPOFIX W6, kept)"
+  # One Mac request with a forged X-Forwarded-For and a row User-Agent; the runner (in the
+  # guest) reads the proxy's log line and asserts the $remote_addr equals mac_src_ip (M4's
+  # observed shape), not the forged header and not a bridge gateway.
+  local agent_rc=0
+  agent_request W6 240 || agent_rc=$?
+  if (( agent_rc != 0 )); then
+    record W6 "$slice" W FAIL "the W6 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): ${CAP_ERR:0:300}${CAP:+ | stdout: ${CAP:0:300}}"
+    return
+  fi
+  printf '%s\n' "$CAP" > "$STATE/w6-agent-response.json" && chmod 600 "$STATE/w6-agent-response.json"
+  local status ua issuer leak
+  w6_response_fields "$STATE/w6-agent-response.json" || { record W6 "$slice" W FAIL "the W6 agent response could not be parsed (see run.log); response kept at $STATE/w6-agent-response.json"; return; }
+  status="$W6_STATUS"; ua="$W6_UA"; issuer="$W6_ISSUER"; leak="$W6_LEAK"
   if [[ ! "$status" =~ ^[0-9]{3}$ || -z "$ua" ]]; then
     record W6 "$slice" W FAIL "the agent response tail names no status/ua (the RESULT W6 line is in run.log)"
     return

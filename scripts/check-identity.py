@@ -988,6 +988,14 @@ def sh_lines(text):
     return out
 
 
+def bash_function_source(path, name):
+    """The source of one top-level function of a Bash script whose opening line may carry a trailing comment (bash_functions needs a bare `name() {`)."""
+    match = re.search(r'^' + re.escape(name) + r'\(\) \{[^\n]*\n.*?^\}\n', Path(path).read_text(), re.M | re.S)
+    if match is None:
+        raise ValueError(f'{path}: function {name} not found')
+    return match.group(0)
+
+
 def check_topofix2(checks):
     """TOPOFIX2 fix round (harness/phase4-completion/w2/TOPOFIX2-BRIEF.md): behaviour pins for the defects the first read of the
     Mac agent vantage found (PRE-0..PRE-7, F1-F8, G5-G7). Pins are whole-line matches on the code lines (js_lines) or
@@ -1122,19 +1130,27 @@ def check_topofix2(checks):
         w5_python = pyw5.group(1)
         w5_docker = '80,443,3443,9092,9093'
 
-        def w5_case(v6_ports, vm_g6, with_v6=True):
+        def w5_case(v6_ports, vm_g6, with_v6=True, envelope_leak='ok', result_leak=None):
             report = {'swept': {'tcpOnly': True}, 'counts': {'open': 6}, 'open': [22, 80, 443, 3443, 9092, 9093],
                       'spot': [{'port': 111, 'outcome': 'refused'}],
-                      'cert': {'authorized': True, 'protocol': 'TLSv1.3', 'sha256': 'ab12'},
-                      'mac_leak_scan': {'values': 0, 'hits': 0, 'stores': ['agent.log']}}
+                      'cert': {'authorized': True, 'protocol': 'TLSv1.3', 'sha256': 'ab12'}}
+            if result_leak is not None:
+                report['mac_leak_scan'] = result_leak   # probe.mjs never writes this; the evaluator must not read it from here (T16)
             if with_v6:
                 report['v6'] = {'address': 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', 'addressClass': 'global',
                                 'ports': [{'port': port, 'outcome': outcome} for port, outcome in v6_ports]}
+            envelope = {'schema': 1, 'id': 1, 'row': 'W5', 'exit': 0}
+            if envelope_leak == 'ok':
+                envelope['mac_leak_scan'] = {'values': 0, 'hits': 0, 'stores': ['agent.log', 'agent-manifest.tsv']}
+            elif envelope_leak == 'hits':
+                envelope['mac_leak_scan'] = {'values': 1, 'hits': 1, 'stores': ['agent.log']}
             with tempfile.TemporaryDirectory() as w5_tmp:
                 result_path = Path(w5_tmp) / 'w5-result.json'
                 result_path.write_text(json.dumps(report))
+                response_path = Path(w5_tmp) / 'w5-agent-response.json'
+                response_path.write_text(json.dumps(envelope))
                 env = dict(os.environ, W5_EXPECTED='22,' + w5_docker, W5_DOCKER=w5_docker, W5_VM_G6=vm_g6)
-                run = subprocess.run([sys.executable, '-I', '-', str(result_path), 'running'], input=w5_python, env=env, text=True, capture_output=True)
+                run = subprocess.run([sys.executable, '-I', '-', str(result_path), 'running', str(response_path)], input=w5_python, env=env, text=True, capture_output=True)
             return run.returncode, run.stdout + run.stderr
 
         m4_shape = [(22, 'open'), (80, 'refused'), (443, 'refused'), (111, 'refused'), (3443, 'refused'), (9092, 'refused'), (9093, 'refused')]
@@ -1153,6 +1169,17 @@ def check_topofix2(checks):
         rc_s, out_s = w5_case([], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', with_v6=False)
         e(rc_s == 1 and "IPv6 positive control: sshd's 22 did not answer over IPv6 (not-swept)" in out_s,
           f'W5 FAILs when the hello carries a global address but the result has no IPv6 pass; got rc {rc_s}: {out_s[-200:]!r} (G5)')
+        # T16: the leak scan is read from the agent's response envelope (probe.mjs never writes it into w5-result.json) and enforced
+        rc_l, out_l = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', envelope_leak='hits', result_leak={'values': 0, 'hits': 0, 'stores': []})
+        e(rc_l == 1 and "the agent's mac leak scan found 1 hit(s) in ['agent.log']" in out_l,
+          f'W5 reads mac_leak_scan from the saved agent response and fails on a hit even when w5-result.json claims none; got rc {rc_l}: {out_l[-200:]!r} (T16)')
+        rc_m, out_m = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', envelope_leak='missing', result_leak={'values': 0, 'hits': 0, 'stores': []})
+        e(rc_m == 1 and 'the agent response carries no valid mac_leak_scan' in out_m,
+          f'W5 fails when the saved agent response carries no valid mac_leak_scan (a scan in w5-result.json does not count); got rc {rc_m}: {out_m[-200:]!r} (T16)')
+        # T03: an inconclusive IPv6 probe (no route or scope, an unknown errno) proves no filtering
+        rc_i, out_i = w5_case([(22, 'open'), (80, 'refused'), (443, 'no-route-or-scope')] + m4_shape[3:], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
+        e(rc_i == 1 and 'IPv6 probe of port 443 was inconclusive (no-route-or-scope)' in out_i,
+          f'W5 rejects an inconclusive IPv6 probe outcome; got rc {rc_i}: {out_i[-200:]!r} (T03)')
 
     # PRE-4: the W7 Ubuntu branch decides on the first line of `ufw status`, never on the ufw.service state (a oneshot that reads
     # `active (exited)` while ufw is inactive). The runner's own lines run against fake sudo/ufw commands.
@@ -1315,6 +1342,110 @@ def check_topofix2(checks):
         e(run_node.returncode == 0 and 'served from 192.168.64.2:443' in node_out.get('from', '') and node_out.get('cert', '').startswith('TLS TLSv1.3')
           and node_out.get('loopbackRefused') is True and node_out.get('emptyRefused') is True and node_out.get('certMismatchRefused') is True,
           f'the served-address and served-certificate assertions accept a valid asynchronous Response and refuse loopback, empty and mismatching ones; got rc {run_node.returncode}: {run_node.stderr.strip()[:200]!r} {node_out!r} (T08)')
+
+    # T01 / T02 / T04: the runner's own functions run in bash against stubs. agent_request takes only the requester's stdout as the
+    # response (its stderr announcement goes to the raw log), w5_published_any_ports reads the service label with a template
+    # `docker inspect` accepts and fails closed, w6_response_fields reads all four lines of the helper's output.
+    bash_t = bash_binary()
+    runner_path = ROOT / 'scripts/gate-identity.sh'
+    if bash_t is not None:
+        import threading
+        import time as _time
+
+        def agent_request_case():
+            with tempfile.TemporaryDirectory() as t01_tmp:
+                base = Path(t01_tmp)
+                rdv = base / 'rdv'
+                rdv.mkdir()
+                (base / 'state').mkdir()
+                nonce = 'topofix2-t01-nonce'
+
+                def responder():
+                    deadline = _time.time() + 45
+                    while _time.time() < deadline:
+                        req = rdv / 'req-0001.json'
+                        if req.exists():
+                            data = json.loads(req.read_text())
+                            envelope = {'schema': 1, 'id': data['id'], 'row': data['row'], 'nonce': data['nonce'], 'exit': 0,
+                                        'stdout_tail': 'RESULT W6 rc=0 status=200 ua=krate-gate-w6-1 issuer=https://krate-oi.test/identity/realms/krate',
+                                        'files': [], 'browser_json_sha256': '', 'mac_leak_scan': {'values': 0, 'hits': 0, 'stores': ['agent.log']},
+                                        'agent_manifest': 'abc', 't_start': 'a', 't_end': 'b'}
+                            (rdv / '.resp.tmp').write_text(json.dumps(envelope))
+                            (rdv / '.resp.tmp').replace(rdv / 'resp-0001.json')
+                            return
+                        _time.sleep(0.1)
+
+                worker = threading.Thread(target=responder, daemon=True)
+                worker.start()
+                script = ('RAW="$1"; STATE="$2"; RENDEZVOUS="$3"; REND_NONCE="$4"; GATE_DIR="$5"\n'
+                          + bash_function_source(runner_path, 'agent_request')
+                          + 'agent_request W6 30; echo "rc=$?" > "$STATE/rc.txt"; printf "%s" "$CAP" > "$STATE/cap.json"\n')
+                subprocess.run([bash_t, '-c', script, 'bash', str(base / 'raw.log'), str(base / 'state'), str(rdv), nonce, str(ROOT / 'scripts/gate')],
+                               text=True, capture_output=True, timeout=90)
+                worker.join(timeout=5)
+                cap_text = (base / 'state/cap.json').read_text() if (base / 'state/cap.json').exists() else ''
+                raw_text = (base / 'raw.log').read_text() if (base / 'raw.log').exists() else ''
+                rc_text = (base / 'state/rc.txt').read_text().strip() if (base / 'state/rc.txt').exists() else ''
+                try:
+                    parsed_cap = json.loads(cap_text)
+                except ValueError:
+                    parsed_cap = None
+            return rc_text, parsed_cap, raw_text, nonce
+
+        t01_rc, t01_cap, t01_raw, t01_nonce = agent_request_case()
+        e(t01_rc == 'rc=0' and isinstance(t01_cap, dict) and t01_cap.get('row') == 'W6' and t01_cap.get('nonce') == '<rendezvous-nonce-redacted>',
+          f"agent_request saves the requester's stdout alone: a JSON response (nonce redacted), not text prefixed by the stderr announcement; got {t01_rc!r} {t01_cap!r} (T01)")
+        e('written (nonce-bound)' in t01_raw and t01_nonce not in t01_raw,
+          'the requester announcement (stderr) lands in the raw log, with the rendezvous nonce redacted (T01)')
+
+        def w5_ports_case(containers):
+            with tempfile.TemporaryDirectory() as t02_tmp:
+                fake_bin = Path(t02_tmp)
+                (fake_bin / 'docker').write_text(
+                    '#!/bin/sh\n'
+                    'case "$1" in\n'
+                    '  ps) case "$*" in *krate-gate1*) printf "%s\\n" ' + ' '.join(containers.get('gate', [])) + ' ;; *monitoring*) printf "%s\\n" ' + ' '.join(containers.get('mon', [])) + ' ;; esac ;;\n'
+                    '  inspect) tpl="$3"; cid="$4"\n'
+                    '    case "$tpl" in *".Label "*) echo "template parsing error: template: :1:2: executing \\"\\" at <.Label>: Label is not a method but has arguments" >&2; exit 1 ;; esac\n'
+                    '    case "$cid" in\n'
+                    '      c1) echo "proxy|0.0.0.0:443 0.0.0.0:80 " ;;\n'
+                    '      c2) echo "kafka|0.0.0.0:9092 127.0.0.1:19090 :::9093 " ;;\n'
+                    '      c3) echo "grafana|127.0.0.1:13000 " ;;\n'
+                    '      *) echo "Error: No such object: $cid" >&2; exit 1 ;;\n'
+                    '    esac ;;\n'
+                    'esac\n')
+                (fake_bin / 'docker').chmod(0o755)
+                script = ('RAW=/dev/null; PROJECT=krate-gate1; MON_PROJECT=krate-epc-monitoring\n' + bash_function_source(runner_path, 'w5_published_any_ports')
+                          + 'out="$(w5_published_any_ports)"; rc=$?; printf "rc=%s\\n%s\\n" "$rc" "$out"\n')
+                run = subprocess.run([bash_t, '-c', script], env=dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}'), text=True, capture_output=True)
+            return run.stdout.strip().splitlines()
+
+        good_ports = w5_ports_case({'gate': ['c1', 'c2'], 'mon': ['c3']})
+        e(good_ports[:1] == ['rc=0'] and sorted(good_ports[1:]) == ['kafka=9092', 'kafka=9093', 'proxy=443', 'proxy=80'],
+          f'w5_published_any_ports derives the any-address published ports with the service labels from a docker inspect template that works; got {good_ports!r} (T02)')
+        failed_ports = w5_ports_case({'gate': ['c1', 'c9'], 'mon': ['c3']})
+        e(failed_ports[:1] == ['rc=1'] and 'docker inspect failed for [c9 ]' in ' '.join(failed_ports),
+          f'w5_published_any_ports fails closed when a container cannot be inspected; got {failed_ports!r} (T02)')
+        none_ports = w5_ports_case({})
+        e(none_ports[:1] == ['rc=1'] and '0 container(s) were inspected' in ' '.join(none_ports),
+          f'w5_published_any_ports fails closed when no container is listed (a derived set of only 22 would be a silent fallback); got {none_ports!r} (T02)')
+
+        with tempfile.TemporaryDirectory() as t04_tmp:
+            response_path = Path(t04_tmp) / 'w6-agent-response.json'
+            response_path.write_text(json.dumps({'stdout_tail': 'RESULT W6 rc=0 status=200 ua=krate-gate-w6-0001 issuer=https://krate-oi.test/identity/realms/krate',
+                                                  'mac_leak_scan': {'values': 0, 'hits': 0, 'stores': ['agent.log']}}))
+            script = ('RAW=/dev/null\n' + bash_function_source(runner_path, 'w6_response_fields')
+                      + 'w6_response_fields "$1" || echo FAILED; printf "%s|%s|%s|%s\\n" "$W6_STATUS" "$W6_UA" "$W6_ISSUER" "$W6_LEAK"\n')
+            w6_fields = subprocess.run([bash_t, '-c', script, 'bash', str(response_path)], text=True, capture_output=True).stdout.strip()
+        e(w6_fields == '200|krate-gate-w6-0001|https://krate-oi.test/identity/realms/krate|0 values, 0 hits',
+          f'w6_response_fields reads all four lines of the helper output (status, ua, issuer, leak); got {w6_fields!r} (T04)')
+    e("agent_request" in topo_runner_text and 'CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request' in topo_runner_text
+      and '2>&1)"; rc=$?\n  if [[ -n "$REND_NONCE" ]]' not in topo_runner_text,
+      'agent_request no longer merges the requester stderr into CAP (T01)')
+    e("{{index .Config.Labels \"com.docker.compose.service\"}}" in topo_runner_text and "{{.Label \"com.docker.compose.service\"}}|{{range" not in topo_runner_text,
+      'the W5 inspect template reads the service label from .Config.Labels (T02)')
+    e('IFS=$\'\\n\' read -r status ua issuer leak' not in topo_runner_text and 'mapfile -t fields <<<"$parsed"' in topo_runner_text,
+      'W6 takes each helper output line into its own variable (mapfile), not one `read` (T04)')
 
 
 def check_k37_wiring(checks):
