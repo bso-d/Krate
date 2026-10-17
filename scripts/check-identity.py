@@ -4876,6 +4876,55 @@ def check_grafana_realm_plan(checks):
         e(identity.client_differs(client, dict(same, **{field: flipped})) is True,
           f'client_differs: a changed {field} is a difference (the client-mode fields take part in the verdict)')
 
+def check_build_certificate_hint(checks):
+    """kafbat-ui/build.py and scripts/collect-sources.py turn a failed certificate verification anywhere in an
+    exception chain into the one-line remedy (a Python without a certificate store, e.g. the python.org installer
+    on macOS) instead of a traceback; every other failure still raises. Found by a wiki walk of `krate package`
+    on 2026-10-17 (CERTIFICATE_VERIFY_FAILED at the first Maven Central download)."""
+    import ast
+    import ssl
+    import urllib.error
+    e = checks.expect
+    for rel, prog in (('kafbat-ui/build.py', 'build.py'), ('scripts/collect-sources.py', 'collect-sources.py')):
+        text = (ROOT / rel).read_text()
+        tree = ast.parse(text)
+        wanted = [node for node in tree.body
+                  if (isinstance(node, ast.FunctionDef) and node.name == 'certificate_store_missing')
+                  or (isinstance(node, ast.Assign) and any(getattr(t, 'id', '') == 'CERTIFICATE_HINT' for t in node.targets))]
+        if not e(len(wanted) == 2, f'{rel}: defines certificate_store_missing and CERTIFICATE_HINT at top level'):
+            continue
+        namespace = {'ssl': ssl}
+        exec(compile(ast.Module(body=wanted, type_ignores=[]), rel, 'exec'), namespace)
+        missing, hint = namespace['certificate_store_missing'], namespace['CERTIFICATE_HINT']
+        verify = ssl.SSLCertVerificationError(1, 'certificate verify failed: unable to get local issuer certificate')
+        try:
+            try:
+                raise urllib.error.URLError(verify)
+            except urllib.error.URLError as inner:
+                raise RuntimeError('download failed') from inner
+        except RuntimeError as chained:
+            wrapped = chained
+        cases = ((urllib.error.URLError(verify), True), (verify, True), (wrapped, True),
+                 (urllib.error.URLError('timed out'), False), (ValueError('checksum mismatch'), False), (None, False))
+        for error, expected in cases:
+            e(missing(error) is expected, f'{rel}: certificate_store_missing({error!r}) must be {expected}')
+        message = hint % prog
+        e(message.startswith(prog + ': ') and 'SSL_CERT_FILE=/etc/ssl/cert.pem' in message
+          and 'Install Certificates.command' in message, f'{rel}: the hint names the program and both remedies; got {message!r}')
+        guard = text[text.index("if __name__ == '__main__':"):]
+        e('certificate_store_missing(failure)' in guard and "sys.exit(CERTIFICATE_HINT % '" + prog + "')" in guard
+          and guard.rstrip().endswith('raise'),
+          f'{rel}: the entry point exits with the hint for a certificate failure and re-raises everything else')
+        if prog == 'collect-sources.py':
+            # Per-component failures are caught and reported as unresolved (they never reach the entry point),
+            # so the hint must also follow the totals when a reason names the certificate failure.
+            tail = text[text.index("log(f'{args.edition}: {manifest[\"totals\"]}')"):text.index('def certificate_store_missing')]
+            e("if any('CERTIFICATE_VERIFY_FAILED' in (c.reason or '') for c in comps):" in tail
+              and "print(CERTIFICATE_HINT % 'collect-sources.py', flush=True)" in tail
+              and tail.index('CERTIFICATE_HINT') < tail.index('return 2'),
+              f'{rel}: the summary prints the hint when an unresolved reason is a certificate failure, before the exit code')
+
+
 def check_monitor_logins(checks):
     """`krate credentials` and `monitor ui` (monitor_logins) print the Grafana and Perses addresses and sign-ins
     that work: with Krate sign-in Grafana is at https://<public authority>/grafana/ and both UIs say "Krate sign-in";
@@ -5447,7 +5496,7 @@ def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins,
+                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
