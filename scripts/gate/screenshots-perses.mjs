@@ -355,7 +355,8 @@ try {
   console.error('STORY FAILED: ' + String(e.message || e).slice(0, 400));
   process.exitCode = 1;
 } finally {
-  await browser.close();
+  // PRE-5: the browser evidence is read from the LIVE page; after browser.close() page.evaluate throws,
+  // userAgent became '' and the HeadlessChrome refusal in browserEvidence could never fire.
   try {
     const ev = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'X4', certDecision, externalAttempts: ext ? ext.list : null, shotsExpected: SHOTS_EXPECTED, persesPortPin: PINPERS ? { port: PINPERS_PORT, authorized: PINPERS.authorized, protocol: PINPERS.protocol, sha256: PINPERS.sha256 } : null } });
     writeFileSync(`${OUT}/browser.json`, JSON.stringify(ev, null, 2));
@@ -364,6 +365,7 @@ try {
     console.error('browser.json not written: ' + String(e2.message || e2).slice(0, 160));
     if (MAC) process.exitCode = 1;
   }
+  await browser.close();
   if (MAC) cleanProfile(launch.profileDir, process.exitCode === 1);
 }
 console.log('X4 vantage: ' + (MAC ? 'Mac: installed Chrome, fresh profile, pinned certificate (HTTPS + Perses ports), interstitial + Proceed, external attempts tracked' : 'container: walked harness image shape'));

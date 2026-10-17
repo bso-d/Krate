@@ -221,7 +221,8 @@ try {
   console.error('STORY FAILED: ' + String(e.message || e).slice(0, 400));
   process.exitCode = 1;
 } finally {
-  await browser.close();
+  // PRE-5: the browser evidence is read from the LIVE page; after browser.close() page.evaluate throws,
+  // userAgent became '' and the HeadlessChrome refusal in browserEvidence could never fire.
   try {
     const ev = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'X1', certDecision, externalAttempts: ext ? ext.list : null } });
     writeFileSync(`${OUT}/browser.json`, JSON.stringify(ev, null, 2));
@@ -230,6 +231,7 @@ try {
     console.error('browser.json not written: ' + String(e.message || e).slice(0, 160));
     if (MAC) process.exitCode = 1;
   }
+  await browser.close();
   if (MAC) cleanProfile(launch.profileDir, process.exitCode === 1);
 }
 console.log('X1 vantage: ' + (MAC ? 'Mac: installed Chrome, fresh profile, pinned certificate, interstitial + Proceed, external attempts tracked' : 'container: walked harness image shape'));

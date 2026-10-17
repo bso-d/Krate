@@ -799,10 +799,15 @@ def check_gate_scripts(checks):
     e('--browser agent is refused with --phase $PHASE' in runner_text,
       'the runner refuses the agent vantage for phases 1-3 (X1 stays a Mac-fixture row; TOPOFIX F9)')
     u15 = (ROOT / 'scripts/gate/phase4-browser.mjs').read_text()
-    e("const accepted = await acceptGateCertificate(" in u15 and "accepted.decision !== 'proceed'" in u15,
-      "U15 (phase4-browser.mjs) stops when acceptGateCertificate returns no 'proceed' decision: its hooks run only in the interstitial branch (TR2 G1)")
-    e('v6.get("addressClass"' in runner_text and 'v6.get("address"' in runner_text and '.get("ll"' not in runner_text,
-      'the W5 evidence reads the probe report\'s v6 address and addressClass, not the removed link-local "ll" key (TR2 G4)')
+    e(re.search(r"^\s*const accepted = await acceptGateCertificate\(", u15, re.M) is not None
+      and re.search(r"^\s*if \(accepted\.decision !== 'proceed'\) \{\s*$", u15, re.M) is not None,
+      "U15 (phase4-browser.mjs) stops when acceptGateCertificate returns no 'proceed' decision: its hooks run only in the interstitial branch "
+      "(TR2 G1; TOPOFIX2 G6: a multiline match on a non-comment line, so the check disabled behind a comment fails)")
+    e(re.search(r'^\s*v6_addr = v6\.get\("address", ""\)\s*$', runner_text, re.M) is not None
+      and re.search(r'^\s*v6_class = v6\.get\("addressClass", ""\)\s*$', runner_text, re.M) is not None
+      and '.get("ll"' not in runner_text,
+      'the W5 evidence reads the probe report\'s v6 address and addressClass, not the removed link-local "ll" key '
+      '(TR2 G4; TOPOFIX2 G6: the exact assignments, so swapped keys fail)')
     e('is_private' in runner_text and 'mac_src_ip' in runner_text,
       'the agent preflight requires a private mac_src_ip (TOPOFIX F7)')
     e("the fixture's lima0 address is still" in runner_text,
@@ -1063,6 +1068,33 @@ def check_topofix2(checks):
                 r"  --browser agent --rendezvous /home/<guest-user>/gate/rdv --rendezvous-nonce <the launcher's token> \\\n"
                 r"  --candidate <sha> --repo /home/<guest-user>/gate/repo ", guide_text, re.M) is not None,
       "the guide's launcher example states that the guest command carries --candidate and --repo (PRE-7 / F1)")
+
+    # PRE-5: browser.json is read from the LIVE page: browserEvidence runs before browser.close() in the three stories (their
+    # finally block) and in U15 (its closing block). After the close page.evaluate throws, userAgent is '' and the
+    # HeadlessChrome refusal can never fire.
+    for story_name in ('screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs'):
+        story_lines = js_lines((ROOT / 'scripts/gate' / story_name).read_text())
+        finally_at = max((i for i, ln in enumerate(story_lines) if ln == '} finally {'), default=-1)
+        tail = story_lines[finally_at:] if finally_at >= 0 else []
+        ev_at = next((i for i, ln in enumerate(tail) if ln.startswith('const ev = await browserEvidence(')), -1)
+        close_at = [i for i, ln in enumerate(tail) if ln == 'await browser.close();']
+        e(ev_at >= 0 and len(close_at) == 1 and ev_at < close_at[0],
+          f'{story_name} reads browserEvidence from the live page BEFORE browser.close() in its finally block (PRE-5)')
+    u15_lines = js_lines((ROOT / 'scripts/gate/phase4-browser.mjs').read_text())
+    ev_lines = [i for i, ln in enumerate(u15_lines) if ln.startswith('const ev = await browserEvidence(')]
+    close_lines = [i for i, ln in enumerate(u15_lines) if ln == 'await browser.close();']
+    e(len(ev_lines) == 1 and len(close_lines) == 1 and ev_lines[0] < close_lines[0],
+      'phase4-browser.mjs (U15) reads browserEvidence before its closing browser.close() (PRE-5; already so before TOPOFIX2, pinned now)')
+
+    # G7: the no-interstitial step is persisted before the non-zero exit; the dead throw in onAssert is gone.
+    e("result.steps.push({ t: new Date().toISOString(), name: 'no-interstitial', error: accepted.error });" in u15_lines,
+      'phase4-browser.mjs pushes the no-interstitial step when acceptGateCertificate returns no proceed decision (G7)')
+    e(not any(ln.startswith('if (!d.seen) throw') for ln in u15_lines),
+      'phase4-browser.mjs carries no `if (!d.seen) throw` in onAssert: the hook runs only when the interstitial was seen (G7: dead code)')
+    summary_at = [i for i, ln in enumerate(u15_lines) if ln.startswith('try { writeFileSync(`${OUT}/ui15-summary.json`, JSON.stringify({ steps: result.steps, storyFailed:')]
+    exit_at = [i for i, ln in enumerate(u15_lines) if ln == 'process.exit(2);']
+    e(len(summary_at) == 1 and bool(exit_at) and summary_at[0] < exit_at[0],
+      'phase4-browser.mjs writes ui15-summary.json (steps, no-interstitial included) BEFORE the non-zero exit of the story-failed path (G7)')
 
 
 def check_k37_wiring(checks):

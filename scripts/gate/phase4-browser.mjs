@@ -102,7 +102,6 @@ if (MAC) {
     const accepted = await acceptGateCertificate(page, `${BASE}/`, {
       onAssert: (d) => {
         result.steps.push({ t: new Date().toISOString(), name: d.seen ? 'interstitial' : 'no-interstitial', error: d.error, url: page.url().replace(BASE, '').split(/[?#]/)[0] });
-        if (!d.seen) throw new Error('the trust-nothing Mac profile showed no interstitial (a pre-trusted or reused profile)');
         if (!/ERR_CERT_AUTHORITY_INVALID/.test(d.error || '')) {
           result.steps.push({ t: new Date().toISOString(), name: 'interstitial-unexpected', error: d.error });
         }
@@ -118,6 +117,8 @@ if (MAC) {
     console.log(JSON.stringify({ t: new Date().toISOString(), name: 'proceeded' }));
   } catch (e) {
     console.error('STORY FAILED: ' + String(e.message || e).slice(0, 200));
+    // G7: persist the steps (the no-interstitial step included) before the non-zero exit; the runner reads them from ui15-summary.json
+    try { writeFileSync(`${OUT}/ui15-summary.json`, JSON.stringify({ steps: result.steps, storyFailed: String(e.message || e).slice(0, 200) }, null, 2)); } catch { /* the STORY FAILED line above remains */ }
     await browser.close().catch(() => {});
     cleanProfile(launch.profileDir, true);
     process.exit(2);
