@@ -77,6 +77,12 @@ run_outcome() { # runner_rc receipt.md candidate: prints the reason and returns 
   return 0
 }
 
+# Review T13: the guest checkout the runner is started from (and that --repo names) must be at the candidate, checked here so a wrong
+# checkout stops the launcher before the agent and the heavy run start (the runner re-checks HEAD == candidate itself).
+guest_head_is_candidate() { # head candidate: the guest checkout's HEAD starts with the launcher's candidate
+  [[ -n "$1" && "$1" == "$2"* ]]
+}
+
 # ── preconditions ──
 PREFLIGHT_FAIL=0
 if ! pmset -g batt 2>/dev/null | grep -q 'AC Power'; then
@@ -132,6 +138,9 @@ nc -z -G 3 "$VM_IP" 22 >/dev/null 2>&1 || { echo "run-vm-gate: no ssh to $VM_IP:
 echo "run-vm-gate: vm_ip=$VM_IP via $IFACE; preflight ok"
 
 # ── agent + guest runner ──
+GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d '[:space:]')"
+guest_head_is_candidate "$GUEST_HEAD" "$CANDIDATE" \
+  || { echo "run-vm-gate: the guest checkout $GUEST_ROOT/repo is at '${GUEST_HEAD:-unreadable}', not the candidate $CANDIDATE" >&2; exit 2; }
 NONCE="$(openssl rand -hex 16)"
 RDV="$GUEST_ROOT/rdv"
 limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null   # agent-out: limactl copy -r cannot create a missing parent (PRE-3)
@@ -146,7 +155,7 @@ AGENT_PID=$!
 # agent died) before starting the runner.
 hello_seen=0
 for _ in $(seq 1 45); do
-  if limactl shell "$VM" -- test -s "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi
+  if limactl shell "$VM" -- grep -q -F -- "$NONCE" "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi   # present, non-empty and carrying THIS run's nonce
   kill -0 "$AGENT_PID" 2>/dev/null || { echo "run-vm-gate: the agent exited before its hello reached $RDV (see $OUT/agent.log)" >&2; exit 2; }
   sleep 2
 done

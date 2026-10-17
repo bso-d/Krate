@@ -1060,7 +1060,7 @@ def check_topofix2(checks):
     launcher_lines = sh_lines((ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text())
     wait_lines = (
         'for _ in $(seq 1 45); do',
-        'if limactl shell "$VM" -- test -s "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi',
+        'if limactl shell "$VM" -- grep -q -F -- "$NONCE" "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi',
         'kill -0 "$AGENT_PID" 2>/dev/null || { echo "run-vm-gate: the agent exited before its hello reached $RDV (see $OUT/agent.log)" >&2; exit 2; }',
         'sleep 2',
         '(( hello_seen == 1 )) || { echo "run-vm-gate: no agent-hello.json in $RDV within 90 s (see $OUT/agent.log)" >&2; exit 2; }',
@@ -1597,9 +1597,9 @@ def check_topofix2(checks):
     # it ends) and the harvested receipt's verdict row and candidate commit. Its own functions run on receipt fixtures; the launch line
     # (setsid removed, macOS has none) runs behind a fake limactl to prove the exit status is really recorded.
     launcher_path = ROOT / 'scripts/gate/mac/run-vm-gate.sh'
+    candidate_sha = '0123456789abcdef0123456789abcdef01234567'
     if bash_t is not None:
         launcher_funcs = ''.join(bash_function_source(launcher_path, name) for name in ('receipt_verdict', 'receipt_candidate_ok', 'run_outcome'))
-        candidate_sha = '0123456789abcdef0123456789abcdef01234567'
 
         def outcome_case(runner_rc, receipt_text, candidate=candidate_sha):
             with tempfile.TemporaryDirectory() as t14_tmp:
@@ -1647,6 +1647,21 @@ def check_topofix2(checks):
             e(results == {'pass': '0|pid', 'fail': '1|pid'},
               f"the launcher's detached guest command records the runner's exit status beside its pid (0 for a pass, the failure status otherwise); got {results!r} (T14)")
     e('RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d \'[:space:]\')"' in launcher_lines, 'the launcher reads the runner exit status from the guest (T14)')
+    # T12 (rest): the hello wait is for THIS run's nonce, not any non-empty file (a previous run's hello would pass `test -s`).
+    # T13 (rest): the guest checkout must be at the candidate before the agent starts.
+    e('GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d \'[:space:]\')"' in launcher_lines
+      and 'guest_head_is_candidate "$GUEST_HEAD" "$CANDIDATE" \\' in [ln.strip() for ln in (ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text().splitlines()]
+      and launcher_lines.index('NONCE="$(openssl rand -hex 16)"') > launcher_lines.index('GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d \'[:space:]\')"'),
+      'the launcher reads the guest checkout HEAD and refuses a checkout that is not the candidate before it starts the agent (T13)')
+    if bash_t is not None:
+        head_funcs = bash_function_source(launcher_path, 'guest_head_is_candidate')
+
+        def head_case(head, candidate):
+            return subprocess.run([bash_t, '-c', head_funcs + 'guest_head_is_candidate "$1" "$2"; echo $?', 'bash', head, candidate], text=True, capture_output=True).stdout.strip()
+
+        e(head_case(candidate_sha, candidate_sha) == '0' and head_case(candidate_sha, candidate_sha[:9]) == '0'
+          and head_case('', candidate_sha) == '1' and head_case('f' + candidate_sha[1:], candidate_sha) == '1' and head_case(candidate_sha, 'f' + candidate_sha[1:]) == '1',
+          'guest_head_is_candidate accepts the candidate (full or abbreviated) and refuses an unreadable or different HEAD (T13)')
     e('RC=$((RC | 16))' in launcher_lines and any(ln.startswith('if OUTCOME_REASON="$(run_outcome "$RUNNER_RC"') for ln in launcher_lines),
       'the launcher turns a run that is not a candidate-bound PASS into a non-zero exit (T14)')
     e("agent_request" in topo_runner_text and 'CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request' in topo_runner_text
