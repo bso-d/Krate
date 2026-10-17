@@ -32,6 +32,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));   // scripts/gate/mac
 const HELPER_DIR = resolve(HERE, '..');                 // scripts/gate
 
 function die(msg) { console.error(`agent: ${msg}`); process.exit(2); }
+// Review R4: text that came from the guest (a file name, a JSON key or value, a command's stderr) reaches agent.log only through clip(): cut to
+// `limit` characters and JSON-quoted, so it can neither run on for 64 KiB nor start a line that reads like the agent's own (`agent: W6 req=1 ...`).
+function clip(value, limit = 120) { return JSON.stringify(String(value).slice(0, limit)); }
 function sha256File(f) { return createHash('sha256').update(readFileSync(f)).digest('hex'); }
 
 // ── flags (all fixed by the launcher run-vm-gate.sh) ──
@@ -106,7 +109,7 @@ function sh(cmd, argv, opts = {}) {
 function vmAddr4() {
   const out = sh('limactl', ['shell', VM, '--', 'ip', '-4', '-o', 'addr', 'show']).out;
   const m = /(?:^|\n)\s*\d+:\s*lima0\s+inet\s+(\d+\.\d+\.\d+\.\d+)\//.exec(out);
-  if (!m) die('agent: no IPv4 address on the guest lima0 (not a vzNAT VM?): ' + out.slice(0, 200));
+  if (!m) die('agent: no IPv4 address on the guest lima0 (not a vzNAT VM?): ' + clip(out, 200));
   return m[1];
 }
 function macSrcIp() {
@@ -115,13 +118,13 @@ function macSrcIp() {
   // as the request's remote_addr).
   const out = sh('limactl', ['shell', VM, '--', 'ip', 'route', 'show']).out;
   const m = /default via (\d+\.\d+\.\d+\.\d+) dev lima0/.exec(out);
-  if (!m) die('agent: no default route via lima0 in the guest: ' + out.slice(0, 200));
+  if (!m) die('agent: no default route via lima0 in the guest: ' + clip(out, 200));
   return m[1];
 }
 function macIface(vmIp) {
   const out = sh('route', ['-n', 'get', vmIp]).out;
   const m = /interface:\s*(\S+)/.exec(out);
-  if (!m) die(`agent: route -n get ${vmIp} names no interface: ` + out.slice(0, 160));
+  if (!m) die(`agent: route -n get ${vmIp} names no interface: ` + clip(out, 160));
   return m[1]; // M2 observed bridge100
 }
 // The IPv6 target handed to probe.mjs: a global address is routed without a zone (a `%iface` suffix on a
@@ -214,13 +217,17 @@ function guestPut(name, text) {
 }
 // remove a claimed request (after its response, or when it is refused); a failure is only logged
 function dropClaimed(claimedPath) {
-  try { guestSh(`rm -f -- ${q(claimedPath)}`); } catch (e) { console.error('agent: could not remove ' + claimedPath + ': ' + String(e.message || e).slice(0, 120)); }
+  try { guestSh(`rm -f -- ${q(claimedPath)}`); } catch (e) { console.error('agent: could not remove ' + claimedPath + ': ' + clip(e.message || e, 120)); }
 }
 
 // ── guest reads: ONE command per read, realpath-confined, size-capped (F4) ──
+// Review R5: the confinement is a prefix test on whole path components of the RESOLVED paths (`"$d"/*`), and the file read is the resolved one.
+// A substring match (`grep -F`) also accepted `<dir>-other/...` and refused every read when the directory itself had a symlinked component.
 function guestReadFile(fixedPath, mustBeUnder) {
-  const guard = mustBeUnder ? `grep -F -- ${q(mustBeUnder)} >/dev/null && cat -- ${q(fixedPath)}` : `cat -- ${q(fixedPath)}`;
-  const out = guestSh(`realpath -e -- ${q(fixedPath)} | ${guard}`, { timeout: 20000 });
+  const script = mustBeUnder
+    ? `r="$(realpath -e -- ${q(fixedPath)})" && d="$(realpath -e -- ${q(mustBeUnder)})" && case "$r" in "$d"/*) cat -- "$r" ;; esac`
+    : `cat -- ${q(fixedPath)}`;
+  const out = guestSh(script, { timeout: 20000 });
   const buf = Buffer.from(out.out, 'utf8');
   if (buf.length > READ_CAP_BYTES) throw new Error(`guest read of ${fixedPath} exceeds ${READ_CAP_BYTES} bytes`);
   return buf;
@@ -313,7 +320,7 @@ function claimRequest(file) {
   let parsed;
   try { parsed = guestReadJson(claimed, RDV); } catch (e) {
     dropClaimed(claimed);
-    return { bad: `refused: unreadable or unparseable request ${file}: ${String(e.message || e).slice(0, 80)}` };
+    return { bad: `refused: unreadable or unparseable request ${file}: ${clip(e.message || e, 80)}` };
   }
   if (parsed === null || typeof parsed !== 'object') {
     dropClaimed(claimed);
@@ -322,7 +329,7 @@ function claimRequest(file) {
   const keys = Object.keys(parsed).sort().join(',');
   if (keys !== 'id,nonce,row,schema') {
     dropClaimed(claimed);
-    return { bad: `refused: the guest request carries [${keys}]; the protocol is exactly {schema,id,row,nonce} (F4)` };
+    return { bad: `refused: the guest request carries the keys ${clip(keys)}; the protocol is exactly {schema,id,row,nonce} (F4)` };
   }
   if (parsed.schema !== 1 || parsed.nonce !== NONCE) {
     dropClaimed(claimed);
@@ -340,7 +347,7 @@ function claimRequest(file) {
   }
   if (typeof parsed.row !== 'string' || !PLAN.includes(parsed.row)) {
     dropClaimed(claimed);
-    return { bad: `refused: row ${JSON.stringify(String(parsed.row))} is not in this run's plan: ${PLAN.join(', ')}` };
+    return { bad: `refused: row ${clip(parsed.row)} is not in this run's plan: ${PLAN.join(', ')}` };
   }
   if (servedRows.has(parsed.row)) {
     dropClaimed(claimed);
@@ -379,7 +386,7 @@ function execute(claim) {
       if (f === 'browser.json') browserJsonSha = sha256File(p);
     }
     try { deliverToGuest(res.outDir, join(GUEST_ROOT, 'agent-out', req.row.toLowerCase())); } catch (e) {
-      console.log(`agent: delivery failed: ${String(e.message || e).slice(0, 160)}`);
+      console.log(`agent: delivery failed: ${clip(e.message || e, 160)}`);
       if (res.rc === 0) res.rc = 4;
     }
   } else {
@@ -415,13 +422,13 @@ STATE.iface = iface;
 STATE.g6 = g6;
 const CHROME = chromeFacts();
 try { writeHello(STATE.vmIp, srcIp, iface, g6); } catch (e) {
-  die(`the first hello could not be put into the guest rendezvous ${RDV}: ${String(e.message || e).slice(0, 300)}`);
+  die(`the first hello could not be put into the guest rendezvous ${RDV}: ${clip(e.message || e, 300)}`);
 }
 console.log(`agent: ready vm=${VM} vm_ip=${STATE.vmIp} mac_src_ip=${srcIp} iface=${iface} g6=${g6 || 'none'} plan=${PLAN.join(',')} nonce=bound`); // the nonce value is never printed (review N6)
 // The heartbeat keeps the process alive until the launcher stops it; the poll loop is unref'd
 // so an idle teardown does not hang on it.
 setInterval(() => {
-  try { writeHello(STATE.vmIp, srcIp, iface, g6); } catch (e) { console.error('agent: hello rewrite failed (the guest keeps the last one): ' + String(e.message || e).slice(0, 200)); }
+  try { writeHello(STATE.vmIp, srcIp, iface, g6); } catch (e) { console.error('agent: hello rewrite failed (the guest keeps the last one): ' + clip(e.message || e, 200)); }
 }, HELLO_INTERVAL_MS);
 const poll = setInterval(() => {
   if (inFlight) return;
@@ -436,7 +443,7 @@ const poll = setInterval(() => {
     }
   } catch (e) {
     inFlight = false;   // an execute() that threw after the row ran must not wedge the poll
-    console.error('agent: rendezvous poll failed: ' + String(e.message || e).slice(0, 200));
+    console.error('agent: rendezvous poll failed: ' + clip(e.message || e, 200));
   }
 }, POLL_INTERVAL_MS);
 poll.unref();

@@ -67,11 +67,11 @@ check: the pinned `nginx:1.27-alpine@sha256:…` reference does not resolve afte
 value of the installed `.env.template`); the check names the image it rendered with in the
 run log, and the S4 evidence reads `check-identity rc=…; py_compile of N gate helpers rc=…`. X1 needs the
 `krate-harness/playwright:1.60.0` image loaded from a saved archive (3.8 GB on
-disk, 0.94 GB gzipped, arm64), and J7 needs root. A `--phase 4c --browser agent` run
-on a vzNAT VM fixture needs neither image: its W5 and W6 rows run from the Mac
+disk, 0.94 GB gzipped, arm64), and J7 needs root. On a `--phase 4c --browser agent` run
+on a vzNAT VM fixture its W5–W7 rows need neither image: W5 and W6 run from the Mac
 (`scripts/gate/mac/`: the installed Chrome and its Playwright module live there)
 and W7 reads the guest's firewall, so that archive is not loaded into the guest
-for it. The 4a/4b stories (U15, X3, X4) still run in the guest's container
+for it; its S4 row still renders with the nginx image unless `--no-static` is given. The 4a/4b stories (U15, X3, X4) still run in the guest's container
 vantage and need the archive; their Mac vantage is the story started on the Mac
 with `GATE_BROWSER_MAC=1`, as the X1 row describes. The AG rows (below) need the air gap of the host's provisioning: the `krate-airgap` unit (`airgap.sh install`, v2.2 or later), its install record (`phase4_airgap.py install-record`), the bundle's python image and root or passwordless `sudo` for `iptables` and `journalctl`; without them they FAIL.
 

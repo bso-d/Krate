@@ -1060,13 +1060,13 @@ def check_topofix2(checks):
     # before it starts the runner, and the guest command is the bound, full-inventory shape of a bundle host.
     launcher_lines = sh_lines((ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text())
     wait_lines = (
-        'for _ in $(seq 1 45); do',
+        'while (( SECONDS < hello_deadline )); do',
         'if limactl shell "$VM" -- grep -q -F -- "$NONCE" "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi',
         'kill -0 "$AGENT_PID" 2>/dev/null || { echo "run-vm-gate: the agent exited before its hello reached $RDV (see $OUT/agent.log)" >&2; exit 2; }',
         'sleep 2',
         '(( hello_seen == 1 )) || { echo "run-vm-gate: no agent-hello.json in $RDV within 90 s (see $OUT/agent.log)" >&2; exit 2; }',
     )
-    for line in ('limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null',) + wait_lines:
+    for line in ('limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null', 'hello_deadline=$((SECONDS + 90))') + wait_lines:
         e(line in launcher_lines, f'run-vm-gate.sh must carry the code line {line!r} (PRE-2: wait up to 90 s for the hello in the guest, exit 2 when the agent died or nothing came; PRE-3: agent-out is created with the rendezvous)')
     guest_cmd = next((ln for ln in launcher_lines if ln.startswith('GUEST_CMD="')), '')
     if all(line in launcher_lines for line in wait_lines):
@@ -1251,7 +1251,7 @@ def check_topofix2(checks):
           'harness control: the old line, without the fixed locale, reads the translated status and fails a correct fixture as unreadable (T06, R3)')
 
     # F2: --browser knows container and agent only (`local` selected nothing and was only recorded in the receipt row), and the
-    # guide says what the code does: a 4c agent run needs neither image; the 4a/4b stories keep the guest's container vantage.
+    # guide says what the code does: the W5-W7 rows of a 4c agent run need neither image (S4 still renders with the nginx image); the 4a/4b stories keep the guest's container vantage.
     topo_runner_flat = '\n'.join(topo_runner_lines)
     e('case "$BROWSER_MODE" in container|agent) ;; *) echo "--browser must be container or agent: $BROWSER_MODE" >&2; exit 2 ;; esac' in topo_runner_lines
       and 'container)' in topo_runner_lines
@@ -1271,12 +1271,14 @@ def check_topofix2(checks):
         e(browser_refusal('container') == (0, 'reached', '') and browser_refusal('agent') == (0, 'reached', ''),
           'the runner\'s refusal line lets container and agent through (F2)')
     guide_flat = ' '.join(guide_text.split())
-    e('A `--phase 4c --browser agent` run on a vzNAT VM fixture needs neither image' in guide_flat
+    e('On a `--phase 4c --browser agent` run on a vzNAT VM fixture its W5–W7 rows need neither image' in guide_flat
+      and 'its S4 row still renders with the nginx image unless `--no-static` is given' in guide_flat
+      and 'needs neither image' not in guide_flat
       and "The 4a/4b stories (U15, X3, X4) still run in the guest's container vantage and need the archive" in guide_flat
       and 'their Mac vantage is the story started on the Mac with `GATE_BROWSER_MAC=1`, as the X1 row describes' in guide_flat
       and 'that archive is no longer loaded into the guest at all' not in guide_flat
       and 'Only the rows W5 and W6 of slice 4c go through the agent' in guide_flat,
-      'the guide says what the code does: a 4c agent run needs neither image, the 4a/4b stories keep the guest container vantage and need the archive, only W5/W6 go through the agent (F2)')
+      'the guide says what the code does: the W5-W7 rows of a 4c agent run need neither image while S4 still renders with the nginx image, the 4a/4b stories keep the guest container vantage and need the archive, only W5/W6 go through the agent (F2, R10)')
 
     # F7: mac_src_ip must lie inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16 (network membership). The runner's own preflight
     # Python runs on synthetic hellos; ipaddress.is_private would have accepted 198.18.0.1, 192.0.2.5 and 203.0.113.9.
@@ -1511,14 +1513,14 @@ def check_topofix2(checks):
             'arch': 'ID=arch\n',
         }
 
-        def w7_case(os_name, firewalld='active', with_firewall_cmd=True, docker_target='ACCEPT', ufw_status='Status: inactive', caller_locale=''):
+        def w7_case(os_name, firewalld='active', with_firewall_cmd=True, docker_target='ACCEPT', ufw_status='Status: inactive', caller_locale='', sudo_works=True):
             with tempfile.TemporaryDirectory() as t05_tmp:
                 base = Path(t05_tmp)
                 fake_bin = base / 'bin'
                 fake_bin.mkdir()
                 (base / 'os-release').write_text(os_releases[os_name])
                 scripts_text = {
-                    'sudo': '[ "$1" = -n ] && shift\nexec "$@"',
+                    'sudo': '[ "$1" = -n ] && shift\nexec "$@"' if sudo_works else 'exit 1',
                     'systemctl': 'case "$*" in "is-active firewalld") echo "${FAKE_FIREWALLD:-inactive}" ;; "is-active ufw") echo active ;; esac',
                     'ufw': 'if [ -n "$FAKE_LOCALIZED" ] && [ "$LC_ALL" != C ]; then echo "Estado: inactivo"; else echo "$FAKE_UFW_STATUS"; fi',
                     'iptables': 'echo "-P INPUT ACCEPT"',
@@ -1539,10 +1541,10 @@ def check_topofix2(checks):
                     (fake_bin / name).chmod(0o755)
                 (base / 'krate').write_text('#!/bin/sh\necho "[ok] firewalld active, docker zone present (target ACCEPT)"\n')
                 (base / 'krate').chmod(0o755)
-                script = ('section() { :; }\nrecord() { printf "RECORD %s|%s\\n" "$4" "$5"; }\nRAW=/dev/null; KRATE="$1"; OS_RELEASE_FILE="$2"\n'
+                script = ('section() { :; }\nrecord() { printf "RECORD %s|%s\\n" "$4" "$5"; }\nRAW=/dev/null; KRATE="$1"\n'
                           'command() { if [[ "$1" == -v && "$2" == firewall-cmd ]]; then [[ -n "${FAKE_FWCMD_PATH:-}" ]] || return 1; echo "$FAKE_FWCMD_PATH"; return 0; fi; builtin command "$@"; }\n'
                           + bash_function_source(runner_path, 'w7_os_family') + bash_function_source(runner_path, 'phase4_row_w7')
-                          + 'phase4_row_w7 4c\n')
+                          + 'phase4_row_w7 4c "$2"\n')
                 env = dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}', FAKE_FIREWALLD=firewalld, FAKE_DOCKER_TARGET=docker_target, FAKE_UFW_STATUS=ufw_status,
                            FAKE_FWCMD_PATH=str(fake_bin / 'firewall-cmd') if with_firewall_cmd else '', FAKE_LOCALIZED='1' if caller_locale else '')
                 if caller_locale:
@@ -1550,7 +1552,7 @@ def check_topofix2(checks):
                 run = subprocess.run([bash_t, '-c', script, 'bash', str(base / 'krate'), str(base / 'os-release')], env=env, text=True, capture_output=True)
             return (run.stdout + run.stderr).strip()
 
-        family_script = 'OS_RELEASE_FILE="$1"\n' + bash_function_source(runner_path, 'w7_os_family') + 'w7_os_family\n'
+        family_script = bash_function_source(runner_path, 'w7_os_family') + 'w7_os_family "$1"\n'
         for id_only, wanted in (('ID=rhel', 'rhel'), ('ID="rocky"', 'rhel'), ('ID=almalinux', 'rhel'), ('ID=centos', 'rhel'), ('ID=fedora', 'rhel'), ('ID=ol\nID_LIKE="fedora"', 'rhel'),
                                 ('ID=ubuntu', 'debian'), ('ID=debian', 'debian'), ('ID=linuxmint\nID_LIKE="ubuntu debian"', 'debian'), ('ID=arch', 'unknown'), ('NAME=x', 'unknown')):
             with tempfile.TemporaryDirectory() as fam_tmp:
@@ -1578,6 +1580,9 @@ def check_topofix2(checks):
         out_loc_rhel = w7_case('rocky', caller_locale='de_DE.UTF-8')
         e(out_loc_rhel.startswith('RECORD PASS|') and 'docker zone target [ACCEPT]' in out_loc_rhel,
           f'W7 on a RHEL-family fixture reads the firewall-cmd output under LC_ALL=C whatever the caller locale is; got {out_loc_rhel[:240]!r} (R3)')
+        out_loc_plain = w7_case('rocky', caller_locale='de_DE.UTF-8', sudo_works=False)
+        e(out_loc_plain.startswith('RECORD PASS|') and 'docker zone target [ACCEPT]' in out_loc_plain,
+          f'W7 on a RHEL-family fixture reads the firewall-cmd output under LC_ALL=C on the no-sudo arm too; got {out_loc_plain[:240]!r} (R3)')
         out_loc_ubuntu = w7_case('ubuntu', firewalld='inactive', with_firewall_cmd=False, caller_locale='de_DE.UTF-8')
         e(out_loc_ubuntu.startswith('RECORD PASS|') and 'ufw status first line [Status: inactive]' in out_loc_ubuntu,
           f'W7 on an Ubuntu fixture reads ufw status under LC_ALL=C whatever the caller locale is; got {out_loc_ubuntu[:240]!r} (T06, R3)')
@@ -1676,6 +1681,151 @@ def check_topofix2(checks):
                                                     'websocketPredicate': [False, True], 'websocketClosed': 1008,
                                                     'list': ['blocked:127.0.0.1', 'blocked:203.0.113.9', 'websocket-blocked:127.0.0.1'], 'assertClean': 'threw'},
           f'the external guard continues gate-host and non-network requests, aborts and records an IP-literal and a bare external request before dispatch, routes only non-gate websockets and closes them, and assertClean then throws; got rc {run_guard.returncode}: {run_guard.stderr.strip()[:200]!r} {guard_out!r} (T07)')
+
+    # R6: the rendezvous nonce binds the run and reaches no log. The agent's stdout and stderr are the Mac receipt's agent.log. Three pins: the
+    # ready line is run with a known nonce in scope and must not print it; the agent code names the nonce in exactly four enumerated lines (its
+    # definition, the hello, the request check, the response), so any new mention, in a log call or elsewhere, needs a conscious pin edit; and
+    # no log call (console, die, throw) dumps a whole object that holds it (the hello, the response, the request, the parsed flags, argv).
+    ready_line = ("console.log(`agent: ready vm=${VM} vm_ip=${STATE.vmIp} mac_src_ip=${srcIp} iface=${iface} g6=${g6 || 'none'} "
+                  "plan=${PLAN.join(',')} nonce=bound`);")
+    e(ready_line in agent_lines, 'agent.mjs prints its ready line with `nonce=bound`, never the value (R6, review N6)')
+    ready_actual = next((ln for ln in agent_lines if ln.startswith('console.log(`agent: ready ')), '')   # whatever the line says, it is what runs below
+    e(bool(ready_actual), 'agent.mjs has a ready line to run (R6)')
+    if node_binary and ready_actual:
+        r6_secret = 'r6-secret-nonce-value-0123456789'
+        r6_run = subprocess.run([node_binary, '-e',
+                                 f"const VM='vm', STATE={{vmIp:'192.168.64.2'}}, srcIp='192.168.64.1', iface='bridge100', g6='', PLAN=['W5','W6'], NONCE='{r6_secret}';\n{ready_actual}\n"],
+                                text=True, capture_output=True)
+        e(r6_run.returncode == 0 and 'nonce=bound' in r6_run.stdout and r6_secret not in r6_run.stdout + r6_run.stderr,
+          f'the agent ready line, run with a nonce in scope, prints nonce=bound and not the nonce; got rc {r6_run.returncode}: {r6_run.stdout.strip()[:200]!r} (R6)')
+    agent_nonce_refs = [ln for ln in agent_lines if re.search(r"\bNONCE\b|args\[.rendezvous-nonce.\]|\.nonce\b", ln)]
+    e(len(agent_nonce_refs) == 4 and agent_nonce_refs[0].startswith("const NONCE = args['rendezvous-nonce'] || die('--rendezvous-nonce is required ")
+      and agent_nonce_refs[1:] == ['schema: 1, t: new Date().toISOString(), seq: ++helloSeq, pid: process.pid, nonce: NONCE,',
+                                   'if (parsed.schema !== 1 || parsed.nonce !== NONCE) {',
+                                   'schema: 1, id: req.id, row: req.row, nonce: NONCE,'],
+      f'agent.mjs names the rendezvous nonce in exactly its definition, the hello, the request check and the response; found {agent_nonce_refs!r} (R6)')
+
+    def code_without_literals(js_line):
+        """A JS line with string literals removed and each template literal reduced to its ${...} expressions (what a log call can print besides fixed text)."""
+        out = re.sub(r"`(?:[^`\\]|\\.)*`", lambda m: ' '.join(re.findall(r"\$\{(.*?)\}", m.group(0))), js_line)
+        return re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", "''", out)
+
+    agent_log_calls = [ln for ln in agent_lines if re.search(r"\bconsole\.(?:log|error|warn|info|debug)\(|\bdie\(|process\.std(?:out|err)\.write\(|\bthrow new Error\(", ln)]
+    agent_dumps = [ln for ln in agent_log_calls
+                   if re.search(r"(?<![\w.])(?:hello|resp|req|parsed|claim|args|SECRETS|argvPairs)\b(?![\w.\[])|process\.argv|process\.env\b(?!\.)", code_without_literals(ln))]
+    e(len(agent_log_calls) >= 10 and not agent_dumps, f'no agent log call (console, die, throw) prints a whole hello, response, request, flags, argv or environment object; found {agent_dumps!r} (R6)')
+    e(not [ln for ln in launcher_lines if not ln.startswith('limactl shell') and re.search(r"\b(?:echo|printf)\b[^;|]*\$\{?(?:NONCE|GUEST_CMD)\b", ln)],
+      'run-vm-gate.sh echoes neither $NONCE nor $GUEST_CMD (the guest command carries the nonce) (R6)')
+
+    # R4: guest-derived text (a file name, a JSON key or value, a command's stderr) reaches agent.log only through clip(): cut to a limit and
+    # JSON-quoted, so a hostile guest can neither fill the log nor start a line that reads like the agent's own (`agent: W6 req=1 exit=0 ...`).
+    clip_line = 'function clip(value, limit = 120) { return JSON.stringify(String(value).slice(0, limit)); }'
+    e(clip_line in agent_lines, 'agent.mjs defines clip(value, limit): the only way guest text reaches its log (R4)')
+    for line in ("return { bad: `refused: unreadable or unparseable request ${file}: ${clip(e.message || e, 80)}` };",
+                 "return { bad: `refused: the guest request carries the keys ${clip(keys)}; the protocol is exactly {schema,id,row,nonce} (F4)` };",
+                 "return { bad: `refused: row ${clip(parsed.row)} is not in this run's plan: ${PLAN.join(', ')}` };"):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (R4: the guest-supplied key list, row and parse message go through clip())')
+    e(not [ln for ln in agent_lines if re.search(r"\be\.message\b", ln) and re.search(r"console\.|\bdie\(|\bbad:", ln) and 'clip(' not in ln],
+      'no agent.mjs log line (console, die, a refusal text) prints an exception message without clip(); the one e.message that is not logged goes into the response tail (R4)')
+    clip_actual = next((ln for ln in agent_lines if ln.startswith('function clip(')), '')
+    if node_binary and clip_actual:
+        clip_run = subprocess.run([node_binary, '-e', clip_actual + r"""
+const forged = 'x\nagent: W6 req=1 exit=0 files=0 manifest=abc\n' + 'A'.repeat(70000);
+const out = clip(forged);
+console.log(JSON.stringify({ length: out.length, newline: out.includes('\n'), parsed: JSON.parse(out).length, small: clip('ab'), num: clip(7, 5) }));
+"""], text=True, capture_output=True)
+        try:
+            clip_out = json.loads(clip_run.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            clip_out = {}
+        e(clip_run.returncode == 0 and clip_out.get('parsed') == 120 and clip_out.get('length', 999) <= 130 and clip_out.get('newline') is False
+          and clip_out.get('small') == '"ab"' and clip_out.get('num') == '"7"',
+          f'clip() cuts a 70 KB guest text with newlines to 120 characters, escapes the newlines and quotes the result; got rc {clip_run.returncode}: {clip_out!r} {clip_run.stderr.strip()[:160]!r} (R4)')
+
+    # R5: the guest read confines the RESOLVED file to the RESOLVED directory by path components (`"$d"/*`), not by a substring match. The
+    # function's own text runs in node against a stub GNU `realpath -e` (macOS has none) in a temp tree: a file inside, a sibling directory
+    # that merely starts with the directory's name, a directory that is itself reached through a symlink, a symlink pointing out, a missing file.
+    e('grep -F -- ${q(mustBeUnder)}' not in agent_code, 'agent.mjs no longer confines a guest read with a substring match (grep -F) (R5)')
+
+    def js_function_source(text, name):
+        match = re.search(r'^function ' + re.escape(name) + r'\([^\n]*\n', text, re.M)
+        if match is None:
+            raise ValueError(f'agent.mjs: function {name} not found')
+        if match.group(0).count('{') == match.group(0).count('}'):
+            return match.group(0)
+        return text[match.start():text.index('\n}\n', match.start()) + 3]
+
+    if node_binary:
+        with tempfile.TemporaryDirectory() as r5_tmp:
+            base = Path(r5_tmp)
+            (base / 'bin').mkdir()
+            (base / 'bin/realpath').write_text('#!/bin/sh\n[ "$1" = -e ] && shift\n[ "$1" = -- ] && shift\nexec "%s" -I -c \'import os, sys\nif not os.path.exists(sys.argv[1]): sys.exit(1)\nprint(os.path.realpath(sys.argv[1]))\' "$1"\n' % sys.executable)
+            (base / 'bin/realpath').chmod(0o755)
+            (base / 'rdv').mkdir()
+            (base / 'rdv/req-0001.json').write_text('{"a":1}')
+            (base / 'rdv-other').mkdir()
+            (base / 'rdv-other/req-0001.json').write_text('{"other":1}')
+            (base / 'real').mkdir()
+            (base / 'real/req-0001.json').write_text('{"a":1}')
+            os.symlink(base / 'real', base / 'link')
+            (base / 'secret.txt').write_text('SECRET')
+            os.symlink(base / 'secret.txt', base / 'rdv/evil')
+            (base / 'cert.pem').write_text('CERT')
+            r5_script = (
+                "import { spawnSync } from 'node:child_process';\nimport { posix } from 'node:path';\nconst READ_CAP_BYTES = 65536;\n"
+                "function die(m) { throw new Error(m); }\n"
+                "function guestSh(script, opts = {}) { const r = spawnSync('sh', ['-c', script], { encoding: 'utf8' }); if (r.status !== 0 && !opts.allowFail) throw new Error('exit ' + r.status); return { out: r.stdout || '', status: r.status }; }\n"
+                + next((ln for ln in agent_lines if ln.startswith('const GUEST_PATH_RE = ')), 'const GUEST_PATH_RE = /(?!)/;') + '\n'
+                + js_function_source(agent_text, 'guestPath') + js_function_source(agent_text, 'q') + js_function_source(agent_text, 'guestReadFile')
+                + "const T = process.argv[1];\nconst out = {};\n"
+                  "const tryRead = (p, under) => { try { return guestReadFile(p, under).toString('utf8'); } catch (e) { return 'THROWS'; } };\n"
+                  "out.inside = tryRead(`${T}/rdv/req-0001.json`, `${T}/rdv`);\n"
+                  "out.siblingWithSamePrefix = tryRead(`${T}/rdv-other/req-0001.json`, `${T}/rdv`);\n"
+                  "out.symlinkedDirectory = tryRead(`${T}/link/req-0001.json`, `${T}/link`);\n"
+                  "out.symlinkPointingOut = tryRead(`${T}/rdv/evil`, `${T}/rdv`);\n"
+                  "out.missing = tryRead(`${T}/rdv/nope.json`, `${T}/rdv`);\n"
+                  "out.unconfined = tryRead(`${T}/cert.pem`, null);\n"
+                  "console.log(JSON.stringify(out));\n")
+            r5_run = subprocess.run([node_binary, '--input-type=module', '-e', r5_script, str(base)], env=dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}'), text=True, capture_output=True, timeout=60)
+            try:
+                r5_out = json.loads(r5_run.stdout.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                r5_out = {}
+            e(r5_out == {'inside': '{"a":1}', 'siblingWithSamePrefix': '', 'symlinkedDirectory': '{"a":1}', 'symlinkPointingOut': '', 'missing': 'THROWS', 'unconfined': 'CERT'},
+              f'the guest read returns a file inside the directory (also one reached through a symlinked directory) and nothing for a sibling that shares the name prefix or a symlink that points out; got rc {r5_run.returncode}: {r5_out!r} {r5_run.stderr.strip()[:200]!r} (R5)')
+
+    # R7: the OS branch of W7 follows an argument, never the operator's environment: the row's one call site passes no file, and an
+    # OS_RELEASE_FILE in the environment changes nothing.
+    e('os_family="$(w7_os_family "${2:-/etc/os-release}")"' in topo_runner_lines and 'OS_RELEASE_FILE' not in topo_runner_text,
+      'W7 takes the os-release file as an argument (default /etc/os-release) and the runner reads no OS_RELEASE_FILE variable (R7)')
+    if bash_t is not None:
+        with tempfile.TemporaryDirectory() as r7_tmp:
+            (Path(r7_tmp) / 'rhel').write_text('ID=rocky\n')
+            (Path(r7_tmp) / 'deb').write_text('ID=ubuntu\n')
+            r7_script = bash_function_source(runner_path, 'w7_os_family') + 'w7_os_family "$1"\n'
+            r7_run = subprocess.run([bash_t, '-c', r7_script, 'bash', str(Path(r7_tmp) / 'deb')], env=dict(os.environ, OS_RELEASE_FILE=str(Path(r7_tmp) / 'rhel')), text=True, capture_output=True)
+        e(r7_run.stdout.strip() == 'debian', f'w7_os_family reads the file it is given and ignores OS_RELEASE_FILE in the environment; got {r7_run.stdout.strip()!r} (R7)')
+
+        # R8: a failed agent request keeps the TAIL of the requester's stderr (the cause, `no response in N s`, comes last, behind the line
+        # it repeats every 2 s while a row runs); `${s: -n}` alone is empty for a string shorter than n, so the cut is a function.
+        tail_src = bash_function_source(runner_path, 'tail_chars')
+
+        def tail_case(count, text):
+            return subprocess.run([bash_t, '-c', tail_src + 'tail_chars "$1" "$2"', 'bash', str(count), text], text=True, capture_output=True).stdout
+
+        e(tail_case(10, 'short') == 'short' and tail_case(5, '12345') == '12345' and tail_case(5, '1234567890') == '...67890' and tail_case(5, '') == '',
+          'tail_chars keeps a short text whole and the last n characters of a long one behind ... (R8)')
+        repeated = 'browser_remote: the request /g/rdv/req-0001.json disappeared without a response (the agent agent log holds the refusal)\n'
+        cause = 'browser_remote: no response in 1500 s (hello age 3 s; heartbeat expected every 15 s)\n'
+        e('no response in 1500 s' in tail_case(300, repeated * 40 + cause) and 'no response in 1500 s' not in (repeated * 40 + cause)[:300],
+          'the failure record keeps the cause at the end of a long requester stderr, which the first 300 characters never reach (R8)')
+        e(topo_runner_text.count('$(tail_chars 300 "$CAP_ERR")') == 2 and '${CAP_ERR:0:' not in topo_runner_text,
+          'the W5 and W6 failure records quote the tail of the requester stderr, not its first 300 characters (R8)')
+
+    # R12: the delivery target is validated twice (it sits under --guest-root, and it is a plain normalized guest path) before it reaches limactl.
+    for line in ("if (!guestDir.startsWith(GUEST_ROOT + '/')) die(`agent: refusing to deliver outside --guest-root: ${guestDir}`);",
+                 "sh('limactl', ['copy', '--backend=scp', '-r', localDir, `${VM}:${guestPath('delivery target', guestDir)}`], { timeout: 180000 });"):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (R12: the delivery target is a validated guest path under --guest-root)')
 
     # T14: the launcher returns success only for a candidate-bound PASS: the guest runner's own exit status (written beside its pid when
     # it ends) and the harvested receipt's verdict row and candidate commit. Its own functions run on receipt fixtures; the launch line
@@ -1899,6 +2049,27 @@ esac
             rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'])
             e(rc_e == 24 and 'the named guest receipt' in err_e and 'does not exist' in err_e and 'left no exit status' in err_e,
               f'a guest with neither receipt nor runner.rc reports both reasons and bits 8 and 16 (S3, T14); got rc {rc_e}: {err_e[:300]!r} (R2)')
+
+            # R9: the hello wait is bounded by the clock (90 s), not by a number of passes: each pass costs a limactl round trip and a sleep. Both are
+            # stood in for by functions that advance SECONDS (a round trip takes 5 s, a sleep its argument); the real loop runs, in no real time.
+            hello_wait = launcher_block('hello_seen=0', lambda ln: ln.startswith('(( hello_seen == 1 )) || {'))
+            e(bool(hello_wait), 'the launcher keeps the hello wait block the R9 test runs')
+
+            def hello_wait_case(seen_on_call):
+                script = ('set -euo pipefail\nVM=fake; RDV=/g/rdv; NONCE=n; OUT=/o; AGENT_PID=$$; calls=0; SEEN="$1"\n'
+                          'limactl() { calls=$((calls + 1)); SECONDS=$((SECONDS + 5)); [[ -n "$SEEN" && $calls -ge $SEEN ]]; }\n'
+                          'sleep() { SECONDS=$((SECONDS + $1)); }\n'
+                          'trap \'echo "calls=$calls" >&2\' EXIT\n' + hello_wait + '\necho passed\n')
+                run = subprocess.run([bash_t, '-c', script, 'bash', str(seen_on_call or '')], text=True, capture_output=True, timeout=30)
+                found = re.search(r'calls=(\d+)', run.stderr)
+                return run.returncode, run.stdout.strip(), run.stderr, int(found.group(1)) if found else -1
+
+            if hello_wait:
+                rc_h, out_h, err_h, calls_h = hello_wait_case(None)
+                e(rc_h == 2 and 'no agent-hello.json' in err_h and 'within 90 s' in err_h and 10 <= calls_h <= 14,
+                  f'with 7 s per pass the hello wait gives up after about 90 s (13 passes), not after 45 passes; got rc {rc_h}, {calls_h} passes: {err_h[:200]!r} (R9)')
+                rc_h, out_h, err_h, calls_h = hello_wait_case(3)
+                e(rc_h == 0 and out_h == 'passed' and calls_h == 3, f'control: a hello seen on the third pass ends the wait; got rc {rc_h}, {calls_h} passes: {out_h!r} (R9)')
     e("The launcher empties the guest's `agent-out` folder before every run" in guide_flat
       and "W5 evaluates its result file only when that file's sha256 equals the `w5-result.json` entry in the `files[]` of the agent's response" in guide_flat,
       'the guide says the launcher empties the guest agent-out and W5 binds its result file to the response files[] sha256 (R1)')

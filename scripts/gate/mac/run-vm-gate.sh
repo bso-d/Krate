@@ -168,7 +168,8 @@ AGENT_PID=$!
 # second after it starts; wait until the agent's first hello is in the guest rendezvous (or the
 # agent died) before starting the runner.
 hello_seen=0
-for _ in $(seq 1 45); do
+hello_deadline=$((SECONDS + 90))   # review R9: a wall-clock bound; each pass costs one limactl round trip plus the sleep, so a pass count is not 90 s
+while (( SECONDS < hello_deadline )); do
   if limactl shell "$VM" -- grep -q -F -- "$NONCE" "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi   # present, non-empty and carrying THIS run's nonce
   kill -0 "$AGENT_PID" 2>/dev/null || { echo "run-vm-gate: the agent exited before its hello reached $RDV (see $OUT/agent.log)" >&2; exit 2; }
   sleep 2

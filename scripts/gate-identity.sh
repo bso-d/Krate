@@ -2032,6 +2032,10 @@ agent_request() { # row timeout_s: the runner's {schema,id,row,nonce} request to
   printf -- '--- agent request %s (exit %s)\n%s\n--- agent request %s stderr\n%s\n' "$1" "$rc" "$CAP" "$1" "$CAP_ERR" >> "$RAW"
   return $rc
 }
+tail_chars() { # n text: the LAST n characters of text, behind `...` when it was cut (`${s: -n}` is empty when s is shorter than n)
+  local n="$1" s="$2"
+  if (( ${#s} > n )); then printf '...%s' "${s: -n}"; else printf '%s' "$s"; fi
+}
 agent_delivered_dir() { # row: the guest folder the agent copies the row's evidence into (one
   # limactl copy --backend=scp -r invocation per response; M1 observed the flag)
   printf '%s/agent-out/w%s' "$(dirname "$RENDEZVOUS")" "${1#W}"
@@ -2098,7 +2102,7 @@ phase4_row_w5() {
   local agent_rc=0
   agent_request W5 1500 || agent_rc=$?
   if (( agent_rc != 0 )); then
-    record W5 "$slice" W FAIL "the W5 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): ${CAP_ERR:0:300}${CAP:+ | stdout: ${CAP:0:300}}"
+    record W5 "$slice" W FAIL "the W5 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): $(tail_chars 300 "$CAP_ERR")${CAP:+ | stdout: ${CAP:0:300}}"
     return
   fi
   if [[ "$CAP" != *'"exit"'* ]]; then
@@ -2261,7 +2265,7 @@ phase4_row_w6() {
   local agent_rc=0
   agent_request W6 240 || agent_rc=$?
   if (( agent_rc != 0 )); then
-    record W6 "$slice" W FAIL "the W6 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): ${CAP_ERR:0:300}${CAP:+ | stdout: ${CAP:0:300}}"
+    record W6 "$slice" W FAIL "the W6 agent request failed (browser_remote rc=$agent_rc: the agent holds the refusal or the timeout; the Mac agent.log names it): $(tail_chars 300 "$CAP_ERR")${CAP:+ | stdout: ${CAP:0:300}}"
     return
   fi
   printf '%s\n' "$CAP" > "$STATE/w6-agent-response.json" && chmod 600 "$STATE/w6-agent-response.json"
@@ -2286,8 +2290,8 @@ phase4_row_w6() {
   fi
 }
 
-w7_os_family() { # rhel | debian | unknown, from ID and ID_LIKE of /etc/os-release (review T05; OS_RELEASE_FILE overrides the path for the checker)
-  local file="${OS_RELEASE_FILE:-/etc/os-release}" ids
+w7_os_family() { # [os-release file]: rhel | debian | unknown, from ID and ID_LIKE (review T05). The file is an argument, never an environment variable: the operator's environment must not choose the OS branch W7 takes (R7)
+  local file="${1:-/etc/os-release}" ids
   ids="$(sed -n -E 's/^(ID|ID_LIKE)=//p' "$file" 2>/dev/null | tr -d "\"'" | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
   case " $ids " in
     *" rhel "* | *" fedora "* | *" centos "* | *" rocky "* | *" almalinux "*) echo rhel ;;
@@ -2301,7 +2305,7 @@ phase4_row_w7() {
   # Review T05: the branch follows the fixture's OS, not the firewall that happens to be running, so a Rocky/RHEL fixture whose
   # firewalld stopped FAILs here instead of falling into the Ubuntu/ufw shape and passing with no firewall at all.
   local os_family fw_active=false
-  os_family="$(w7_os_family)"
+  os_family="$(w7_os_family "${2:-/etc/os-release}")"   # the optional second argument exists for the checker; the row's one call site passes the slice only
   if command -v firewall-cmd >/dev/null 2>&1 && [[ "$(systemctl is-active firewalld 2>/dev/null || true)" == active ]]; then fw_active=true; fi
   if [[ "$os_family" == unknown ]]; then
     st=1
