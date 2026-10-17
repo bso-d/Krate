@@ -1592,6 +1592,63 @@ def check_topofix2(checks):
                                                     'websocketPredicate': [False, True], 'websocketClosed': 1008,
                                                     'list': ['blocked:127.0.0.1', 'blocked:203.0.113.9', 'websocket-blocked:127.0.0.1'], 'assertClean': 'threw'},
           f'the external guard continues gate-host and non-network requests, aborts and records an IP-literal and a bare external request before dispatch, routes only non-gate websockets and closes them, and assertClean then throws; got rc {run_guard.returncode}: {run_guard.stderr.strip()[:200]!r} {guard_out!r} (T07)')
+
+    # T14: the launcher returns success only for a candidate-bound PASS: the guest runner's own exit status (written beside its pid when
+    # it ends) and the harvested receipt's verdict row and candidate commit. Its own functions run on receipt fixtures; the launch line
+    # (setsid removed, macOS has none) runs behind a fake limactl to prove the exit status is really recorded.
+    launcher_path = ROOT / 'scripts/gate/mac/run-vm-gate.sh'
+    if bash_t is not None:
+        launcher_funcs = ''.join(bash_function_source(launcher_path, name) for name in ('receipt_verdict', 'receipt_candidate_ok', 'run_outcome'))
+        candidate_sha = '0123456789abcdef0123456789abcdef01234567'
+
+        def outcome_case(runner_rc, receipt_text, candidate=candidate_sha):
+            with tempfile.TemporaryDirectory() as t14_tmp:
+                receipt = Path(t14_tmp) / 'receipt.md'
+                if receipt_text is not None:
+                    receipt.write_text(receipt_text)
+                script = launcher_funcs + 'reason="$(run_outcome "$1" "$2" "$3")"; rc=$?; printf "%s|%s\\n" "$rc" "$reason"\n'
+                run = subprocess.run([bash_t, '-c', script, 'bash', runner_rc, str(receipt), candidate], text=True, capture_output=True)
+            return run.stdout.strip()
+
+        def receipt_text(verdict='PASS', commit=candidate_sha):
+            return (f'| field | value |\n|---|---|\n| verdict | **{verdict}** (PASS 70, FAIL 0, NOT_RUN 0, required missing 0: none; bound: true) |\n'
+                    f'| candidate commit | {commit} (stated as {commit[:7]} and resolved in --repo) |\n')
+
+        e(outcome_case('0', receipt_text()) == '0|', f'a guest runner exit 0 with a PASS receipt of the launcher candidate is a success; got {outcome_case("0", receipt_text())!r} (T14)')
+        e(outcome_case('0', receipt_text(commit=candidate_sha[:7] + 'f' * 33)) .startswith('1|the receipt') and 'candidate commit' in outcome_case('0', receipt_text(commit=candidate_sha[:7] + 'f' * 33)),
+          'a PASS receipt of another candidate commit is a failure (T14)')
+        e(outcome_case('garbage', receipt_text()) == '1|the guest runner left no exit status (it was killed before it finished)',
+          'a runner that left no numeric exit status (killed, stale or garbage) is a failure (T14)')
+        e(outcome_case('', receipt_text()) == '1|the guest runner left no exit status (it was killed before it finished)', 'an empty runner exit status is a failure (T14)')
+        e(outcome_case('1', receipt_text()) == '1|the guest runner exited 1', 'a non-zero runner exit status is a failure even beside a PASS receipt (T14)')
+        e(outcome_case('0', receipt_text('FAIL')) == "1|the receipt verdict is 'FAIL', not PASS", 'a FAIL receipt is a failure (T14)')
+        e(outcome_case('0', receipt_text('INCOMPLETE')) == "1|the receipt verdict is 'INCOMPLETE', not PASS", 'an INCOMPLETE receipt is a failure (T14)')
+        e(outcome_case('0', None) == '1|no harvested receipt.md', 'a missing receipt is a failure (T14)')
+        e(outcome_case('0', '| field | value |\n|---|---|\n| candidate commit | ' + candidate_sha + ' |\n') == "1|the receipt verdict is 'missing', not PASS",
+          'an unfinished receipt without a verdict row is a failure (T14)')
+        launcher_raw = launcher_path.read_text()
+        launch_line = next((ln for ln in launcher_raw.splitlines() if ln.startswith('limactl shell "$VM" -- sh -c "nohup setsid sh -c $(printf')), '')
+        e(bool(launch_line), 'the launcher keeps its detached guest command line (T14 test anchor)')
+        if launch_line:
+            with tempfile.TemporaryDirectory() as t14_launch:
+                base = Path(t14_launch)
+                (base / 'bin').mkdir()
+                (base / 'bin/limactl').write_text('#!/bin/sh\n[ "$1" = shell ] || exit 9\nshift; shift\n[ "$1" = -- ] && shift\nexec "$@"\n')
+                (base / 'bin/limactl').chmod(0o755)
+                (base / 'rdv').mkdir()
+                results = {}
+                for name, guest_cmd in (('pass', 'true'), ('fail', 'cd /nonexistent-for-the-check && true')):
+                    sub_rdv = base / name
+                    sub_rdv.mkdir()
+                    script = ('VM=fake; GUEST_ROOT="$1"; RDV="$2"; CANDIDATE=0123456789abcdef; GUEST_CMD="$3"\n' + launch_line.replace('nohup setsid sh', 'nohup sh') + '\n'
+                              'for _ in $(seq 1 50); do [ -s "$RDV/runner.rc" ] && break; sleep 0.1; done; printf "%s|%s" "$(cat "$RDV/runner.rc" 2>/dev/null)" "$(test -s "$RDV/runner.pid" && echo pid)"\n')
+                    run = subprocess.run([bash_t, '-c', script, 'bash', str(base), str(sub_rdv), guest_cmd], env=dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}'), text=True, capture_output=True, timeout=30)
+                    results[name] = run.stdout.strip()
+            e(results == {'pass': '0|pid', 'fail': '1|pid'},
+              f"the launcher's detached guest command records the runner's exit status beside its pid (0 for a pass, the failure status otherwise); got {results!r} (T14)")
+    e('RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d \'[:space:]\')"' in launcher_lines, 'the launcher reads the runner exit status from the guest (T14)')
+    e('RC=$((RC | 16))' in launcher_lines and any(ln.startswith('if OUTCOME_REASON="$(run_outcome "$RUNNER_RC"') for ln in launcher_lines),
+      'the launcher turns a run that is not a candidate-bound PASS into a non-zero exit (T14)')
     e("agent_request" in topo_runner_text and 'CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request' in topo_runner_text
       and '2>&1)"; rc=$?\n  if [[ -n "$REND_NONCE" ]]' not in topo_runner_text,
       'agent_request no longer merges the requester stderr into CAP (T01)')

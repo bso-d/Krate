@@ -55,6 +55,28 @@ OUT="${OUT:-$REPO/harness/gate-receipts/topo-mac-$PHASE-$(date -u +%Y%m%dT%H%M%S
 mkdir -p "$OUT" "$OUT/agent-tmp"
 case "$(uname -s):$(uname -m)" in Darwin:arm64|Darwin:x86_64) ;; *) echo "run-vm-gate: the Mac launcher runs on a macOS host (this is $(uname -s):$(uname -m))" >&2; exit 2 ;; esac
 
+# Review T14: a harvested receipt directory is not a successful run. Success needs the guest runner's own exit status (0 only for a
+# PASS verdict: finish() returns `[[ $verdict == PASS ]]`) AND a harvested receipt whose verdict row says PASS and whose candidate commit is the
+# launcher's candidate. A killed runner leaves no status, an unfinished receipt has no verdict row.
+receipt_verdict() { # receipt.md -> PASS | FAIL | INCOMPLETE, or nothing
+  sed -n -E 's/^\| verdict \| \*\*([A-Z_]+)\*\*.*/\1/p' "$1" 2>/dev/null | head -1
+}
+receipt_candidate_ok() { # receipt.md candidate: the receipt's candidate commit row starts with the launcher's candidate
+  local row
+  row="$(sed -n -E 's/^\| candidate commit \| ([0-9a-f]+).*/\1/p' "$1" 2>/dev/null | head -1)"
+  [[ -n "$row" && "$row" == "$2"* ]]
+}
+run_outcome() { # runner_rc receipt.md candidate: prints the reason and returns 1 unless the run is a candidate-bound PASS
+  local rrc="$1" receipt="$2" cand="$3" verdict
+  if [[ ! "$rrc" =~ ^[0-9]+$ ]]; then echo "the guest runner left no exit status (it was killed before it finished)"; return 1; fi
+  if (( rrc != 0 )); then echo "the guest runner exited $rrc"; return 1; fi
+  [[ -f "$receipt" ]] || { echo "no harvested receipt.md"; return 1; }
+  verdict="$(receipt_verdict "$receipt")"
+  [[ "$verdict" == PASS ]] || { echo "the receipt verdict is '${verdict:-missing}', not PASS"; return 1; }
+  receipt_candidate_ok "$receipt" "$cand" || { echo "the receipt's candidate commit is not the launcher's candidate $cand"; return 1; }
+  return 0
+}
+
 # ── preconditions ──
 PREFLIGHT_FAIL=0
 if ! pmset -g batt 2>/dev/null | grep -q 'AC Power'; then
@@ -113,6 +135,7 @@ echo "run-vm-gate: vm_ip=$VM_IP via $IFACE; preflight ok"
 NONCE="$(openssl rand -hex 16)"
 RDV="$GUEST_ROOT/rdv"
 limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null   # agent-out: limactl copy -r cannot create a missing parent (PRE-3)
+limactl shell "$VM" -- rm -f "$RDV/runner.rc" "$RDV/runner.pid" 2>/dev/null   # a previous run's exit status must not be read as this run's (T14)
 TMPDIR="$OUT/agent-tmp" PW_MODULES="$PW_MODULES" node "$WT/scripts/gate/mac/agent.mjs" \
   --vm "$VM" --rendezvous "$RDV" --guest-root "$GUEST_ROOT" --public-host "$HOST" \
   --rows "$ROWS" --out "$OUT" --guest-cert "$EDITION_DIR/certs/server.crt" \
@@ -133,7 +156,8 @@ done
 # without a receipt must not exit rc=0.
 GUEST_RECEIPT="$GUEST_ROOT/receipt-${CANDIDATE:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
 GUEST_CMD="cd $GUEST_ROOT/repo && scripts/gate-identity.sh --edition-dir $EDITION_DIR --wipe --phase $PHASE --public-host $HOST --out $GUEST_RECEIPT --browser agent --rendezvous $RDV --rendezvous-nonce $NONCE --candidate $CANDIDATE --repo $GUEST_ROOT/repo"   # PRE-7: the bound, full-inventory shape of a bundle host (identity-gate.md, the bundle-host invocation)
-limactl shell "$VM" -- sh -c "nohup setsid sh -c $(printf '%q' "$GUEST_CMD") > $GUEST_ROOT/run-${CANDIDATE:0:7}.log 2>&1 & echo \$! > $RDV/runner.pid"
+# the runner's exit status is written next to its pid when it ends (T14): `; echo $?` runs in the detached shell after the runner
+limactl shell "$VM" -- sh -c "nohup setsid sh -c $(printf '%q' "$GUEST_CMD; echo \$? > $RDV/runner.rc") > $GUEST_ROOT/run-${CANDIDATE:0:7}.log 2>&1 & echo \$! > $RDV/runner.pid"
 echo "run-vm-gate: guest runner detached (pid $(limactl shell "$VM" -- cat "$RDV/runner.pid" 2>/dev/null | tr -d '[:space:]')), tail $GUEST_ROOT/run-${CANDIDATE:0:7}.log"
 
 # ── tail until the runner exits ──
@@ -171,6 +195,14 @@ else
   # launcher, not exit rc=0 with nothing harvested.
   echo "run-vm-gate: FAIL: the named guest receipt $GUEST_RECEIPT does not exist (the guest runner died before writing one; its log is $GUEST_ROOT/run-${CANDIDATE:0:7}.log)" >&2
   RC=$((RC | 8))
+fi
+# T14: the run succeeds only as a candidate-bound PASS: the guest runner's own exit status and the harvested receipt's verdict
+RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d '[:space:]')"
+if OUTCOME_REASON="$(run_outcome "$RUNNER_RC" "${RECEIPT_GUEST:+$OUT/$(basename "$RECEIPT_GUEST")/receipt.md}" "$CANDIDATE")"; then
+  echo "run-vm-gate: the run is a candidate-bound PASS (guest runner exit 0, receipt verdict PASS, candidate $CANDIDATE)"
+else
+  echo "run-vm-gate: FAIL: $OUTCOME_REASON" >&2
+  RC=$((RC | 16))
 fi
 # agent-manifest vs harvested evidence: every manifest row's file digest must appear in the
 # delivered agent-from-guest tree (the guest's receipt copy is the runner's own evidence path).
