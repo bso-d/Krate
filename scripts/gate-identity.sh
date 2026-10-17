@@ -2267,17 +2267,21 @@ phase4_row_w7() {
     fi
     ev+=" doctor: ${doctor:-none printed}"
   else
-    local ufw_state ufw_status input_head doctor
-    ufw_state="$(systemctl is-active ufw 2>/dev/null || true)"
+    local ufw_state ufw_first ufw_reason="" ufw_status input_head doctor
+    ufw_state="$(systemctl is-active ufw 2>/dev/null || true)"   # evidence text only: ufw.service is a oneshot that reads `active` (exited) while `ufw status` says inactive (TOPOFIX2 PRE-4)
+    ufw_first="$( { sudo -n ufw status 2>/dev/null || ufw status 2>/dev/null; } | head -1 || true)"
     ufw_status="$( { sudo -n ufw status verbose 2>/dev/null || ufw status verbose 2>/dev/null; } | head -4 | tr '\n' ' ' || true)"
     input_head="$(sudo -n iptables -S INPUT 2>/dev/null | head -1 || true)"
     doctor="$("$KRATE" doctor 2>>"$RAW" | grep -i firewall | head -2 | tr '\n' ' ' || true)"
-    if [[ "$ufw_state" == active ]]; then
-      st=1 # the gate's standard fixture keeps ufw inactive (TOPOFIX 5.5; enabling it is an operator choice)
-    fi
-    ev+="no active firewalld (Ubuntu shape, M6 pending on a re-created VM): ufw $ufw_state${ufw_status:+; status: }$ufw_status,"
+    case "$ufw_first" in
+      "Status: inactive"*) ;;
+      "Status: active"*) st=1 ;; # the gate's standard fixture keeps ufw inactive (TOPOFIX 5.5; enabling it is an operator choice)
+      *) st=1; ufw_reason="ufw status unreadable (needs root or passwordless sudo)" ;;
+    esac
+    ev+="no active firewalld (Ubuntu shape, M6 pending on a re-created VM): ufw status first line [${ufw_first:-none}], ufw.service $ufw_state${ufw_status:+; status: }$ufw_status,"
+    [[ -z "$ufw_reason" ]] || ev+=" $ufw_reason,"
     ev+=" INPUT head: ${input_head:-unavailable}; doctor: ${doctor:-none printed};"
-    ev+=" no firewall-effectiveness control available for W5 on this host (ufw $ufw_state)"
+    ev+=" no firewall-effectiveness control available for W5 on this host (ufw ${ufw_first:-unreadable})"
   fi
   if (( st == 0 )); then
     record W7 "$slice" W PASS "$ev"

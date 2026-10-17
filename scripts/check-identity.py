@@ -1153,6 +1153,34 @@ def check_topofix2(checks):
         e(rc_s == 1 and "IPv6 positive control: sshd's 22 did not answer over IPv6 (not-swept)" in out_s,
           f'W5 FAILs when the hello carries a global address but the result has no IPv6 pass; got rc {rc_s}: {out_s[-200:]!r} (G5)')
 
+    # PRE-4: the W7 Ubuntu branch decides on the first line of `ufw status`, never on the ufw.service state (a oneshot that reads
+    # `active (exited)` while ufw is inactive). The runner's own lines run against fake sudo/ufw commands.
+    ufw_first_line = next((ln for ln in topo_runner_lines if ln.startswith('ufw_first="$(')), '')
+    case_match = re.search(r'^ {4}case "\$ufw_first" in\n(?: {6}.*\n)+? {4}esac$', topo_runner_text, re.M)
+    e(ufw_first_line == 'ufw_first="$( { sudo -n ufw status 2>/dev/null || ufw status 2>/dev/null; } | head -1 || true)"'
+      and case_match is not None and 'ufw_state' not in (case_match.group(0) if case_match else 'ufw_state')
+      and '[[ "$ufw_state" == active ]]' not in topo_runner_text,
+      'W7 (Ubuntu) reads the first line of `ufw status` (sudo -n, then plain) and decides on it in a case block that never looks at the ufw.service state (PRE-4)')
+    if case_match is not None and ufw_first_line:
+        def w7_ubuntu(sudo_body, ufw_body):
+            with tempfile.TemporaryDirectory() as w7_tmp:
+                fake_bin = Path(w7_tmp)
+                for name, body in (('sudo', sudo_body), ('ufw', ufw_body)):
+                    (fake_bin / name).write_text('#!/bin/sh\n' + body + '\n')
+                    (fake_bin / name).chmod(0o755)
+                script = 'st=0; ufw_reason=""\n' + ufw_first_line + '\n' + case_match.group(0) + '\nprintf "%s|%s|%s\\n" "$st" "$ufw_first" "$ufw_reason"\n'
+                run = subprocess.run(['bash', '-c', script], env=dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}'), text=True, capture_output=True)
+            return run.stdout.strip()
+        pass_sudo = 'exec "$@"'
+        e(w7_ubuntu(pass_sudo, 'echo "Status: inactive"') == '0|Status: inactive|',
+          'W7 (Ubuntu) passes on `Status: inactive` (PRE-4)')
+        e(w7_ubuntu(pass_sudo, 'echo "Status: active"; echo "To  Action  From"') == '1|Status: active|',
+          'W7 (Ubuntu) fails on `Status: active` (as before; PRE-4)')
+        e(w7_ubuntu('exit 1', 'echo "ERROR: You need to be root to run this script" >&2; exit 1') == '1||ufw status unreadable (needs root or passwordless sudo)',
+          'W7 (Ubuntu) fails with the unreadable reason when ufw status cannot be read without root (PRE-4)')
+        e(w7_ubuntu(pass_sudo, 'echo "Status: unknown"') == '1|Status: unknown|ufw status unreadable (needs root or passwordless sudo)',
+          'W7 (Ubuntu) fails on any first line that is neither Status: active nor Status: inactive (PRE-4)')
+
 
 def check_k37_wiring(checks):
     """Gate row K37 (Kafbat's absolute session lifetime): the helper, the 4a companion wiring of the runner and the guide rows agree."""
