@@ -14,7 +14,7 @@ CLI (python3 -I, Python 3.9+):
 
 Exit codes: 0 the response's own exit was 0; 1 bad usage; 2 the response says the agent
 refused/failed (its exit is printed on stdout before exiting 2); 3 response timeout; 4 the
-agent hello is stale (never observed, or older than --max-age); 5 nonce mismatch or schema
+agent hello is stale (never observed, or older than --max-age); 5 nonce/id/row or schema
 mismatch; 6 the response is not the expected shape.
 Nothing secret is printed: the response's stdout_tail is already agent-redacted.
 """
@@ -66,11 +66,13 @@ def cmd_hello(rendezvous, max_age, nonce):
 
 
 def next_request_id(rendezvous):
-    """A fresh 4-digit id: every req/resp/processing file of this rendezvous is seen."""
+    """Find a free 4-digit id among queued, claimed and response files."""
     used = set()
     try:
         for name in os.listdir(rendezvous):
             m = re.match(r"^(?:req|resp)-([0-9]{4})(?:\.processing)?\.json$", name)
+            if m is None:
+                m = re.match(r"^req-([0-9]{4})\.json\.claimed-[0-9]+$", name)
             if m:
                 used.add(m.group(1))
     except OSError as exc:
@@ -85,7 +87,7 @@ def next_request_id(rendezvous):
     return "%04d" % n
 
 
-def wait_response(rendezvous, req_id, timeout, nonce):
+def wait_response(rendezvous, req_id, timeout, nonce, row):
     deadline = time.time() + timeout
     resp_path = os.path.join(rendezvous, "resp-%s.json" % req_id)
     req_path = os.path.join(rendezvous, "req-%s.json" % req_id)
@@ -102,8 +104,14 @@ def wait_response(rendezvous, req_id, timeout, nonce):
             if keys != want:
                 sys.stderr.write("browser_remote: response carries [%s]; expected [%s]\n" % (keys, want))
                 sys.exit(6)
+            if resp.get("schema") != 1:
+                sys.stderr.write("browser_remote: response schema is not 1; refusing it\n")
+                sys.exit(5)
             if resp.get("nonce") != nonce or resp.get("id") != int(req_id):
                 sys.stderr.write("browser_remote: response nonce/id do not bind this run (nonce mismatch); refusing it\n")
+                sys.exit(5)
+            if resp.get("row") != row:
+                sys.stderr.write("browser_remote: response row does not bind this request; refusing it\n")
                 sys.exit(5)
             return resp
         # A disappeared request without a response means the agent refused it: log the
@@ -122,7 +130,7 @@ def cmd_request(rendezvous, nonce, row, timeout):
     req = {"schema": 1, "id": int(req_id), "row": row, "nonce": nonce}
     _atomic_write(os.path.join(rendezvous, "req-%s.json" % req_id), json.dumps(req) + "\n")
     sys.stderr.write("browser_remote: request %s row %s written (nonce-bound)\n" % (req_id, row))
-    resp = wait_response(rendezvous, req_id, timeout, nonce)
+    resp = wait_response(rendezvous, req_id, timeout, nonce, row)
     if resp is None:
         hi, age = read_hello(rendezvous, 0, nonce)  # the hello age is part of the failure
         sys.stderr.write("browser_remote: no response in %d s (hello age %.0f s; heartbeat expected every 15 s)\n" % (timeout, age))

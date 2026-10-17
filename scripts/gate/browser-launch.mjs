@@ -226,8 +226,13 @@ export function certDigests(certPem) {
 // A.crt and C.crt: notAfter 2020-01-02); the comparison itself is clock arithmetic.
 export function assertCertValidity(certPem, now = new Date()) {
   const cert = x509OrDie(certPem, 'certPem');
-  const notBefore = new Date(cert.validFromDate);
-  const notAfter = new Date(cert.validToDate);
+  // Date getters arrived in Node 22.10; the supported Node 18/20 expose strings.
+  const notBefore = new Date(cert.validFromDate ?? cert.validFrom);
+  const notAfter = new Date(cert.validToDate ?? cert.validTo);
+  if (!Number.isFinite(notBefore.getTime()) || !Number.isFinite(notAfter.getTime())
+      || !(now instanceof Date) || !Number.isFinite(now.getTime())) {
+    exit2('launchGateCertificate: invalid certificate validity dates or clock');
+  }
   if (now < notBefore || now > notAfter) {
     exit2(`launchGateCertificate: the pinned certificate is not valid at the Mac clock (${now.toISOString()}); validity ${notBefore.toISOString()} .. ${notAfter.toISOString()}`);
   }
