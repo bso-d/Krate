@@ -157,8 +157,8 @@ RDV="$GUEST_ROOT/rdv"
 # Review R1: the delivery folder starts every run EMPTY. `limactl copy --backend=scp -r DIR VM:agent-out/w5` puts DIR INSIDE an existing
 # agent-out/w5 (scp -r into an existing directory nests), so an earlier run's w5-result.json would stay where the runner reads it.
 limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out" 2>/dev/null || { echo "run-vm-gate: could not empty $GUEST_ROOT/agent-out in the guest; an earlier run's delivery would be read as this run's" >&2; exit 2; }
-limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null   # agent-out: limactl copy -r cannot create a missing parent (PRE-3)
-limactl shell "$VM" -- rm -f "$RDV/runner.rc" "$RDV/runner.pid" 2>/dev/null   # a previous run's exit status must not be read as this run's (T14)
+limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null || { echo "run-vm-gate: could not create $RDV and $GUEST_ROOT/agent-out in the guest (is $GUEST_ROOT writable?)" >&2; exit 2; }   # agent-out: limactl copy -r cannot create a missing parent (PRE-3)
+limactl shell "$VM" -- rm -f "$RDV/runner.rc" "$RDV/runner.pid" 2>/dev/null || { echo "run-vm-gate: could not remove an earlier runner.rc/runner.pid from $RDV in the guest; an earlier exit status would be read as this run's" >&2; exit 2; }   # a previous run's exit status must not be read as this run's (T14)
 TMPDIR="$OUT/agent-tmp" PW_MODULES="$PW_MODULES" node "$WT/scripts/gate/mac/agent.mjs" \
   --vm "$VM" --rendezvous "$RDV" --guest-root "$GUEST_ROOT" --public-host "$HOST" \
   --rows "$ROWS" --out "$OUT" --guest-cert "$EDITION_DIR/certs/server.crt" \

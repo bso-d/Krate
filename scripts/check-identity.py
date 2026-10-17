@@ -1066,7 +1066,10 @@ def check_topofix2(checks):
         'sleep 2',
         '(( hello_seen == 1 )) || { echo "run-vm-gate: no agent-hello.json in $RDV within 90 s (see $OUT/agent.log)" >&2; exit 2; }',
     )
-    for line in ('limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null', 'hello_deadline=$((SECONDS + 90))') + wait_lines:
+    mkdir_guest_line = 'limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null || { echo "run-vm-gate: could not create $RDV and $GUEST_ROOT/agent-out in the guest (is $GUEST_ROOT writable?)" >&2; exit 2; }'
+    rm_status_line = ('limactl shell "$VM" -- rm -f "$RDV/runner.rc" "$RDV/runner.pid" 2>/dev/null || { echo "run-vm-gate: could not remove an earlier runner.rc/runner.pid from $RDV in the guest; '
+                      'an earlier exit status would be read as this run\'s" >&2; exit 2; }')
+    for line in (mkdir_guest_line, rm_status_line, 'hello_deadline=$((SECONDS + 90))') + wait_lines:
         e(line in launcher_lines, f'run-vm-gate.sh must carry the code line {line!r} (PRE-2: wait up to 90 s for the hello in the guest, exit 2 when the agent died or nothing came; PRE-3: agent-out is created with the rendezvous)')
     guest_cmd = next((ln for ln in launcher_lines if ln.startswith('GUEST_CMD="')), '')
     if all(line in launcher_lines for line in wait_lines):
@@ -1157,6 +1160,8 @@ def check_topofix2(checks):
                     envelope['files'] = [sibling, dict(entry, sha256=hashlib.sha256(b'an earlier run').hexdigest())]
                 elif listing == 'unlisted':
                     envelope['files'] = [sibling]
+                elif listing == 'last-char':   # all but the last hex character of the real digest: only a prefix compare accepts it
+                    envelope['files'] = [sibling, dict(entry, sha256=entry['sha256'][:-1] + ('0' if entry['sha256'][-1] != '0' else '1'))]
                 elif listing == 'twice':
                     envelope['files'] = [entry, entry]
                 elif listing == 'no-files-key':
@@ -1203,6 +1208,15 @@ def check_topofix2(checks):
               f'W5 fails closed, evaluating nothing, when the delivered result file is not tied to the agent response ({listing}); got rc {rc_r1}: {out_r1[-240:]!r} (R1)')
         rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing='match')
         e(rc_r1 == 0 and 'breaches=0' in out_r1, f'W5 passes when the result file is the one the response lists; got rc {rc_r1}: {out_r1[-200:]!r} (R1)')
+        # N2 (delta review of 2d4c9df, mutant D-R1p): the comparison is on the whole sha256. A listing that agrees with the result file on
+        # every hex character but the last (a prefix compare would accept it) is refused, and the two lines that decide it are pinned whole.
+        rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing='last-char')
+        e(rc_r1 == 1 and 'breaches=1' in out_r1 and 'is not the file this agent response lists' in out_r1 and 'open=[' not in out_r1,
+          f'W5 refuses a listed sha256 that differs from the result file only in its last hex character; got rc {rc_r1}: {out_r1[-200:]!r} (N2)')
+        w5_python_lines = [ln.strip() for ln in w5_python.splitlines()]
+        for pin in ('result_sha = hashlib.sha256(result_bytes).hexdigest()',
+                    'if len(listed) != 1 or listed[0].get("sha256") != result_sha:'):
+            e(pin in w5_python_lines, f'the W5 evaluation carries the whole line {pin!r}: the listed sha256 must equal the full digest of the bytes it read (N2)')
 
     # PRE-4: the W7 Ubuntu branch decides on the first line of `ufw status`, never on the ufw.service state (a oneshot that reads
     # `active (exited)` while ufw is inactive). The runner's own lines run against fake sudo/ufw commands.
@@ -1941,12 +1955,27 @@ console.log(JSON.stringify({ length: out.length, newline: out.includes('\n'), pa
             e(fixed == {'rc': 0, 'stderr': '', 'top': 'FRESH', 'nested': False, 'keep': True, 'hello': True},
               f'the launcher empties the guest agent-out before the run: after its rm and mkdir lines the delivered w5-result.json is the fresh one, nothing nests, and files outside agent-out stay; got {fixed!r} (R1)')
             rm_at = [i for i, ln in enumerate(launcher_lines) if ln.startswith('limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out"')]
-            mkdir_at = [i for i, ln in enumerate(launcher_lines) if ln == 'limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null']
+            mkdir_at = [i for i, ln in enumerate(launcher_lines) if ln.startswith('limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null')]
             agent_at = [i for i, ln in enumerate(launcher_lines) if ln == 'AGENT_PID=$!']
             e(len(rm_at) == 1 and len(mkdir_at) == 1 and len(agent_at) == 1 and rm_at[0] < mkdir_at[0] < agent_at[0],
               'the launcher empties agent-out before it creates it and before the agent starts (R1)')
         e(any(ln.startswith('limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out" 2>/dev/null || { echo "run-vm-gate: could not empty ') and ln.endswith('exit 2; }') for ln in launcher_lines),
           'the launcher exits 2 with a reason when it cannot empty the guest agent-out (R1: a stale delivery must not be read as this run\'s)')
+        # N1 (delta review of 2d4c9df): the guest's mkdir and the removal of the previous run's exit status fail loudly. Under `set -e` a bare
+        # failing line ended the launcher silently with rc 1; each of the three guest lines runs behind a limactl whose `shell` always fails and
+        # must end the script with exit 2 and exactly one message line of its own on stderr (nothing on stdout, nothing after it).
+        rm_status = next((ln for ln in launcher_all if ln.startswith('limactl shell "$VM" -- rm -f "$RDV/runner.rc" "$RDV/runner.pid" ')), '')
+        e(bool(rm_status), 'the launcher keeps its guest rm -f line for runner.rc and runner.pid (N1 test anchor)')
+        with tempfile.TemporaryDirectory() as n1_tmp:
+            (Path(n1_tmp) / 'limactl').write_text('#!/bin/sh\nexit 1\n')
+            (Path(n1_tmp) / 'limactl').chmod(0o755)
+            for label, guest_line, word in (('rm -rf', rm_line, 'could not empty'), ('mkdir', mkdir_line, 'could not create'), ('rm -f', rm_status, 'could not remove')):
+                if not guest_line:
+                    continue
+                script = 'set -euo pipefail\nVM=fake; GUEST_ROOT=/g; RDV=/g/rdv\n' + guest_line + '\necho CONTINUED\n'
+                run = subprocess.run([bash_t, '-c', script], env=dict(os.environ, PATH=f'{n1_tmp}:{os.environ["PATH"]}'), text=True, capture_output=True, timeout=30)
+                e(run.returncode == 2 and run.stdout == '' and run.stderr.startswith(f'run-vm-gate: {word} ') and len(run.stderr.strip().splitlines()) == 1,
+                  f'the launcher exits 2 with one message line when its guest {label} fails (N1); got rc {run.returncode}: stdout {run.stdout!r} stderr {run.stderr!r}')
         # the launcher checks --guest-root with the shape agent.mjs's guestPath accepts before it runs `rm -rf` on a path built from it
         guest_path_funcs = bash_function_source(launcher_path, 'guest_path_ok')
 
