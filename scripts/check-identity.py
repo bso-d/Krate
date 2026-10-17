@@ -4317,11 +4317,206 @@ def check_runtime_preflight(checks):
                 check_local_mode_unchanged(checks, edition, site, env, rendered)
 
 
+def check_probe_diagnostic_privacy(checks):
+    """Actual probe.main() must not log credential-bearing URLs or arbitrary server/library text.
+
+    Manual CLI RED is harness/progress/codex-probe-codeql/MANUAL-BASELINE.json. These isolated
+    cases replace file, trust, resolver, signal and HTTP boundaries; no request or real alarm runs.
+    Cause categories, safe public host, file references and repair hints remain observable.
+    """
+    import email.message
+    import http.client
+    import signal
+    import socket
+    import ssl
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import urlsplit
+    from unittest import mock
+
+    spec = importlib.util.spec_from_file_location('probe_privacy', ROOT / 'sso/probe.py')
+    assert spec is not None and spec.loader is not None, 'sso/probe.py missing'
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    origin = f'https://{PUBLIC_HOST}'
+    issuer = origin + '/identity/realms/krate'
+    user = 'privacy-user-codeql15'
+    password = 'privacy-password-codeql15'
+    query = 'privacy-query-codeql15'
+    fragment = 'privacy-fragment-codeql15'
+    path_token = 'privacy-path-codeql15'
+    external_text = 'privacy-external-codeql15'
+    markers = (user, password, query, fragment, path_token, external_text)
+    unsafe_url = f'https://{user}:{password}@outside.example.test/{path_token}?token={query}#{fragment}'
+    runtime_file = 'auth/ui/runtime.yml'
+    cert_file = 'certs/server.crt'
+    document = {'issuer': issuer, **{key: issuer + '/' + key for key in probe.ENDPOINT_KEYS}}
+    rows = []
+
+    def add(title, configured=issuer, error=None, reply=None, lookups=None, required=(), forbidden=(), request_expected=True):
+        rows.append((title, configured, error, reply, lookups, required, forbidden, request_expected))
+
+    invalid_hints = (runtime_file, 'KEYCLOAK_PUBLIC_URL', 'krate auth configure')
+    add('malformed credential-bearing issuer', f'https://{user}:{password}@[broken', required=invalid_hints, request_expected=False)
+    add('valid userinfo issuer', f'https://{user}:{password}@{PUBLIC_HOST}/identity/realms/krate',
+        error=HTTPError(issuer, 502, external_text, email.message.Message(), None),
+        required=invalid_hints, request_expected=False)
+    for label, configured in (
+            ('query', issuer + '?token=' + query), ('fragment', issuer + '#' + fragment),
+            ('path', origin + '/' + path_token)):
+        add('configured issuer ' + label, configured,
+            error=HTTPError(configured, 502, external_text, email.message.Message(), None),
+            required=invalid_hints if label != 'path' else ('HTTP 502', PUBLIC_HOST, 'Keycloak'),
+            request_expected=label == 'path')
+    for field in ('issuer',) + probe.ENDPOINT_KEYS:
+        add('server ' + field + ' contains credentials', reply=dict(document, **{field: unsafe_url}),
+            required=('KEYCLOAK_PUBLIC_URL', runtime_file, 'krate auth configure',
+                      'issuer' if field == 'issuer' else field))
+    add('HTTP reason contains arbitrary secret',
+        error=HTTPError(issuer, 503, external_text + ' ' + unsafe_url, email.message.Message(), None),
+        required=('HTTP 503', PUBLIC_HOST, 'Keycloak'))
+    invalid_url_text = 'nonnumeric port: ' + unsafe_url + ' ' + external_text
+    for label, error in (('raw', http.client.InvalidURL(invalid_url_text)),
+                         ('wrapped', URLError(http.client.InvalidURL(invalid_url_text)))):
+        add(label + ' InvalidURL contains secret', error=error,
+            required=('is invalid', runtime_file, 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
+            forbidden=('nothing was contacted', 'the issuer URL'))
+    add('OSError text contains secret', error=URLError(OSError(113, external_text + unsafe_url)),
+        required=('no connection', PUBLIC_HOST, 'proxy must be running'))
+    add('SSL error text contains secret', error=URLError(ssl.SSLError(1, external_text + unsafe_url)),
+        required=('TLS error', PUBLIC_HOST, cert_file))
+    verification = ssl.SSLCertVerificationError(1, external_text + unsafe_url)
+    verification.verify_code, verification.verify_message = 62, external_text + unsafe_url
+    add('SSL verify_message contains secret', error=URLError(verification),
+        required=('certificate verification failed', PUBLIC_HOST, cert_file, 'must cover', '62'))
+    add('redirect credential-like invalid lookup', error=URLError(socket.gaierror(-2, external_text)),
+        lookups=((PUBLIC_HOST, 443), (f'{user}:{password}@outside.example.test', 8443)),
+        required=('cannot resolve', 'DNS', 'redirect', PUBLIC_HOST))
+    add('proxy URL-like invalid lookup', error=URLError(ConnectionRefusedError(111, external_text)),
+        lookups=((PUBLIC_HOST, 443), (unsafe_url, 8443)),
+        required=('no connection', 'proxy must be running', 'proxy setting', PUBLIC_HOST))
+    add('generic library reason contains secret', error=URLError(external_text + unsafe_url),
+        required=('request', 'failed', PUBLIC_HOST, 'proxy'))
+    add('unexpected exception contains secret', error=RuntimeError(external_text + unsafe_url),
+        required=('unexpected readiness error', PUBLIC_HOST), forbidden=('RuntimeError',))
+    # Positive cause controls use native error objects but never contact their named endpoints.
+    add('ordinary DNS cause', error=URLError(socket.gaierror(-2, 'Name or service not known')),
+        required=('cannot resolve', PUBLIC_HOST, 'DNS', '/etc/hosts'), forbidden=('no connection',))
+    add('ordinary refusal cause', error=URLError(ConnectionRefusedError(111, 'Connection refused')),
+        required=('no connection', PUBLIC_HOST, 'proxy must be running', '111'), forbidden=('cannot resolve',))
+    add('ordinary connected read stall', error=socket.timeout('The read operation timed out'),
+        required=('accepted the connection but did not answer in time', PUBLIC_HOST, 'Keycloak'), forbidden=('no connection',))
+    add('ordinary deadline', error=TimeoutError('Readiness deadline exceeded'),
+        required=('no answer within 15 s', PUBLIC_HOST, 'Keycloak'), forbidden=('no connection',))
+    add('ordinary invalid redirect after issuer lookup', error=http.client.InvalidURL('nonnumeric port: hidden'),
+        required=('is invalid', runtime_file, 'redirect or proxy target'), forbidden=('nothing was contacted', 'hidden'))
+    add('ordinary plain HTTP compatibility', configured=f'http://{PUBLIC_HOST}/identity/realms/krate',
+        error=HTTPError(issuer, 502, 'Bad Gateway', email.message.Message(), None),
+        lookups=((PUBLIC_HOST, 80),), required=('HTTP 502', f'http://{PUBLIC_HOST}', 'Keycloak'))
+    add('ordinary IPv6 origin', configured='https://[2001:db8::1]:8443/identity/realms/krate',
+        error=URLError(ConnectionRefusedError(111, 'Connection refused')),
+        lookups=(('2001:db8::1', 8443),), required=('no connection', '[2001:db8::1]:8443', 'proxy must be running'))
+    add('ordinary redirected destination', error=URLError(ConnectionRefusedError(111, 'Connection refused')),
+        lookups=((PUBLIC_HOST, 443), ('outside.example.test', 8443)),
+        required=('no connection to outside.example.test:8443', 'redirect', PUBLIC_HOST),
+        forbidden=(f'no connection to {PUBLIC_HOST}',))
+    add('configured multiple DNS root dots', configured=f'https://{PUBLIC_HOST}.../identity/realms/krate',
+        required=invalid_hints, forbidden=(PUBLIC_HOST + '...',), request_expected=False)
+    add('configured scoped IPv6', configured='https://[fe80::1%25privacy-password-codeql15]/identity/realms/krate',
+        required=invalid_hints, forbidden=('fe80::1%',), request_expected=False)
+    add('redirect multiple DNS root dots', error=URLError(socket.gaierror(-2, external_text)),
+        lookups=((PUBLIC_HOST, 443), ('outside.example.test...', 8443)),
+        required=('cannot resolve <invalid host>', 'redirect', PUBLIC_HOST), forbidden=('outside.example.test...',))
+    add('redirect scoped IPv6', error=URLError(socket.gaierror(-2, external_text)),
+        lookups=((PUBLIC_HOST, 443), ('fe80::1%privacy-password-codeql15', 8443)),
+        required=('cannot resolve <invalid host>', 'redirect', PUBLIC_HOST), forbidden=('fe80::1%',))
+    add('ordinary single DNS root dot', configured=f'https://{PUBLIC_HOST}./identity/realms/krate',
+        error=URLError(ConnectionRefusedError(111, 'Connection refused')),
+        lookups=((PUBLIC_HOST + '.', 443),), required=('no connection', PUBLIC_HOST, '111'), forbidden=('redirect',))
+    add('ordinary valid discovery', reply=document)
+
+    class Reply:
+        def __init__(self, value):
+            self.body = json.dumps(value).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, size):
+            return self.body[:size]
+
+    for title, configured, error, reply, lookups, required, forbidden, request_expected in rows:
+        reads, alarms, requests = [], [], []
+        runtime = json.dumps({'auth': {'oauth2': {'client': {'keycloak': {
+            'issuer-uri': configured, 'client-secret': password}}}}})
+
+        def read_runtime(file, *_args, **_kwargs):
+            reads.append(str(file))
+            assert str(file).endswith(runtime_file), 'only runtime.yml may be read'
+            return runtime
+
+        def request(*args, **kwargs):
+            requests.append((args, kwargs))
+            for host, port in lookups if lookups is not None else ((PUBLIC_HOST, 443),):
+                socket.getaddrinfo(host, port)
+            if error is not None:
+                raise error
+            return Reply(reply if reply is not None else document)
+
+        def resolver(*_args, **_kwargs):
+            return []
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(Path, 'read_text', read_runtime), \
+                mock.patch.object(probe, 'urlopen', request), \
+                mock.patch.object(ssl, 'create_default_context', return_value=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)), \
+                mock.patch.object(socket, 'getaddrinfo', resolver), \
+                mock.patch.object(signal, 'signal'), \
+                mock.patch.object(signal, 'alarm', side_effect=lambda seconds: alarms.append(seconds) or 0), \
+                mock.patch.object(sys, 'argv', ['probe.py', '--directory', '/privacy-fixture']), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = probe.main()
+            restored = socket.getaddrinfo is resolver
+        output = out.getvalue() + err.getvalue()
+        label = 'probe diagnostic privacy (' + title + ')'
+        success = title == 'ordinary valid discovery'
+        checks.expect(status == (0 if success else 1), f'{label}: failure stays exit1; only valid discovery exits0; got {status}')
+        checks.expect(all(marker not in output for marker in markers), f'{label}: no credentials, URL tokens or external text may be printed; got {output!r}')
+        displayed_urls = re.findall(r'https?://[^\s)>,;]+', output)
+        try:
+            parts = [urlsplit(value.rstrip(':')) for value in displayed_urls]
+            origin_only = all(value.hostname and not any((value.username, value.password, value.path, value.query, value.fragment))
+                              for value in parts)
+        except ValueError:
+            origin_only = False
+        checks.expect(origin_only,
+                      f'{label}: diagnostic URLs expose only the safe origin, never userinfo/path/query/fragment; got {output!r}')
+        checks.expect(success or (out.getvalue() == '' and err.getvalue().startswith('Public SSO readiness failed: ')
+                                  and err.getvalue().count('\n') == 1 and err.getvalue()[:-1].isprintable()),
+                      f'{label}: failure remains one printable stderr line and no stdout; got {output!r}')
+        for needle in required:
+            checks.expect(needle in output, f'{label}: cause/file/repair detail {needle!r} must remain; got {output!r}')
+        for needle in forbidden:
+            checks.expect(needle not in output, f'{label}: must not misattribute {needle!r}; got {output!r}')
+        checks.expect(reads == ['/privacy-fixture/' + runtime_file] and restored and alarms == [15, 0],
+                      f'{label}: read only runtime.yml, cancel the deadline and restore the resolver')
+        if request_expected:
+            checks.expect(len(requests) == 1 and requests[0][0] == (configured + '/.well-known/openid-configuration',),
+                          f'{label}: sanitizing the displayed address must not rewrite the actual discovery request target; got {requests!r}')
+        else:
+            checks.expect(not requests, f'{label}: malformed/private issuer is refused before any request')
+        if success:
+            checks.expect(len(requests) == 1 and out.getvalue() == 'Public HTTPS identity discovery verified.\n' and not err.getvalue(),
+                          f'{label}: valid discovery still reaches the real main success contract')
+
+
 def check_probe_causes(checks):
     """sso/probe.py, the public sign-in check `krate auth apply` ends with, names the actual cause of a failure (its real main(),
     urlopen replaced by stubs that raise real exception objects; nothing connects): one stderr line that keeps the
-    'Public SSO readiness failed: ' prefix, the host or URL involved and what to check, exit status 1, no file content, text
-    that came from the server (status-line reason, fetched issuer and endpoints) printable and cut at 200 characters, the
+    'Public SSO readiness failed: ' prefix, the safe public host/origin involved and what to check, exit status 1, no file content, no raw
+    server values or library text (status-line reason, fetched issuer/endpoints, error messages), the
     host named in a lookup failure being the one looked up (a redirect target), a read stall told from a failed connection,
     an invalid issuer URL told from a dead proxy, the alarm armed for 15 s and cancelled on every path, getaddrinfo restored.
     Found on 2026-10-17 on an Ubuntu server that could not resolve its own public name: the old line listed four possible
@@ -4343,6 +4538,7 @@ def check_probe_causes(checks):
     old_message = 'verify application DNS, HTTPS certificate, proxy identity route and realm issuer'
     issuer = f'https://{PUBLIC_HOST}/identity/realms/krate'
     url = issuer + '/.well-known/openid-configuration'
+    display = f'https://{PUBLIC_HOST}:443'  # diagnostics expose an origin; requests retain the complete URL
     other = 'https://other.example.test/identity/realms/krate'
     endpoints = ('authorization_endpoint', 'token_endpoint', 'jwks_uri')
     document = {'issuer': issuer, 'authorization_endpoint': issuer + '/protocol/openid-connect/auth',
@@ -4484,30 +4680,30 @@ def check_probe_causes(checks):
         case('runtime.yml with an empty issuer-uri', runtime({'issuer-uri': '', 'client-secret': secret}),
              required=('auth.oauth2.client.keycloak.issuer-uri', 'krate auth configure')),
         case('issuer without a host name', with_issuer('https:///identity/realms/krate'),
-             required=('https:///identity/realms/krate', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
+             required=('auth/ui/runtime.yml', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
         case('issuer without a host name, with line breaks', with_issuer('https:///identity/\n\nrealms\t/krate'),
              required=('no host name', 'KEYCLOAK_PUBLIC_URL')),
         case('issuer with an unbalanced IPv6 bracket', with_issuer('https://[::1/identity/realms/krate'),
-             required=('https://[::1/identity/realms/krate', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
+             required=('auth/ui/runtime.yml', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
         case('issuer with a port that is not a number', with_issuer(f'https://{PUBLIC_HOST}:notaport/identity/realms/krate'),
-             required=(f'{PUBLIC_HOST}:notaport', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
+             required=('auth/ui/runtime.yml', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
         case('certs/server.crt missing', runtime(keycloak), cert=None, required=('certs/server.crt', 'is missing', 'krate gen-cert')),
         case('certs/server.crt unusable', runtime(keycloak), cert='not a certificate\n' + secret + '\n',
              required=('certs/server.crt', 'cannot be used as the trust anchor', 'krate gen-cert'), forbidden=('is missing',)),
         case('host name does not resolve', runtime(keycloak),
              raising(urllib.error.URLError(socket.gaierror(-2, 'Name or service not known'))),
-             required=(f'this server cannot resolve {PUBLIC_HOST}', 'Name or service not known', '/etc/hosts', 'DNS'),
+             required=(f'this server cannot resolve {PUBLIC_HOST}', 'resolver error code -2', '/etc/hosts', 'DNS'),
              forbidden=('no connection', 'certificate', 'no answer', 'redirect')),
         case('redirect target does not resolve', runtime(keycloak),
              raising(urllib.error.URLError(socket.gaierror(-2, 'Name or service not known')), detour_lookups),
              required=('this server cannot resolve elsewhere.example.test', 'add elsewhere.example.test to DNS', 'redirect', PUBLIC_HOST),
              forbidden=(f'cannot resolve {PUBLIC_HOST}', f'add {PUBLIC_HOST} to DNS')),
         case('connection refused', runtime(keycloak), raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused'))),
-             required=(f'no connection to {PUBLIC_HOST}:443', 'Connection refused', 'proxy must be running', f'{PUBLIC_HOST} must point at this server'),
+             required=(f'no connection to {PUBLIC_HOST}:443', 'operating system error 111', 'proxy must be running', f'{PUBLIC_HOST} must point at this server'),
              forbidden=('cannot resolve', 'certificate', 'redirect', 'accepted the connection')),
         case('connection refused, host looked up in capitals', runtime(keycloak),
              raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused')), ((PUBLIC_HOST.upper(), 443),)),
-             required=(f'no connection to {PUBLIC_HOST.upper()}:443',), forbidden=('redirect',)),
+             required=(f'no connection to {PUBLIC_HOST}:443',), forbidden=('redirect',)),
         case('connection refused by a redirect target on another port', runtime(keycloak),
              raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused')),
                      ((PUBLIC_HOST, 443), ('elsewhere.example.test', 8443))),
@@ -4517,7 +4713,7 @@ def check_probe_causes(checks):
              required=(f'no connection to {PUBLIC_HOST}:8443', 'redirect')),
         case('redirect target with a hostile name', runtime(keycloak),
              raising(urllib.error.URLError(socket.gaierror(-2, 'Name or service not known')), ((PUBLIC_HOST, 443), (hostile_name, 443))),
-             required=('cannot resolve evil?[2J.' + 'H' * 191 + '...', 'redirect'), forbidden=('\x1b', 'H' * 192)),
+             required=('cannot resolve <invalid host>', 'redirect'), forbidden=('\x1b', 'H' * 192)),
         case('connection refused, IPv6 issuer', with_issuer('https://[::1]:8443/identity/realms/krate'),
              raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused')), (('::1', 8443),)),
              required=('no connection to [::1]:8443',), forbidden=('redirect',)),
@@ -4529,101 +4725,101 @@ def check_probe_causes(checks):
              required=(f'no connection to {PUBLIC_HOST}:80',), forbidden=(':443',)),
         case('library error text far beyond the limit', runtime(keycloak),
              raising(urllib.error.URLError(ConnectionRefusedError(111, hostile_library))),
-             required=('(Refused?[2J ' + 'R' * 188 + '...)',), forbidden=('\x1b', 'R' * 189)),
+             required=('operating system error 111', 'no connection'), forbidden=('\x1b', 'R' * 189)),
         case('host unreachable', runtime(keycloak), raising(urllib.error.URLError(OSError(113, 'No route to host'))),
-             required=(f'no connection to {PUBLIC_HOST}:443', 'No route to host', 'proxy must be running'), forbidden=('cannot resolve',)),
+             required=(f'no connection to {PUBLIC_HOST}:443', 'operating system error 113', 'proxy must be running'), forbidden=('cannot resolve',)),
         case('timeout while connecting', runtime(keycloak), raising(urllib.error.URLError(socket.timeout('timed out'))),
-             required=(f'no connection to {PUBLIC_HOST}:443', 'timed out', 'proxy must be running'),
+             required=(f'no connection to {PUBLIC_HOST}:443', 'timeout', 'proxy must be running'),
              forbidden=('cannot resolve', 'no answer within', 'accepted the connection')),
         case('connected, then no answer in time (read stall)', runtime(keycloak), raising(socket.timeout('The read operation timed out')),
-             required=(f'{PUBLIC_HOST}:443 accepted the connection but did not answer in time', 'The read operation timed out', 'Keycloak'),
+             required=(f'{PUBLIC_HOST}:443 accepted the connection but did not answer in time', 'timeout', 'Keycloak'),
              forbidden=('no connection to', 'must point at this server', 'no answer within')),
         case('connection dropped without an answer', runtime(keycloak),
              raising(http.client.RemoteDisconnected('Remote end closed connection without response')),
-             required=(f'{PUBLIC_HOST}:443', 'did not answer with valid HTTP', 'RemoteDisconnected'), forbidden=('cannot resolve',)),
+             required=(f'{PUBLIC_HOST}:443', 'did not answer with valid HTTP', 'HTTP protocol error'), forbidden=('cannot resolve',)),
         case('invalid request URL before a lookup', runtime(keycloak),
              raising(http.client.InvalidURL("URL can't contain control characters. '/iden tity' (found at least ' ')"), ()),
-             required=(f'a URL used while checking {url}', 'auth/ui/runtime.yml', 'is invalid', 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
+             required=(f'a URL used while checking {display}', 'auth/ui/runtime.yml', 'is invalid', 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
              forbidden=('the issuer URL', 'nothing was contacted', 'did not answer with valid HTTP', 'request had been sent on')),
         # Observed with a real loopback TLS302: the issuer answered, then the redirect's nonnumeric port raised InvalidURL
         # before a second lookup. Recording only the issuer lookup cannot establish that nothing was contacted.
         case('invalid redirect URL after the issuer answered', runtime(keycloak),
              raising(http.client.InvalidURL("nonnumeric port: 'notaport'"), ((PUBLIC_HOST, 443),)),
-             required=(f'a URL used while checking {url}', "nonnumeric port: 'notaport'", 'is invalid', 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
+             required=(f'a URL used while checking {display}', 'invalid URL', 'is invalid', 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
              forbidden=('the issuer URL', 'nothing was contacted', 'did not answer with valid HTTP', 'request had been sent on')),
         case('wrapped invalid request URL', runtime(keycloak),
              raising(urllib.error.URLError(http.client.InvalidURL("nonnumeric port: 'notaport'")), ()),
-             required=(f'a URL used while checking {url}', 'is invalid', 'redirect or proxy target'),
+             required=(f'a URL used while checking {display}', 'is invalid', 'redirect or proxy target'),
              forbidden=('the issuer URL', 'nothing was contacted', 'did not answer with valid HTTP')),
         case('invalid URL with hostile library text', runtime(keycloak),
              raising(http.client.InvalidURL('Bad\x1b[2J ' + 'U' * 5000), ((PUBLIC_HOST, 443),)),
-             required=('(Bad?[2J ' + 'U' * 192 + '...)', 'redirect or proxy target'),
+             required=('invalid URL', 'redirect or proxy target'),
              forbidden=('\x1b', 'U' * 193, 'nothing was contacted')),
         case('certificate verification failed', runtime(keycloak), raising(urllib.error.URLError(mismatch)),
-             required=(f'certificate verification failed for {PUBLIC_HOST}', verify_text, 'certs/server.crt', f'must cover {PUBLIC_HOST}'),
+             required=(f'certificate verification failed for {PUBLIC_HOST}', 'certificate verification code 62', 'certs/server.crt', f'must cover {PUBLIC_HOST}'),
              forbidden=('cannot resolve', 'no connection')),
         case('certificate verify_message far beyond the limit', runtime(keycloak), raising(urllib.error.URLError(hostile_verify)),
-             required=('(Hostile?[2J ' + 'V' * 188 + '...)',), forbidden=('\x1b', 'V' * 189)),
+             required=('certificate verification code 62',), forbidden=('\x1b', 'V' * 189)),
         case('certificate verification failed, no verify_message', runtime(keycloak),
              raising(urllib.error.URLError(ssl.SSLCertVerificationError(1, 'certificate has expired'))),
-             required=(f'certificate verification failed for {PUBLIC_HOST}', 'certificate has expired', 'certs/server.crt'),
+             required=(f'certificate verification failed for {PUBLIC_HOST}', 'certificate verification code unavailable', 'certs/server.crt'),
              forbidden=('unexpected',)),
         case('other TLS error', runtime(keycloak),
              raising(urllib.error.URLError(ssl.SSLError(1, '[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1129)'))),
-             required=('TLS error', f'{PUBLIC_HOST}:443', 'WRONG_VERSION_NUMBER', 'certs/server.crt'),
+             required=('TLS error', f'{PUBLIC_HOST}:443', 'TLS error code 1', 'certs/server.crt'),
              forbidden=('certificate verification failed', 'cannot resolve')),
         case('HTTP error status from the proxy', runtime(keycloak),
              raising(urllib.error.HTTPError(url, 502, 'Bad Gateway', email.message.Message(), None)),
-             required=(url, '502', 'Bad Gateway', '/identity'), forbidden=('cannot resolve', 'no connection', 'redirect')),
+             required=(display, 'HTTP 502', '/identity'), forbidden=('cannot resolve', 'no connection', 'redirect')),
         case('HTTP error status with a hostile reason phrase', runtime(keycloak),
              raising(urllib.error.HTTPError(url, 502, hostile_reason, email.message.Message(), None)),
-             required=(url, 'HTTP 502 Bad?Gate?[2J?way ' + 'A' * 183 + '...:'), forbidden=('\x1b', 'A' * 184)),
+             required=(display, 'HTTP 502', '/identity'), forbidden=('\x1b', 'A' * 184)),
         case('host name that urllib cannot encode', runtime(keycloak), raising(UnicodeError('label empty or too long')),
-             required=(url, 'not a usable address', 'UnicodeError', 'KEYCLOAK_PUBLIC_URL'), forbidden=('unexpected',)),
+             required=(display, 'not a usable address', 'request error', 'KEYCLOAK_PUBLIC_URL'), forbidden=('unexpected',)),
         case('host name that urllib cannot encode, after a redirect', runtime(keycloak),
              raising(UnicodeError('label empty or too long'), detour_lookups),
-             required=(url, 'not a usable address', 'redirect', 'elsewhere.example.test')),
+             required=(display, 'not a usable address', 'redirect', 'elsewhere.example.test')),
         case('URLError with a text reason', runtime(keycloak), raising(urllib.error.URLError('no host given')),
-             required=(f'the request to {url} failed (no host given)', f'{PUBLIC_HOST} points at this server')),
+             required=(f'the request to {display}', f'{PUBLIC_HOST} points at this server')),
         case('anything unanticipated', runtime(keycloak), raising(RuntimeError('boom ' + secret)),
-             required=('unexpected RuntimeError', url), forbidden=('boom',)),
+             required=('unexpected readiness error', display), forbidden=('boom',)),
         case('answer is not JSON', runtime(keycloak), answering(b'<html>502</html>'),
-             required=(url, 'not an OpenID configuration'), forbidden=('<html>', 'redirect')),
+             required=(display, 'not an OpenID configuration'), forbidden=('<html>', 'redirect')),
         case('answer from a redirect target is not JSON', runtime(keycloak), answering(b'<html>502</html>', detour_lookups),
-             required=(url, 'not an OpenID configuration', 'redirect', 'elsewhere.example.test')),
+             required=(display, 'not an OpenID configuration', 'redirect', 'elsewhere.example.test')),
         case('answer lacks the endpoints', runtime(keycloak), answering(json.dumps({'issuer': issuer}).encode()),
-             required=(url, 'not an OpenID configuration', 'authorization_endpoint', 'token_endpoint', 'jwks_uri')),
+             required=(display, 'not an OpenID configuration', 'authorization_endpoint', 'token_endpoint', 'jwks_uri')),
         case('answer from a redirect target lacks the endpoints', runtime(keycloak),
              answering(json.dumps({'issuer': issuer}).encode(), detour_lookups),
-             required=(url, 'not an OpenID configuration', 'redirect', 'elsewhere.example.test')),
-        case('answer is not an object', runtime(keycloak), answering(b'["issuer"]'), required=(url, 'not an OpenID configuration')),
+             required=(display, 'not an OpenID configuration', 'redirect', 'elsewhere.example.test')),
+        case('answer is not an object', runtime(keycloak), answering(b'["issuer"]'), required=(display, 'not an OpenID configuration')),
         case('issuer differs', runtime(keycloak), answering(json.dumps(dict(document, issuer=other)).encode()),
-             required=(issuer, other, 'KEYCLOAK_PUBLIC_URL'), forbidden=('redirect',)),
+             required=('different issuer', display, 'KEYCLOAK_PUBLIC_URL'), forbidden=('redirect',)),
         case('issuer differs, from a redirect target', runtime(keycloak),
              answering(json.dumps(dict(document, issuer=other)).encode(), detour_lookups),
-             required=(issuer, other, 'KEYCLOAK_PUBLIC_URL', 'redirect', 'elsewhere.example.test')),
+             required=('different issuer', display, 'KEYCLOAK_PUBLIC_URL', 'redirect', 'elsewhere.example.test')),
         case('issuer differs, hostile value', runtime(keycloak), answering(json.dumps(dict(document, issuer=hostile_value)).encode()),
-             required=(issuer, hostile_value[:200] + '...', 'KEYCLOAK_PUBLIC_URL'), forbidden=(hostile_value[:201],)),
+             required=('different issuer', display, 'KEYCLOAK_PUBLIC_URL'), forbidden=(hostile_value[:201],)),
         case('issuer differs, control characters', runtime(keycloak), answering(json.dumps(dict(document, issuer=other + '\n\x1b[2J')).encode()),
-             required=(other + '??[2J',), forbidden=('\x1b',)),
+             required=('different issuer', display, 'KEYCLOAK_PUBLIC_URL'), forbidden=('\x1b',)),
     ]
     for key in endpoints:
         outside = other + '/protocol/openid-connect/x'
         cases.append(case(f'{key} outside the issuer', runtime(keycloak), answering(json.dumps(dict(document, **{key: outside})).encode()),
-                          required=(issuer, outside, key, 'KEYCLOAK_PUBLIC_URL'), forbidden=('redirect',)))
+                          required=('outside the configured issuer', key, 'auth/ui/runtime.yml', 'KEYCLOAK_PUBLIC_URL'), forbidden=('redirect',)))
     cases.append(case('endpoint outside the issuer, from a redirect target', runtime(keycloak),
                       answering(json.dumps(dict(document, jwks_uri=other + '/x')).encode(), detour_lookups),
-                      required=('jwks_uri', other + '/x', 'redirect', 'elsewhere.example.test')))
+                      required=('jwks_uri', 'outside the configured issuer', 'redirect', 'elsewhere.example.test')))
     cases.append(case('endpoint outside the issuer, hostile value', runtime(keycloak),
                       answering(json.dumps(dict(document, jwks_uri=hostile_value)).encode()),
-                      required=('jwks_uri ' + hostile_value[:200] + '...', 'KEYCLOAK_PUBLIC_URL'), forbidden=(hostile_value[:201],)))
+                      required=('jwks_uri', 'outside the configured issuer', 'KEYCLOAK_PUBLIC_URL'), forbidden=(hostile_value[:201],)))
     cases += [
         case('deadline inside URLError', runtime(keycloak), raising(urllib.error.URLError(TimeoutError(deadline))),
-             required=('no answer within 15 s', url), forbidden=('no connection', 'cannot resolve')),
+             required=('no answer within 15 s', display), forbidden=('no connection', 'cannot resolve')),
         case('deadline raised directly', runtime(keycloak), raising(TimeoutError(deadline)),
-             required=('no answer within 15 s', url), forbidden=('no connection', 'cannot resolve')),
+             required=('no answer within 15 s', display), forbidden=('no connection', 'cannot resolve')),
         case('deadline while the trust anchor loads', runtime(keycloak), hook=('context', TimeoutError(deadline)),
-             required=('no answer within 15 s', url), forbidden=('trust anchor', 'unexpected')),
+             required=('no answer within 15 s', display), forbidden=('trust anchor', 'unexpected')),
         case('deadline while runtime.yml is read', runtime(keycloak), hook=('read_text', TimeoutError(deadline)),
              required=('no answer within 15 s from the identity route',), forbidden=('cannot be read', 'unexpected')),
     ]
@@ -4652,6 +4848,10 @@ def check_probe_causes(checks):
             for needle in row['forbidden']:
                 e(needle not in err, f'{what}: the message must not say {needle!r}; got {err.strip()!r}')
             e(secret not in result['out'] + err, f'{what}: the output must not carry file content')
+            for untrusted in (verify_text, hostile_reason[:30], hostile_value[:30], hostile_library[:30],
+                              'Bad Gateway', 'no host given', 'nonnumeric port:', 'Name or service not known',
+                              'Connection refused', 'No route to host', 'WRONG_VERSION_NUMBER', other):
+                e(untrusted not in err, f'{what}: raw server/library/URL text must not be echoed: {untrusted!r}')
             e(result['left'] == 0 and result['resolver'], f'{what}: the alarm must be cancelled and socket.getaddrinfo restored on a failure')
             e(result['alarms'][:1] == [15] and result['alarms'][-1:] == [0],
               f'{what}: the 15 s alarm is armed first and cancelled last; main made the calls {result["alarms"]!r}')
@@ -9079,7 +9279,7 @@ def main():
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
-                  check_plan_and_preflight, check_configure_dual, check_runtime_preflight, check_probe_causes,
+                  check_plan_and_preflight, check_configure_dual, check_runtime_preflight, check_probe_causes, check_probe_diagnostic_privacy,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
                   check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip, check_public_cert_permissions,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,

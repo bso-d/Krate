@@ -4,6 +4,8 @@ import argparse
 import http.client
 import ipaddress
 import json
+import errno
+import re
 from pathlib import Path
 import socket
 import ssl
@@ -17,7 +19,6 @@ RUNTIME_FILE = 'auth/ui/runtime.yml'
 CERT_FILE = 'certs/server.crt'
 DEADLINE_SECONDS = 15
 DEADLINE_TEXT = 'Readiness deadline exceeded'
-SHOWN_LIMIT = 200
 ENDPOINT_KEYS = ('authorization_endpoint', 'token_endpoint', 'jwks_uri')
 ISSUER_HINT = ('check KEYCLOAK_PUBLIC_URL in .env (the https address users open, ending in /identity) and rerun '
                'krate auth configure')
@@ -27,17 +28,44 @@ class Failure(Exception):
     """A failed readiness step, already worded for the administrator."""
 
 
-def shown(value, limit=SHOWN_LIMIT):
-    """Text from outside (a server's status line or document, a library) made safe to print on one line: every character
-    that is not printable becomes '?', and at most `limit` characters are kept, followed by '...'."""
-    text = str(value)
-    kept = ''.join(char if char.isprintable() else '?' for char in text[:limit])
-    return kept + '...' if len(text) > limit else kept
+def public_host(value):
+    """A bounded DNS/IP name only; never arbitrary URL, user information or error text."""
+    if not isinstance(value, str) or not value or len(value) > 253 or '%' in value:
+        return '<invalid host>'
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        pass
+    name = value[:-1] if value.endswith('.') else value
+    labels = name.split('.')
+    if all(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label) for label in labels):
+        return name.lower()
+    return '<invalid host>'
+
+
+def integer_code(value):
+    return str(value) if type(value) is int and -(2 ** 31) <= value < 2 ** 31 else 'unavailable'
 
 
 def describe(error):
-    """Short, bounded text for an error: its strerror, else its text, else its class."""
-    return shown(getattr(error, 'strerror', None) or str(error) or type(error).__name__)
+    """Fixed categories and numeric codes; library messages can contain credentials."""
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return 'certificate verification code ' + integer_code(getattr(error, 'verify_code', None))
+    if isinstance(error, ssl.SSLError):
+        return 'TLS error code ' + integer_code(error.errno)
+    if isinstance(error, socket.gaierror):
+        return 'resolver error code ' + integer_code(error.errno)
+    if isinstance(error, http.client.InvalidURL):
+        return 'invalid URL'
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return 'timeout'
+    if isinstance(error, http.client.HTTPException):
+        return 'HTTP protocol error'
+    if isinstance(error, OSError):
+        code = getattr(error, 'errno', None)
+        name = errno.errorcode.get(code, 'unknown') if type(code) is int else 'unavailable'
+        return 'operating system error ' + integer_code(code) + ' (' + name + ')'
+    return 'request error'
 
 
 def is_deadline(error):
@@ -45,8 +73,10 @@ def is_deadline(error):
 
 
 def address(name, port):
-    """host:port as a person writes it, an IPv6 literal in brackets."""
-    return f'[{name}]:{port}' if ':' in str(name) else f'{name}:{port}'
+    """Only a validated public host and a numeric port are safe diagnostic values."""
+    host = public_host(name)
+    host = f'[{host}]' if ':' in host else host
+    return f'{host}:{integer_code(port)}'
 
 
 class Target:
@@ -55,6 +85,7 @@ class Target:
     def __init__(self, issuer, host, port, runtime_file, certificate):
         self.issuer, self.host, self.port = issuer, host, port
         self.url = issuer + '/.well-known/openid-configuration'
+        self.display_url = f'{urlsplit(issuer).scheme}://{address(host, port)} (identity discovery from {runtime_file})'
         self.runtime_file, self.certificate = runtime_file, certificate
         self.lookups = []  # (name, port) the resolver was asked for, in order; a redirect or proxy setting makes the last differ
 
@@ -66,7 +97,7 @@ class Target:
         """A note for a failure that happened after the request left the issuer's own host, else ''."""
         name, port = self.reached()
         if self.lookups and (str(name).lower(), port) != (self.host.lower(), self.port):
-            return f' (the request had been sent on to {address(shown(name), port)} from {self.host}, by a redirect or a proxy setting)'
+            return f' (the request had been sent on to {address(name, port)} from {public_host(self.host)}, by a redirect or a proxy setting)'
         return ''
 
     def watching(self, real_getaddrinfo, connect_ip):
@@ -81,8 +112,8 @@ class Target:
 
 
 def deadline_failure(target):
-    return (f'no answer within {DEADLINE_SECONDS} s from {target.url if target else "the identity route"}: check that the proxy '
-            f'and Keycloak are running and that {shown(target.reached()[0]) if target else "the public name"} points at this server')
+    return (f'no answer within {DEADLINE_SECONDS} s from {target.display_url if target else "the identity route"}: check that the proxy '
+            f'and Keycloak are running and that {public_host(target.reached()[0]) if target else "the public name"} points at this server')
 
 
 def runtime_issuer(runtime_file):
@@ -105,14 +136,19 @@ def runtime_issuer(runtime_file):
 
 
 def make_target(issuer, runtime_file, certificate):
-    """The Target of the issuer; its host name is what must resolve, certify and answer."""
+    """Validate the request address without ever printing a malformed/private URL."""
+    host = port = None
     try:
         parts = urlsplit(issuer)
-        host, port = parts.hostname, parts.port or (80 if parts.scheme == 'http' else 443)
-    except ValueError:  # an unbalanced IPv6 bracket or a port that is not a number
-        host = port = None
-    if not host:
-        raise Failure(f'the issuer {issuer} in {runtime_file} has no host name (or a malformed address): {ISSUER_HINT}')
+        host = parts.hostname
+        port = parts.port if parts.port is not None else (80 if parts.scheme == 'http' else 443)
+        valid = (parts.scheme in ('http', 'https') and host and public_host(host) != '<invalid host>'
+                 and 0 < port < 65536 and parts.username is None and parts.password is None
+                 and not parts.query and not parts.fragment)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise Failure(f'the issuer in {runtime_file} has no host name or has a malformed/private address: {ISSUER_HINT}')
     return Target(issuer, host, port, runtime_file, certificate)
 
 
@@ -136,12 +172,12 @@ def trust_context(certificate):
 def explain_request(error, target: Target):
     """Say what a failed request to the identity route means and what to check (HTTPError and URLError are OSErrors)."""
     if isinstance(error, HTTPError):
-        return (f'{target.url} answered HTTP {error.code} {shown(error.reason)}: the proxy identity route /identity must reach a '
+        return (f'{target.display_url} answered HTTP {integer_code(error.code)}: the proxy identity route /identity must reach a '
                 'running Keycloak (check krate health and the proxy and Keycloak logs)')
     wrapped = isinstance(error, URLError)  # urllib wraps only connect-time OSErrors: a stall while reading arrives unwrapped
     cause = error.reason if wrapped else error
     name, port = target.reached()  # the name last looked up: after a redirect that is not the issuer's host
-    name = shown(name)
+    name = public_host(name)
     where = address(name, port)
     if is_deadline(cause):
         return deadline_failure(target)
@@ -149,24 +185,24 @@ def explain_request(error, target: Target):
         return (f'this server cannot resolve {name} ({describe(cause)}): add {name} to DNS or to /etc/hosts on this server, '
                 "pointing at this server's address")
     if isinstance(cause, ssl.SSLCertVerificationError):
-        why = shown(getattr(cause, 'verify_message', None) or describe(cause))  # the ssl module sets verify_message; a constructed error lacks it
+        why = describe(cause)  # verify_message may contain a URL or credential-bearing library text
         return (f'HTTPS certificate verification failed for {name} ({why}): the certificate in {target.certificate} must cover '
                 f'{name} and be valid (krate gen-cert makes a self-signed one)')
     if isinstance(cause, ssl.SSLError):
         return (f'TLS error talking to {where} ({describe(cause)}): {where} must be the Krate proxy serving HTTPS '
                 f'with the certificate in {target.certificate}')
     if isinstance(cause, http.client.InvalidURL):  # a redirect or proxy URL may fail after the issuer already answered
-        return (f'a URL used while checking {target.url} (from {target.runtime_file}) is invalid ({describe(cause)}): '
+        return (f'a URL used while checking {target.display_url} is invalid ({describe(cause)}): '
                 f'{ISSUER_HINT}; also check any redirect or proxy target')
     if isinstance(cause, http.client.HTTPException):
-        return f'{where} did not answer with valid HTTP ({type(cause).__name__}): it must be the Krate proxy'
+        return f'{where} did not answer with valid HTTP ({describe(cause)}): it must be the Krate proxy'
     if isinstance(cause, (socket.timeout, TimeoutError)) and not wrapped:  # connected, then nothing came back in time
         return (f'{where} accepted the connection but did not answer in time ({describe(cause)}): check that Keycloak behind the '
                 'proxy is running and answering (krate health and the Keycloak log)')
     if isinstance(cause, OSError):  # connection refused, unreachable, reset, or a timeout while connecting
         return (f'no connection to {where} ({describe(cause)}): the Krate proxy must be running on this server '
                 f'(krate health) and {name} must point at this server')
-    return f'the request to {target.url} failed ({describe(cause)}): check that {name} points at this server and the proxy is running'
+    return f'the request to {target.display_url} failed ({describe(cause)}): check that {name} points at this server and the proxy is running'
 
 
 def fetch_discovery(target: Target, context):
@@ -176,11 +212,11 @@ def fetch_discovery(target: Target, context):
     except (OSError, http.client.HTTPException) as error:
         raise Failure(explain_request(error, target) + target.detour()) from None
     except ValueError as error:  # e.g. a UnicodeError for a host name with an empty label
-        raise Failure(f'{target.url} is not a usable address ({type(error).__name__}): {ISSUER_HINT}' + target.detour()) from None
+        raise Failure(f'{target.display_url} is not a usable address ({describe(error)}): {ISSUER_HINT}' + target.detour()) from None
     try:
         return json.loads(body)
     except ValueError:
-        raise Failure(f'the answer from {target.url} is not an OpenID configuration (not JSON): the proxy identity route /identity '
+        raise Failure(f'the answer from {target.display_url} is not an OpenID configuration (not JSON): the proxy identity route /identity '
                       'must reach Keycloak' + target.detour()) from None
 
 
@@ -188,14 +224,14 @@ def verify_discovery(data, target: Target):
     issuer = target.issuer
     missing = [key for key in ('issuer',) + ENDPOINT_KEYS if not isinstance(data, dict) or not isinstance(data.get(key), str)]
     if missing:
-        raise Failure(f'the answer from {target.url} is not an OpenID configuration (no {", ".join(missing)}): the proxy identity '
+        raise Failure(f'the answer from {target.display_url} is not an OpenID configuration (no {", ".join(missing)}): the proxy identity '
                       'route /identity must reach Keycloak' + target.detour())
     if data['issuer'] != issuer:
-        raise Failure(f'Keycloak answers with issuer {shown(data["issuer"])} but {target.runtime_file} expects {issuer}: '
+        raise Failure(f'Keycloak answers with a different issuer than {target.display_url}: '
                       f'{ISSUER_HINT}' + target.detour())
     for key in ENDPOINT_KEYS:
         if not data[key].startswith(issuer + '/'):
-            raise Failure(f'Keycloak reports {key} {shown(data[key])}, which is not under the issuer {issuer} in '
+            raise Failure(f'Keycloak reports {key} outside the configured issuer in '
                           f'{target.runtime_file}: {ISSUER_HINT}' + target.detour())
 
 
@@ -228,7 +264,7 @@ def main():
         problem = str(failure)
     except Exception as error:  # the alarm fired between steps, or a failure no step above anticipated
         problem = (deadline_failure(target) if is_deadline(error)
-                   else f'unexpected {type(error).__name__} while checking {target.url if target else "the public sign-in"}')
+                   else f'unexpected readiness error while checking {target.display_url if target else "the public sign-in"}')
     finally:
         signal.alarm(0)  # first: the deadline must not interrupt the restore
         socket.getaddrinfo = real_getaddrinfo
