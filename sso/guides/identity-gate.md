@@ -33,6 +33,13 @@ scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --pha
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1   # companion run: REQUIRED_P1 + U27 + V23
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle: smoke run, unbound
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo             # the same with the full inventory (see below)
+# on a vzNAT VM fixture, the Mac vantage (drives the guest runner through the rendezvous;
+# W5/W6/W7 enter the inventory only under this vantage; the Mac side needs the installed
+# Google Chrome and a PW_MODULES playwright 1.60.0 checkout, see scripts/gate/mac/package.json):
+scripts/gate/mac/run-vm-gate.sh --vm krate-p4-topo1 --phase 4c --public-host krate-oi.test \
+  --guest-root /home/<guest-user>/gate --candidate <sha>     # the launcher starts the agent and the detached guest run
+scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --phase 4c --public-host krate-oi.test \
+  --browser agent --rendezvous /home/<guest-user>/gate/rdv --rendezvous-nonce <the launcher's token>   # the guest command it runs
 ```
 
 Two invocations exist for a bundle host. The reduced one, `--no-static
@@ -59,7 +66,10 @@ check: the pinned `nginx:1.27-alpine@sha256:…` reference does not resolve afte
 value of the installed `.env.template`); the check names the image it rendered with in the
 run log, and the S4 evidence reads `check-identity rc=…; py_compile of N gate helpers rc=…`. X1 needs the
 `krate-harness/playwright:1.60.0` image loaded from a saved archive (3.8 GB on
-disk, 0.94 GB gzipped, arm64), and J7 needs root. The AG rows (below) need the air gap of the host's provisioning: the `krate-airgap` unit (`airgap.sh install`, v2.2 or later), its install record (`phase4_airgap.py install-record`), the bundle's python image and root or passwordless `sudo` for `iptables` and `journalctl`; without them they FAIL.
+disk, 0.94 GB gzipped, arm64), and J7 needs root. On a vzNAT VM fixture run with
+`--browser agent` that archive is no longer loaded into the guest at all: the
+browser and its Playwright module live on the Mac (`scripts/gate/mac/`), and the
+W5–W7 rows need neither image. The AG rows (below) need the air gap of the host's provisioning: the `krate-airgap` unit (`airgap.sh install`, v2.2 or later), its install record (`phase4_airgap.py install-record`), the bundle's python image and root or passwordless `sudo` for `iptables` and `journalctl`; without them they FAIL.
 
 The runner refuses to start when another Krate installation runs on the host or
 when monitoring volumes of the edition's project already exist, because it would
@@ -103,7 +113,7 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 | images | every `*_IMAGE` value of the installed edition template: digests on a git checkout, the offline runtime tags on a bundle host (compared through the product byte binding row) |
 | runner | gate version, sha256 of `scripts/gate-identity.sh` and one digest over `scripts/gate/*.py`, `*.mjs` and `*.sh` (file list, sorted; `stub_idp.sh` is bound by this digest and linted by S3 with the runner), plus the commit (and dirty state) of the repository the runner was executed from |
 | host | OS, Docker, Compose, python, openssl versions |
-| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `REQUIRED_P3` with `--phase 3` or `all`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. For a Phase 4 slice (`--phase 4a\|4b\|4c`) the inventory is `REQUIRED_P1` plus the slice's own list (`REQUIRED_P4A`/`REQUIRED_P4B`/`REQUIRED_P4C` — no Phase 2/3 ids, and `X1` is not part of it); with `--session-max-hours N` it is `REQUIRED_P1` plus U27 and K37 (4a) or U27 and V23 (4b) only, and the receipt names N; `X3`/`X4` leave it under `--no-screenshots` like `X1`, and `W3` leaves it on a Linux host without root (or sudo) or without iproute2 (the J7 pattern; the Mac always runs its W3 variant). On a bundle host (an installed bundle on Linux) `AG1`–`AG5` join every inventory; on the Mac and on a git checkout they are NOT_RUN rows outside it. Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE |
+| verdict | PASS only when no test failed, every id of the selected inventory passed, and the candidate is bound. The inventory is `REQUIRED_P1`; `REQUIRED_P2` is added unless `--phase 1`; `REQUIRED_P3` with `--phase 3` or `all`; `X1` unless `--no-screenshots`; `S1`–`S4` leave it under `--no-static`. For a Phase 4 slice (`--phase 4a\|4b\|4c`) the inventory is `REQUIRED_P1` plus the slice's own list (`REQUIRED_P4A`/`REQUIRED_P4B`/`REQUIRED_P4C` — no Phase 2/3 ids, and `X1` is not part of it); with `--session-max-hours N` it is `REQUIRED_P1` plus U27 and K37 (4a) or U27 and V23 (4b) only, and the receipt names N; `X3`/`X4` leave it under `--no-screenshots` like `X1`; `W3` leaves it on a Linux host without root (or sudo) or without iproute2, and `W5`/`W6`/`W7` leave it without the Mac vantage (`--browser agent` on a vzNAT VM fixture; both are the J7 pattern — the Mac always runs its `W3` variant, and `W5`–`W7` are decided by the VM receipt). On a bundle host (an installed bundle on Linux) `AG1`–`AG5` join every inventory; on the Mac and on a git checkout they are NOT_RUN rows outside it. Ids outside the selected inventory, and J7 on a host without root or sudo or without a `logrotate` binary (the runner computes this up front), are NOT_RUN rows that carry information but do not decide. A selected id that is FAIL gives FAIL; NOT_RUN or absent gives INCOMPLETE. An agent run adds a `vmip` row at the end (the fixture's NIC address must still be the hello's — a change voids the binding) and a receipt `browser vantage` row naming the vantage and the hello facts |
 
 The required inventory is declared in the runner before anything runs
 (`REQUIRED_P1`, `REQUIRED_P2`, `REQUIRED_P3`, `REQUIRED_X`, and for the Phase 4
@@ -242,7 +252,7 @@ Every id is one row of the receipt.
 
 | id | test | pass condition |
 |---|---|---|
-| X1 | a real browser (Playwright, Chromium in the harness container, reaching the published proxy port through the Docker host gateway as a browser on the host does): account console asks to sign in → login form → TOTP enrolment (QR code and secret masked before the capture) → forced password change → signed-in console → second login asks the OTP → wrong OTP → wrong password → disabled user → admin console, master realm and metrics blocked | every step's outcome asserted (OTP prompt without a password field, `Invalid authenticator code`, `Invalid username or password`, `Account is disabled`, HTTP 404 on the three blocked paths); the story needs both users; one PNG per step in `screenshots/`, captions and the assertions in `manifest.json` |
+| X1 | a real browser (Playwright; two vantages, `scripts/gate/browser-launch.mjs`): the walked container vantage (Chromium in the harness container reaching the published proxy port through the Docker host gateway) or, with `GATE_BROWSER_MAC=1`, the Mac vantage — the installed, signed, headed Google Chrome with a fresh profile, the fixture certificate pinned through Node with the name check on, and Chrome's own certificate interstitial (Advanced + Proceed; the recorded code proves only that the chain has no trusted root — name and date validity come from the pin and the served-certificate assertions): account console asks to sign in → [Mac vantage: the certificate interstitial] → login form → TOTP enrolment (QR code and secret masked before the capture) → forced password change → signed-in console → second login asks the OTP → wrong OTP → wrong password → disabled user → admin console, master realm and metrics blocked | every step's outcome asserted (OTP prompt without a password field, `Invalid authenticator code`, `Invalid username or password`, `Account is disabled`, HTTP 404 on the three blocked paths; Mac vantage: the interstitial carries `net::ERR_CERT_AUTHORITY_INVALID`, one Advanced+Proceed covers the host, no external-host attempt appears in `external_attempts`); the story needs both users; 11 PNGs in the container vantage, 12 with the interstitial shot in the Mac vantage; captions and the assertions in `manifest.json`, the browser/certificate facts in `browser.json` |
 
 ### K: Phase 2, "the first UI uses the Keycloak issuer in local mode and enforces approved roles at its backend"
 
@@ -312,7 +322,8 @@ item of each slice's VM live walk.
 Slices are gated separately and in the fixed order 4a, then 4b, then 4c. A slice
 runs `REQUIRED_P1` (with its Z1 scan; X1's story does not run and is not in the
 inventory) plus its own rows: `REQUIRED_P4A` (U1–U20, U21a, U21b, U22–U26, U28,
-U29, X3, Z4a), `REQUIRED_P4B` (V1–V22, V24, X4, Z4b), `REQUIRED_P4C` (W1–W4).
+U29, X3, Z4a), `REQUIRED_P4B` (V1–V22, V24, X4, Z4b), `REQUIRED_P4C` (W1–W7,
+where W5/W6/W7 leave the inventory without the Mac vantage, see below).
 No Phase 4 inventory holds a Phase 2/3 id. The session-maximum rows U27+K37 (4a) and
 U27+V23 (4b) run only in the `--session-max-hours N` companion receipts and are
 not part of the default inventories; a slice is complete with both receipts per
@@ -324,7 +335,8 @@ so a slice runs under `--public-host NAME` (required for 4a/4b/4c, refused for
 1–3 — the Phase 1–3 inventory and receipts are localhost runs: X1's browser story
 maps the name `localhost` in Chromium, and K33 probes plain HTTP with
 `Host: localhost` against `$BASE`; a K33-style probe would itself still pass under
-NAME, the binding constraint is X1 plus receipt comparability). `/etc/hosts` is
+NAME, the binding constraint is X1 plus receipt comparability, and X1 stays a
+Mac-fixture row — `--browser agent` is refused for Phases 1–3, F9). `/etc/hosts` is
 never touched: the runner's `curl()` wrapper adds `--resolve NAME:<port>:127.0.0.1`
 for the HTTPS, HTTP and Perses ports, the Python helpers map the same one name
 through `scripts/gate/netmap.py` (`$GATE_PUBLIC_HOST`, exported by the runner;
@@ -332,7 +344,12 @@ TLS keeps the real name). `auth apply` starts a separate `sso/probe.py` process;
 the runner passes `KRATE_PROBE_CONNECT_IP=127.0.0.1` to it so the public
 discovery request reaches the same fixture proxy while still checking NAME in
 the certificate and the issuer document. Containers resolve NAME through their
-`extra_hosts` host-gateway entry. `gen-cert` derives the certificate's SAN from
+`extra_hosts` host-gateway entry. On the Mac vantage (`--browser agent`) the same
+name is mapped inside Chrome itself with `--host-resolver-rules=MAP NAME vm-ip,
+MAP * ~NOTFOUND, EXCLUDE vm-ip`: the name is resolved to the guest's NIC address,
+every other name is forced to fail so the browser stays offline, and nothing is
+written to `/etc/hosts` or `/etc/resolver` (TOPOFIX 1b/F3). `gen-cert` derives the
+certificate's SAN from
 `KEYCLOAK_PUBLIC_URL`, so the fixture certificate covers NAME. The receipt's
 edition/fixture row records the host actually used (`$BASE`).
 
@@ -355,7 +372,7 @@ in the 4a companion run only), print TSV rows
 `<id>\tPASS|FAIL|NOT_RUN\t<evidence>` with `phase2_kafbat.py`'s exit codes; the
 runner-owned rows are X3/X4 (screenshot stories `screenshots-grafana.mjs` /
 `screenshots-perses.mjs`, own directories and `manifest.tsv` with sha256; X1's
-script stays unchanged), Z4a/Z4b (the extended leak scans) and W1–W4. A row that
+script stays unchanged), Z4a/Z4b (the extended leak scans) and W1–W7. A row that
 lists several probes passes only when every probe passes: the evidence carries
 one `probe=PASS|FAIL|NOT_RUN` token per probe in the row's listed order (U15:
 `flow`, `cookie`, `origin`, `ws`, `ui`) and the row takes the worst token —
@@ -373,7 +390,29 @@ cookies, tokens, enrolled passwords and TOTP seeds) go to
 the J7 pattern: on the Mac it always runs, variant (a)+(b) from the Mac's LAN
 address; on Linux it needs root (or sudo) and iproute2 for the `p4probe`
 namespace and leaves the inventory without them (decided by the VM receipt);
-the row's evidence states which variant ran and why.
+the row's evidence states which variant ran and why. In the Mac vantage an
+outside fetch attempt by a page would appear as a failed request of a non-gate
+host carrying the `net::ERR_NAME_NOT_RESOLVED` fingerprint of the
+`MAP * ~NOTFOUND` rule (M5's at-rest observation); the stories collect such
+attempts into `external_attempts` and the row fails on any that is not
+Chrome-internal.
+
+The Mac vantage (TOPOFIX): a Phase 4 slice on a vzNAT VM fixture can run under
+`--browser agent --rendezvous DIR --rendezvous-nonce TOKEN`, driven by
+`scripts/gate/mac/run-vm-gate.sh` (battery/caffeinate/proxy preflights, the
+candidate worktree, the agent `scripts/gate/mac/agent.mjs`, the guest runner
+detached). The guest may ask the Mac agent for a planned row with nothing but a
+`{schema, id, row, nonce}` request; the agent owns the row table, the fixed
+arguments, the pinned certificate (`certs/server.crt`), the wall-clock budget,
+one `limactl shell` command per guest read, one `limactl copy --backend=scp -r`
+delivery, and a Mac-held `agent-manifest.tsv` it compares at harvest; the
+runner's preflight requires a fresh hello (≤ 60 s, nonce-bound, skew ≤ 10 s, a
+private `mac_src_ip`, and gate-file digests equal to its own copies). W5–W7 run
+only under this vantage and leave the inventory otherwise (the J7/W3 pattern;
+decided by the VM receipt). The container vantage keeps the walked behaviour
+unchanged. X1 is never driven through the agent: `--browser agent` is refused
+for Phases 1–3, because X1's story maps the name `localhost`, which no user
+points at a remote machine (TOPOFIX-REVIEW F9) — X1 stays a Mac-fixture row.
 
 **Status at candidate `77e2333`**: The 4a, 4b and 4c row bodies are encoded, but
 there is no passing Phase 4 receipt on this candidate. Its V24 row always
@@ -401,7 +440,7 @@ owner and the test per id.
 | U25–U26 | helper | `identity users logout` ends a live Kafbat session ≤ 5 s; the static session defaults (realm 28800, `realm.ini` 8h/15m equal to the `.env` keys) |
 | U27 | helper (companion runs only) | at `--session-max-hours N` (M = 60·N min): 200 before M−1 min, refused in [M+10 s, M+1 min], then the Keycloak password form |
 | U28–U29 | helper | the Admin-datasource residual measured against table 2 of `monitoring/README.md`; the 16-min idle expiry with the once-a-minute control (timed) |
-| X3 | runner | `screenshots-grafana.mjs` (Chromium against the fixture): exactly 5 PNGs, own directory, `manifest.tsv` with sha256, none empty, each shot taken after its DOM assertion passed (login page, realm form, Viewer without Edit/New, Admin with Edit, after logout) |
+| X3 | runner | `screenshots-grafana.mjs` (two vantages, `scripts/gate/browser-launch.mjs`): exactly 5 PNGs in the walked container vantage, 6 with the certificate interstitial shot in the Mac vantage (installed headed Chrome, fresh profile, the fixture certificate pinned through Node, Chrome's own interstitial, every shot bound to the VM address and the served certificate, `MAP * ~NOTFOUND` keeping the browser offline, external attempts collected and failing the story); own directory, `manifest.tsv` with sha256, none empty, each shot taken after its DOM assertion passed (login page, realm form, Viewer without Edit/New, Admin with Edit, after logout) |
 | Z4a | runner | the extended leak scan: no `GRAFANA_OAUTH_CLIENT_SECRET`, seed token, enrolled password, TOTP seed or session cookie in any searched file (both projects' container logs, the raw gate log, the receipt, the screenshot manifests, `ps -eo args` samples every 0.2 s during `monitor realm`/`monitor up`/`grafana-user retire`). The row fails, whatever the scan found in the files it could read, when the Docker listing fails, when no container is listed, when a container's logs cannot be read, when a scan input cannot be opened (the raw log, its copy without the display lines, the receipt, the journal, the screenshot manifests, a file or directory under `auth/keycloak`; a missing receipt, journal, raw log or auth tree counts, and so does an unsearchable parent of the receipt, the auth tree or a manifest) and when there are no secret values to search; the evidence names the containers whose logs were not read and the unreadable inputs. |
 
 ### V: Phase 4b, "the Kafbat contract applied to Perses (native mode on the realm)"
@@ -419,7 +458,7 @@ owner and the test per id.
 | V20–V22 | helper | the across-slice container ledger; the loopback `KEYCLOAK_PUBLIC_URL` refusals before any container change; the static session defaults (rendered `cookie_expire 8h`, `cookie_refresh 5m` = derived proof, realm 28800) |
 | V23 | helper (companion runs only) | at `--session-max-hours N` (M = 60·N min): API 401 and page 302 → `/oauth2/start` → password form by M+6 min |
 | V24 | helper | restart during the outage: Docker's back-off recorded, nobody let in, recovery without a `krate` command ≤ 90 s; on the VMs additionally `systemctl restart docker` as the slice's last row |
-| X4 | runner | `screenshots-perses.mjs` (Chromium against the fixture): exactly 6 PNGs, own directory, `manifest.tsv` with sha256, none empty, each shot after its DOM assertion (realm form from the Perses URL, Viewer project, Admin controls, after logout, disabled user, no-group refusal at `/oauth2/callback`) |
+| X4 | runner | `screenshots-perses.mjs` (two vantages, `scripts/gate/browser-launch.mjs`): exactly 6 PNGs in the walked container vantage, 7 with the certificate interstitial shot in the Mac vantage (installed headed Chrome on the Perses gateway origin, fresh profile, the fixture certificate pinned through Node on the HTTPS and Perses ports, Chrome's own interstitial, served certificate/address assertions per shot, external attempts collected); own directory, `manifest.tsv` with sha256, none empty, each shot after its DOM assertion (realm form from the Perses URL, Viewer project, Admin controls, after logout, disabled user, no-group refusal at `/oauth2/callback`) |
 | Z4b | runner | the extended leak scan: no Perses/guard/cookie secret, JWT, refresh token or oauth2-proxy cookie in any searched file, and no line matching `id_token_hint=`, `jwtPayload=`, `jwtSignature=`, `jwtRefreshToken=`, `_oauth2_proxy=`, `/oauth2/callback?code=` (both projects' container logs incl. `perses-migrate`, the raw gate log, the receipt, the manifests, `ps -eo args` samples every 0.2 s during `monitor up`). The row fails, whatever the scan found in the files it could read, when the Docker listing fails, when no container is listed, when a container's logs cannot be read, when a scan input cannot be opened (the raw log, its copy without the display lines, the receipt, the journal, the screenshot manifests, a file or directory under `auth/keycloak`; a missing receipt, journal, raw log or auth tree counts, and so does an unsearchable parent of the receipt, the auth tree or a manifest) and when there are no secret values to search; the evidence names the containers whose logs were not read and the unreadable inputs. |
 
 Recorded limits of 4b (measured by the gate, not failures): cookies copied
@@ -437,6 +476,29 @@ password while that session lives.
 | W2 | runner | Prometheus lifecycle 403 from the `monitoring` network; `krate monitor reload` (SIGHUP) succeeds on a valid edit with the same container and increased reload timestamp, and fails on an invalid edit with `prometheus_config_last_reload_successful 0` and Prometheus still answering |
 | W3 | runner | the foreign-source probe: on a VM as root the `p4probe` netns checks (a)–(e) of `harness/phase4/lab8/w1x-row.sh` (firewalld zone mirrored when active); on the Mac (a)+(b) from the LAN address; without root/iproute2 on Linux it leaves the inventory (J7 pattern) and the evidence names the variant that ran |
 | W4 | runner | the reachability census (`scripts/gate/phase4_w4.py`) over every running container of both projects, label-less ones included, on the union of its TCP listeners (read in its own network namespace, loopback excluded), its `ExposedPorts` and its exact table 2 ports, from five sources: a host process as root and as uid 65534 (VM only; not run on the Mac), probe containers on `monitoring`, `perses` and `kafka-network`, and the Grafana container; equal to table 2 of `monitoring/README.md`. A reachable pair table 2 does not allow fails; an exact table 2 pair of a running service that is not reachable fails (stricter than the plan's "reported": the table is the complete list); a probe without its own result line (a failed `docker exec`, a crashed worker) is inconclusive and fails. Probes use `nc -z` (the plan's Grafana `wget` reports reachable HTTP 403/404 and Kafka listeners as failures). The one-row-per-service rule of the README's table 1 is asserted statically by `scripts/check-identity.py` (S4) |
+| W5 | runner (Mac vantage only; J7 pattern) | the published-port surface measured from the Mac against the fixture's NIC address (`scripts/gate/mac/probe.mjs sweep`): a full TCP connect sweep of 1–65535 over IPv4, every probe classified into open / refused / rejected-or-unreachable / timeout; the expected set is derived at run time from the fixture's own runtime state (the any-address published ports of the running Compose projects plus sshd's 22), never copied from README line numbers; the row passes only when the observed open set equals that derived set, the control port 111 is refused or rejected while firewalld runs (`111` is the free negative control: rpcbind listens on every address and Docker publishes nothing there), every other undocumented spot port (Grafana, Prometheus, Loki, Loki gRPC 9096, Keycloak 8080/9000, Postgres 5432, the stand-in IdP 18443 and the loopback-published monitoring ports) is refused/rejected/timeout, port 443 is TLS-authorised against the pinned certificate with the name check on, the guest's IPv6 pass (against the guest's lima0 GLOBAL address carried in the hello's `vm_g6` — the class M1 observed, `fd61:…/64`; M4 probed the link-local, so the global's refusal behaviour itself is a still-needed observation) leaves no Docker-published port open (the `[::]` docker-proxy path is filtered by the zone: lab8 N11a, M4), the agent's Mac-side leak scan reports 0 hits, and the guest's `ss -ltnH`/`ss -lunH` tables are printed beside it (TCP only: no published product port is UDP) |
+| W6 | runner (Mac vantage only; J7 pattern) | the client address: the Mac requests the realm discovery document with `X-Forwarded-For: 203.0.113.9` and a row User-Agent, TLS verified against the pinned certificate (never `-k`); the runner reads the proxy's log line for that User-Agent and passes only when the logged `$remote_addr` equals the hello's `mac_src_ip` (a real vmnet client address, M4's observed shape) and the answer was HTTP 200. IPv4 path only: over IPv6 the docker-proxy host socket is the lab8 N11a asymmetry and the row states it instead of asserting it |
+| W7 | runner (Mac vantage only; J7 pattern) | the firewall state as an operator sees it (guest side): firewalld running, `lima0` in the default zone (M3), one Docker bridge in zone `docker` with target `ACCEPT` (M4), runtime and permanent lists equal for services/ports/protocols/icmp-blocks (no runtime-only harness edit; Docker's interface membership is runtime-managed by design), no rich rules and no forward ports, `--get-policies` naming `docker-forwarding`, and the `krate doctor` firewall line printed; on Ubuntu/ufw fixtures: `ufw` inactive (the standard state), `iptables -S INPUT` printed beside it, and the row states that W5 has no firewall-effectiveness control there |
+
+Firewall facts an operator must know (recorded from the M3/M4 hand-walk of the
+vzNAT fixture, 2026-10-17; the row evidence carries the same):
+
+1. With firewalld running, traffic from other hosts to a port that Docker
+   publishes is translated and forwarded by Docker's own rules and is not
+   filtered by the zone's service and port lists (Docker documents the `docker`
+   zone and the `docker-forwarding` policy). On this platform the
+   Docker-published ports 80, 443, 3443, 9092 and 9093 answered from another
+   host over IPv4 while `firewall-cmd --list-all` listed only the OS-default
+   services `cockpit dhcpv6-client ssh`.
+2. Over IPv6 only sshd's own port 22 answered; the probed Docker-published ports
+   (80, 443, 3443, 9092) were refused — those listeners are docker-proxy's `[::]`
+   host sockets on the INPUT path, so an IPv6-only client needs the ports opened
+   in the zone of the interface (`firewall-cmd --add-port=443/tcp …`).
+3. To restrict by source, add rules to Docker's `DOCKER-USER` chain (Docker
+   docs, firewall-iptables.md) or edit the `ports:` entries to name a host
+   address; the packages offer no setting for it (searched: only `PROM_BIND`
+   and `LOKI_BIND` exist, covering Prometheus and Loki, not the UI or broker
+   ports).
 
 ### AG: the air gap of a bundle host, "Installation/start in the offline test must not fetch missing components"
 

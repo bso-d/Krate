@@ -13,6 +13,16 @@
 // TOTP enrolment -> forced password change -> signed-in account console -> sign out ->
 // second login asks for the OTP -> wrong password refused -> disabled user refused ->
 // admin console and master realm are not reachable through the proxy.
+//
+// Browser vantage (scripts/gate/browser-launch.mjs): with GATE_BROWSER_MAC unset this is the
+// walked container story (X1, live receipts use it); with GATE_BROWSER_MAC=1 it drives the
+// installed, signed, headed Google Chrome on the Mac (fresh profile, the fixture certificate
+// pinned through Node, Chrome's own interstitial with Advanced + Proceed, the served
+// certificate and server address asserted, `MAP * ~NOTFOUND` keeping the browser offline).
+// X1 stays a Mac-fixture row: the runner refuses the agent vantage for Phase 1-3
+// (TOPOFIX-REVIEW F9) because mapping the name `localhost` onto a non-loopback address is not
+// what a user does. 11 PNGs in the container vantage, 12 with the one certificate-interstitial
+// shot in the Mac vantage.
 import { createRequire } from 'node:module';
 // The harness image installs playwright globally; ESM ignores NODE_PATH, so resolve it explicitly.
 const require = createRequire(process.env.PW_MODULES ? process.env.PW_MODULES + '/resolve-from-here.js' : import.meta.url);
@@ -38,6 +48,7 @@ const ERROR_TEXT = '[id^="input-error"], #kc-error-message, .kc-feedback-text';
 function errorLocator() { return page.locator(ERROR_TEXT).filter({ hasText: /\S/ }).first(); }
 async function waitForError() { await errorLocator().waitFor({ state: 'visible', timeout: 30000 }); return (await errorLocator().innerText()).trim(); }
 const NEW_PW = [...Array(18)].map(() => 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'[randomInt(54)]).join('');
+let certDecision = null;
 
 function totp(secretBytes, t = Date.now() / 1000) {
   const counter = Buffer.alloc(8);
@@ -55,6 +66,9 @@ let n = 0;
 const manifest = [];
 async function shot(page, slug, caption) {
   n += 1;
+  // Mac vantage: bind the shot's main document to the VM address and the pinned certificate
+  // (assertServedFrom/assertServedCertificate; M0 point 4 observed the fields).
+  if (MAC && serve) serve.record(resolveTo, PIN, slug, asserted);
   const file = `${String(n).padStart(2, '0')}-${slug}.png`;
   await page.screenshot({ path: `${OUT}/${file}`, fullPage: false });
   manifest.push({ file, caption, url: publicUrl(page.url()), asserted: asserted.splice(0) });
@@ -62,10 +76,25 @@ async function shot(page, slug, caption) {
 }
 
 const resolveTo = args['resolve-to'];
-const launchArgs = resolveTo ? [`--host-resolver-rules=MAP localhost ${resolveTo}`] : [];
-const browser = await chromium.launch({ args: launchArgs });
-const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
-const page = await ctx.newPage();
+// The launch is shared with X3/X4/U15-U7 through browser-launch.mjs: container vantage keeps
+// the walked launch bytes, the Mac vantage (GATE_BROWSER_MAC=1) requires the pinned fixture
+// certificate and drives the installed Chrome.
+import { launchGateBrowser, macMode, acceptGateCertificate, attachServeTracker, browserEvidence, cleanProfile, requireCertFile, pinGateCertificate, externalAttemptsTracker } from './browser-launch.mjs';
+const MAC = macMode();
+const PORT_FOR_PIN = (new URL(BASE).port ? Number(new URL(BASE).port) : 443);
+const CERT = MAC ? requireCertFile() : null;
+const PIN = MAC ? await pinGateCertificate({ host: 'localhost', port: PORT_FOR_PIN, certPem: CERT.pem, connectHost: resolveTo }) : null;
+const launch = await launchGateBrowser(chromium, { host: 'localhost', resolveTo, outDir: OUT, viewport: MAC ? { width: 1440, height: 900 } : { width: 1280, height: 800 } });
+const browser = launch.browser;
+// In the Mac vantage `browser` IS the persistent context with its first page; in the
+// container vantage this is the walked newContext shape.
+const ctx = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
+const page = MAC ? (ctx.pages()[0] || await ctx.newPage()) : await ctx.newPage();
+const serve = MAC ? attachServeTracker(page) : null;
+// Mac vantage (F3): every failed request whose host is not the gate host is an external
+// attempt; the row fails on any that is not Chrome-internal (chrome://, devtools://).
+const ext = MAC ? externalAttemptsTracker('localhost') : null;
+if (ext) page.on('requestfailed', (r) => ext.onFailed(r));
 const account = `${BASE}/identity/realms/krate/account`;
 
 async function openLogin() {
@@ -76,6 +105,22 @@ async function openLogin() {
 }
 
 try {
+  // Mac vantage gate: the trust-nothing profile must see and pass Chrome's own certificate
+  // interstitial first (M0 points 2-3; M5 run 2 for the render-after-reject order); one
+  // Advanced+Proceed decision covers this host for the whole story. The code proves only that
+  // the chain has no trusted root (F2); name and date validity are the Node pin + Mac-clock
+  // check done above in pinGateCertificate.
+  if (MAC) {
+    const decision = await acceptGateCertificate(page, account, {
+      onAssert: (d) => {
+        assert(d.seen, 'the trust-nothing profile saw Chrome\'s real certificate interstitial (none seen: a pre-trusted or reused profile)');
+        assert(/ERR_CERT_AUTHORITY_INVALID/.test(d.error), `the interstitial carries net::ERR_CERT_AUTHORITY_INVALID (got: ${d.error || 'none'}; F2: the code ranks above name/date, so another code means another defect)`);
+      },
+      onShot: async () => { await shot(page, 'certificate-warning', 'Chrome shows its own certificate warning for the untrusted fixture certificate (decision per exact certificate in this fresh profile); name and date validity are evidenced by the Node pin and the securityDetails assertions, not by this code'); },
+    });
+    assert(decision.decision === 'proceed', 'the story proceeded through Advanced -> Proceed (one decision covers this host; got: ' + (decision.decision || 'none') + ')');
+    certDecision = decision;
+  }
   // Verified in Chrome DevTools (2026-10-10): the unauthenticated account console redirects
   // straight to the realm login form (#kc-form-login, #username, #password, #kc-login).
   await openLogin();
@@ -160,6 +205,13 @@ try {
     assert(resp && resp.status() === 404, `${path} answers HTTP ${resp ? resp.status() : '?'} (404 required)`);
     await shot(page, slug, `${caption}; HTTP ${resp.status()}`);
   }
+  // Mac vantage (F3): no external host may have been attempted; the fingerprint a violation
+  // would show is net::ERR_NAME_NOT_RESOLVED (M5 run 3).
+  if (ext) ext.assertClean();
+  // S2 (review): X1 asserts its own exact count in both vantages, the way X3/X4 do — 11 in the
+  // walked container vantage, 12 with the one certificate-interstitial shot in the Mac vantage.
+  const SHOTS_EXPECTED = MAC ? 12 : 11;
+  if (manifest.length !== SHOTS_EXPECTED) throw new Error(`expected exactly ${SHOTS_EXPECTED} screenshots, wrote ${manifest.length}`);
   writeFileSync(`${OUT}/manifest.json`, JSON.stringify(manifest, null, 2));
   chmodSync(`${OUT}/manifest.json`, 0o644);
   console.log(`STORY OK: ${manifest.reduce((k, m) => k + m.asserted.length, 0)} assertions over ${manifest.length} screenshots`);
@@ -170,4 +222,14 @@ try {
   process.exitCode = 1;
 } finally {
   await browser.close();
+  try {
+    const ev = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'X1', certDecision, externalAttempts: ext ? ext.list : null } });
+    writeFileSync(`${OUT}/browser.json`, JSON.stringify(ev, null, 2));
+    chmodSync(`${OUT}/browser.json`, 0o644);
+  } catch (e) {
+    console.error('browser.json not written: ' + String(e.message || e).slice(0, 160));
+    if (MAC) process.exitCode = 1;
+  }
+  if (MAC) cleanProfile(launch.profileDir, process.exitCode === 1);
 }
+console.log('X1 vantage: ' + (MAC ? 'Mac: installed Chrome, fresh profile, pinned certificate, interstitial + Proceed, external attempts tracked' : 'container: walked harness image shape'));

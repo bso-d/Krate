@@ -31,6 +31,17 @@
 //   4 after logout, the Keycloak password form
 //   5 the disabled user: Keycloak's "Account is disabled"
 //   6 the no-group user: the refusal page at /oauth2/callback
+//   7 (Mac vantage only) the certificate interstitial before step 1
+//
+// Browser vantage (scripts/gate/browser-launch.mjs): with GATE_BROWSER_MAC unset this is the
+// walked container story (live4b ran it); with GATE_BROWSER_MAC=1 it drives the installed,
+// signed, headed Google Chrome on the Mac — fresh profile, the fixture certificate pinned
+// through Node with the name check on (the identity port and the Perses gateway port are both
+// pinned), Chrome's own certificate interstitial with Advanced + Proceed on the Perses origin
+// (one decision covers the host: M0 point 3), every shot's main document bound to the VM
+// address and the served certificate, `MAP * ~NOTFOUND` keeping the browser offline, external
+// attempts collected and failing the story. 6 PNGs in the container vantage, 7 with the
+// interstitial shot in the Mac vantage.
 import { createRequire } from 'node:module';
 // The harness image installs playwright globally; ESM ignores NODE_PATH, so resolve it explicitly.
 const require = createRequire(process.env.PW_MODULES ? process.env.PW_MODULES + '/resolve-from-here.js' : import.meta.url);
@@ -61,7 +72,8 @@ if (!VIEWER || !VIEWER_PW || !VIEWER_TOTP || !ADMIN || !ADMIN_PW || !ADMIN_TOTP
   console.error('need --viewer-user, --admin-user, --disabled-user, --nogroup-user and GATE_VIEWER_PASSWORD/GATE_VIEWER_TOTP/GATE_ADMIN_PASSWORD/GATE_ADMIN_TOTP/GATE_DISABLED_PASSWORD/GATE_NOGROUP_PASSWORD/GATE_NOGROUP_TOTP');
   process.exit(2);
 }
-const SHOTS_EXPECTED = 6;
+const SHOTS_EXPECTED_MAC = 7; // +1: the certificate interstitial the trust-nothing Mac profile must show
+const SHOTS_EXPECTED_CONTAINER = 6;
 
 const asserted = [];
 function assert(cond, what) { if (!cond) throw new Error('assert: ' + what); asserted.push(what); }
@@ -102,6 +114,9 @@ let n = 0;
 const manifest = [];
 async function capture(page, slug, caption) {
   n += 1;
+  // Mac vantage: bind the shot's main document to the VM address and the pinned certificate
+  // (assertServedFrom/assertServedCertificate; the fields' behaviour observed in M0 point 4).
+  if (MAC && serve) serve.record(PERS_IP, PIN, slug, asserted);
   const file = `${String(n).padStart(2, '0')}-${slug}.png`;
   await page.screenshot({ path: `${OUT}/${file}`, fullPage: false });
   const bytes = readFileSync(`${OUT}/${file}`);
@@ -130,8 +145,20 @@ function writeManifest() {
 
 mkdirSync(OUT, { recursive: true });
 const resolveTo = args['resolve-to'];
-const launchArgs = resolveTo ? [`--host-resolver-rules=MAP ${HOST} ${resolveTo}`] : [];
-const browser = await chromium.launch({ args: launchArgs });
+// The launch is shared with X1/X3/U15-U7 through browser-launch.mjs.
+import { launchGateBrowser, macMode, acceptGateCertificate, attachServeTracker, browserEvidence, cleanProfile, requireCertFile, pinGateCertificate, externalAttemptsTracker } from './browser-launch.mjs';
+const MAC = macMode();
+const SHOTS_EXPECTED = MAC ? SHOTS_EXPECTED_MAC : SHOTS_EXPECTED_CONTAINER;
+const CERT = MAC ? requireCertFile() : null;
+// Pin both surfaces the story drives: the public HTTPS port (M4's probe) and the Perses
+// gateway port of this story's own entry URL. Both are the fixture's server.crt.
+const PERS_IP = resolveTo;
+const PIN = MAC ? await pinGateCertificate({ host: HOST, port: 443, certPem: CERT.pem, connectHost: resolveTo }) : null;
+const PINPERS_PORT = (new URL(PBASE).port ? Number(new URL(PBASE).port) : 443);
+const PINPERS = MAC ? await pinGateCertificate({ host: HOST, port: PINPERS_PORT, certPem: CERT.pem, connectHost: resolveTo }) : null;
+const launch = await launchGateBrowser(chromium, { host: HOST, resolveTo, outDir: OUT });
+const browser = launch.browser;
+let certDecision = null;
 
 // lab7 (082): the gateway sends an anonymous visitor to /oauth2/start and on to the
 // realm's authorization endpoint; the password form of realm krate is the landing page.
@@ -170,9 +197,31 @@ async function keycloakLogin(page, user, password, totpB32) {
 }
 
 let page = null;
+// Mac vantage trackers: serve (per-shot main-document evidence) and ext (F3 external attempts).
+const serve = MAC ? attachServeTracker(null) : null;
+const ext = MAC ? externalAttemptsTracker(HOST) : null;
 try {
-  const ctx = await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
-  page = await ctx.newPage();
+  const ctx = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
+  page = MAC ? (ctx.pages()[0] || await ctx.newPage()) : await ctx.newPage();
+  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
+
+  // ── Mac vantage gate: the trust-nothing profile must show and pass Chrome's own certificate
+  // interstitial on the story's entry URL (the Perses gateway) before story step 1 (M0 points
+  // 2-3; M5 run 2 for the render-after-reject order); one Advanced+Proceed covers this host,
+  // both ports, for the whole story. The code proves only that the chain has no trusted root
+  // (F2); the pins above carry name/date validity.
+  if (MAC) {
+    const decision = await acceptGateCertificate(page, `${PBASE}/`, {
+      onAssert: (d) => {
+        assert(d.seen, 'the trust-nothing profile saw Chrome\'s real certificate interstitial (none seen: a pre-trusted or reused profile)');
+        assert(/ERR_CERT_AUTHORITY_INVALID/.test(d.error), `the interstitial carries net::ERR_CERT_AUTHORITY_INVALID (got: ${d.error || 'none'}; F2: the code ranks above name/date, so another code means another defect)`);
+        assert(PIN && PINPERS && PIN.authorized && PINPERS.authorized, 'both the HTTPS and the Perses gateway ports are TLS-authorised against the pinned certificate with the name check on (Node pin, M4)');
+      },
+      onShot: async () => { await shot(page, 'certificate-warning', 'Chrome shows its own certificate warning for the untrusted fixture certificate on the Perses gateway origin; name and date validity are evidenced by the Node pins and the securityDetails assertions, not by this code'); },
+    });
+    assert(decision.decision === 'proceed', 'the story proceeded through Advanced -> Proceed (one decision covers this host; got: ' + (decision.decision || 'none') + ')');
+    certDecision = decision;
+  }
 
   // ── shot 1: the Keycloak password form reached from the Perses URL ──
   await openPersesAtKeycloak(page);
@@ -213,6 +262,7 @@ try {
 
   // ── shot 3: the Admin in the same project, with the create/edit controls the Viewer does not have ──
   page = await ctx.newPage();
+  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
   await openPersesAtKeycloak(page);
   await keycloakLogin(page, ADMIN, ADMIN_PW, ADMIN_TOTP);
   await persesSignIn(page);
@@ -264,6 +314,7 @@ try {
 
   // ── shot 5: the disabled user is refused by Keycloak ──
   page = await ctx.newPage();
+  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
   await openPersesAtKeycloak(page);
   await page.fill('#username', DISABLED);
   await page.fill('#password', DISABLED_PW);
@@ -276,6 +327,7 @@ try {
 
   // ── shot 6: the no-group user is refused at /oauth2/callback ──
   page = await ctx.newPage();
+  if (ext) { page.on('requestfailed', (r) => ext.onFailed(r)); serve.attach(page); }
   await openPersesAtKeycloak(page);
   await keycloakLogin(page, NOGROUP, NOGROUP_PW, NOGROUP_TOTP);
   await page.waitForLoadState('networkidle');
@@ -291,15 +343,27 @@ try {
 
   writeManifest();
   const total = manifest.reduce((k, m) => k + m.asserted.length, 0);
+  // Mac vantage (F3): no external host may have been attempted (fingerprint at rest: M5 run 3).
+  if (ext) ext.assertClean();
   if (manifest.length !== SHOTS_EXPECTED) throw new Error(`expected exactly ${SHOTS_EXPECTED} screenshots, wrote ${manifest.length}`);
   console.log(`STORY OK: ${total} assertions over ${manifest.length} screenshots`);
 } catch (e) {
   // The failure capture bypasses the assertion-before-shot rule (it documents where
-  // the story stopped); the exact-6-PNG count of the runner then fails the row.
+  // the story stopped); the expected-count check of the runner then fails the row.
   if (page) await capture(page, 'failure', `Story failed: ${String(e.message || e).slice(0, 160)}`).catch(() => {});
   writeManifest();
   console.error('STORY FAILED: ' + String(e.message || e).slice(0, 400));
   process.exitCode = 1;
 } finally {
   await browser.close();
+  try {
+    const ev = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'X4', certDecision, externalAttempts: ext ? ext.list : null, shotsExpected: SHOTS_EXPECTED, persesPortPin: PINPERS ? { port: PINPERS_PORT, authorized: PINPERS.authorized, protocol: PINPERS.protocol, sha256: PINPERS.sha256 } : null } });
+    writeFileSync(`${OUT}/browser.json`, JSON.stringify(ev, null, 2));
+    chmodSync(`${OUT}/browser.json`, 0o644);
+  } catch (e2) {
+    console.error('browser.json not written: ' + String(e2.message || e2).slice(0, 160));
+    if (MAC) process.exitCode = 1;
+  }
+  if (MAC) cleanProfile(launch.profileDir, process.exitCode === 1);
 }
+console.log('X4 vantage: ' + (MAC ? 'Mac: installed Chrome, fresh profile, pinned certificate (HTTPS + Perses ports), interstitial + Proceed, external attempts tracked' : 'container: walked harness image shape'));

@@ -712,15 +712,135 @@ def check_gate_scripts(checks):
     # Every recorded .url() in every gate story — manifest fields, asserted
     # strings and step records alike — must be stripped of query and fragment
     # before it can reach a manifest or summary file.
-    for story_path in sorted((ROOT / 'scripts/gate').glob('*.mjs')):
-        story = story_path.read_text()
-        for match in re.finditer(r'\.url\(\)', story):
-            tail = story[match.end():match.end() + 80]
-            head = story[max(0, match.start() - 40):match.start()]
-            ok = (re.search(r'publicUrl\(\w+$', head) is not None or tail.startswith('.split(/[?#]/)')
-                  or tail.startswith('.includes(') or tail.startswith('.startsWith(')
-                  or (tail.startswith('.replace(') and '.split(/[?#]/)' in tail[:70]))
-            e(ok, f'{story_path.name} records a verbatim .url() near: ...{story[max(0, match.start() - 40):match.end() + 40]!r}')
+    # Same rule for the Mac agent's helpers under scripts/gate/mac.
+    for story_folder in ((ROOT / 'scripts/gate', ROOT / 'scripts/gate/mac')):
+        for story_path in sorted(story_folder.glob('*.mjs')):
+            story = story_path.read_text()
+            for match in re.finditer(r'\.url\(\)', story):
+                tail = story[match.end():match.end() + 80]
+                head = story[max(0, match.start() - 40):match.start()]
+                ok = (re.search(r'publicUrl\(\w+$', head) is not None or tail.startswith('.split(/[?#]/)')
+                      or tail.startswith('.includes(') or tail.startswith('.startsWith(')
+                      or (tail.startswith('.replace(') and '.split(/[?#]/)' in tail[:70])
+                      or re.search(r'new URL\(\w+$', head) is not None)
+                e(ok, f'{story_path.name} records a verbatim .url() near: ...{story[max(0, match.start() - 40):match.end() + 40]!r}')
+
+    # TOPOFIX: the amended browser vantage and the Mac agent (harness/phase4-completion/w2,
+    # design sections 1b/3.4/3.6, review F1-F12). Every hard wiring claim is asserted here;
+    # a mutant that removes one must fail the whole check.
+    launch_mod = (ROOT / 'scripts/gate/browser-launch.mjs').read_text()
+    # a code-only view: a comment may CITE a claim ("we once mapped * ~NOTFOUND") without the
+    # code carrying it, so the claim assertions below that a comment could satisfy scan this
+    # instead of the raw text
+    launch_mod_code = '\n'.join(l for l in launch_mod.splitlines() if not l.strip().startswith('//'))
+    for story_path in sorted((ROOT / 'scripts/gate').rglob('*.mjs')):
+        if story_path.name == 'browser-launch.mjs':
+            continue
+        e('--host-resolver-rules' not in '\n'.join(l for l in story_path.read_text().splitlines() if not l.strip().startswith('//')),
+          f'{story_path.name} must not build --host-resolver-rules itself (launchGateBrowser is the only builder; comments may name the switch)')
+    e('MAP * ~NOTFOUND, EXCLUDE' in launch_mod_code,
+      'browser-launch.mjs builds the F3 resolver value "MAP <host> <ip>, MAP * ~NOTFOUND, EXCLUDE <ip>" '
+      '(M0 point 5: example.com resolves net::ERR_NAME_NOT_RESOLVED under it); the claim must be in code, not only in a comment')
+    mac_branch = launch_mod.split('export async function launchGateBrowserMac', 1)[1].split('export async function launchGateBrowserContainer', 1)[0]
+    e("channel: 'chrome'" in mac_branch, "browser-launch.mjs launches the installed Chrome (channel 'chrome') in the Mac vantage (M0/M5)")
+    e('launchPersistentContext' in mac_branch, 'the Mac vantage uses a fresh per-story profile (launchPersistentContext)')
+    e('ignoreHTTPSErrors' not in mac_branch,
+      "the Mac vantage must NOT ignore certificate errors (Chrome's own verifier runs; the interstitial is the story's evidence; TOPOFIX 1c)")
+    for story_path in sorted((ROOT / 'scripts/gate').rglob('*.mjs')):
+        text_code = '\n'.join(l for l in story_path.read_text().splitlines() if not l.strip().startswith('//'))
+        e('ignore-certificate-errors' not in text_code, f'{story_path.name} must not carry an --ignore-certificate-errors switch (TOPOFIX F2)')
+        # the call shapes of a CDP Network.getCertificate request (a CDP session send or a
+        # direct method call); naming the method in a comment or label is fine, calling it is not (M0 point 6)
+        e('getCertificate(' not in text_code and "'Network.getCertificate'" not in text_code and '"Network.getCertificate"' not in text_code,
+          f'{story_path.name} must not call CDP Network.getCertificate (M0 point 6: it returned no certificate in Chrome 155; the digest source is the Node pin + Response.securityDetails)')
+    e('requireCertFile' in launch_mod_code and 'GATE_CERT_FILE' in launch_mod_code,
+      'the Mac vantage pins the fixture certificate from GATE_CERT_FILE (fail-closed without it)')
+    e('assertCertValidity' in launch_mod and 'validToDate' in launch_mod,
+      "browser-launch.mjs checks the pinned certificate's Mac-side validity window (TOPOFIX F2)")
+    e('assertServedFrom' in launch_mod and 'assertServedCertificate' in launch_mod,
+      'browser-launch.mjs binds the served address (never 127.0.0.1/::1) and the served certificate (Response.serverAddr/securityDetails, M0 point 4)')
+    e('externalAttemptsTracker' in launch_mod_code
+      and launch_mod_code.count("scheme !== 'chrome'") == 1 and launch_mod_code.count("scheme !== 'devtools'") == 1,
+      'external_attempts must exempt only chrome:// and devtools:// targets (TOPOFIX F3)')
+    e('refuseSystemProxy' in launch_mod_code and 'ProxyAutoDiscoveryEnable' in launch_mod_code,
+      'the launcher refuses a system proxy, whose names --host-resolver-rules does not cover (TOPOFIX F3; M0 observed none)')
+    e('HeadlessChrome' in launch_mod_code,
+      'browser evidence refuses a HeadlessChrome build in the Mac vantage (the formal receipt is the installed headed Chrome)')
+    for name in ('screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs', 'phase4-browser.mjs'):
+        story = (ROOT / 'scripts/gate' / name).read_text()
+        e("from './browser-launch.mjs'" in story, f'{name} must import the shared browser launch')
+        e('macMode()' in story, f"{name} must gate its new behaviour on macMode() (GATE_BROWSER_MAC; the container runner keeps today's walked shape)")
+    agent = (ROOT / 'scripts/gate/mac/agent.mjs').read_text()
+    e("'id,nonce,row,schema'" in agent, 'the agent accepts exactly {schema,id,row,nonce} guest requests (TOPOFIX F4)')
+    e('claimRequest' in agent and 'ALLOWED_SCRIPTS' in agent, 'the agent holds claim validation and an allow-list of the scripts it may run (F4)')
+    allow_list = re.search(r'const ALLOWED_SCRIPTS = \[(.*?)\];', agent, re.S)
+    e(allow_list is not None, 'the agent\'s ALLOWED_SCRIPTS array must exist')
+    if allow_list is not None:
+        for allowed in ('probe.mjs', 'screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs', 'phase4-browser.mjs'):
+            e(allowed in allow_list.group(1), f'the agent ALLOWED_SCRIPTS array must not silently drop {allowed}')
+    e('realpath -e' in agent, 'the agent reads guest files through one realpath-confined command (F4)')
+    e('65536' in agent, 'the agent caps each guest file read at 64 KiB (F4)')
+    e('agent-manifest.tsv' in agent, 'the agent keeps its own manifest on the Mac (F4)')
+    e('--backend=scp' in '\n'.join(l for l in agent.splitlines() if not l.strip().startswith('//')),
+      'the agent delivers with limactl copy --backend=scp -r (F8; M1 observed the flag; the delivery call must be in code, not only a comment)')
+    e('mac_src_ip' in agent and 'mac_iface' in agent and 'vm_g6' in agent and 'clock_skew_ms' in agent,
+      'the agent hello carries the guest address, the Mac source address, the guest\'s lima0 GLOBAL address (vm_g6, review S6: the field is named for the class it carries) and the clock facts the runner preflights')
+    probe = (ROOT / 'scripts/gate/mac/probe.mjs').read_text()
+    e("case 'ECONNREFUSED': return 'refused';" in probe and "return 'rejected';" in probe and "return 'timeout';" in probe,
+      'probe.mjs classifies every connect outcome, not only open/closed (TOPOFIX F6: three outcomes; the mapping must be the shipped one)')
+    guide_fingerprint = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    e('net::ERR_NAME_NOT_RESOLVED' in guide_fingerprint,
+      'the guide names the external-attempt fingerprint of the MAP * ~NOTFOUND rule (M5)')
+    remote = (ROOT / 'scripts/gate/browser_remote.py').read_text()
+    e('req = {"schema": 1, "id": int(req_id), "row": row, "nonce": nonce}' in remote,
+      'browser_remote.py sends exactly {schema,id,row,nonce} — no paths, secrets or arguments (TOPOFIX F4)')
+    runner_text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e('REQUIRED_P4C=(W1 W2 W3 W4 W5 W6 W7)' in runner_text, 'W5/W6/W7 are inside REQUIRED_P4C (TOPOFIX F6)')
+    e('--browser agent is refused with --phase $PHASE' in runner_text,
+      'the runner refuses the agent vantage for phases 1-3 (X1 stays a Mac-fixture row; TOPOFIX F9)')
+    u15 = (ROOT / 'scripts/gate/phase4-browser.mjs').read_text()
+    e("const accepted = await acceptGateCertificate(" in u15 and "accepted.decision !== 'proceed'" in u15,
+      "U15 (phase4-browser.mjs) stops when acceptGateCertificate returns no 'proceed' decision: its hooks run only in the interstitial branch (TR2 G1)")
+    e('v6.get("addressClass"' in runner_text and 'v6.get("address"' in runner_text and '.get("ll"' not in runner_text,
+      'the W5 evidence reads the probe report\'s v6 address and addressClass, not the removed link-local "ll" key (TR2 G4)')
+    e('is_private' in runner_text and 'mac_src_ip' in runner_text,
+      'the agent preflight requires a private mac_src_ip (TOPOFIX F7)')
+    e("the fixture's lima0 address is still" in runner_text,
+      'the runner records the end-of-run vmip row (TOPOFIX F7)')
+    s3_line = next((ln for ln in runner_text.splitlines() if 'koalaman/shellcheck:v0.9.0' in ln and 'kraft/krate' in ln), '')
+    e('mac/run-vm-gate.sh' in s3_line, "scripts/gate/mac/run-vm-gate.sh is in S3's shellcheck 0.9.0 list")
+    e('browser_remote.py' in runner_text, 'the runner asks the agent through scripts/gate/browser_remote.py')
+    e('| browser vantage |' in runner_text, 'the receipt header names the browser vantage (TOPOFIX design 3.5)')
+    e('--rendezvous-nonce' in runner_text and 'the token is not printed' in runner_text,
+      'the rendezvous nonce binds the run and is never printed')
+    guide = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    for row in ('| W5 | runner (Mac vantage only; J7 pattern) | the published-port surface',
+                '| W6 | runner (Mac vantage only; J7 pattern) | the client address',
+                '| W7 | runner (Mac vantage only; J7 pattern) | the firewall state'):
+        e(row in guide, f'the guide carries the W-row ({row[2:20]}...); its text must match the code')
+    e('docker-forwarding` policy' in guide and '--add-port=443/tcp' in guide,
+      "the guide carries the F10 firewall sentences (Docker's rules, the IPv6 zone clause, DOCKER-USER/bind address)")
+    # ── review round (TOPOFIX-IMPL-REVIEW §4): the four defects the 48 mutants could not reach ──
+    # B1: the preflight must skip the agent's own directory BEFORE the digest read; pin the choice
+    # by text order (the `continue` sits above the hashlib read in agent_preflight's python).
+    preflight = runner_text[runner_text.index('agent_preflight() {'):runner_text.index('case "$BROWSER_MODE" in', runner_text.index('agent_preflight() {'))]
+    skip_at = preflight.find("startswith(\"mac/\")")
+    hash_at = preflight.find('hashlib.sha256(open(local')
+    e(0 <= skip_at < hash_at,
+      'the agent preflight skips scripts/gate/mac/* BEFORE computing the digest (review B1: the agent\'s own files are not in the guest, so reading before the skip - or no skip at all - refuses every agent run)')
+    # S1: the external-attempt guard compares host NAMES (the stories build the tracker with the
+    # bare host; X4's Perses origin is https://<host>:3443 and user:port comparisons would
+    # classify its own SPA churn as an external attempt).
+    e('u.hostname !== host' in launch_mod_code and 'host: u.hostname' in launch_mod_code,
+      'the external-attempts guard compares u.hostname against the bare host and records the hostname (review S1)')
+    # S4: the response echoes the rendezvous nonce by protocol; the runner redacts it before the
+    # raw log and the row's response copy see it.
+    e('${CAP//$REND_NONCE/<rendezvous-nonce-redacted>}' in runner_text,
+      'the runner redacts the rendezvous nonce from the agent response before the raw log and the row copy (review S4; the response echo is protocol, the receipt must not carry the token)')
+    # S2: X1 asserts its own exact count in both vantages, the way X3/X4 do.
+    x1_story = (ROOT / 'scripts/gate/screenshots.mjs').read_text()
+    e('const SHOTS_EXPECTED = MAC ? 12 : 11;' in x1_story,
+      'X1 asserts the exact PNG count in both vantages (11 container, 12 Mac with the interstitial shot; review S2)')
 
     # U9 evidence must render (tag, result, detail) 3-tuples: the rocky-4a run
     # at 959fed2 failed the gate with `TypeError: not all arguments converted`
