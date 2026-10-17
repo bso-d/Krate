@@ -996,6 +996,8 @@ def check_topofix2(checks):
     agent_lines = js_lines(agent_text)
     agent_code = '\n'.join(agent_lines)
     remote_text = (ROOT / 'scripts/gate/browser_remote.py').read_text()
+    topo_runner_text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    topo_runner_lines = sh_lines(topo_runner_text)
 
     # PRE-0: the rendezvous lives in the GUEST (the VM is --mount-none). Every operation on it is a guest operation
     # through limactl; nothing in the agent touches a Mac file named after RDV, a claim or a guest temp.
@@ -1095,6 +1097,61 @@ def check_topofix2(checks):
     exit_at = [i for i, ln in enumerate(u15_lines) if ln == 'process.exit(2);']
     e(len(summary_at) == 1 and bool(exit_at) and summary_at[0] < exit_at[0],
       'phase4-browser.mjs writes ui15-summary.json (steps, no-interstitial included) BEFORE the non-zero exit of the story-failed path (G7)')
+
+    # PRE-6 + G5: W5's IPv6 leg. The agent passes the guest's GLOBAL address without a zone (a zone only on fe80::/10) and
+    # probe.mjs accepts that shape; the runner derives the docker-published set WITHOUT sshd's 22, the IPv6 rule fails only
+    # an open docker-published port, and 22 over IPv6 is the positive control. The runner's real extracted Python decides
+    # the four shapes (M4: 22 open, the rest refused; 22 refused; 443 open; no vm_g6) exactly as the TR2 G4 battery ran it.
+    for line in (
+        "function v6Target(addr, iface) { return /^fe[89ab][0-9a-f]:/i.test(addr) && iface ? `${addr}%${iface}` : addr; }",
+        "if (STATE.g6) argv.push('--v6', v6Target(STATE.g6, STATE.iface));",
+    ):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (PRE-6: the global IPv6 address goes to the probe without a %iface zone)')
+    probe_lines = js_lines((ROOT / 'scripts/gate/mac/probe.mjs').read_text())
+    e(any(ln.startswith('if (!net.isIPv6(ll) || (linkLocal && !iface) || (!linkLocal && iface)) die(') for ln in probe_lines)
+      and 'const target = iface ? `${ll}%${iface}` : ll;' in probe_lines
+      and 'const r = await connectOnce(target, p, 6, Math.max(timeoutMs, 3000));' in probe_lines,
+      'probe.mjs accepts a global --v6 address without a zone and an fe80::/10 address only with its zone, and connects to that target (PRE-6)')
+    e('docker_csv="$(printf \'%s\\n\' $any_ports | LC_ALL=C sort -n -u | paste -s -d, -)"' in topo_runner_lines
+      and any(ln.startswith('evidence="$(W5_EXPECTED="$expected_csv" W5_DOCKER="$docker_csv" W5_VM_G6="${VM_G6:-}" python3 -I - ') for ln in topo_runner_lines),
+      'the W5 row derives the docker-published set from $any_ports WITHOUT 22 and passes it, with vm_g6, to its Python as W5_DOCKER / W5_VM_G6 (G5)')
+    pyw5 = re.search(r"<<'PYW5' 2>>\"\$RAW\"\n(.*?)\nPYW5\n", topo_runner_text, re.S)
+    e(pyw5 is not None, 'the W5 row keeps its evaluation in the PYW5 heredoc (the pinned cases below run its real text)')
+    if pyw5 is not None:
+        w5_python = pyw5.group(1)
+        w5_docker = '80,443,3443,9092,9093'
+
+        def w5_case(v6_ports, vm_g6, with_v6=True):
+            report = {'swept': {'tcpOnly': True}, 'counts': {'open': 6}, 'open': [22, 80, 443, 3443, 9092, 9093],
+                      'spot': [{'port': 111, 'outcome': 'refused'}],
+                      'cert': {'authorized': True, 'protocol': 'TLSv1.3', 'sha256': 'ab12'},
+                      'mac_leak_scan': {'values': 0, 'hits': 0, 'stores': ['agent.log']}}
+            if with_v6:
+                report['v6'] = {'address': 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', 'addressClass': 'global',
+                                'ports': [{'port': port, 'outcome': outcome} for port, outcome in v6_ports]}
+            with tempfile.TemporaryDirectory() as w5_tmp:
+                result_path = Path(w5_tmp) / 'w5-result.json'
+                result_path.write_text(json.dumps(report))
+                env = dict(os.environ, W5_EXPECTED='22,' + w5_docker, W5_DOCKER=w5_docker, W5_VM_G6=vm_g6)
+                run = subprocess.run([sys.executable, '-I', '-', str(result_path), 'running'], input=w5_python, env=env, text=True, capture_output=True)
+            return run.returncode, run.stdout + run.stderr
+
+        m4_shape = [(22, 'open'), (80, 'refused'), (443, 'refused'), (111, 'refused'), (3443, 'refused'), (9092, 'refused'), (9093, 'refused')]
+        rc_m4, out_m4 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
+        e(rc_m4 == 0 and 'breaches=0' in out_m4 and 'BREACH' not in out_m4 and '22 answers over IPv6 (sshd; M4)' in out_m4,
+          f'W5 on the M4 IPv6 shape (22 open, the docker-published ports refused) has no breach and records the 22 control; got rc {rc_m4}: {out_m4[-200:]!r} (G5)')
+        rc_c, out_c = w5_case([(22, 'refused')] + m4_shape[1:], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
+        e(rc_c == 1 and "IPv6 positive control: sshd's 22 did not answer over IPv6 (refused)" in out_c,
+          f"W5 FAILs when the hello carries a global address and sshd's 22 is refused over IPv6; got rc {rc_c}: {out_c[-200:]!r} (G5/PRE-6)")
+        rc_b, out_b = w5_case([(22, 'open'), (443, 'open')] + m4_shape[1:2] + m4_shape[3:], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
+        e(rc_b == 1 and 'BREACH docker-published port 443 is open over IPv6' in out_b and 'BREACH docker-published port 22' not in out_b,
+          f'W5 breaches on an open docker-published port (443) over IPv6 and never on sshd\'s 22; got rc {rc_b}: {out_b[-200:]!r} (G5)')
+        rc_n, out_n = w5_case([], '', with_v6=False)
+        e(rc_n == 0 and 'v6=not-run (no guest IPv6 global address, vm_g6, in the hello)' in out_n and 'BREACH' not in out_n and 'positive control' not in out_n,
+          f'W5 without a global address in the hello keeps the not-run text and does not decide; got rc {rc_n}: {out_n[-200:]!r} (G5)')
+        rc_s, out_s = w5_case([], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', with_v6=False)
+        e(rc_s == 1 and "IPv6 positive control: sshd's 22 did not answer over IPv6 (not-swept)" in out_s,
+          f'W5 FAILs when the hello carries a global address but the result has no IPv6 pass; got rc {rc_s}: {out_s[-200:]!r} (G5)')
 
 
 def check_k37_wiring(checks):

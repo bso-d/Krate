@@ -2056,9 +2056,14 @@ phase4_row_w5() {
     done
   done < <({ docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null
              docker ps -aq --filter "label=com.docker.compose.project=$MON_PROJECT" 2>/dev/null; } | sort -u)
-  local expected_csv
+  local expected_csv docker_csv
   # shellcheck disable=SC2086  # the CSV is built from the split port words
   expected_csv="$(printf '%s\n' $any_ports 22 | LC_ALL=C sort -n -u | paste -s -d, -)"
+  # TOPOFIX2 G5: the docker-published set alone, WITHOUT sshd's 22. The IPv4 open-set equality uses the set
+  # with 22; the IPv6 rule fails only a docker-published port that is open over IPv6, because sshd's own 22
+  # answers over IPv6 by design (M4 point 4) and is the positive control of that pass.
+  # shellcheck disable=SC2086  # the CSV is built from the split port words
+  docker_csv="$(printf '%s\n' $any_ports | LC_ALL=C sort -n -u | paste -s -d, -)"
   local ss_listeners ss_udp fw_state
   ss_listeners="$(ss -ltnH 2>/dev/null | awk '{print $4}' | tr '\n' ' ' | cut -c1-240)"
   ss_udp="$(ss -lunH 2>/dev/null | awk '{print $4}' | tr '\n' ' ' | cut -c1-120)"
@@ -2085,7 +2090,7 @@ phase4_row_w5() {
     return
   fi
   rc_eval=0
-  evidence="$(W5_EXPECTED="$expected_csv" python3 -I - "$result_file" "$fw_state" <<'PYW5' 2>>"$RAW"
+  evidence="$(W5_EXPECTED="$expected_csv" W5_DOCKER="$docker_csv" W5_VM_G6="${VM_G6:-}" python3 -I - "$result_file" "$fw_state" <<'PYW5' 2>>"$RAW"
 import json, os, re, sys
 
 result_file, fw_state = sys.argv[1], sys.argv[2]
@@ -2107,6 +2112,8 @@ v6 = r.get("v6") or {}
 v6_addr = v6.get("address", "")
 v6_class = v6.get("addressClass", "")
 expected = sorted(int(p) for p in re.findall(r"\d+", os.environ.get("W5_EXPECTED", "")))
+docker_published = sorted(int(p) for p in re.findall(r"\d+", os.environ.get("W5_DOCKER", "")))
+vm_g6 = os.environ.get("W5_VM_G6", "")
 if open_set != expected:
     bad.append("observed open set [%s] != derived set [%s]" % (",".join(map(str, open_set)), ",".join(map(str, expected))))
 else:
@@ -2134,13 +2141,21 @@ elif not cert.get("authorized"):
     bad.append("the 443 TLS pin shows authorized=false (%s)" % cert.get("server"))
 else:
     note.append("443 TLS authorized against the pinned certificate (%s, %s)" % (cert.get("protocol"), cert.get("sha256")))
+v6_outcome = {}
 for p in v6entries:
     try:
         port = int(p.get("port"))
     except (TypeError, ValueError):
         continue
-    if port in expected and p.get("outcome") == "open":
+    v6_outcome[port] = p.get("outcome")
+    if port in docker_published and p.get("outcome") == "open":
         bad.append("docker-published port %d is open over IPv6 (lab8 N11a and the M4 sweep observed the [::] docker-proxy path filtered by firewalld's zone)" % port)
+if vm_g6:
+    # sshd's 22 is the positive control: with a global address in the hello the IPv6 pass must reach the guest at all
+    if v6_outcome.get(22, "not-swept") != "open":
+        bad.append("IPv6 positive control: sshd's 22 did not answer over IPv6 (%s)" % v6_outcome.get(22, "not-swept"))
+    else:
+        note.append("22 answers over IPv6 (sshd; M4)")
 leak = r.get("mac_leak_scan") or {}
 if leak.get("hits"):
     bad.append("the agent's mac leak scan found %s hit(s) in %s" % (leak.get("hits"), leak.get("stores")))
@@ -2149,7 +2164,7 @@ print("expected=[%s]" % ",".join(map(str, expected)))
 print("counts=%s" % counts)
 print("control=%s fw=%s" % (spot_by_port.get(111, {}).get("outcome", "not-swept"), fw_state))
 print("cert=%s" % (json.dumps({k: cert.get(k) for k in ("authorized", "protocol", "sha256")}) if cert else "none"))
-print("v6=%s" % ("%s %s open=[%s]" % (v6_class or "?", v6_addr or "?", ",".join(str(p.get("port")) for p in v6entries if p.get("outcome") == "open")) if v6entries else "not-run (no guest IPv6 global address, vm_g6, in the hello)"))
+print("v6=%s" % ("%s %s open=[%s]" % (v6_class or "?", v6_addr or "?", ",".join(str(p.get("port")) for p in v6entries if p.get("outcome") == "open")) if v6entries else ("not-run (the result carries no IPv6 ports although the hello carries vm_g6)" if vm_g6 else "not-run (no guest IPv6 global address, vm_g6, in the hello)")))
 print("spot_not_open=[%s]" % (",".join(str(p) for p in sorted(spot_by_port) if spot_by_port[p].get("outcome") != "open") or "-"))
 print("leak=%s" % ("%s values, %s hits in %s" % (leak.get("values", "?"), leak.get("hits", "?"), ",".join(leak.get("stores", []))) if leak else "no scan in the response"))
 print("notes=%s" % (" | ".join(note) if note else "-"))

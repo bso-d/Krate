@@ -118,6 +118,10 @@ function macIface(vmIp) {
   if (!m) die(`agent: route -n get ${vmIp} names no interface: ` + out.slice(0, 160));
   return m[1]; // M2 observed bridge100
 }
+// The IPv6 target handed to probe.mjs: a global address is routed without a zone (a `%iface` suffix on a
+// non-link-local address may read as no-route-or-scope and make the pass vacuous, TOPOFIX2 PRE-6); only an
+// fe80::/10 address needs the Mac interface as its zone.
+function v6Target(addr, iface) { return /^fe[89ab][0-9a-f]:/i.test(addr) && iface ? `${addr}%${iface}` : addr; }
 function vmGlobal6() {
   const out = sh('limactl', ['shell', VM, '--', 'ip', '-6', 'addr', 'show', 'lima0'], { allowFail: true }).out;
   const m = /inet6\s+([0-9a-fA-F:]+)\/\d+ scope global/.exec(out);
@@ -262,7 +266,7 @@ function runRow(req) {
   if (sub === 'sweep') {
     const argv = [join(HERE, row.script), 'sweep', '--ip', STATE.vmIp, '--host', PUBLIC_HOST, '--spot', row.spot,
       '--cert', certLocal, '--port', String(PORTS[0]), '--out', outDir];
-    if (STATE.g6 && STATE.iface) argv.push('--v6', `${STATE.g6}%${STATE.iface}`);
+    if (STATE.g6) argv.push('--v6', v6Target(STATE.g6, STATE.iface));
     const spawned = spawnSync('node', argv, { encoding: 'utf8', timeout: row.budgetS * 1000, env: { ...process.env, TMPDIR: TMP } });
     const rc = spawned.status === null ? 3 : spawned.status;
     const stdout = (spawned.stdout || '') + (spawned.error ? `\n${String(spawned.error.message || spawned.error)}` : '');

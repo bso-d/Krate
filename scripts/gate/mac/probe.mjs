@@ -3,8 +3,9 @@
 // `sweep`  — from the Mac, a full TCP connect sweep of ports 1-65535 against the VM's vzNAT
 //            address, every probe classified (open / refused / rejected / timeout), a
 //            per-port spot outcome table for the ports the row needs decided (the control
-//            port 111 first among them), a targeted IPv6 pass on the guest's lima0
-//            link-local with the Mac's owning interface in scope, and — when --cert is
+//            port 111 first among them), a targeted IPv6 pass on the guest's lima0 address (the
+//            GLOBAL one without a zone; a link-local only with the Mac's owning interface as its
+//            zone), and — when --cert is
 //            given — the Node TLS pin on --port. TCP only: none of the product's published
 //            ports is UDP; the guest's UDP listeners are printed beside the row by the
 //            runner (F6). Licence: the M4 hand-walk ran this method live (nc -z -G 1,
@@ -134,18 +135,21 @@ async function subSweep() {
   }
   // Targeted IPv6 when the guest carries a link-local/global address on lima0 (M4 probed 22,
   // 80, 443, 111, 3443, 9092; those [::] listeners are docker-proxy's, whose zone behaviour
-  // lab8 N11a recorded: 22 open, published ports refused).
+  // lab8 N11a recorded: 22 open, published ports refused). A zone is valid on an fe80::/10
+  // address only; a global address with a `%iface` suffix is refused (TOPOFIX2 PRE-6).
   if (args.v6) {
     const [ll, iface] = String(args.v6).split('%');
-    if (!iface || !net.isIPv6(ll)) die(`--v6 must be <ipv6>%<mac-iface> (the agent passes the guest's lima0 GLOBAL address from the hello's vm_g6, a class M4 did not probe: M4 probed the link-local %bridge100), got ${args.v6}`);
+    const linkLocal = /^fe[89ab][0-9a-f]:/i.test(ll);
+    if (!net.isIPv6(ll) || (linkLocal && !iface) || (!linkLocal && iface)) die(`--v6 must be a global <ipv6> without a zone (the agent passes the guest's lima0 GLOBAL address from the hello's vm_g6) or an fe80::/10 address with its <mac-iface> zone (M4 probed the link-local %bridge100), got ${args.v6}`);
+    const target = iface ? `${ll}%${iface}` : ll;
     const v6Ports = args['v6-ports'] ? String(args['v6-ports']).split(',').map((s) => Number(s.trim())).filter(Number.isInteger) : [22, 80, 443, 111, 3443, 9092, 9093];
     const v6 = [];
     for (const p of v6Ports) {
-      const r = await connectOnce(`${ll}%${iface}`, p, 6, Math.max(timeoutMs, 3000));
+      const r = await connectOnce(target, p, 6, Math.max(timeoutMs, 3000));
       v6.push({ port: p, outcome: r.outcome });
     }
-    report.v6 = { addressClass: args['v6-class'] || 'global', address: `${ll}%${iface}`, ports: v6 };   // S6: the class is recorded, not assumed
-    report.positives.push(`v6 ${report.v6.addressClass} ${ll}%${iface} open=[${v6.filter((x) => x.outcome === 'open').map((x) => x.port).join(',') || 'none'}]`);
+    report.v6 = { addressClass: args['v6-class'] || (linkLocal ? 'link-local' : 'global'), address: target, ports: v6 };   // S6: the class is recorded, not assumed
+    report.positives.push(`v6 ${report.v6.addressClass} ${target} open=[${v6.filter((x) => x.outcome === 'open').map((x) => x.port).join(',') || 'none'}]`);
   }
   const j = JSON.stringify(report, null, 2);
   writeFileSync(join(OUT, 'w5-result.json'), j + '\n');
