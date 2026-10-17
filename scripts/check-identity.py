@@ -5124,6 +5124,85 @@ def check_monitoring_tables(checks):
           f'{edition}/krate: monitor_prepare must warn when PROM_BIND or LOKI_BIND is not 127.0.0.1')
 
 
+def check_airgap_rows(checks):
+    """The air-gap rows AG1-AG5 (scripts/gate/phase4_airgap.py): the pure helpers behave, a probe that cannot run is FAIL on a bundle
+    host and NOT_RUN on the Mac and on a checkout (never PASS), nothing is left running, and the runner calls the steps where
+    sso/guides/identity-gate.md says."""
+    e = lambda cond, msg: checks.expect(cond, 'air-gap rows: ' + msg)  # noqa: E731
+    helper = ROOT / 'scripts/gate/phase4_airgap.py'
+    spec = importlib.util.spec_from_file_location('phase4_airgap', helper)
+    assert spec is not None and spec.loader is not None
+    m = importlib.util.module_from_spec(spec)
+    keep = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True  # no bytecode next to the helper from a static check
+    try:
+        spec.loader.exec_module(m)
+    finally:
+        sys.dont_write_bytecode = keep
+    e([m.classify_curl(rc)[0] for rc in (0, 7, 28, 56, 127)] == ['leak', 'blocked', 'blocked', 'cannot', 'cannot'],
+      'curl rc 0 is a leak, 7 and 28 are blocked, anything else (a connection may exist, or curl did not run) is not proven')
+    e([m.classify_getent(rc, '')[0] for rc in (0, 2, 1, 127)] == ['leak', 'blocked', 'cannot', 'cannot'], 'getent: 0 leak, 2 blocked, else not proven')
+    e([m.classify_sentinel(rc, out)[0] for rc, out in ((3, 'AGPROBE blocked errno=111'), (0, 'AGPROBE reached'), (1, 'Traceback'), (0, ''))]
+      == ['blocked', 'leak', 'cannot', 'cannot'], 'a container probe is conclusive only through its AGPROBE sentinel line')
+    rules = m.parse_rules('-A OUTPUT -d 192.168.5.2/32 -p udp -m udp --dport 53 -j KRATE-AIRGAP-OUT\n-A OUTPUT -j KRATE-AIRGAP-OUT\n'
+                          '-A KRATE-AIRGAP-OUT -j LOG --log-prefix "krate-airgap-out: "\n-A KRATE-AIRGAP-OUT -j REJECT --reject-with icmp-port-unreachable')
+    e(m.has_catchall(rules, 'OUTPUT', 'KRATE-AIRGAP-OUT') and not m.has_catchall(m.parse_rules('-A OUTPUT -p tcp -j KRATE-AIRGAP-OUT'), 'OUTPUT', 'KRATE-AIRGAP-OUT'),
+      'only a rule without a match is the catch-all jump')
+    e(m.covers(rules, 'OUTPUT', 'KRATE-AIRGAP-OUT', '192.168.5.2', 'udp') and not m.covers(rules, 'OUTPUT', 'KRATE-AIRGAP-OUT', '192.168.5.2', 'tcp'),
+      'a resolver is covered per protocol')
+    e(m.last_target(rules, 'KRATE-AIRGAP-OUT') == 'REJECT', 'a reject chain ends in REJECT')
+    e([m.forward_jump_state(m.parse_rules(text)) for text in ('-A FORWARD -j DOCKER-USER\n-A FORWARD -j DOCKER-FORWARD', '-A FORWARD -j DOCKER-FORWARD',
+                                                              '-A FORWARD -j DOCKER-FORWARD\n-A FORWARD -j DOCKER-USER')] == ['ok', 'missing', 'late'],
+      'FORWARD must jump to DOCKER-USER, and before DOCKER-FORWARD')
+    lines = ['dockerd[1]: msg="[resolver] failed to query external DNS server" question=";config.liquibase.com.\\tIN\\t A"',
+             'dockerd[1]: msg="[resolver] failed to query external DNS server" question=";loki.\\tIN\\t AAAA"',
+             'dockerd[1]: msg="[resolver] failed to query external DNS server" question=";loki.lima.internal.\\tIN\\t A"']
+    public, single = m.split_lookups(m.lookup_names(lines), ['lima.internal'])
+    e(public == {'config.liquibase.com.': 1} and single == {'loki.': 1, 'loki.lima.internal.': 1},
+      'dockerd lookups: a name of two labels is public-looking, a single label (alone or with a search domain) is a service name')
+    e(m.parse_counters('Chain X (1 references)\n pkts bytes target\n  12 960 REJECT all -- * *\n') == {'REJECT': 12} and m.parse_counters('') is None,
+      'unreadable counters are None, never zero')
+    stream = ('{"Type":"volume","Action":"create","Actor":{"ID":"v","Attributes":{}},"timeNano":5}\n{"Type":"volume","Action":"create","Actor":{"ID":"v","Attributes":{}},"timeNano":5}\n'
+              '{"Type":"airgap","Action":"attach","n":2,"ring":7}\n')
+    events, markers, bad = m.parse_stream(stream)
+    e(len(events) == 1 and len(markers) == 1 and bad == 0, 're-attached streams are de-duplicated and the supervisor markers are kept apart')
+    e(m.GETENT_SECONDS <= 6 and m.CONTAINER_PROBE_SECONDS <= 15 and m.DNS_SECONDS <= 6 and m.RING_LIMIT == 256, 'probe bounds and the ring limit')
+    fixture_root = ROOT / 'harness' / 'phase4' / 'path-contract'
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=fixture_root) as tmp:
+        base = Path(tmp)
+        common = ['--state', str(base / 'state'), '--edition-dir', str(base), '--mon-dir', str(base), '--record', str(base / 'none.json'),
+                  '--script', str(base / 'none'), '--boot-id-file', str(base / 'none'), '--resolv-conf', str(base / 'none')]
+        for kind, want in (('bundle', 'FAIL'), ('darwin', 'NOT_RUN'), ('checkout', 'NOT_RUN')):
+            for step, ids in (('before', ('AG1', 'AG4')), ('after', ('AG2', 'AG3', 'AG5'))):
+                proc = subprocess.run([sys.executable, '-I', '-B', str(helper), step, '--host-kind', kind] + common, text=True, capture_output=True, env={'PATH': ''})
+                got = {line.split('\t')[0]: line.split('\t')[1] for line in proc.stdout.splitlines() if line.count('\t') == 2}
+                e(got == {i: want for i in ids}, f'{step} on a {kind} host with no tool must give {want} rows {ids}; got {got}')
+        watcher = base / 'state' / 'watcher.json'
+        if watcher.is_file():  # a step that could not attach must not leave its supervisor running
+            try:
+                os.kill(int(json.loads(watcher.read_text()).get('pid') or 0), 0)
+                e(False, 'a helper step with no tool left its watcher supervisor running')
+            except (OSError, ValueError):
+                pass
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text().splitlines()
+
+    def at(exact):
+        found = [i for i, line in enumerate(runner) if line == exact]
+        e(len(found) == 1, f'the runner must hold exactly one line {exact!r}; found {len(found)}')
+        return found[0] if found else -1
+    e(at('trap on_exit EXIT') < at('airgap_before_rows') < at('run_static'), 'airgap_before_rows runs after the traps and before the first row')
+    esac = max(i for i, line in enumerate(runner) if line == 'esac')
+    e(at('airgap_after_rows') == esac + 1 and runner[esac + 2] == 'FINISHED=true', 'airgap_after_rows runs right after the last slice row, before the teardown')
+    finish = at('finish() {')
+    e(finish >= 0 and runner[finish + 1].strip().startswith('airgap_after_rows exit-path'), 'finish() runs airgap_after_rows exit-path first (a run that ended early)')
+    e(finish >= 0 and runner[finish + 2].strip().startswith('airgap_fill AG1 AG4 AG2 AG3 AG5'), 'finish() then fills the rows an interrupted after step left unrecorded')
+    guide = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    for row in ('AG1', 'AG2', 'AG3', 'AG4', 'AG5'):
+        e(f'| {row} |' in guide, f'sso/guides/identity-gate.md must list {row} in its air-gap table')
+    e('AG1 AG2 AG3 AG4 AG5' in '\n'.join(runner), 'required_ids must hold AG1-AG5 for a bundle host')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
@@ -5131,7 +5210,7 @@ def main():
                   check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,

@@ -381,6 +381,9 @@ required_ids() { # the inventory that decides the verdict, given the flags
     if [[ "$id" == J7 ]] && ! $J7_REQUIRED; then continue; fi
     echo "$id"
   done
+  # The air gap of a bundle host (AG1-AG5, the airgap_* functions): a row that never reports fails the gate there. The Mac and a
+  # git checkout record the rows NOT_RUN outside the inventory.
+  if [[ "$(airgap_host_kind)" == bundle ]]; then for id in AG1 AG2 AG3 AG4 AG5; do echo "$id"; done; fi
   case "$PHASE" in
     1) ;;
     2) for id in "${REQUIRED_P2[@]}"; do echo "$id"; done ;;
@@ -2104,6 +2107,52 @@ run_phase4() { # slice: 4a|4b|4c
   fi
 }
 
+# ═══════════════════════════ air gap (AG1-AG5) ═══════════════════════════
+# A receipt on a bundle host proves the offline condition it claims (owner programme: "Installation/start in the
+# offline test must not fetch missing components"; plan R2b). scripts/gate/phase4_airgap.py runs the probes and
+# decides every row: AG1 and AG4 before the first row, AG2, AG3 and AG5 after the last slice row and before the
+# teardown (a run that ends early runs them from finish()). The Mac and a git checkout record NOT_RUN with the
+# reason; a bundle host never records NOT_RUN or PASS for a probe that could not run.
+airgap_host_kind() { # darwin | bundle | checkout: the host the AG rows run on
+  if [[ "$(uname -s)" == Darwin ]]; then echo darwin
+  elif [[ -n "$REPO_ARG" || -z "$CANDIDATE_GIT_HEAD" ]]; then echo bundle  # an installed bundle: --repo, or no tracked git beside the edition
+  else echo checkout
+  fi
+}
+airgap_fill() { # id...: a row the helper did not return is FAIL on a bundle host and NOT_RUN elsewhere, never absent
+  local id kind; kind="$(airgap_host_kind)"
+  for id in "$@"; do
+    [[ -n "${SEEN[$id]:-}" ]] && continue
+    if [[ "$kind" == bundle ]]; then
+      record "$id" airgap AG FAIL "no air-gap result for $id: the helper returned no row (see the lines above in run.log)"
+    else
+      record "$id" airgap AG NOT_RUN "no air-gap result for $id on a host that is not a bundle host"
+    fi
+  done
+}
+airgap_step() { # before|after [exit-path]: run the helper, record the rows it returns
+  local when="$1" tsv rc
+  local -a extra=()
+  [[ "${2:-}" == exit-path ]] && extra=(--exit-path)
+  tsv="$STATE/airgap-$when.tsv"
+  python3 -I "$GATE_DIR/phase4_airgap.py" "$when" --host-kind "$(airgap_host_kind)" --state "$STATE/airgap" \
+    --edition-dir "$ED" --mon-dir "$MON_DIR" ${extra[@]+"${extra[@]}"} > "$tsv" 2>>"$RAW"; rc=$?
+  log "phase4_airgap.py $when exit=$rc"
+  phase4_ingest "$tsv" airgap '^AG[0-9]+$'
+}
+airgap_before_rows() {
+  section "AG: the air gap before the first row (AG1, AG4)"
+  airgap_step before
+  airgap_fill AG1 AG4
+}
+airgap_after_rows() { # [exit-path]: once per run; after the last slice row, or from finish() when the run ended early
+  [[ "${AIRGAP_AFTER_RAN:-false}" == true ]] && return 0
+  AIRGAP_AFTER_RAN=true
+  section "AG: the air gap after the last row (AG2, AG3, AG5)"
+  airgap_step after "${1:-}"
+  airgap_fill AG1 AG4 AG2 AG3 AG5  # AG1 and AG4 are absent only when the run ended before the before step
+}
+
 # ═══════════════════════════ leak scan, teardown, verdict ═══════════════════════════
 leak_scan() {
   section "Z: secret-leak scan over every captured output, the journal, plan files, receipt files and container logs"
@@ -2217,6 +2266,8 @@ teardown() {
   log "fixture resources left: $left"
 }
 finish() {
+  airgap_after_rows exit-path  # a no-op when the run reached its normal end (it ran before the teardown)
+  airgap_fill AG1 AG4 AG2 AG3 AG5  # a signal during the after step leaves rows unrecorded: a bundle host gets FAIL rows, never absent ones
   local verdict=PASS missing=() id notrun_required=0
   while IFS= read -r id; do
     [[ -n "${SEEN[$id]:-}" ]] || { missing+=("$id"); continue; }
@@ -2302,6 +2353,7 @@ host_conflicts
 open_receipt
 trap on_signal HUP INT TERM
 trap on_exit EXIT
+airgap_before_rows
 run_static
 case "$PHASE" in
   1) run_phase1; run_screenshots; leak_scan Z1 1 ;;
@@ -2313,6 +2365,7 @@ case "$PHASE" in
   # are Z4a/Z4b.
   4a|4b|4c) run_phase1; leak_scan Z1 1; run_phase4 "$PHASE" ;;
 esac
+airgap_after_rows
 FINISHED=true
 trap - EXIT HUP INT TERM
 teardown
