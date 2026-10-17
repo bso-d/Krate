@@ -1439,6 +1439,73 @@ def check_topofix2(checks):
             w6_fields = subprocess.run([bash_t, '-c', script, 'bash', str(response_path)], text=True, capture_output=True).stdout.strip()
         e(w6_fields == '200|krate-gate-w6-0001|https://krate-oi.test/identity/realms/krate|0 values, 0 hits',
           f'w6_response_fields reads all four lines of the helper output (status, ua, issuer, leak); got {w6_fields!r} (T04)')
+
+        # T05 / T17: the runner's own W7 row runs against fake firewall-cmd, systemctl, sudo, ufw and iptables commands. The branch
+        # follows the OS, a RHEL-family host without a running firewalld FAILs, and the docker zone's target must be ACCEPT.
+        os_releases = {
+            'rocky': 'NAME="Rocky Linux"\nID="rocky"\nID_LIKE="rhel centos fedora"\nVERSION_ID="9.8"\n',
+            'alma': 'ID="almalinux"\nID_LIKE="rhel centos fedora"\n',
+            'ubuntu': 'NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"\n',
+            'debian': 'ID=debian\n',
+            'arch': 'ID=arch\n',
+        }
+
+        def w7_case(os_name, firewalld='active', with_firewall_cmd=True, docker_target='ACCEPT', ufw_status='Status: inactive'):
+            with tempfile.TemporaryDirectory() as t05_tmp:
+                base = Path(t05_tmp)
+                fake_bin = base / 'bin'
+                fake_bin.mkdir()
+                (base / 'os-release').write_text(os_releases[os_name])
+                scripts_text = {
+                    'sudo': 'exec "$@"',
+                    'systemctl': 'case "$*" in "is-active firewalld") echo "${FAKE_FIREWALLD:-inactive}" ;; "is-active ufw") echo active ;; esac',
+                    'ufw': 'echo "$FAKE_UFW_STATUS"',
+                    'iptables': 'echo "-P INPUT ACCEPT"',
+                }
+                if with_firewall_cmd:
+                    scripts_text['firewall-cmd'] = (
+                        'case "$*" in\n'
+                        '  *--get-default-zone*) echo public ;;\n'
+                        '  *--get-zone-of-interface=lima0*) echo public ;;\n'
+                        '  *--get-zone-of-interface=*) echo docker ;;\n'
+                        '  *--list-services*) echo "cockpit dhcpv6-client ssh" ;;\n'
+                        '  *--get-policies*) echo "allow-host-ipv6 docker-forwarding docker-to-host" ;;\n'
+                        '  *--info-zone=docker*) printf "docker (active)\\n  target: %s\\n  icmp-block-inversion: no\\n" "$FAKE_DOCKER_TARGET" ;;\n'
+                        'esac')
+                for name, body in scripts_text.items():
+                    (fake_bin / name).write_text('#!/bin/sh\n' + body + '\n')
+                    (fake_bin / name).chmod(0o755)
+                (base / 'krate').write_text('#!/bin/sh\necho "[ok] firewalld active, docker zone present (target ACCEPT)"\n')
+                (base / 'krate').chmod(0o755)
+                script = ('section() { :; }\nrecord() { printf "RECORD %s|%s\\n" "$4" "$5"; }\nRAW=/dev/null; KRATE="$1"; OS_RELEASE_FILE="$2"\n'
+                          'command() { if [[ "$1" == -v && "$2" == firewall-cmd ]]; then [[ -n "${FAKE_FWCMD_PATH:-}" ]] || return 1; echo "$FAKE_FWCMD_PATH"; return 0; fi; builtin command "$@"; }\n'
+                          + bash_function_source(runner_path, 'w7_os_family') + bash_function_source(runner_path, 'phase4_row_w7')
+                          + 'phase4_row_w7 4c\n')
+                env = dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}', FAKE_FIREWALLD=firewalld, FAKE_DOCKER_TARGET=docker_target, FAKE_UFW_STATUS=ufw_status,
+                           FAKE_FWCMD_PATH=str(fake_bin / 'firewall-cmd') if with_firewall_cmd else '')
+                run = subprocess.run([bash_t, '-c', script, 'bash', str(base / 'krate'), str(base / 'os-release')], env=env, text=True, capture_output=True)
+            return (run.stdout + run.stderr).strip()
+
+        e(w7_case('rocky').startswith('RECORD PASS|') and 'docker zone target [ACCEPT]' in w7_case('rocky'),
+          f'W7 on a Rocky fixture with a running firewalld and the docker zone ACCEPT passes and records the target; got {w7_case("rocky")[:300]!r} (T17)')
+        e(w7_case('alma').startswith('RECORD PASS|'), 'W7 treats AlmaLinux (ID_LIKE rhel) as the firewalld branch (T05)')
+        for bad_target in ('DROP', 'REJECT', ''):
+            out_t = w7_case('rocky', docker_target=bad_target)
+            e(out_t.startswith('RECORD FAIL|') and f'docker zone target [{bad_target or "unknown"}]' in out_t,
+              f'W7 fails when the docker zone target is {bad_target or "unreadable"} instead of ACCEPT; got {out_t[:260]!r} (T17)')
+        out_stopped = w7_case('rocky', firewalld='inactive')
+        e(out_stopped.startswith('RECORD FAIL|') and 'RHEL-family fixture without a running firewalld' in out_stopped,
+          f'W7 FAILs a Rocky fixture whose firewalld stopped instead of falling into the ufw shape; got {out_stopped[:260]!r} (T05)')
+        out_missing = w7_case('rocky', firewalld='inactive', with_firewall_cmd=False)
+        e(out_missing.startswith('RECORD FAIL|') and 'RHEL-family fixture without a running firewalld' in out_missing,
+          f'W7 FAILs a Rocky fixture without firewall-cmd; got {out_missing[:260]!r} (T05)')
+        e(w7_case('ubuntu', firewalld='inactive', with_firewall_cmd=False).startswith('RECORD PASS|'), 'W7 passes an Ubuntu fixture whose ufw is inactive, whatever the ufw.service state says (T05/PRE-4)')
+        e(w7_case('debian', firewalld='inactive', with_firewall_cmd=False, ufw_status='Status: active').startswith('RECORD FAIL|'), 'W7 fails a Debian-family fixture whose ufw is active (T05)')
+        out_unknown = w7_case('arch', firewalld='inactive', with_firewall_cmd=False)
+        e(out_unknown.startswith('RECORD FAIL|') and 'unsupported fixture OS' in out_unknown, f'W7 FAILs an unsupported OS (T05); got {out_unknown[:200]!r}')
+    e('local os_family fw_active=false' in topo_runner_text and 'elif [[ "$os_family" == rhel ]] && ! $fw_active; then' in topo_runner_text
+      and "docker_target=\"$(\"${fwcmd[@]}\" --info-zone=docker" in topo_runner_text and '[[ "$docker_target" == ACCEPT ]] || st=1' in topo_runner_text,
+      'W7 selects its branch from the OS and checks the docker zone target (T05, T17)')
     e("agent_request" in topo_runner_text and 'CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request' in topo_runner_text
       and '2>&1)"; rc=$?\n  if [[ -n "$REND_NONCE" ]]' not in topo_runner_text,
       'agent_request no longer merges the requester stderr into CAP (T01)')

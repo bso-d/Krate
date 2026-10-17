@@ -2272,11 +2272,31 @@ phase4_row_w6() {
   fi
 }
 
+w7_os_family() { # rhel | debian | unknown, from ID and ID_LIKE of /etc/os-release (review T05; OS_RELEASE_FILE overrides the path for the checker)
+  local file="${OS_RELEASE_FILE:-/etc/os-release}" ids
+  ids="$(sed -n -E 's/^(ID|ID_LIKE)=//p' "$file" 2>/dev/null | tr -d "\"'" | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')"
+  case " $ids " in
+    *" rhel "* | *" fedora "* | *" centos "* | *" rocky "* | *" almalinux "*) echo rhel ;;
+    *" debian "* | *" ubuntu "*) echo debian ;;
+    *) echo unknown ;;
+  esac
+}
 phase4_row_w7() {
   local slice="$1" st=0 ev=""
   section "W7: firewalld/ufw state as the fixture itself sees it (zone of lima0, no runtime-only edit, no rich rules, the doctor's line)"
-  if command -v firewall-cmd >/dev/null 2>&1 && [[ "$(systemctl is-active firewalld 2>/dev/null || true)" == active ]]; then
-    local fwcmd def zone_lima0 zone_bridge bridge svc_rt svc_perm ports_rt ports_perm proto_rt proto_perm
+  # Review T05: the branch follows the fixture's OS, not the firewall that happens to be running, so a Rocky/RHEL fixture whose
+  # firewalld stopped FAILs here instead of falling into the Ubuntu/ufw shape and passing with no firewall at all.
+  local os_family fw_active=false
+  os_family="$(w7_os_family)"
+  if command -v firewall-cmd >/dev/null 2>&1 && [[ "$(systemctl is-active firewalld 2>/dev/null || true)" == active ]]; then fw_active=true; fi
+  if [[ "$os_family" == unknown ]]; then
+    st=1
+    ev+="unsupported fixture OS (/etc/os-release ID/ID_LIKE are neither RHEL-family nor Debian/Ubuntu): W7 supports RHEL-family hosts with a running firewalld and Debian/Ubuntu hosts with ufw"
+  elif [[ "$os_family" == rhel ]] && ! $fw_active; then
+    st=1
+    ev+="RHEL-family fixture without a running firewalld (firewall-cmd: $(command -v firewall-cmd || echo missing); systemctl is-active firewalld: $(systemctl is-active firewalld 2>/dev/null || echo unknown)): the supported fixture requires it running with lima0 in its default zone"
+  elif [[ "$os_family" == rhel ]]; then
+    local fwcmd def zone_lima0 zone_bridge docker_target bridge svc_rt svc_perm ports_rt ports_perm proto_rt proto_perm
     local icmp_rt icmp_perm rich fwd policies doctor
     fwcmd=(sudo -n firewall-cmd)
     sudo -n true 2>/dev/null || fwcmd=(firewall-cmd)
@@ -2287,6 +2307,10 @@ phase4_row_w7() {
       if [[ -e "$netdev" ]]; then bridge="$(basename "$netdev")"; break; fi
     done
     zone_bridge="$("${fwcmd[@]}" --get-zone-of-interface="${bridge:-none}" 2>>"$RAW" || echo "no bridge interface")"
+    # Review T17: the docker zone must also be ACCEPT (a docker zone changed to DROP/REJECT changes the forwarding behaviour the row
+    # asserts). The query is the doctor's own (epc/krate: firewall-cmd --info-zone=docker); --get-target is a --permanent-only query
+    # (firewall-cmd(1): "--permanent [--zone=zone] --get-target") and the docker zone is runtime-managed.
+    docker_target="$("${fwcmd[@]}" --info-zone=docker 2>>"$RAW" | awk -F': ' '/target:/{print $2}' | tr -d '[:space:]')"
     svc_rt="$("${fwcmd[@]}" --zone="$def" --list-services 2>>"$RAW")"; svc_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-services 2>>"$RAW")"
     ports_rt="$("${fwcmd[@]}" --zone="$def" --list-ports 2>>"$RAW")"; ports_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-ports 2>>"$RAW")"
     proto_rt="$("${fwcmd[@]}" --zone="$def" --list-protocols 2>>"$RAW")"; proto_perm="$("${fwcmd[@]}" --permanent --zone="$def" --list-protocols 2>>"$RAW")"
@@ -2296,9 +2320,10 @@ phase4_row_w7() {
     doctor="$("$KRATE" doctor 2>>"$RAW" | grep -i firewall | head -2 | tr '\n' ' ' || true)"
     [[ "$def" != "?" && "$zone_lima0" == "$def" ]] || st=1
     [[ "$zone_bridge" == "docker" ]] || st=1
+    [[ "$docker_target" == ACCEPT ]] || st=1
     [[ "$svc_rt" == "$svc_perm" && "$ports_rt" == "$ports_perm" && "$proto_rt" == "$proto_perm" && "$icmp_rt" == "$icmp_perm" ]] || st=1
     [[ -z "${rich// /}" && -z "${fwd// /}" ]] || st=1
-    ev+="default zone $def: lima0 in it (M3), bridge ${bridge:-none} in zone $zone_bridge (docker, M4);"
+    ev+="default zone $def: lima0 in it (M3), bridge ${bridge:-none} in zone $zone_bridge (docker, M4), docker zone target [${docker_target:-unknown}] (ACCEPT required);"
     ev+=" runtime==permanent for services/ports/protocols/icmp-blocks (no runtime-only harness edit; docker's interface membership is runtime-managed by design),"
     ev+=" services=[$svc_rt] ports=[$ports_rt];"
     ev+=" rich rules [${rich:-none}] forward-ports [${fwd:-none}] empty;"
