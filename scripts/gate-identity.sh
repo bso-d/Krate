@@ -173,7 +173,7 @@ fi
 # ── browser vantage (TOPOFIX F3/F4/F9): the agent is the VM vantage; its preflight reads the
 # Mac agent's hello here, before anything is started, like the --repo checks above. ──
 case "$BROWSER_MODE" in container|agent) ;; *) echo "--browser must be container or agent: $BROWSER_MODE" >&2; exit 2 ;; esac
-agent_preflight() { # hello younger than 60 s, nonce-bound, skew <= 10 s, private mac_src_ip (F7), and the
+agent_preflight() { # hello younger than 60 s, nonce-bound, skew <= 10 s, mac_src_ip inside 10/8, 172.16/12 or 192.168/16 (F7), and the
   # gate_files digests of the Mac worktree must be exactly this runner's own copies (F4: the Mac
   # runs the very bytes the receipt binds)
   [[ -d "$RENDEZVOUS" ]] || { echo "--rendezvous $RENDEZVOUS is not a directory (scripts/gate/mac/agent.mjs writes agent-hello.json there)" >&2; exit 2; }
