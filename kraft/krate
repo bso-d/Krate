@@ -3856,11 +3856,11 @@ print("\n".join(matches))')" || die "Grafana returned an invalid collision inven
     case "$auth_class" in
       local)
         # Disabled local users still hold the address; preserve the observed remedy.
-        warn "Local Grafana user $login ($state) holds the e-mail of realm user $email: that sign-in fails until the local user is retired"
+        printf '%b  !%b Local Grafana user %s (%s) holds the e-mail of realm user %s: that sign-in fails until the local user is retired\n' "$YELLOW" "$RESET" "$login" "$state" "$email"
         printf '         krate monitor grafana-user retire %q\n' "$login"
         ;;
       external)
-        warn "External Grafana user $login ($state) shares the e-mail $email with a realm user. Its ownership by this realm is unknown; verify its authentication linkage before changing this account."
+        printf '%b  !%b External Grafana user %s (%s) shares the e-mail %s with a realm user. Its ownership by this realm is unknown; verify its authentication linkage before changing this account.\n' "$YELLOW" "$RESET" "$login" "$state" "$email"
         ;;
       *) die "Grafana returned an invalid authentication class" ;;
     esac

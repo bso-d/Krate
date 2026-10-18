@@ -9983,7 +9983,6 @@ def check_grafana_collision_classification(checks):
         "FIXTURE=\"$1\"; IDENTITY_REALM=krate\n"
         "fault() { printf '%s\\n' VF23_UNEXPECTED_ADAPTER_COMMAND >> \"$FIXTURE/fault\"; return 97; }\n"
         "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
-        "warn() { printf '%s\\n' \"$*\" >&2; }\n"
         "env_value() { [[ \"$*\" == KEYCLOAK_CLI_CLIENT_SECRET ]] || { fault; return 97; }; echo public-placeholder; }\n"
         "grafana_admin() {\n"
         "  [[ \"$*\" == local-users ]] || { fault; return 97; }\n"
@@ -10014,6 +10013,41 @@ def check_grafana_collision_classification(checks):
         "\n"
         "class AdapterError(Exception):\n"
         "    \"\"\"A fixture mismatch never counts as a product refusal or mutation kill.\"\"\"\n"
+        "\n"
+        "\n"
+        "def inline_python(fixture):\n"
+        "    \"\"\"Pin inline python3 resolution to this controller in the owned fixture.\"\"\"\n"
+        "    private_bin = fixture / 'bin'\n"
+        "    private_bin.mkdir()\n"
+        "    shim = private_bin / 'python3'\n"
+        "    expected = str(Path(sys.executable).resolve())\n"
+        "    shim.symlink_to(expected)\n"
+        "    probe = subprocess.run(\n"
+        "        [str(shim), '-I', '-B', '-c',\n"
+        "         'import json,sys; from pathlib import Path; '\n"
+        "         'print(json.dumps(dict(resolved_executable=str(Path(sys.executable).resolve()), '\n"
+        "         'version=list(sys.version_info[:3]))))'],\n"
+        "        capture_output=True, text=True, timeout=3)\n"
+        "    try:\n"
+        "        observed = json.loads(probe.stdout)\n"
+        "    except ValueError as error:\n"
+        "        raise AdapterError('inline Python identity receipt invalid') from error\n"
+        "    if (probe.returncode != 0 or probe.stderr or not isinstance(observed, dict)\n"
+        "            or observed.get('resolved_executable') != expected\n"
+        "            or observed.get('version') != list(sys.version_info[:3])):\n"
+        "        raise AdapterError('inline Python does not match controller')\n"
+        "    observed['path_first_python3'] = str(shim)\n"
+        "    return str(private_bin) + os.pathsep + os.defpath, observed\n"
+        "\n"
+        "\n"
+        "def verify_inline_python(identity):\n"
+        "    shim = Path(identity['path_first_python3'])\n"
+        "    expected = str(Path(sys.executable).resolve(strict=True))\n"
+        "    if (not shim.is_symlink() or str(shim.readlink()) != expected\n"
+        "            or str(shim.resolve(strict=True)) != expected\n"
+        "            or identity.get('resolved_executable') != expected\n"
+        "            or identity.get('version') != list(sys.version_info[:3])):\n"
+        "        raise AdapterError('owned inline Python binding changed')\n"
         "\n"
         "\n"
         "def digest(path):\n"
@@ -10155,8 +10189,15 @@ def check_grafana_collision_classification(checks):
         "    run('later-page-failure', pages=[first], fail='/api/users?perpage=1000&page=2', refused=True)\n"
         "\n"
         "\n"
-        "def consumer_rows(path, rows, bash, adapter_negative_control=False):\n"
-        "    function = complete_function(path.read_text(), 'grafana_list_collisions')\n"
+        "def consumer_rows(path, rows, bash, path_value, python_identity, adapter_negative_control=False):\n"
+        "    text = path.read_text()\n"
+        "    function = complete_function(text, 'grafana_list_collisions')\n"
+        "    warns = re.findall(r'^warn\\(\\)[^\\n]*\\n', text, re.M)\n"
+        "    colors = re.findall(r'^if \\[\\[ -t 1 \\]\\]; then\\n(.*?)^else\\n(.*?)^fi\\n', text, re.M | re.S)\n"
+        "    if len(warns) != 1 or len(colors) != 1:\n"
+        "        raise AdapterError('expected unique shipped warn and color branches')\n"
+        "    actual_warn = warns[0]\n"
+        "    non_tty_colors = colors[0][1]\n"
         "    local = {'login': 'disabled-local', 'email': 'disabled@example.test', 'isDisabled': True, 'authClass': 'local'}\n"
         "    external = {'login': 'opaque-external', 'email': 'external@example.test', 'isDisabled': False, 'authClass': 'external'}\n"
         "    cases = []\n"
@@ -10213,8 +10254,8 @@ def check_grafana_collision_classification(checks):
         "                    (fixture / ('page-' + str(offset))).write_text(raw(page))\n"
         "                tail = ('\\ngrafana_list_collisions\\n' if context == 'ordinary' else\n"
         "                        '\\nif grafana_list_collisions; then result=0; else result=$?; fi\\nexit \"$result\"\\n')\n"
-        "                command = [bash, '-c', STUBS + function + tail, 'vf23-collision', str(fixture)]\n"
-        "                environment = {'PATH': str(Path(sys.executable).parent) + os.pathsep + os.defpath,\n"
+        "                command = [bash, '-c', STUBS + non_tty_colors + actual_warn + function + tail, 'vf23-collision', str(fixture)]\n"
+        "                environment = {'PATH': path_value,\n"
         "                               'LANG': 'C', 'LC_ALL': 'C', 'FAKE_FAIL': 'adapter' if adapter_negative_control else item['fail']}\n"
         "                result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=5)\n"
         "                if ((fixture / 'fault').exists() or MARKER in result.stderr\n"
@@ -10226,11 +10267,11 @@ def check_grafana_collision_classification(checks):
         "                              ('no uncaught product exception', not re.search(r'Traceback \\(most recent call last\\)|(?:Syntax|Indentation|Tab)Error:', result.stderr))]\n"
         "                if item['rc']:\n"
         "                    assertions.extend([('no partial retirement advice', 'krate monitor grafana-user retire ' not in result.stdout),\n"
-        "                                       ('no partial local warning', 'Local Grafana user ' not in result.stderr),\n"
-        "                                       ('no partial external warning', 'External Grafana user ' not in result.stderr)])\n"
+        "                                       ('no partial local warning', 'Local Grafana user ' not in result.stdout),\n"
+        "                                       ('no partial external warning', 'External Grafana user ' not in result.stdout)])\n"
         "                else:\n"
-        "                    local_lines = [line for line in result.stderr.splitlines() if line.startswith('Local Grafana user ')]\n"
-        "                    external_lines = [line for line in result.stderr.splitlines() if line.startswith('External Grafana user ')]\n"
+        "                    local_lines = [line for line in result.stdout.splitlines() if line.startswith('  ! Local Grafana user ')]\n"
+        "                    external_lines = [line for line in result.stdout.splitlines() if line.startswith('  ! External Grafana user ')]\n"
         "                    retire_lines = [line for line in result.stdout.splitlines() if 'krate monitor grafana-user retire ' in line]\n"
         "                    assertions.extend([('exact local warning population', len(local_lines) == len(item['local_names'])),\n"
         "                                       ('exact external warning population', len(external_lines) == len(item['external_names'])),\n"
@@ -10250,17 +10291,23 @@ def check_grafana_collision_classification(checks):
         "                if 'login' in calls and item['fail'] != 'login':\n"
         "                    assertions.append(('own Keycloak session logged out once', calls.count('logout') == 1))\n"
         "                add_row(rows, path, context + '/' + item['name'], assertions,\n"
-        "                        {'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr, 'calls': calls})\n"
+        "                        {'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr, 'calls': calls, 'inline_python': python_identity})\n"
         "\n"
         "\n"
         "def worker(args):\n"
         "    paths = [args.admin, *args.cli]\n"
         "    before = {str(path): digest(path) for path in paths}\n"
         "    rows, errors = [], []\n"
+        "    runtime_ok = False\n"
         "    try:\n"
-        "        producer_rows(args.admin, rows)\n"
-        "        for path in args.cli:\n"
-        "            consumer_rows(path, rows, args.bash, args.adapter_negative_control)\n"
+        "        with tempfile.TemporaryDirectory(prefix='python-runtime-', dir=PURPOSE) as runtime_directory:\n"
+        "            path_value, python_identity = inline_python(Path(runtime_directory))\n"
+        "            verify_inline_python(python_identity)\n"
+        "            producer_rows(args.admin, rows)\n"
+        "            for path in args.cli:\n"
+        "                consumer_rows(path, rows, args.bash, path_value, python_identity, args.adapter_negative_control)\n"
+        "            verify_inline_python(python_identity)\n"
+        "            runtime_ok = True\n"
         "    except Exception as failure:\n"
         "        errors.append(type(failure).__name__)\n"
         "    unchanged = before == {str(path): digest(path) for path in paths}\n"
@@ -10270,7 +10317,7 @@ def check_grafana_collision_classification(checks):
         "              'assertions': sum(len(row['assertions']) for row in rows), 'failed_assertions': failed,\n"
         "              'semantic_failed_assertions': sum(row['failed_assertions'] for row in rows if not row['product_exception']),\n"
         "              'product_exception_rows': [row['condition'] for row in rows if row['product_exception']],\n"
-        "              'harness_errors': errors}\n"
+        "              'harness_errors': errors, 'inline_python_unchanged': runtime_ok}\n"
         "    print(json.dumps(report, sort_keys=True))\n"
         "    return 2 if status == 'HARNESS_ERROR' else (1 if failed else 0)\n"
         "\n"
@@ -10374,6 +10421,7 @@ def check_grafana_collision_classification(checks):
             checks.expect(False, 'Grafana collision adapter must return a JSON receipt')
             return
         if not checks.expect(isinstance(report, dict) and not report.get('harness_errors')
+                             and report.get('inline_python_unchanged') is True
                              and child.returncode in (0, 1) and report.get('status') in ('PASS', 'FAIL'),
                              'Grafana collision adapter must reach semantic assertions'):
             return
@@ -10399,6 +10447,13 @@ def check_grafana_collision_classification(checks):
         for row in rows:
             checks.expect(row.get('source_sha256') == before.get(row.get('source')),
                           'Grafana collision row must bind exact source bytes')
+            if row.get('source') in (str(source_paths[1]), str(source_paths[2])):
+                observed = row.get('observed')
+                identity = observed.get('inline_python') if isinstance(observed, dict) else None
+                checks.expect(isinstance(identity, dict)
+                              and identity.get('resolved_executable') == str(Path(sys.executable).resolve())
+                              and identity.get('version') == list(sys.version_info[:3]),
+                              'Grafana collision inline Python must match the actual controller')
             assertions = row.get('assertions')
             if not checks.expect(isinstance(assertions, list) and assertions
                                  and all(isinstance(item, dict) and type(item.get('passed')) is bool for item in assertions),
@@ -10416,11 +10471,369 @@ def check_grafana_collision_classification(checks):
         checks.expect((child.returncode, report.get('status'), failed) == (0, 'PASS', 0),
                       'Grafana collision behavior requires actual semantic PASS')
 
+def check_grafana_collision_warning_rendering(checks):
+    """Literal account data must survive the actual collision warning renderer."""
+    import signal
+
+    bash = bash_binary()
+    if not checks.expect(bash is not None, 'Grafana warning regressions require Bash'):
+        return
+    program = (
+        "\"\"\"Full shipped collision rendering with actual warn and source-selected color constants.\n"
+        "\n"
+        "Manual observations precede this file: ROOT-MANUAL-WARN-REPRO.json and\n"
+        "ROOT-MANUAL-ANSI-WARN-CONTROL.json. Controlled ANSI constants are not native TTY proof.\n"
+        "\"\"\"\n"
+        "import argparse\n"
+        "import hashlib\n"
+        "import json\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "import re\n"
+        "import signal\n"
+        "import subprocess\n"
+        "import sys\n"
+        "import tempfile\n"
+        "\n"
+        "PURPOSE = Path(__file__).resolve().parent\n"
+        "MARKER = 'COLLISION_WARNING_ADAPTER_ERROR'\n"
+        "STUBS = r'''\n"
+        "set -euo pipefail\n"
+        "FIXTURE=\"$1\"; IDENTITY_REALM=krate\n"
+        "fault() { printf '%s\\n' COLLISION_WARNING_ADAPTER_ERROR >> \"$FIXTURE/fault\"; return 97; }\n"
+        "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+        "env_value() { [[ \"$*\" == KEYCLOAK_CLI_CLIENT_SECRET ]] || { fault; return 97; }; printf '%s\\n' public-placeholder; }\n"
+        "grafana_admin() {\n"
+        "  [[ \"$*\" == local-users ]] || { fault; return 97; }\n"
+        "  [[ \"$FAKE_ADAPTER\" != yes ]] || { fault; return 97; }\n"
+        "  printf '%s\\n' users >> \"$FIXTURE/calls\"\n"
+        "  cat \"$FIXTURE/users\"\n"
+        "}\n"
+        "kcadm_login() {\n"
+        "  [[ \"$*\" == 'krate client krate-cli public-placeholder' ]] || { fault; return 97; }\n"
+        "  printf '%s\\n' login >> \"$FIXTURE/calls\"\n"
+        "}\n"
+        "kcadm_logout() { printf '%s\\n' logout >> \"$FIXTURE/calls\"; }\n"
+        "kcadm() {\n"
+        "  [[ \"$*\" == '-- get users -r krate --offset 0 --limit 100 --fields email' ]] || { fault; return 97; }\n"
+        "  printf '%s\\n' page >> \"$FIXTURE/calls\"\n"
+        "  cat \"$FIXTURE/page\"\n"
+        "}\n"
+        "'''\n"
+        "\n"
+        "\n"
+        "class AdapterError(Exception):\n"
+        "    \"\"\"Fixture/transport/source errors cannot become semantic mutation kills.\"\"\"\n"
+        "\n"
+        "\n"
+        "def inline_python(fixture):\n"
+        "    \"\"\"Pin inline python3 resolution to this controller in the owned fixture.\"\"\"\n"
+        "    private_bin = fixture / 'bin'\n"
+        "    private_bin.mkdir()\n"
+        "    shim = private_bin / 'python3'\n"
+        "    expected = str(Path(sys.executable).resolve())\n"
+        "    shim.symlink_to(expected)\n"
+        "    probe = subprocess.run(\n"
+        "        [str(shim), '-I', '-B', '-c',\n"
+        "         'import json,sys; from pathlib import Path; '\n"
+        "         'print(json.dumps(dict(resolved_executable=str(Path(sys.executable).resolve()), '\n"
+        "         'version=list(sys.version_info[:3]))))'],\n"
+        "        capture_output=True, text=True, timeout=3)\n"
+        "    try:\n"
+        "        observed = json.loads(probe.stdout)\n"
+        "    except ValueError as error:\n"
+        "        raise AdapterError('inline Python identity receipt invalid') from error\n"
+        "    if (probe.returncode != 0 or probe.stderr or not isinstance(observed, dict)\n"
+        "            or observed.get('resolved_executable') != expected\n"
+        "            or observed.get('version') != list(sys.version_info[:3])):\n"
+        "        raise AdapterError('inline Python does not match controller')\n"
+        "    observed['path_first_python3'] = str(shim)\n"
+        "    return str(private_bin) + os.pathsep + os.defpath, observed\n"
+        "\n"
+        "\n"
+        "def verify_inline_python(identity):\n"
+        "    shim = Path(identity['path_first_python3'])\n"
+        "    expected = str(Path(sys.executable).resolve(strict=True))\n"
+        "    if (not shim.is_symlink() or str(shim.readlink()) != expected\n"
+        "            or str(shim.resolve(strict=True)) != expected\n"
+        "            or identity.get('resolved_executable') != expected\n"
+        "            or identity.get('version') != list(sys.version_info[:3])):\n"
+        "        raise AdapterError('owned inline Python binding changed')\n"
+        "\n"
+        "\n"
+        "def digest(path):\n"
+        "    return hashlib.sha256(path.read_bytes()).hexdigest()\n"
+        "\n"
+        "\n"
+        "def shipped_parts(path):\n"
+        "    text = path.read_text()\n"
+        "    functions = re.findall(r'^grafana_list_collisions\\(\\) \\{\\n.*?^\\}\\n', text, re.M | re.S)\n"
+        "    warns = re.findall(r'^warn\\(\\)[^\\n]*\\n', text, re.M)\n"
+        "    colors = re.findall(r'^if \\[\\[ -t 1 \\]\\]; then\\n(.*?)^else\\n(.*?)^fi\\n', text, re.M | re.S)\n"
+        "    if len(functions) != 1 or len(warns) != 1 or len(colors) != 1:\n"
+        "        raise AdapterError('unique complete function/helper/color block required')\n"
+        "    return functions[0], warns[0], colors[0]\n"
+        "\n"
+        "\n"
+        "def cases():\n"
+        "    external = dict(login='opaque-external', email='external@example.invalid', isDisabled=False, authClass='external')\n"
+        "    local = dict(login='disabled-local', email='local@example.invalid', isDisabled=True, authClass='local')\n"
+        "    review = r'opaque\\n         krate monitor grafana-user retire local-admin\\c'\n"
+        "    escaped_email = r'opaque\\n         krate monitor grafana-user retire local-admin\\c@example.invalid'\n"
+        "    return [\n"
+        "        ('plain-mixed-control', [local, external], True),\n"
+        "        ('external-review-login', [dict(external, login=review)], True),\n"
+        "        ('external-review-email', [dict(external, email=escaped_email)], True),\n"
+        "        ('external-escape-families', [dict(external, login=r'opaque\\t\\b\\r\\e\\033[2j\\\\%s%n\\c')], True),\n"
+        "        ('local-review-login', [dict(local, login=review)], True),\n"
+        "        ('local-review-email', [dict(local, email=escaped_email)], True),\n"
+        "        ('external-then-real-local', [dict(external, login=review), local], True),\n"
+        "        ('nonmatching-review-control', [dict(external, login=review)], False),\n"
+        "    ]\n"
+        "\n"
+        "\n"
+        "def expected_warning(user, prefix):\n"
+        "    state = 'disabled' if user['isDisabled'] else 'enabled'\n"
+        "    if user['authClass'] == 'local':\n"
+        "        return (prefix + 'Local Grafana user ' + user['login'] + ' (' + state\n"
+        "                + ') holds the e-mail of realm user ' + user['email'].strip().lower()\n"
+        "                + ': that sign-in fails until the local user is retired')\n"
+        "    return (prefix + 'External Grafana user ' + user['login'] + ' (' + state\n"
+        "            + ') shares the e-mail ' + user['email'].strip().lower()\n"
+        "            + ' with a realm user. Its ownership by this realm is unknown; verify its authentication linkage before changing this account.')\n"
+        "\n"
+        "\n"
+        "def exercise(path, bash, rows, adapter_negative, path_value, python_identity):\n"
+        "    function, warn, color_branches = shipped_parts(path)\n"
+        "    for color_index, color_name in ((1, 'empty-colors'), (0, 'controlled-ANSI-colors')):\n"
+        "        # Execute exact source assignments from the selected branch, not invented constants.\n"
+        "        color_source = color_branches[color_index]\n"
+        "        prefix = '  ! ' if color_index else '\\033[1;33m  !\\033[0m '\n"
+        "        for context in ('ordinary', 'conditional'):\n"
+        "            for name, users, matching in cases():\n"
+        "                with tempfile.TemporaryDirectory(prefix='warning-', dir=PURPOSE) as directory:\n"
+        "                    fixture = Path(directory)\n"
+        "                    (fixture / 'users').write_text(json.dumps(users))\n"
+        "                    page = [{'email': user['email']} for user in users] if matching else [{'email': 'different@example.invalid'}]\n"
+        "                    (fixture / 'page').write_text(json.dumps(page))\n"
+        "                    tail = ('\\ngrafana_list_collisions\\n' if context == 'ordinary' else\n"
+        "                            '\\nif grafana_list_collisions; then rc=0; else rc=$?; fi\\nexit \"$rc\"\\n')\n"
+        "                    command = [bash, '-c', STUBS + color_source + warn + function + tail,\n"
+        "                               'shipped-collision-warning', str(fixture)]\n"
+        "                    environment = {'PATH': path_value,\n"
+        "                                   'LANG': 'C', 'LC_ALL': 'C',\n"
+        "                                   'FAKE_ADAPTER': 'yes' if adapter_negative else 'no'}\n"
+        "                    completed = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=3)\n"
+        "                    if ((fixture / 'fault').exists() or MARKER in completed.stderr or completed.returncode not in (0, 1)\n"
+        "                            or re.search(r'command not found|unbound variable|syntax error|Traceback \\(most recent call last\\)|(?:Syntax|Indentation|Tab)Error:', completed.stderr)):\n"
+        "                        raise AdapterError('unexpected adapter/source/child failure')\n"
+        "                    calls = (fixture / 'calls').read_text().splitlines() if (fixture / 'calls').exists() else []\n"
+        "                    visible = users if matching else []\n"
+        "                    wanted = [expected_warning(user, prefix) for user in visible]\n"
+        "                    lines = completed.stdout.splitlines()\n"
+        "                    warnings = [line for line in lines if line.startswith(prefix)]\n"
+        "                    genuine = [line for line in lines if line.startswith('         krate monitor grafana-user retire ')]\n"
+        "                    local_count = sum(user['authClass'] == 'local' for user in visible)\n"
+        "                    checks = [\n"
+        "                        ('exact success status', completed.returncode == 0),\n"
+        "                        ('real warning channel is stdout', completed.stderr == ''),\n"
+        "                        ('complete literal warning rows', warnings == wanted),\n"
+        "                        ('exact line framing', len(lines) == len(wanted) + local_count),\n"
+        "                        ('only local genuine retirement commands', len(genuine) == local_count),\n"
+        "                        ('no forged standalone local-admin advice',\n"
+        "                         '         krate monitor grafana-user retire local-admin' not in lines),\n"
+        "                        ('own session cleanup and boundaries', calls == ['users', 'login', 'page', 'logout']),\n"
+        "                    ]\n"
+        "                    for user in visible:\n"
+        "                        if user['authClass'] == 'external':\n"
+        "                            checks.append(('external ownership warning survives', expected_warning(user, prefix) in lines))\n"
+        "                        elif user['login'] == 'disabled-local':\n"
+        "                            checks.append(('normal disabled-local remedy retained',\n"
+        "                                           '         krate monitor grafana-user retire disabled-local' in lines))\n"
+        "                    rows.append({'source': str(path), 'condition': color_name + '/' + context + '/' + name,\n"
+        "                                 'assertions': len(checks), 'failed': [label for label, passed in checks if not passed],\n"
+        "                                 'stdout': completed.stdout, 'stderr': completed.stderr,\n"
+        "                                 'returncode': completed.returncode, 'calls': calls, 'inline_python': python_identity})\n"
+        "\n"
+        "\n"
+        "def worker(args):\n"
+        "    before = {str(path): digest(path) for path in args.cli}\n"
+        "    rows, errors = [], []\n"
+        "    runtime_ok = False\n"
+        "    try:\n"
+        "        with tempfile.TemporaryDirectory(prefix='python-runtime-', dir=PURPOSE) as runtime_directory:\n"
+        "            path_value, python_identity = inline_python(Path(runtime_directory))\n"
+        "            verify_inline_python(python_identity)\n"
+        "            for path in args.cli:\n"
+        "                exercise(path, args.bash, rows, args.adapter_negative_control, path_value, python_identity)\n"
+        "            verify_inline_python(python_identity)\n"
+        "            runtime_ok = True\n"
+        "    except Exception as error:\n"
+        "        errors.append(type(error).__name__)\n"
+        "    unchanged = before == {str(path): digest(path) for path in args.cli}\n"
+        "    if not unchanged:\n"
+        "        errors.append('SourceChanged')\n"
+        "    failures = sum(len(row['failed']) for row in rows)\n"
+        "    result = {'status': 'HARNESS_ERROR' if errors else ('FAIL' if failures else 'PASS'),\n"
+        "              'source_sha256': before, 'source_unchanged': unchanged, 'rows': rows,\n"
+        "              'cases': len(rows), 'assertions': sum(row['assertions'] for row in rows),\n"
+        "              'inline_python_unchanged': runtime_ok,\n"
+        "              'failed_assertions': failures, 'harness_errors': errors,\n"
+        "              'color_scope': 'source-selected constants; not native TTY branch selection'}\n"
+        "    print(json.dumps(result, sort_keys=True))\n"
+        "    return 2 if errors else (1 if failures else 0)\n"
+        "\n"
+        "\n"
+        "def controller(args):\n"
+        "    command = [sys.executable, '-I', '-B', str(Path(__file__).resolve()), '--worker', '--bash', args.bash]\n"
+        "    for path in args.cli:\n"
+        "        command.extend(['--cli', str(path)])\n"
+        "    if args.adapter_negative_control:\n"
+        "        command.append('--adapter-negative-control')\n"
+        "    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)\n"
+        "    output = errors = b''\n"
+        "    failure = None\n"
+        "    cleanup = {'group_signal_sent_or_absent': False, 'direct_child_reaped': False}\n"
+        "    try:\n"
+        "        output, errors = process.communicate(timeout=35)\n"
+        "    except subprocess.SubprocessError as error:\n"
+        "        failure = type(error).__name__\n"
+        "    finally:\n"
+        "        try:\n"
+        "            try:\n"
+        "                os.killpg(process.pid, signal.SIGKILL)\n"
+        "            except ProcessLookupError:\n"
+        "                pass\n"
+        "            cleanup['group_signal_sent_or_absent'] = True\n"
+        "        finally:\n"
+        "            try:\n"
+        "                output, errors = process.communicate(timeout=5)\n"
+        "                cleanup['direct_child_reaped'] = process.returncode is not None\n"
+        "            except subprocess.SubprocessError as error:\n"
+        "                failure = type(error).__name__\n"
+        "    try:\n"
+        "        value = json.loads(output)\n"
+        "        if (failure is not None or errors or process.returncode not in (0, 1, 2)\n"
+        "                or not cleanup['direct_child_reaped'] or not cleanup['group_signal_sent_or_absent']\n"
+        "                or not isinstance(value, dict)):\n"
+        "            raise AdapterError('worker transport failed')\n"
+        "    except (ValueError, TypeError, AdapterError):\n"
+        "        value = {'status': 'HARNESS_ERROR', 'harness_errors': [failure or 'WorkerProtocol'],\n"
+        "                 'failed_assertions': 0, 'rows': [], 'source_unchanged': False}\n"
+        "    value['owned_worker'] = cleanup\n"
+        "    print(json.dumps(value, sort_keys=True))\n"
+        "    return 2 if value['status'] == 'HARNESS_ERROR' else (1 if value['status'] == 'FAIL' else 0)\n"
+        "\n"
+        "\n"
+        "def main():\n"
+        "    parser = argparse.ArgumentParser(description=__doc__)\n"
+        "    parser.add_argument('--cli', type=Path, action='append', required=True)\n"
+        "    parser.add_argument('--bash', required=True)\n"
+        "    parser.add_argument('--adapter-negative-control', action='store_true')\n"
+        "    parser.add_argument('--worker', action='store_true')\n"
+        "    args = parser.parse_args()\n"
+        "    return worker(args) if args.worker else controller(args)\n"
+        "\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main())\n"
+    )
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    source_paths = [ROOT / edition / 'krate' for edition in EDITIONS]
+    before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
+    with tempfile.TemporaryDirectory(prefix='grafana-warning-', dir=fixture_base) as directory:
+        runner = Path(directory) / 'focused-warning.py'
+        runner.write_text(program)
+        command = [sys.executable, '-I', '-B', str(runner), '--worker', '--bash', bash]
+        for path in source_paths:
+            command.extend(['--cli', str(path)])
+        try:
+            child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, start_new_session=True)
+        except OSError:
+            checks.expect(False, 'Grafana warning adapter could not start its owned group')
+            return
+        timed_out, cleanup_ok = False, True
+        stdout = stderr = ''
+        try:
+            stdout, stderr = child.communicate(timeout=35)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                cleanup_ok = False
+            try:
+                stdout, stderr = child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                cleanup_ok = False
+                child.kill()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    cleanup_ok = False
+        if not checks.expect(cleanup_ok and not timed_out and stderr == '',
+                             'Grafana warning adapter must finish and retire its owned group'):
+            return
+        try:
+            report = json.loads(stdout)
+        except ValueError:
+            checks.expect(False, 'Grafana warning adapter must return a JSON receipt')
+            return
+        if not checks.expect(isinstance(report, dict) and report.get('harness_errors') == []
+                             and report.get('inline_python_unchanged') is True
+                             and child.returncode in (0, 1) and report.get('status') in ('PASS', 'FAIL'),
+                             'Grafana warning adapter must reach semantic assertions'):
+            return
+        checks.expect(report.get('source_sha256') == before and report.get('source_unchanged') is True,
+                      'Grafana warning receipt must bind unchanged complete current sources')
+        checks.expect(before == {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths},
+                      'Grafana warning sources must remain unchanged')
+        rows = report.get('rows')
+        if not isinstance(rows, list):
+            checks.expect(False, 'Grafana warning adapter must return a row list')
+            return
+        if not checks.expect(len(rows) == 64 and all(isinstance(row, dict) for row in rows),
+                             'Grafana warning adapter must retain all64 planned rows'):
+            return
+        counts = {str(path): sum(row.get('source') == str(path) for row in rows) for path in source_paths}
+        checks.expect(counts == {str(path): 32 for path in source_paths},
+                      'Grafana warning matrix requires both editions, colors and invocation contexts')
+        if not checks.expect(all(isinstance(row.get('source'), str) and isinstance(row.get('condition'), str) for row in rows),
+                             'Grafana warning source and condition keys must be strings'):
+            return
+        checks.expect(len({(row['source'], row['condition']) for row in rows}) == 64,
+                      'Grafana warning condition/source keys must be unique')
+        failed = total = 0
+        for row in rows:
+            count, failures = row.get('assertions'), row.get('failed')
+            if not checks.expect(type(count) is int and count >= 7 and isinstance(failures, list)
+                                 and all(isinstance(item, str) for item in failures) and len(failures) <= count,
+                                 'Grafana warning row accounting must be explicit'):
+                continue
+            identity = row.get('inline_python')
+            checks.expect(isinstance(identity, dict)
+                          and identity.get('resolved_executable') == str(Path(sys.executable).resolve())
+                          and identity.get('version') == list(sys.version_info[:3]),
+                          'Grafana warning inline Python must match the actual controller')
+            failed += len(failures)
+            total += count
+            checks.expect(not failures, 'Grafana warning: %s: %s' % (row['condition'], ', '.join(failures)))
+        checks.expect(report.get('cases') == 64 and report.get('failed_assertions') == failed
+                      and report.get('assertions') == total,
+                      'Grafana warning aggregate accounting must agree')
+        checks.expect((child.returncode, report.get('status'), failed) == (0, 'PASS', 0),
+                      'Grafana warning rendering requires actual semantic PASS')
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_collision_classification, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
+                  check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_collision_classification, check_grafana_collision_warning_rendering, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
                   check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
