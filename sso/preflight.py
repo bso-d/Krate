@@ -465,6 +465,8 @@ def validate_broker(root, env, origin, secrets, require_secret=True):
     plan_file = root / identity.BROKER_PLAN
     try:
         plan = identity.broker_plan(plan_file)
+    except identity.MfaStanceError as exc:  # complete already: it names both options and the way back
+        raise Preflight(str(exc)) from None
     except ValueError as exc:  # broker_plan's messages name keys and aliases, never a value
         raise Preflight(f'{exc}; regenerate it: remove auth/ui/runtime.yml and {identity.BROKER_PLAN}, then krate auth configure <site.json>') from None
     if require_secret and identity.BROKER_SECRET_KEY not in secrets:

@@ -2100,6 +2100,25 @@ cmd_identity_users() {
 # Change a Keycloak credential in its authoritative store first, then in .env,
 # then recreate the consumer and verify. A value is generated unless --value
 # reads one from stdin (never from an argument).
+# `identity rotate` of a secret the plan carries ends in a read of the PingFederate plan: the
+# provider update (PING_KEYCLOAK_CLIENT_SECRET) or the preflight of the kafka-ui recreate
+# (KEYCLOAK_KAFBAT_CLIENT_SECRET in runtime.yml mode). Both come after the first write, and both
+# refuse a plan that states no MFA stance, so the plan is read through the same validator
+# (identity.py broker_plan) before preparation syncs image pins in .env: a refusal leaves .env, Keycloak and the
+# containers as they were.
+identity_rotate_plan_check() {
+  local plan="$SCRIPT_DIR/$IDENTITY_IDP_PLAN"
+  case "$1" in
+    PING_KEYCLOAK_CLIENT_SECRET) ;;
+    KEYCLOAK_KAFBAT_CLIENT_SECRET) [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml ]] || return 0 ;;
+    *) return 0 ;;
+  esac
+  [[ -f "$plan" ]] || return 0
+  command -v python3 >/dev/null || die "python3 is required for krate identity"
+  python3 "$(sso_dir)/identity.py" broker --plan "$plan" provider >/dev/null \
+    || die "Nothing was rotated: $IDENTITY_IDP_PLAN is refused (see above). Fix the site file, run krate auth configure <site.json>, then rotate again."
+}
+
 cmd_identity_rotate() {
   local key="${1:-}" value state client cid id json q
   case "$key" in
@@ -2110,6 +2129,7 @@ cmd_identity_rotate() {
     *) die "Usage: krate identity rotate {KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET} [--value] | PING_KEYCLOAK_CLIENT_SECRET --value" ;;
   esac
   [[ $# -eq 1 || "${2:-}" == --value ]] || die "Usage: krate identity rotate <KEY> [--value]   (--value reads the new value from stdin)"
+  identity_rotate_plan_check "$key"
   prepare_identity_env; require_env
   identity_lock
   state="$(identity_state)" || exit 1
@@ -3627,6 +3647,133 @@ monitor_realm_refresh() {
   monitor_grafana_seed_renew
 }
 
+# ─── Grafana sessions across a sign-in switch ────────────────────────────────
+# Grafana keeps its sessions in its own database, which survives the recreate that applies
+# another GRAFANA_AUTH_CONFIG, and the browser's session cookie names no port: a session made
+# with Grafana's own login kept working at the Krate sign-in address after the switch to
+# realm.ini (seen live, 2026-10-17: the local admin's session, created before the switch, was
+# still active after it). Krate sign-in means Krate sign-in only, so `monitor up` ends the
+# sessions the new sign-in does not allow:
+#   to realm.ini    every user's sessions, BEFORE the recreate: only the local admin's Basic
+#                   login can end them, and realm mode turns it off;
+#   from realm.ini  external-login users' sessions, right AFTER the recreate, with the same
+#                   Basic login.
+# Both go through Grafana's admin API (monitoring/grafana-admin.py end-sessions). A sign-in is
+# "realm" for realm.ini and "local" for any other file (Grafana's own login, whatever site file
+# carries it). The sign-ins whose sessions the database may hold are kept in GRAFANA_AUTH_APPLIED
+# ("local", "realm" or "local,realm"), widened by the one the container runs: a run that is
+# refused or stops half-way leaves the sign-in it still owes in that record, so the next run
+# repeats the step instead of finding nothing to do.
+
+# The sign-in file Grafana's container was created with, read from its own GF_PATHS_CONFIG
+# through a template that prints that one variable: the admin password sits in the same
+# environment and never leaves docker. Empty when there is no such container.
+monitor_grafana_auth_running() {
+  local name="krate-${KRATE_VARIANT}-monitoring-grafana" inventory line id="" selected state config value
+  # The name filter is a substring filter: select the exact name below. A failed list
+  # is UNKNOWN, never the successful absence of a container. Include stopped containers.
+  inventory="$(docker container ls --all --no-trunc --filter "name=$name" \
+    --format '{{.ID}} {{.Names}}' 2>/dev/null)" || return 1
+  if [[ -n "$inventory" ]]; then
+    while IFS= read -r line; do
+      [[ "$line" =~ ^([0-9a-f]{64})\ ([A-Za-z0-9][A-Za-z0-9_.-]*)$ ]] || return 1
+      if [[ "${BASH_REMATCH[2]}" == "$name" ]]; then
+        [[ -z "$id" ]] || return 1
+        id="${BASH_REMATCH[1]}"
+      fi
+    done <<< "$inventory"
+  fi
+  [[ -n "$id" ]] || return 0
+  # Inspect the validated ID, not the name again; disappearance is UNKNOWN. Emit only
+  # state and the selected key, never the environment containing the admin password.
+  selected="$(docker container inspect -f '{{.State.Status}}
+{{range .Config.Env}}{{with split . "="}}{{if eq (index . 0) "GF_PATHS_CONFIG"}}{{if eq (len .) 2}}{{index . 0}}={{index . 1}}{{println}}{{else}}INVALID_SELECTED_ENV_SHAPE{{println}}{{end}}{{end}}{{end}}{{end}}' "$id" 2>/dev/null)" || return 1
+  [[ "$selected" == *$'\n'* ]] || return 1
+  state="${selected%%$'\n'*}"
+  config="${selected#*$'\n'}"
+  case "$state" in
+    created|running|paused|restarting|removing|exited|dead) ;;
+    *) return 1 ;;
+  esac
+  [[ "$config" =~ ^GF_PATHS_CONFIG=/etc/krate/auth/([A-Za-z0-9_.-]+)$ ]] || return 1
+  value="${BASH_REMATCH[1]}"
+  [[ "$value" != . && "$value" != .. ]] || return 1
+  printf '%s\n' "$value"
+  return 0
+}
+
+# The sign-in of a Grafana config file: "realm" for realm.ini, "local" for any other file, and
+# nothing for no file.
+monitor_grafana_class() {
+  case "${1:-}" in
+    "") ;;
+    realm.ini) echo realm ;;
+    *) echo local ;;
+  esac
+}
+
+# The sign-ins whose sessions Grafana's database may hold ("local", "realm" or "local,realm"):
+# supplied record, known running class and optional target. Empty for a Grafana
+# that never ran: successful absent discovery and no applied record.
+monitor_grafana_holders() {
+  # Pure merge of the staged record ($1), known running class ($2), and optional
+  # target ($3). No Docker call can replace the caller's single discovery snapshot.
+  local joined=",${1:-},${2:-},${3:-}," held=""
+  [[ "$joined" != *,local,* ]] || held="local"
+  [[ "$joined" != *,realm,* ]] || held="${held:+$held,}realm"
+  printf '%s\n' "$held"
+  return 0
+}
+
+# What `monitor up` owes Grafana's sessions around its Compose run: "all" (end every user's
+# before the recreate, going to realm.ini), "external" (end external-login users' after it, going to
+# a local sign-in) or nothing.
+monitor_grafana_session_plan() {
+  local target="$1" held=",$2,"
+  if [[ "$target" == realm && "$held" == *,local,* ]]; then
+    echo all
+  elif [[ "$target" == local && "$held" == *,realm,* ]]; then
+    echo external
+  fi
+  return 0
+}
+
+# Record the sign-ins whose sessions Grafana's database may hold ($1).
+monitor_grafana_record_holders() {
+  local recorded
+  [[ -f "$MONITOR_DIR/.env" ]] || return 0
+  recorded="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_APPLIED)" || return 1
+  if [[ "$recorded" != "$1" ]]; then
+    set_env_file_value "$MONITOR_DIR/.env" GRAFANA_AUTH_APPLIED "$1" || return 1
+  fi
+  return 0
+}
+
+# End the sessions of one scope (all | external) with the local admin's Basic login and say
+# how many. A failure is fatal: the switch promises that no session of the old sign-in
+# survives it, so a run that cannot keep the promise does not finish the switch ($2: seconds
+# to wait for a Grafana that is starting or was just recreated).
+monitor_grafana_end_sessions() {
+  local scope="$1" wait_seconds="${2:-0}" result counts
+  if ! result="$(grafana_admin end-sessions --scope "$scope" --wait-seconds "$wait_seconds")"; then
+    if [[ "$scope" == all ]]; then
+      die "The Grafana sessions made with Grafana's own login could not be ended, so Grafana was not recreated and Krate sign-in is not applied: those sessions would stay valid at the Krate sign-in address. Grafana has to be running with its own login, and GRAFANA_PASSWORD has to be the password Grafana's volume holds (krate monitor status; to set one: docker exec <grafana container> grafana cli admin reset-admin-password <new>, then krate config set GRAFANA_PASSWORD=<new>). Each attempt is a login that Grafana counts, and it locks a login out after repeated failures: correct the password before you run krate monitor up again. If Grafana is stopped, or already runs with Krate sign-in, start it with its own login first, then switch again:
+  krate config set GRAFANA_AUTH_CONFIG=local.ini && krate monitor up
+  krate config set GRAFANA_AUTH_CONFIG=realm.ini && krate monitor up"
+    fi
+    die "Grafana is up with its own login, but external-login users' sessions could not be ended: they would stay valid on Grafana's own address. Correct GRAFANA_PASSWORD if it is wrong (Grafana locks a login out after repeated failures), then run krate monitor up again: it repeats this until it succeeds (krate monitor status)."
+  fi
+  counts="$(printf '%s' "$result" | python3 -c 'import json, sys
+data = json.load(sys.stdin)
+print(data["sessions_ended"], data["users_ended"])')" \
+    || die "grafana-admin.py end-sessions returned no count, so the ended sessions cannot be confirmed"
+  if [[ "$scope" == all ]]; then
+    ok "Ended ${counts%% *} Grafana session(s) of ${counts##* } user(s): sessions made with Grafana's own login do not carry over into Krate sign-in"
+  else
+    ok "Ended ${counts%% *} Grafana session(s) of ${counts##* } user(s): external-login users' sessions do not carry over into Grafana's own login"
+  fi
+}
+
 # Local Grafana users whose e-mail a realm user also has: after the switch Grafana
 # refuses that sign-in ("User sync failed"), and taking the local user over is not
 # an option (harness/phase4/lab4 Q1: e-mail linking handed the local account the
@@ -3692,16 +3839,42 @@ for user in json.load(sys.stdin):
   done
 }
 
+# Grafana's address: with Krate sign-in (GRAFANA_AUTH_CONFIG=realm.ini) the cluster proxy
+# serves it over TLS at /grafana/, and Grafana's own port is on the loopback interface.
+grafana_address() {
+  if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini && -n "$(public_url_host)" ]]; then
+    printf 'https://%s/grafana/\n' "$(public_url_authority)"
+  else
+    printf 'http://%s:%s\n' "$(hostname -f 2>/dev/null || hostname)" "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
+  fi
+}
+
+# Perses' address. With the Krate realm (PERSES_IDP=krate) only the public name works:
+# the realm client's redirect URI is built from it (monitoring/render.py realm_site
+# public_url), so the host name of this machine would not sign in.
+perses_address() {
+  local port host
+  port="$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
+  [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]] && host="$(public_url_host)"
+  # Without a public name (KEYCLOAK_PUBLIC_URL unset) only the host name is left to print.
+  [[ -n "${host:-}" ]] || host="$(hostname -f 2>/dev/null || hostname)"
+  printf 'https://%s:%s\n' "$host" "$port"
+}
+
 # Grafana and Perses addresses and logins.
 monitor_logins() {
-  local port; port="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
-  echo "Grafana:  http://$(hostname -f 2>/dev/null || hostname):${port}"
+  echo "Grafana:  $(grafana_address)"
+  if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
+    echo "Sign-in:  Krate sign-in (realm $IDENTITY_REALM); the user below is Grafana's own login, kept for the rollback on this host"
+  fi
   echo "User:     $(env_value_file "$MONITOR_DIR/.env" GRAFANA_USER admin)"
   echo "Password: $(env_value_file "$MONITOR_DIR/.env" GRAFANA_PASSWORD changeme)"
-  echo "Perses:   https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)"
+  echo "Perses:   $(perses_address)"
   if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
     echo "User:     $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_USER admin)"
     echo "Password: $(env_value_file "$MONITOR_DIR/.env" PERSES_ADMIN_PASSWORD)"
+  elif [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]]; then
+    echo "Sign-in:  Krate sign-in (realm $IDENTITY_REALM)"
   else
     echo "Sign-in:  company SSO ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) mode)"
   fi
@@ -3762,6 +3935,12 @@ cmd_monitor() {
   case "$sub" in
     up)
       require_compose; require_compose_file; require_env
+      local running_config running_class recorded held widened target_config target_class session_plan
+      # Stage one known discovery before preparation, record writes or any Compose action.
+      running_config="$(monitor_grafana_auth_running)" \
+        || die "Grafana container sign-in state could not be determined; no session record or Compose action was performed. Check Docker access and the container configuration, then retry."
+      running_class="$(monitor_grafana_class "$running_config")" \
+        || die "Grafana container sign-in class could not be determined"
       info "Starting observability stack..."
       command -v python3 >/dev/null || die "python3 is required to initialize editable Grafana alerts."
       # The same preparation as the cluster commands: a cluster still running
@@ -3781,12 +3960,42 @@ cmd_monitor() {
       local conflicts
       conflicts="$(monitor_port_conflicts | xargs)"
       [[ -z "$conflicts" ]] || die "Host ports already in use or configured twice: $conflicts. Choose free, distinct ones, e.g. krate config set GRAFANA_PORT=13000"
+      # A sign-in switch ends the Grafana sessions the new sign-in does not allow: every
+      # user's before the recreate (only the local admin's Basic login can, and realm mode
+      # turns it off), the realm users' after it. What a refused or half-finished run still
+      # owes stays in GRAFANA_AUTH_APPLIED, so the next run repeats it; a run that changes
+      # nothing ends nothing.
+      recorded="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_APPLIED)" \
+        || die "Grafana session record could not be read"
+      target_config="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" \
+        || die "Grafana target sign-in could not be read"
+      target_class="$(monitor_grafana_class "$target_config")" \
+        || die "Grafana target sign-in class could not be determined"
+      held="$(monitor_grafana_holders "$recorded" "$running_class")" \
+        || die "Grafana session holders could not be determined"
+      widened="$(monitor_grafana_holders "$recorded" "$running_class" "$target_class")" \
+        || die "Grafana session holders could not be determined"
+      session_plan="$(monitor_grafana_session_plan "$target_class" "$held")" \
+        || die "Grafana session transition could not be determined"
+      if [[ "$session_plan" == all ]]; then
+        # Compose refuses a stopped cluster only when it runs: refuse before anyone is signed out.
+        monitor_network >/dev/null || die "The cluster is not running — start it first: krate start"
+        monitor_grafana_end_sessions all 30 || die "Grafana session revocation failed"
+        monitor_grafana_record_holders "$target_class" || die "Grafana session record could not be written"
+      else
+        monitor_grafana_record_holders "$widened" || die "Grafana session record could not be written"
+      fi
       # Compose leaves a dropped profile's services running. In local mode remove
       # the SSO services first, so the previous mode's guard cannot act on Perses.
       if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local)" == local ]]; then
-        monitor_compose rm -s -f oauth2-proxy perses-sync >/dev/null
+        monitor_compose rm -s -f oauth2-proxy perses-sync >/dev/null \
+          || die "Dropped monitoring SSO services could not be removed; Grafana sign-in transition stopped"
       fi
-      monitor_compose up -d
+      monitor_compose up -d || die "Monitoring startup failed; Grafana sign-in transition remains owed"
+      if [[ "$session_plan" == external ]]; then
+        monitor_grafana_end_sessions external 120 || die "Grafana session revocation failed"
+        monitor_grafana_record_holders "$target_class" || die "Grafana session record could not be written"
+      fi
       if [[ "$(env_value_file "$MONITOR_DIR/.env" PERSES_IDP)" == krate ]]; then
         local current_issuer
         current_issuer="$(env_value KEYCLOAK_PUBLIC_URL)"
@@ -3795,13 +4004,9 @@ cmd_monitor() {
       fi
       python3 "$MONITOR_DIR/seed-alerting.py" "$MONITOR_DIR/.env"
       echo ""
-      if [[ "$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini)" == realm.ini ]]; then
-        # Realm mode: the cluster proxy serves Grafana over TLS at /grafana/, and its
-        # own port is on the loopback interface (use it for the local login rollback).
-        ok "Grafana:    https://$(public_url_authority)/grafana/"
-      else
-        ok "Grafana:    http://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" GRAFANA_PORT 3000)"
-      fi
+      # Realm mode: the cluster proxy serves Grafana over TLS at /grafana/, and its own
+      # port is on the loopback interface (use it for the local login rollback).
+      ok "Grafana:    $(grafana_address)"
       # Prometheus (and Loki) answer on PROM_BIND/LOKI_BIND only, 127.0.0.1 by
       # default: the address printed is the one that works.
       local prom_bind prom_host
@@ -3812,10 +4017,23 @@ cmd_monitor() {
         prom_host="$prom_bind"
       fi
       ok "Prometheus: http://${prom_host}:$(env_value_file "$MONITOR_DIR/.env" PROM_PORT 9090)$([[ "$prom_bind" == 0.0.0.0 ]] || echo ' (this host only; PROM_BIND)')"
-      ok "Perses:     https://$(hostname -f 2>/dev/null || hostname):$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443) ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) sign-in)"
+      ok "Perses:     $(perses_address) ($(env_value_file "$MONITOR_DIR/.env" PERSES_AUTH_MODE local) sign-in)"
       note_smtp
       ;;
-    down)    require_compose; monitor_compose down "$@" ;;
+    down)
+      require_compose
+      local running_config running_class recorded held
+      running_config="$(monitor_grafana_auth_running)" \
+        || die "Grafana container sign-in state could not be determined; no session record or Compose action was performed. Check Docker access and the container configuration, then retry."
+      running_class="$(monitor_grafana_class "$running_config")" \
+        || die "Grafana container sign-in class could not be determined"
+      recorded="$(env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_APPLIED)" \
+        || die "Grafana session record could not be read"
+      held="$(monitor_grafana_holders "$recorded" "$running_class")" \
+        || die "Grafana session holders could not be determined"
+      monitor_grafana_record_holders "$held" || die "Grafana session record could not be written"
+      monitor_compose down "$@"
+      ;;
     status)  require_compose; monitor_compose ps ;;
     logs)    require_compose; monitor_compose logs --tail 100 "$@" ;;
     reload)
@@ -3874,7 +4092,7 @@ Remove it first — a public dashboard under Dashboards → Share → Public das
         || die "Cannot write monitoring/auth/realm.ini"
       ok "Wrote monitoring/auth/realm.ini"
       echo ""
-      info "Next: krate config set GRAFANA_AUTH_CONFIG=realm.ini && krate monitor up"
+      info "Next: krate config set GRAFANA_AUTH_CONFIG=realm.ini && krate monitor up (ends every Grafana session made with Grafana's own login)"
       ;;
     grafana-user)
       local gsub="${1:-}"; shift || true
@@ -4341,7 +4559,7 @@ cmd_lag() {
     local raw
     raw=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
       --bootstrap-server "$BOOTSTRAP" \
-      --describe --group "$group" 2>&1) || die "Failed to describe group '$group'"
+      --describe --group "$group") || die "Failed to describe group '$group'"
 
     if echo "$raw" | grep -qiE "does not exist|group .* not found"; then
       die "Consumer group '$group' does not exist."

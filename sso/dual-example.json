@@ -6,6 +6,8 @@
   "admin_group": "KRATE_ADMINS",
   "groups_claim": "groups",
   "idp_truststore": "local",
+  "mfa_claim_name": "REPLACE_WITH_ASSERTED_CLAIM",
+  "mfa_claim_value": "REPLACE_WITH_ASSERTED_VALUE",
   "scopes": [
     "openid",
     "profile",

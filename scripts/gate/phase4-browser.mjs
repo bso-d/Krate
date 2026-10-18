@@ -19,11 +19,24 @@
 // is printed. Output: one JSON `step` line per stage, then `SUMMARY <json>`;
 // ui15-summary.json + PNGs land in --out.
 //   node phase4-browser.mjs --base https://HOST:PORT --host HOST --resolve-to IP --out /out
+//
+// Mac vantage (GATE_BROWSER_MAC=1, scripts/gate/browser-launch.mjs): exactly the shape walked
+// on 2026-10-17 with the m5/phase4-browser.m5.mjs adapter (launch block + interstitial block
+// ONLY, per that file's header) — installed headed Chrome, fresh profile
+// `--host-resolver-rules=MAP <host> <ip>, MAP * ~NOTFOUND, EXCLUDE <ip>`, ignoreHTTPSErrors
+// NOT set, Advanced+Proceed on the real interstitial, then the same walk. Added in the Mac
+// vantage (encoded from the same walk plus TOPOFIX-REVIEW F2/F3): served_from (Response
+// .serverAddr/securityDetails vs the pinned certificate, M0 point 4), external_attempts
+// (`requestfailed` of a non-gate host; the fingerprint of a violation is
+// net::ERR_NAME_NOT_RESOLVED, M5 run 3), browser.json, the Node certificate pin. M0 point 6:
+// CDP Network.getCertificate is NOT a digest source in Chrome 155 — there is no CDP digest
+// claim here.
 import { createRequire } from 'node:module';
 const require = createRequire(process.env.PW_MODULES ? process.env.PW_MODULES + '/x.js' : import.meta.url);
 const { chromium } = require('playwright');
 import { createHmac } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, chmodSync } from 'node:fs';
+import { macMode, launchGateBrowser, cleanProfile, requireCertFile, pinGateCertificate, attachServeTracker, browserEvidence, externalAttemptsTracker, assertServedFrom, assertServedCertificate, acceptGateCertificate } from './browser-launch.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((a, v, i, arr) => {
   if (v.startsWith('--')) a.push([v.slice(2), arr[i + 1]]);
@@ -64,26 +77,76 @@ const step = (name, data) => { const s = { t: new Date().toISOString(), name, ..
 let n = 0;
 async function shot(page, slug) { n += 1; const f = `${String(n).padStart(2, '0')}-${slug}.png`; await page.screenshot({ path: `${OUT}/${f}` }); return f; }
 
-const browser = await chromium.launch({ args: resolveTo ? [`--host-resolver-rules=MAP ${HOST} ${resolveTo}`] : [] });
-const context = await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
-const page = await context.newPage();
-page.on('console', m => {
-  const e = { type: m.type(), text: m.text().slice(0, 300), url: page.url().replace(BASE, '').split(/[?#]/)[0] };
-  if (/Content Security Policy|Refused to/i.test(m.text())) result.csp.push(e);
-  if (m.type() === 'error' || m.type() === 'warning') result.console.push(e);
-});
-page.on('pageerror', e => result.pageErrors.push({ text: String(e).slice(0, 300), url: page.url().replace(BASE, '').split(/[?#]/)[0] }));
-page.on('requestfailed', r => result.failed.push({ url: r.url().replace(BASE, '').split(/[?#]/)[0], err: r.failure()?.errorText }));
-page.on('response', r => { if (r.status() >= 400 && r.url().startsWith(BASE)) result.http4xx5xx.push({ s: r.status(), m: r.request().method(), url: r.url().replace(BASE, '').split(/[?#]/)[0] }); });
-page.on('websocket', ws => {
-  const w = { url: ws.url().replace(BASE.replace('https', 'wss'), '').split(/[?#]/)[0], framesIn: 0, framesOut: 0, error: null };
-  result.websockets.push(w);
-  ws.on('framereceived', () => { w.framesIn += 1; });
-  ws.on('framesent', () => { w.framesOut += 1; });
-  ws.on('socketerror', e => { w.error = String(e); });
-});
+// Mac vantage (launch lines only, per the m5 adapter which was walked exactly like this):
+// the installed Chrome on the Mac with the M0 launch lines - headed, fresh profile, the
+// fixture name mapped to the VM, every other name NOTFOUND so the browser cannot leave the
+// machine. The fixture certificate is not trusted by the Mac keychain, so the first
+// navigation shows the real interstitial; the probe proceeds after the human-style Advanced +
+// Proceed below (M0 point 3: one exception covers the same host+port). ignoreHTTPSErrors
+// deliberately NOT set. The certificate is pinned first (Node, name check on, M4); the served
+// certificate and server address are asserted at summary time.
+const MAC = macMode();
+const CERT = MAC ? requireCertFile() : null;
+const PORT_FOR_PIN = (new URL(BASE).port ? Number(new URL(BASE).port) : 443);
+const PIN = MAC ? await pinGateCertificate({ host: HOST, port: PORT_FOR_PIN, certPem: CERT.pem, connectHost: resolveTo }) : null;
+const launch = await launchGateBrowser(chromium, { host: HOST, resolveTo, outDir: OUT });
+const browser = launch.browser;
+let page = null;
+let served_from = null;
+const serve = MAC ? attachServeTracker(null) : null;
+const ext = MAC ? externalAttemptsTracker(HOST) : null;
+const failures = [];
+function recordFailure(stage, error) {
+  const message = String(error?.message || error).slice(0, 300);
+  failures.push({ stage, error: message });
+  process.exitCode = 1;
+  console.error(`STORY FAILED: ${stage}: ${message}`);
+  step(stage, { error: message });
+}
 
+// Once the browser has launched, every setup, probe and assertion failure must
+// reach live evidence collection and teardown; none may exit the process early.
 try {
+  const context = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
+  page = MAC ? (context.pages()[0] || await context.newPage()) : await context.newPage();
+  // Review T07: the external-request guard and the served-response tracker are installed BEFORE the first navigation (the
+  // certificate acceptance below is already a page load), context-wide so every later page is covered too.
+  if (MAC) { await ext.guard(context); serve.attachContext(context); }
+  if (MAC) {
+    const accepted = await acceptGateCertificate(page, `${BASE}/`, {
+      onAssert: (d) => {
+        result.steps.push({ t: new Date().toISOString(), name: d.seen ? 'interstitial' : 'no-interstitial', error: d.error, url: page.url().replace(BASE, '').split(/[?#]/)[0] });
+        if (!/ERR_CERT_AUTHORITY_INVALID/.test(d.error || '')) {
+          result.steps.push({ t: new Date().toISOString(), name: 'interstitial-unexpected', error: d.error });
+        }
+      },
+      onShot: async () => { await page.screenshot({ path: `${OUT}/interstitial.png` }).catch(() => {}); },
+    });
+    // acceptGateCertificate runs the hooks only when the interstitial is seen, so a missing
+    // interstitial returns here with decision 'no-interstitial': stop as X1/X3/X4 do (TR2 G1).
+    if (accepted.decision !== 'proceed') {
+      result.steps.push({ t: new Date().toISOString(), name: 'no-interstitial', error: accepted.error });
+      throw new Error('the trust-nothing Mac profile showed no interstitial (a pre-trusted or reused profile)');
+    }
+    console.log(JSON.stringify({ t: new Date().toISOString(), name: 'proceeded' }));
+    page = context.pages()[0] || await context.newPage();
+  }
+  page.on('console', m => {
+    const e = { type: m.type(), text: m.text().slice(0, 300), url: page.url().replace(BASE, '').split(/[?#]/)[0] };
+    if (/Content Security Policy|Refused to/i.test(m.text())) result.csp.push(e);
+    if (m.type() === 'error' || m.type() === 'warning') result.console.push(e);
+  });
+  page.on('pageerror', e => result.pageErrors.push({ text: String(e).slice(0, 300), url: page.url().replace(BASE, '').split(/[?#]/)[0] }));
+  page.on('requestfailed', r => result.failed.push({ url: r.url().replace(BASE, '').split(/[?#]/)[0], err: r.failure()?.errorText }));
+  page.on('response', r => { if (r.status() >= 400 && r.url().startsWith(BASE)) result.http4xx5xx.push({ s: r.status(), m: r.request().method(), url: r.url().replace(BASE, '').split(/[?#]/)[0] }); });
+  page.on('websocket', ws => {
+    const w = { url: ws.url().replace(BASE.replace('https', 'wss'), '').split(/[?#]/)[0], framesIn: 0, framesOut: 0, error: null };
+    result.websockets.push(w);
+    ws.on('framereceived', () => { w.framesIn += 1; });
+    ws.on('framesent', () => { w.framesOut += 1; });
+    ws.on('socketerror', e => { w.error = String(e); });
+  });
+
   await page.goto(`${G}/`, { waitUntil: 'networkidle' });
   await page.getByRole('link', { name: /Krate sign-in/ }).first().click();
   await page.waitForSelector('#username', { timeout: 30000 });
@@ -115,17 +178,67 @@ try {
   step('explore live tail 20 s', {
     liveRows: await page.locator('[class*="logs-row"], [data-testid="logRows"] tr').count(),
     websockets: result.websockets, shot: await shot(page, 'explore-live') });
+  // Both vantage assertions and the external-attempt assertion share the failure path.
+  if (MAC) {
+    const mr = serve.last();
+    if (!mr) throw new Error('no main-document response captured for the vantage assertion');
+    served_from = (await assertServedFrom(mr, resolveTo, 'main document')) + '; ' + (await assertServedCertificate(mr, PIN, 'main document'));
+    step('vantage evidence', { served_from });
+    await ext.assertClean();
+  }
 } catch (e) {
-  step('probe ended', { error: String(e.message || e).slice(0, 300) });
+  recordFailure('probe ended', e);
+} finally {
+  // Read the live page before closing it, even when a vantage assertion failed.
+  let browserReceipt = null;
+  let evidenceFailed = null;
+  try {
+    browserReceipt = await browserEvidence({ browser, mode: launch.mode, rules: launch.rules, headless: launch.headless, page, cert: PIN, extra: { story: 'U15/U7 phase4-browser', servedFrom: served_from } });
+  } catch (e) {
+    evidenceFailed = String(e.message || e).slice(0, 300);
+    recordFailure('browser evidence failed', e);
+  }
+  try {
+    if (ext) await ext.closeOwnedBrowser(() => browser.close());
+    else await browser.close();
+  } catch (e) {
+    recordFailure('browser cleanup failed', e);
+  }
+  if (MAC) {
+    try {
+      const keep = failures.length > 0;
+      const removed = cleanProfile(launch.profileDir, keep);
+      if (!keep && launch.profileDir && !removed) recordFailure('profile cleanup failed', new Error('story profile could not be removed'));
+    } catch (e) {
+      recordFailure('profile cleanup failed', e);
+    }
+  }
+  // Persist after teardown so cleanup failures are in the receipts as well.
+  // An unavailable live capture is explicit; it is never substituted by invented proof.
+  try {
+    writeFileSync(`${OUT}/browser.json`, JSON.stringify({ ...(browserReceipt || { story: 'U15/U7 phase4-browser', evidenceFailed }), networkGuard: ext ? ext.evidence() : null, failures }, null, 2));
+    chmodSync(`${OUT}/browser.json`, 0o644);
+  } catch (e) {
+    recordFailure('browser.json not written', e);
+  }
+  const summary = {
+    cspViolations: result.csp.length,
+    pageErrors: result.pageErrors.length,
+    failedRequests: result.failed,
+    http4xx5xx: result.http4xx5xx,
+    websockets: result.websockets,
+    consoleErrors: result.console.filter(c => c.type === 'error'),
+    servedFrom: served_from,
+    externalAttempts: MAC && ext ? ext.list : null,
+    networkGuard: ext ? ext.evidence() : null,
+    storyFailed: failures[0]?.error || null,
+    failures,
+  };
+  try {
+    writeFileSync(`${OUT}/ui15-summary.json`, JSON.stringify({ steps: result.steps, ...summary }, null, 2));
+  } catch (e) {
+    recordFailure('ui15-summary.json not written', e);
+  }
+  // Include a summary-write failure in stdout even when the file cannot be saved.
+  console.log('SUMMARY ' + JSON.stringify({ ...summary, storyFailed: failures[0]?.error || null }));
 }
-const summary = {
-  cspViolations: result.csp.length,
-  pageErrors: result.pageErrors.length,
-  failedRequests: result.failed,
-  http4xx5xx: result.http4xx5xx,
-  websockets: result.websockets,
-  consoleErrors: result.console.filter(c => c.type === 'error'),
-};
-writeFileSync(`${OUT}/ui15-summary.json`, JSON.stringify({ steps: result.steps, ...summary }, null, 2));
-console.log('SUMMARY ' + JSON.stringify(summary));
-await browser.close();

@@ -391,7 +391,9 @@ secret. The read-only commands `status`, `users list`, `users groups` and
    not placeholders, all different), `KC_DB_TLS_MODE=verify-server`, the TLS
    files, the realm file, that neither identity service publishes a port, and
    the identity network (internal, one subnet, members, the proxy's fixed
-   address equal to `KC_PROXY_TRUSTED_ADDRESSES` and inside the subnet). It
+   address equal to `KC_PROXY_TRUSTED_ADDRESSES` and inside the subnet). With
+   the PingFederate plan present it validates the plan too, and refuses one that
+   states no MFA stance (neither the claim pair nor `mfa_not_asserted`). It
    warns when the database certificate expires within 30 days.
    Then it lists every Docker network and stops when one outside this Compose
    project overlaps `KRATE_IDENTITY_SUBNET`, naming it and the two keys to
@@ -445,7 +447,9 @@ secret. The read-only commands `status`, `users list`, `users groups` and
     and `PING_KEYCLOAK_CLIENT_SECRET` set, applies the plan to the realm
     exactly as `auth apply` does (flows, provider, mappers, browser flow;
     journal line `up reconciled identity provider pingfederate: ...`, or
-    `No changes`); with the secret unset it says so and leaves the realm
+    `No changes`; step 4 has already refused a plan that states no MFA
+    stance, see [dual-login.md](dual-login.md), "Changing or withdrawing the
+    MFA claim filter"); with the secret unset it says so and leaves the realm
     alone; with the plan file absent and the provider present it removes the
     provider, its mappers and flows and rebinds the `browser` flow. Before
     all this, right after the realm plan, it records the truststore digest
@@ -508,6 +512,12 @@ temporary password and enrols TOTP at first login.
 3. Recreate the consumer: `keycloak` for the database password; `kafka-ui`
    for the Kafbat client secret only when `KAFKA_UI_AUTH_CONFIG=runtime.yml`.
 4. Verify (ready, login) and write the journal line.
+
+Before step 1, for `KEYCLOAK_KAFBAT_CLIENT_SECRET` in `runtime.yml` mode and for
+`PING_KEYCLOAK_CLIENT_SECRET`, the command reads the PingFederate plan file (when it
+exists) through the plan validator: a plan that states no MFA stance, or is
+otherwise refused, stops it with `Nothing was rotated`, and `.env`, Keycloak and the
+containers stay as they were.
 
 The new value is generated (24 characters) unless `--value` reads one from
 standard input; a supplied value must be 16 or more characters from

@@ -780,7 +780,9 @@ class Gate(Phase4Gate):
 
     def _network_flake(self, summary):
         """Whether a dirty summary is retryable network-only dirt."""
-        if not summary or summary.get('cspViolations') or summary.get('pageErrors'):
+        if (not summary or summary.get('cspViolations') or summary.get('pageErrors')
+                or summary.get('storyFailed') or summary.get('failures')
+                or summary.get('probeExitCode', 0) != 0):
             return False
         failed = summary.get('failedRequests') or []
         if not failed:
@@ -829,6 +831,9 @@ class Gate(Phase4Gate):
                 steps = json.load(handle).get('steps') or []
         except (OSError, ValueError):
             pass
+        if summary is not None:
+            # A retained diagnostic summary must not hide a failed child or teardown.
+            summary['probeExitCode'] = rc
         log('browser probe %s (dash %s): docker rc=%s, summary=%s' % (user, dash, rc, bool(summary)))
         if rc != 0 and summary is None:
             log('browser probe stderr tail: %s' % (err or '')[-200:])
@@ -904,7 +909,8 @@ class Gate(Phase4Gate):
         """The walk's clean-run criteria (logs 146/148 SUMMARY): 0 CSP violations,
         0 page errors, no failed requests, and the only HTTP >= 400 the UI's own
         public-dashboards 404 (public dashboards are off; benign)."""
-        if not summary:
+        if (not summary or summary.get('storyFailed') or summary.get('failures')
+                or summary.get('probeExitCode', 0) != 0):
             return False
         benign = all(self._benign_404(item) for item in summary.get('http4xx5xx') or [])
         return (summary.get('cspViolations') == 0 and summary.get('pageErrors') == 0

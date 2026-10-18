@@ -20,6 +20,7 @@ The frozen ZooKeeper edition has no monitoring sign-in and is not affected.
 | Prometheus through a datasource | reload and quit reachable (`--web.enable-lifecycle`) | refused: the lifecycle API is off, the admin API and the remote-write receiver were never on |
 | Public surfaces | `/metrics` and `/api/health` (with version and commit) answered without a login | `[metrics] enabled = false`, `[auth.anonymous] hide_version = true`, `[public_dashboards]` and `[snapshots]` off, and the port is on the loopback interface |
 | Machine identities | the Basic admin, used by `monitoring/seed-alerting.py` | the `krate-seed` service account and its token (see below); no password is used by anything |
+| Sessions | the ones made with Grafana's own login | only the ones made through Krate sign-in: the `krate monitor up` that applies the switch ends every session made with Grafana's own login, and people sign in again through Krate sign-in |
 
 Two things keep working unchanged: the provisioned dashboards and their uid bindings
 (`prometheus`, `loki`), and alert seeding — `seed-alerting.py` reads
@@ -51,7 +52,7 @@ Two things keep working unchanged: the provisioned dashboards and their uid bind
 ./krate monitor up                       # Grafana still local: monitor realm reads it with the Basic admin
 ./krate monitor realm                    # checks, creates the client, secret, seed token, realm.ini
 ./krate config set GRAFANA_AUTH_CONFIG=realm.ini
-./krate monitor up                       # recreates Grafana (and the one-shot that renders its secret)
+./krate monitor up                       # ends every Grafana session, then recreates Grafana (and the one-shot that renders its secret)
 ./krate identity users add <name> --viewer --email <address>
 ```
 
@@ -92,6 +93,35 @@ client secret) and `monitoring-init` re-renders the secret into the volume Grafa
 `/etc/krate/grafana/client-secret` (uid 472, mode 0400). No other monitoring container is
 recreated, and no broker, Kafbat, Keycloak or proxy container is touched.
 
+**A sign-in switch ends the sessions described below, with the stated timing limits.** Grafana keeps its sessions in its database, which
+the recreate keeps, and a browser's session cookie names no port: without this step a session
+made with Grafana's own login would still answer at `https://<host>/grafana/` after the
+switch (seen on 2026-10-17: the local admin's session, created before the switch, was still
+active after it). So `./krate monitor up`, when Grafana's sessions may still include ones made
+with its own login, first signs every Grafana user out through Grafana's admin API with the
+local admin's Basic login — the one credential that can, because realm mode turns it off and a
+service account may not call the user endpoints — and prints
+`Ended N Grafana session(s) of K user(s)`. Only then does it recreate Grafana. The caller's own
+user, the local admin, cannot be signed out by the logout endpoint, so its sessions are revoked
+one by one. A `monitor up` that does not change the sign-in ends nothing, and service accounts
+and their tokens are never touched. Any config file other than `realm.ini` counts as Grafana's
+own login.
+If Grafana does not answer with the local admin login, the run stops before it recreates
+Grafana. Health polling has a 30-second budget; individual requests and revocation can extend
+the step. It also refuses a stopped cluster before it signs anyone
+out. If Grafana is stopped, or already runs with Krate sign-in, start it with its own login first
+(`./krate config set GRAFANA_AUTH_CONFIG=local.ini && ./krate monitor up`) and switch again.
+The sign-ins whose sessions Grafana's database may hold are listed in `GRAFANA_AUTH_APPLIED`
+(`monitoring/.env`, managed by krate), which `monitor up` and `monitor down` keep widened by the
+sign-in Grafana runs, so a refused or interrupted run is repeated by the next one.
+Limits: a browser that signs in with Grafana's own login after the sign-out and before Grafana
+is recreated keeps that session (normally a few seconds; Compose first runs `monitoring-init`
+and `idp-wait`, which waits up to two minutes for a realm that is down). An installation that has
+no record yet — it was last started by an older Krate — and whose Grafana container is gone when
+`monitor up` runs has nothing to read its previous sign-in from, so it ends nothing; after one
+`monitor up` of this version the record exists, and one trip back to `local.ini` and forward
+again ends the old sessions of an installation an older Krate switched.
+
 ## Seed token renewal
 
 `./krate monitor up` renews the token when less than 30 days of its 90-day life are left: it
@@ -112,6 +142,7 @@ Bounds at the shipped defaults (`KEYCLOAK_SESSION_MAX_HOURS=8`,
 | Removing the user from `KEYCLOAK_ADMIN_GROUP` | at their next sign-in, which `./krate identity users logout <name>` forces now; the session is refused within 300 s and the next sign-in is a Viewer |
 | Inactivity | at the first request after at most 15 min without one (measured 16 min). No lower bound is claimed: Grafana counts inactivity from its last session rotation (every 10 min) and the realm from its last token refresh, so a prompt can come 5 min after the last request |
 | Session maximum | an active user is not prompted before 8 h and is prompted once it is reached: the realm caps every token at the session maximum |
+| `GRAFANA_AUTH_CONFIG` switched between `local.ini` and `realm.ini`, then `./krate monitor up` | all human users before recreation going to `realm.ini`; external-login users after recreation going back to `local.ini`, once the API revocation completes; timing limits are below |
 | Keycloak stopped | new sign-ins fail closed (the proxy answers 502); live sessions end at their next token check, within 300 s; running containers keep running (Grafana contacts the realm only at sign-in and refresh, with explicit endpoint URLs) and recover by themselves when it returns; containers that could not start during the outage start at the next `./krate monitor up`, which exits non-zero naming `idp-wait` while the realm is down |
 
 Kafbat sessions are unaffected by any of this except `identity users logout`, which ends them
@@ -130,7 +161,20 @@ again **on Grafana's own port**, which local mode publishes on every interface a
 `http://<host>:<GRAFANA_PORT>/`. In local mode every `https://<host>/grafana…` path answers
 `302` to the cluster proxy's `/login`, which is Kafbat's — that is expected, not a fault.
 The realm client and the seed token are left in place, so switching back is the two commands
-above.
+above. The same `./krate monitor up` ends external-login users' sessions, including those of
+Krate sign-in users, right after Grafana is up again, with the local admin login, because Grafana's own login does not accept
+them; it prints `Ended N Grafana session(s) of K user(s)`. External-login users' sessions stay valid on
+Grafana's own port from the recreate until that line. Health polling has a 120-second budget,
+but an in-flight request and per-user revocation can extend the run; there is no two-minute
+limit for the whole step. If Grafana does not answer with that login the run
+stops with an error after the recreate, and the next `./krate monitor up` repeats the step
+(`GRAFANA_AUTH_APPLIED` in `monitoring/.env` still lists `realm`).
+External classification requires consistent user-list authentication labels and a boolean
+external-user profile flag; missing or conflicting metadata stops the command. It identifies
+users with any external login, not ownership by the current realm or the origin of each
+session. Local users are preserved on rollback; service accounts and their tokens are untouched.
+A failed Docker inventory/config read or Compose action stops the command; unknown container
+state is never treated as an absent Grafana or a completed switch.
 
 ## Residuals that stay accepted
 
@@ -160,5 +204,7 @@ above.
 | `loginError: InternalError` and `/userinfo/emails` 404 in Grafana's log | the realm user has no e-mail address: `./krate identity users set-email <name> <address>` |
 | "User sync failed" | a disabled local Grafana user still holds that e-mail. `./krate monitor grafana-user retire <login>` speaks to Grafana as the Basic admin, which realm mode turns off, so roll back first: `./krate config set GRAFANA_AUTH_CONFIG=local.ini && ./krate monitor up`, retire, then `./krate config set GRAFANA_AUTH_CONFIG=realm.ini && ./krate monitor up` |
 | `krate monitor up` exits non-zero naming `idp-wait` | the realm did not answer within 120 s: start Keycloak (`./krate identity up`), then `./krate monitor up` again — the consumers were created, not started, and are not restart-looping. During such an outage `monitor up` also warns that it skipped the client reconcile (and a due seed-token renewal) and does both on a later run |
+| `krate monitor up` stops with "Grafana was not recreated and Krate sign-in is not applied" | the sessions made with Grafana's own login could not be ended: Grafana is stopped or already on Krate sign-in, or `GRAFANA_PASSWORD` is not the password Grafana's volume holds (`./krate monitor status`; the message gives the `grafana cli admin reset-admin-password` command). Nothing was recreated. Each try is a login Grafana counts and it locks a login out after repeated failures, so correct the password first. Start Grafana with its own login (`./krate config set GRAFANA_AUTH_CONFIG=local.ini && ./krate monitor up`), then switch again |
+| `krate monitor up` stops with "external-login users' sessions could not be ended" | going back to `local.ini`: Grafana is up with its own login, but authentication, a user API step or authentication-metadata validation failed. Correct the cause printed above; if the password is wrong, fix `GRAFANA_PASSWORD` to match Grafana's volume. Run `./krate monitor up` again: it retains the owed step until it succeeds |
 | `krate monitor up` refuses with "run krate monitor realm first" | `GRAFANA_AUTH_CONFIG=realm.ini` was set by hand on an installation that never ran the switch: run `./krate monitor realm` (or roll back) |
 | Alerts stopped provisioning | the seed token expired or its file is missing: `./krate monitor up` renews it; `ls -l monitoring/auth/secrets/` and `./krate monitor logs` show the rest |

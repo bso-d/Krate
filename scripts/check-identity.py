@@ -2,6 +2,7 @@
 """Static checks for the Krate identity foundation (templates, realm plan, Compose, CLI parity)."""
 import configparser
 import contextlib
+import hashlib
 import importlib.util
 from typing import Callable
 import io
@@ -712,15 +713,141 @@ def check_gate_scripts(checks):
     # Every recorded .url() in every gate story — manifest fields, asserted
     # strings and step records alike — must be stripped of query and fragment
     # before it can reach a manifest or summary file.
-    for story_path in sorted((ROOT / 'scripts/gate').glob('*.mjs')):
-        story = story_path.read_text()
-        for match in re.finditer(r'\.url\(\)', story):
-            tail = story[match.end():match.end() + 80]
-            head = story[max(0, match.start() - 40):match.start()]
-            ok = (re.search(r'publicUrl\(\w+$', head) is not None or tail.startswith('.split(/[?#]/)')
-                  or tail.startswith('.includes(') or tail.startswith('.startsWith(')
-                  or (tail.startswith('.replace(') and '.split(/[?#]/)' in tail[:70]))
-            e(ok, f'{story_path.name} records a verbatim .url() near: ...{story[max(0, match.start() - 40):match.end() + 40]!r}')
+    # Same rule for the Mac agent's helpers under scripts/gate/mac.
+    for story_folder in ((ROOT / 'scripts/gate', ROOT / 'scripts/gate/mac')):
+        for story_path in sorted(story_folder.glob('*.mjs')):
+            story = story_path.read_text()
+            for match in re.finditer(r'\.url\(\)', story):
+                tail = story[match.end():match.end() + 80]
+                head = story[max(0, match.start() - 40):match.start()]
+                ok = (re.search(r'publicUrl\(\w+$', head) is not None or tail.startswith('.split(/[?#]/)')
+                      or tail.startswith('.includes(') or tail.startswith('.startsWith(')
+                      or (tail.startswith('.replace(') and '.split(/[?#]/)' in tail[:70])
+                      or re.search(r'new URL\(\w+$', head) is not None)
+                e(ok, f'{story_path.name} records a verbatim .url() near: ...{story[max(0, match.start() - 40):match.end() + 40]!r}')
+
+    # TOPOFIX: the amended browser vantage and the Mac agent (harness/phase4-completion/w2,
+    # design sections 1b/3.4/3.6, review F1-F12). Every hard wiring claim is asserted here;
+    # a mutant that removes one must fail the whole check.
+    launch_mod = (ROOT / 'scripts/gate/browser-launch.mjs').read_text()
+    # a code-only view: a comment may CITE a claim ("we once mapped * ~NOTFOUND") without the
+    # code carrying it, so the claim assertions below that a comment could satisfy scan this
+    # instead of the raw text
+    launch_mod_code = '\n'.join(l for l in launch_mod.splitlines() if not l.strip().startswith('//'))
+    for story_path in sorted((ROOT / 'scripts/gate').rglob('*.mjs')):
+        if story_path.name == 'browser-launch.mjs':
+            continue
+        e('--host-resolver-rules' not in '\n'.join(l for l in story_path.read_text().splitlines() if not l.strip().startswith('//')),
+          f'{story_path.name} must not build --host-resolver-rules itself (launchGateBrowser is the only builder; comments may name the switch)')
+    e('MAP * ~NOTFOUND, EXCLUDE' in launch_mod_code,
+      'browser-launch.mjs builds the F3 resolver value "MAP <host> <ip>, MAP * ~NOTFOUND, EXCLUDE <ip>" '
+      '(M0 point 5: example.com resolves net::ERR_NAME_NOT_RESOLVED under it); the claim must be in code, not only in a comment')
+    mac_branch = launch_mod.split('export async function launchGateBrowserMac', 1)[1].split('export async function launchGateBrowserContainer', 1)[0]
+    e("channel: 'chrome'" in mac_branch, "browser-launch.mjs launches the installed Chrome (channel 'chrome') in the Mac vantage (M0/M5)")
+    e('launchPersistentContext' in mac_branch, 'the Mac vantage uses a fresh per-story profile (launchPersistentContext)')
+    e('ignoreHTTPSErrors' not in mac_branch,
+      "the Mac vantage must NOT ignore certificate errors (Chrome's own verifier runs; the interstitial is the story's evidence; TOPOFIX 1c)")
+    for story_path in sorted((ROOT / 'scripts/gate').rglob('*.mjs')):
+        text_code = '\n'.join(l for l in story_path.read_text().splitlines() if not l.strip().startswith('//'))
+        e('ignore-certificate-errors' not in text_code, f'{story_path.name} must not carry an --ignore-certificate-errors switch (TOPOFIX F2)')
+        # the call shapes of a CDP Network.getCertificate request (a CDP session send or a
+        # direct method call); naming the method in a comment or label is fine, calling it is not (M0 point 6)
+        e('getCertificate(' not in text_code and "'Network.getCertificate'" not in text_code and '"Network.getCertificate"' not in text_code,
+          f'{story_path.name} must not call CDP Network.getCertificate (M0 point 6: it returned no certificate in Chrome 155; the digest source is the Node pin + Response.securityDetails)')
+    e('requireCertFile' in launch_mod_code and 'GATE_CERT_FILE' in launch_mod_code,
+      'the Mac vantage pins the fixture certificate from GATE_CERT_FILE (fail-closed without it)')
+    e('assertCertValidity' in launch_mod and 'validToDate' in launch_mod,
+      "browser-launch.mjs checks the pinned certificate's Mac-side validity window (TOPOFIX F2)")
+    e('assertServedFrom' in launch_mod and 'assertServedCertificate' in launch_mod,
+      'browser-launch.mjs binds the served address (never 127.0.0.1/::1) and the served certificate (Response.serverAddr/securityDetails, M0 point 4)')
+    e('externalAttemptsTracker' in launch_mod_code
+      and launch_mod_code.count("scheme !== 'chrome'") == 1 and launch_mod_code.count("scheme !== 'devtools'") == 1,
+      'external_attempts must exempt only chrome:// and devtools:// targets (TOPOFIX F3)')
+    e('refuseSystemProxy' in launch_mod_code and 'ProxyAutoDiscoveryEnable' in launch_mod_code,
+      'the launcher refuses a system proxy, whose names --host-resolver-rules does not cover (TOPOFIX F3; M0 observed none)')
+    e('HeadlessChrome' in launch_mod_code,
+      'browser evidence refuses a HeadlessChrome build in the Mac vantage (the formal receipt is the installed headed Chrome)')
+    for name in ('screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs', 'phase4-browser.mjs'):
+        story = (ROOT / 'scripts/gate' / name).read_text()
+        e("from './browser-launch.mjs'" in story, f'{name} must import the shared browser launch')
+        e('macMode()' in story, f"{name} must gate its new behaviour on macMode() (GATE_BROWSER_MAC; the container runner keeps today's walked shape)")
+    agent = (ROOT / 'scripts/gate/mac/agent.mjs').read_text()
+    e("'id,nonce,row,schema'" in agent, 'the agent accepts exactly {schema,id,row,nonce} guest requests (TOPOFIX F4)')
+    e('claimRequest' in agent and 'ALLOWED_SCRIPTS' in agent, 'the agent holds claim validation and an allow-list of the scripts it may run (F4)')
+    allow_list = re.search(r'const ALLOWED_SCRIPTS = \[(.*?)\];', agent, re.S)
+    e(allow_list is not None, 'the agent\'s ALLOWED_SCRIPTS array must exist')
+    if allow_list is not None:
+        for allowed in ('probe.mjs', 'screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs', 'phase4-browser.mjs'):
+            e(allowed in allow_list.group(1), f'the agent ALLOWED_SCRIPTS array must not silently drop {allowed}')
+    e('realpath -e' in agent, 'the agent reads guest files through one realpath-confined command (F4)')
+    e('65536' in agent, 'the agent caps each guest file read at 64 KiB (F4)')
+    e('agent-manifest.tsv' in agent, 'the agent keeps its own manifest on the Mac (F4)')
+    e('--backend=scp' in '\n'.join(l for l in agent.splitlines() if not l.strip().startswith('//')),
+      'the agent delivers with limactl copy --backend=scp -r (F8; M1 observed the flag; the delivery call must be in code, not only a comment)')
+    e('mac_src_ip' in agent and 'mac_iface' in agent and 'vm_g6' in agent and 'clock_skew_ms' in agent,
+      'the agent hello carries the guest address, the Mac source address, the guest\'s lima0 GLOBAL address (vm_g6, review S6: the field is named for the class it carries) and the clock facts the runner preflights')
+    probe = (ROOT / 'scripts/gate/mac/probe.mjs').read_text()
+    e("case 'ECONNREFUSED': return 'refused';" in probe and "return 'rejected';" in probe and "return 'timeout';" in probe,
+      'probe.mjs classifies every connect outcome, not only open/closed (TOPOFIX F6: three outcomes; the mapping must be the shipped one)')
+    guide_fingerprint = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    e('net::ERR_NAME_NOT_RESOLVED' in guide_fingerprint,
+      'the guide names the external-attempt fingerprint of the MAP * ~NOTFOUND rule (M5)')
+    remote = (ROOT / 'scripts/gate/browser_remote.py').read_text()
+    e('req = {"schema": 1, "id": int(req_id), "row": row, "nonce": nonce}' in remote,
+      'browser_remote.py sends exactly {schema,id,row,nonce} — no paths, secrets or arguments (TOPOFIX F4)')
+    runner_text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e('REQUIRED_P4C=(W1 W2 W3 W4 W5 W6 W7)' in runner_text, 'W5/W6/W7 are inside REQUIRED_P4C (TOPOFIX F6)')
+    e('--browser agent is refused with --phase $PHASE' in runner_text,
+      'the runner refuses the agent vantage for phases 1-3 (X1 stays a Mac-fixture row; TOPOFIX F9)')
+    u15 = (ROOT / 'scripts/gate/phase4-browser.mjs').read_text()
+    e(re.search(r"^\s*const accepted = await acceptGateCertificate\(", u15, re.M) is not None
+      and re.search(r"^\s*if \(accepted\.decision !== 'proceed'\) \{\s*$", u15, re.M) is not None,
+      "U15 (phase4-browser.mjs) stops when acceptGateCertificate returns no 'proceed' decision: its hooks run only in the interstitial branch "
+      "(TR2 G1; TOPOFIX2 G6: a multiline match on a non-comment line, so the check disabled behind a comment fails)")
+    e(re.search(r'^\s*v6_addr = v6\.get\("address", ""\)\s*$', runner_text, re.M) is not None
+      and re.search(r'^\s*v6_class = v6\.get\("addressClass", ""\)\s*$', runner_text, re.M) is not None
+      and '.get("ll"' not in runner_text,
+      'the W5 evidence reads the probe report\'s v6 address and addressClass, not the removed link-local "ll" key '
+      '(TR2 G4; TOPOFIX2 G6: the exact assignments, so swapped keys fail)')
+    e('is_private' not in runner_text and 'rfc1918 = [ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]' in runner_text
+      and 'not any(addr in net for net in rfc1918)' in runner_text,
+      'the agent preflight requires mac_src_ip inside 10/8, 172.16/12 or 192.168/16 by network membership, not ipaddress.is_private (TOPOFIX F7; TOPOFIX2 F7)')
+    e("the fixture's lima0 address is still" in runner_text,
+      'the runner records the end-of-run vmip row (TOPOFIX F7)')
+    s3_line = next((ln for ln in runner_text.splitlines() if 'koalaman/shellcheck:v0.9.0' in ln and 'kraft/krate' in ln), '')
+    e('mac/run-vm-gate.sh' in s3_line, "scripts/gate/mac/run-vm-gate.sh is in S3's shellcheck 0.9.0 list")
+    e('browser_remote.py' in runner_text, 'the runner asks the agent through scripts/gate/browser_remote.py')
+    e('| browser vantage |' in runner_text, 'the receipt header names the browser vantage (TOPOFIX design 3.5)')
+    e('--rendezvous-nonce' in runner_text and 'the token is not printed' in runner_text,
+      'the rendezvous nonce binds the run and is never printed')
+    guide = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    for row in ('| W5 | runner (Mac vantage only; J7 pattern) | the published-port surface',
+                '| W6 | runner (Mac vantage only; J7 pattern) | the client address',
+                '| W7 | runner (Mac vantage only; J7 pattern) | the firewall state'):
+        e(row in guide, f'the guide carries the W-row ({row[2:20]}...); its text must match the code')
+    e('docker-forwarding` policy' in guide and '--add-port=443/tcp' in guide,
+      "the guide carries the F10 firewall sentences (Docker's rules, the IPv6 zone clause, DOCKER-USER/bind address)")
+    # ── review round (TOPOFIX-IMPL-REVIEW §4): the four defects the 48 mutants could not reach ──
+    # B1: the preflight must skip the agent's own directory BEFORE the digest read; pin the choice
+    # by text order (the `continue` sits above the hashlib read in agent_preflight's python).
+    preflight = runner_text[runner_text.index('agent_preflight() {'):runner_text.index('case "$BROWSER_MODE" in', runner_text.index('agent_preflight() {'))]
+    skip_at = preflight.find("startswith(\"mac/\")")
+    hash_at = preflight.find('hashlib.sha256(open(local')
+    e(0 <= skip_at < hash_at,
+      'the agent preflight skips scripts/gate/mac/* BEFORE computing the digest (review B1: the agent\'s own files are not in the guest, so reading before the skip - or no skip at all - refuses every agent run)')
+    # S1: the external-attempt guard compares host NAMES (the stories build the tracker with the
+    # bare host; X4's Perses origin is https://<host>:3443 and user:port comparisons would
+    # classify its own SPA churn as an external attempt).
+    e('u.hostname !== host' in launch_mod_code and 'host: u.hostname' in launch_mod_code,
+      'the external-attempts guard compares u.hostname against the bare host and records the hostname (review S1)')
+    # S4: the response echoes the rendezvous nonce by protocol; the runner redacts it before the
+    # raw log and the row's response copy see it.
+    e('${CAP//$REND_NONCE/<rendezvous-nonce-redacted>}' in runner_text,
+      'the runner redacts the rendezvous nonce from the agent response before the raw log and the row copy (review S4; the response echo is protocol, the receipt must not carry the token)')
+    # S2: X1 asserts its own exact count in both vantages, the way X3/X4 do.
+    x1_story = (ROOT / 'scripts/gate/screenshots.mjs').read_text()
+    e('const SHOTS_EXPECTED = MAC ? 12 : 11;' in x1_story,
+      'X1 asserts the exact PNG count in both vantages (11 container, 12 Mac with the interstitial shot; review S2)')
 
     # U9 evidence must render (tag, result, detail) 3-tuples: the rocky-4a run
     # at 959fed2 failed the gate with `TypeError: not all arguments converted`
@@ -839,6 +966,2350 @@ def check_gate_scripts(checks):
     e(u9_keeps == 6 and len(u9_hits) == 6 and u9_now[0] - 1000.0 >= 360,
       'u9 keep-alive must make all 6 boundary requests over the real 6-minute '
       'interval; got %s keeps in %.0f s' % (u9_keeps, u9_now[0] - 1000.0))
+
+
+def js_lines(text):
+    """The code lines of a JS source, stripped, with comment-only lines and trailing `// ...` comments removed.
+    Every pin built on these lines is a whole-line match: a claim kept in a comment cannot satisfy it (TR2 G6)."""
+    out = []
+    for raw in text.splitlines():
+        line = re.sub(r'\s//(?:\s.*)?$', '', raw).strip()
+        if line and not line.startswith('//'):
+            out.append(line)
+    return out
+
+
+def sh_lines(text):
+    """The code lines of a shell script: stripped, comment-only lines and trailing `# ...` comments removed (see js_lines)."""
+    out = []
+    for raw in text.splitlines():
+        line = re.sub(r'\s+#(?:\s.*)?$', '', raw).strip()
+        if line and not line.startswith('#'):
+            out.append(line)
+    return out
+
+
+def bash_function_source(path, name):
+    """The source of one top-level function of a Bash script whose opening line may carry a trailing comment (bash_functions needs a bare `name() {`)."""
+    match = re.search(r'^' + re.escape(name) + r'\(\) \{[^\n]*\n.*?^\}\n', Path(path).read_text(), re.M | re.S)
+    if match is None:
+        raise ValueError(f'{path}: function {name} not found')
+    return match.group(0)
+
+
+def check_mac_launcher_round4(checks):
+    """Run shipped admission and harvest boundaries with Git/Lima adapters only."""
+    bash = shutil.which('bash')
+    if bash is None:
+        checks.expect(False, 'Bash is required for the Mac launcher regression checks')
+        return
+    text = (ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text()
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='mac-launcher-', dir=fixture_base) as fixture_dir:
+        fixture = Path(fixture_dir)
+        candidate = '0123456789abcdef0123456789abcdef01234567'
+        wt = fixture / 'harness/worktrees' / ('gate-' + candidate[:7])
+        for rel in ('scripts/gate/mac/agent.mjs', 'scripts/gate/browser-launch.mjs', 'scripts/gate/browser_remote.py'):
+            path = wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('// inert fixture\n')
+        binding = text[text.index('if [[ -e "$REPO/harness/worktrees/gate-'):text.index('caffeinate -dims &')]
+        # Any helper the live binding calls must come from its actual shipped function body.
+        if 'candidate_worktree_ok() {' in text:
+            start = text.index('candidate_worktree_ok() {')
+            end = text.index('\n}\n', start) + 3
+            binding = text[start:end] + '\n' + binding
+        head_stub = r"""
+        git() {
+          printf '%s\n' "$*" >> "$FIXTURE/git-calls"
+          case "$*" in
+            *rev-parse*) [[ "$CASE" != unreadable-head ]] || return 9
+              if [[ "$CASE" == wrong-head ]]; then printf '%040d\n' 1; else printf '%s\n' "$CANDIDATE"; fi ;;
+            *status*) [[ "$CASE" != unreadable-status ]] || return 8
+              case "$CASE" in dirty-tracked) echo ' M scripts/gate/mac/probe.mjs';; dirty-untracked) echo '?? scripts/gate/mac/injected.mjs';; esac ;;
+            *) return 97 ;;
+          esac
+        }
+        """
+        for case in ('clean', 'wrong-head', 'dirty-tracked', 'dirty-untracked', 'unreadable-head', 'unreadable-status'):
+            script = 'set -euo pipefail\n' + head_stub + '\n' + binding + '\necho ADMITTED\n'
+            env = dict(os.environ, REPO=str(fixture), CANDIDATE=candidate, PREFLIGHT_FAIL='0', CASE=case, FIXTURE=str(fixture))
+            result = subprocess.run([bash, '-c', script], env=env, text=True, capture_output=True, timeout=5)
+            expected = case == 'clean'
+            ok = (result.returncode == 0 and 'ADMITTED' in result.stdout) == expected
+            checks.expect(ok, f'launcher candidate binding {case}: expected admitted={expected}; rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}')
+        # Run the complete shipped post-agent harvest/outcome/manifest tail, stubbing only limactl.
+        functions = text[text.index('receipt_verdict() {'):text.index('# Review T13:')]
+        harvest_at = text.index('limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out"')
+        harvest = text[text.rfind('\n', 0, harvest_at) + 1:]
+        harvest_stub = r"""
+        limactl() {
+          case "$1" in
+            copy)
+              case "$4" in
+                *:*/agent-out)
+                  if [[ "$CASE" == copy-fails || "$CASE" == copy-fails-partial ]]; then
+                    if [[ "$CASE" == copy-fails-partial ]]; then mkdir -p "$5"; printf proof > "$5/proof.json"; fi
+                    return 7
+                  fi
+                  mkdir -p "$5"; printf 'proof' > "$5/proof.json" ;;
+                *) mkdir -p "$5"
+                  printf '| verdict | **PASS** |\n| candidate commit | %s |\n' "$CANDIDATE" > "$5/receipt.md"
+                  printf 'receipt-copy\n' >> "$OUT/calls" ;;
+              esac ;;
+            shell)
+              case "$*" in
+                *runner.rc*) echo 0 ;;
+                *) echo "$GUEST_RECEIPT" ;;
+              esac ;;
+            *) return 98 ;;
+          esac
+        }
+        """
+        digest = hashlib.sha256(b'proof').hexdigest()[:12]
+        for phase, case in [('4c', 'valid'), ('4c', 'copy-fails'), ('4c', 'copy-fails-partial'),
+                            ('4c', 'missing-manifest'), ('4c', 'empty-manifest'), ('4c', 'manifest-directory'), ('4c', 'missing-tree'), ('4a', 'optional-evidence'),
+                            ('4b', 'copy-fails')]:
+            destination = fixture / (phase + '-' + case)
+            destination.mkdir(exist_ok=True)
+            manifest = destination / 'agent-manifest.tsv'
+            if case not in ('missing-manifest', 'manifest-directory', 'optional-evidence'):
+                manifest.write_text('request_id\trow\trequest_sha\tfiles\tchrome\n1\tW5\trequest\t' + digest + '\t155\n')
+            if case == 'manifest-directory':
+                manifest.mkdir()
+            if case == 'empty-manifest':
+                manifest.write_text('')
+            # Missing tree is a successful-copy/no-output boundary, not an actual SCP claim.
+            stub = harvest_stub
+            if case in ('missing-tree', 'optional-evidence'):
+                stub = stub.replace('mkdir -p "$5"; printf \'proof\' > "$5/proof.json"', ':')
+            env = dict(os.environ, VM='fake', GUEST_ROOT='/fixture', GUEST_RECEIPT='/fixture/receipt',
+                       OUT=str(destination), RDV='/fixture/rdv', CANDIDATE=candidate, PHASE=phase,
+                       CASE=case, RC='0')
+            result = subprocess.run([bash, '-c', 'set -euo pipefail\n' + functions + stub + harvest],
+                                    env=env, text=True, capture_output=True, timeout=5)
+            expected = case in ('valid', 'optional-evidence')
+            receipt = (destination / 'receipt/receipt.md').is_file()
+            ok = (result.returncode == 0) == expected and receipt
+            checks.expect(ok and result.returncode == (0 if expected else 4), f'launcher harvest {phase}/{case}: expected success={expected}, receipt required; rc={result.returncode}, receipt={receipt}, stdout={result.stdout!r}, stderr={result.stderr!r}')
+
+
+def check_mac_ipv6_ports(checks):
+    """Execute the entire shipped sweep with deterministic filesystem/socket adapters."""
+    node = shutil.which('node')
+    if node is None:
+        print('Identity check NOT RUN: Mac IPv6 sweep regressions (Node unavailable on this host)', file=sys.stderr)
+        return
+    source = r'''import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import vm from 'node:vm';
+
+// Execute the complete shipped entrypoint, replacing only boundary dependencies.
+// No copied port-selection expression, source rewriting, real sockets or product stack.
+const sourcePath = resolve(process.argv[2] || 'scripts/gate/mac/probe.mjs');
+const source = readFileSync(sourcePath, 'utf8');
+const cases = [
+  { name: 'runtime ports with default options', ports: [22, 13443, 32000], v6: true },
+  { name: 'explicit ports add, deduplicate and validate', ports: [22, 13443, 32000], v6: true,
+    extra: ['--v6-ports', '4444,13443,4444,0,65536,nope'] },
+  { name: 'explicit ports without IPv4 opens preserve controls', ports: [], v6: true,
+    extra: ['--v6-ports', '4444'] },
+  { name: 'no IPv6 address preserves IPv4-only behavior', ports: [22, 13443], v6: false },
+];
+let failures = 0;
+for (const test of cases) {
+  const files = new Map();
+  const connections = [];
+  const argv = ['node', sourcePath, 'sweep', '--ip', '127.0.0.1', '--host', 'fixture.test', '--out', '/owned-output'];
+  if (test.v6) argv.push('--v6', '::1');
+  argv.push(...(test.extra || []));
+  const context = vm.createContext({
+    process: { argv, stdout: { write() {} }, exit(rc) { throw new Error('unexpected exit ' + rc); } },
+    console: { log() {}, error() {} },
+  });
+  const module = new vm.SourceTextModule(source, {
+    context, identifier: pathToFileURL(sourcePath).href,
+    initializeImportMeta(meta) { meta.url = pathToFileURL(sourcePath).href; },
+  });
+  const imported = new Map();
+  await module.link(async (specifier) => {
+    if (imported.has(specifier)) return imported.get(specifier);
+    const namespace = { ...await import(specifier) };
+    if (specifier === 'node:fs') {
+      namespace.mkdirSync = () => {};
+      namespace.writeFileSync = (path, data) => files.set(path, String(data));
+    }
+    if (specifier === 'node:net') {
+      namespace.default = { ...namespace.default, connect(options) {
+        const socket = new EventEmitter();
+        socket.setTimeout = () => socket;
+        socket.destroy = () => socket;
+        if (options.family === 6) connections.push(options.port);
+        queueMicrotask(() => {
+          if (test.ports.includes(options.port)) socket.emit('connect');
+          else socket.emit('error', Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }));
+        });
+        return socket;
+      } };
+    }
+    const keys = Object.keys(namespace);
+    const linked = new vm.SyntheticModule(keys, function () {
+      for (const key of keys) this.setExport(key, namespace[key]);
+    }, { context });
+    imported.set(specifier, linked);
+    return linked;
+  });
+  await module.evaluate({ timeout: 10000 });
+  const report = JSON.parse(files.get('/owned-output/w5-result.json'));
+  const problems = [];
+  const check = (condition, message) => { if (!condition) problems.push(message); };
+  assert.deepEqual(report.open, test.ports);
+  assert.equal(Object.values(report.counts).reduce((a, b) => a + b), 65535);
+  if (test.v6) {
+    const ports = report.v6.ports.map(p => p.port);
+    check(test.ports.every(p => ports.includes(p)), 'missing IPv4-open ports: ' + test.ports.filter(p => !ports.includes(p)));
+    check(ports.includes(111), 'default firewall control 111 missing');
+    check(!test.extra || ports.includes(4444), 'explicit additional port 4444 missing');
+    check(ports.length === new Set(ports).size, 'duplicate IPv6 probes');
+    check(ports.every(p => Number.isInteger(p) && p >= 1 && p <= 65535), 'out-of-range IPv6 probes');
+    check(ports.every((p, i) => !i || ports[i - 1] < p), 'IPv6 probes not sorted');
+    assert.deepEqual(connections, ports);
+  } else {
+    assert.equal(report.v6, undefined);
+    assert.deepEqual(connections, []);
+  }
+  console.log(JSON.stringify({ case: test.name, verdict: problems.length ? 'FAIL' : 'PASS',
+    ipv4Open: report.open, ipv6Ports: report.v6?.ports.map(p => p.port) || [], problems }));
+  failures += problems.length;
+}
+console.log(JSON.stringify({ cases: cases.length, failedAssertions: failures }));
+process.exitCode = failures ? 1 : 0;
+'''
+    run = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-',
+                          str(ROOT / 'scripts/gate/mac/probe.mjs')], input=source,
+                         text=True, capture_output=True, timeout=30)
+    checks.expect(run.returncode == 0, f'Mac sweep IPv6 runtime-port/default/additional/IPv4-only regressions: rc={run.returncode}, stdout={run.stdout!r}, stderr={run.stderr!r}')
+
+
+def check_firewall_round4(checks):
+    """Run full shipped W5/W7 rows against deterministic listener/firewall producers."""
+    bash = shutil.which('bash')
+    if bash is None:
+        checks.expect(False, 'Bash is required for W5/W7 firewall regression checks')
+        return
+    text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='firewall-', dir=fixture_base) as fixture_dir:
+        folder = Path(fixture_dir)
+        def function(name):
+            start = text.index(name + '() {')
+            return text[start:text.index('\n}\n', start) + 3] + '\n'
+
+        common = r'''
+        set -uo pipefail
+        section() { :; }
+        record() { printf 'RECORD %s|%s\n' "$4" "$5"; }
+        sudo() { [[ "$1" == -n ]] && shift; "$@"; }
+        env() { [[ "$1" == LC_ALL=C ]] && shift; "$@"; }
+        systemctl() { echo active; }
+        RAW=/dev/stderr; KRATE=/usr/bin/true
+        '''
+
+        def run(condition, case, script, env, expected):
+            result = subprocess.run([bash, '-c', script], env=dict(os.environ, **env),
+                                    text=True, capture_output=True, timeout=5)
+            verdict = next((line.split('|')[0].split()[-1] for line in result.stdout.splitlines()
+                            if line.startswith('RECORD ')), 'MISSING')
+            checks.expect(verdict == expected, f'{condition}/{case}: expected {expected}, got {verdict}; rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}')
+            if condition == 'W5 listener precondition' and expected == 'FAIL':
+                checks.expect('AGENT_CALLED' not in result.stdout, f'W5/{case}: failed control precondition must stop before requesting the Mac sweep')
+
+        w5_stub = r'''
+        firewall-cmd() { echo "$FW_STATE"; }
+        w5_published_any_ports() { echo proxy=443; [[ "$PUBLISHED_CONTROL" != yes ]] || echo control=111; }
+        ip() { [[ "$IP_RC" == 0 ]] || return "$IP_RC"; printf '%s\n' "$NIC_INFO"; }
+        ss() {
+          if [[ "$*" == *'sport = :111'* ]]; then
+            [[ "$SS_RC" == 0 ]] || return "$SS_RC"; printf '%s\n' "$LISTENERS"
+          fi
+        }
+        agent_request() { CAP="$ENVELOPE"; printf 'AGENT_CALLED\n'; }
+        agent_delivered_dir() { echo "$CASE_DIR"; }
+        '''
+        w5_script = common + w5_stub
+        if 'w5_control_listener() {' in text:
+            w5_script += function('w5_control_listener')
+        w5_script += function('phase4_row_w5') + 'phase4_row_w5 4c\n'
+        nic = '3: lima0 inet 192.168.64.3/24 scope global lima0'
+        for case, listener, ip_rc, ss_rc, fw, published, expected in (
+            ('wildcard', 'LISTEN 0 4096 0.0.0.0:111 0.0.0.0:*', 0, 0, 'running', 'no', 'PASS'),
+            ('nic', 'LISTEN 0 4096 192.168.64.3:111 0.0.0.0:*', 0, 0, 'running', 'no', 'PASS'),
+            ('asterisk', 'LISTEN 0 4096 *:111 *:*', 0, 0, 'running', 'no', 'PASS'),
+            ('absent', '', 0, 0, 'running', 'no', 'FAIL'),
+            ('loopback', 'LISTEN 0 4096 127.0.0.1:111 0.0.0.0:*', 0, 0, 'running', 'no', 'FAIL'),
+            ('other-nic', 'LISTEN 0 4096 192.168.5.15:111 0.0.0.0:*', 0, 0, 'running', 'no', 'FAIL'),
+            ('ipv6-only', 'LISTEN 0 4096 [::]:111 [::]:*', 0, 0, 'running', 'no', 'FAIL'),
+            ('ip-read-fails', '', 19, 0, 'running', 'no', 'FAIL'),
+            ('ss-read-fails', '', 0, 20, 'running', 'no', 'FAIL'),
+            ('no-firewall', '', 0, 0, 'not running', 'no', 'PASS'),
+            ('published-control', '', 0, 0, 'running', 'yes', 'PASS'),
+        ):
+            directory = folder / case
+            directory.mkdir(exist_ok=True)
+            ports = [22, 443] if published == 'no' else [22, 111, 443]
+            report = dict(open=ports, swept={'tcpOnly': True}, counts={},
+                          spot=[{'port': 111, 'outcome': 'refused'}], cert={'authorized': True},
+                          v6={'address': '2001:db8::1', 'addressClass': 'global',
+                              'ports': [{'port': 22, 'outcome': 'open'}, {'port': 443, 'outcome': 'refused'}]})
+            data = json.dumps(report).encode()
+            (directory / 'w5-result.json').write_bytes(data)
+            envelope = dict(files=[{'name': 'w5-result.json', 'sha256': hashlib.sha256(data).hexdigest()}],
+                            exit=0, mac_leak_scan={'values': 1, 'hits': 0, 'stores': ['agent.log']})
+            run('W5 listener precondition', case, w5_script,
+                dict(STATE=str(directory), CASE_DIR=str(directory), ENVELOPE=json.dumps(envelope),
+                     FW_STATE=fw, PUBLISHED_CONTROL=published, IP_RC=str(ip_rc), SS_RC=str(ss_rc),
+                     NIC_INFO=nic, LISTENERS=listener, VM_G6='2001:db8::1'), expected)
+
+        w7_stub = r'''
+        firewall-cmd() {
+          local result='' key="$*"
+          case "$*" in
+            *--get-default-zone*|*--get-zone-of-interface=lima0*) result=public ;;
+            *--get-zone-of-interface=*) result=docker ;;
+            *--info-zone=docker*) result=$'docker (active)\n target: ACCEPT' ;;
+            *--list-services*) result=ssh ;;
+            *--get-policies*) result=docker-forwarding ;;
+          esac
+          printf '%s\n' "$result"
+          if [[ "$key" == "$FAIL_QUERY" || ( "$FAIL_QUERY" == bridge-zone && "$key" == --get-zone-of-interface=* && "$key" != --get-zone-of-interface=lima0 ) ]]; then echo 'manual producer refusal rc23' >&2; return 23; fi
+          return 0
+        }
+        '''
+        w7_script = common + w7_stub + function('w7_os_family') + function('phase4_row_w7')
+        w7_script += "phase4_row_w7 4c <(printf 'ID=rocky\\n')\n"
+        queries = ['--get-default-zone', '--get-zone-of-interface=lima0', 'bridge-zone',
+                   '--info-zone=docker', '--get-policies']
+        for query in ('--list-services', '--list-ports', '--list-protocols', '--list-icmp-blocks'):
+            queries += ['--zone=public ' + query, '--permanent --zone=public ' + query]
+        queries += ['--zone=public --list-rich-rules', '--zone=public --list-forward-ports']
+        run('W7 query status', 'clean', w7_script, {'FAIL_QUERY': ''}, 'PASS')
+        for query in queries:
+            run('W7 query status', query + ' returns23 with valid-looking stdout', w7_script,
+                {'FAIL_QUERY': query}, 'FAIL')
+
+
+
+def check_browser_certificate_proceed(checks):
+    """Exercise Proceed's shipped future-document and error-propagation contract."""
+    node = shutil.which('node')
+    if node is None:
+        print('Identity check NOT RUN: browser certificate Proceed regressions (Node unavailable on this host)', file=sys.stderr)
+        return
+    source = r'''import process from 'node:process';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+// Controlled shipped-export contract probe: no browser, socket, timer or fixtures.
+// Default click below retains Playwright's main-frame navigation signal barrier.
+const modulePath = resolve(process.argv[2] || 'scripts/gate/browser-launch.mjs');
+const { acceptGateCertificate } = await import(pathToFileURL(modulePath).href);
+const sha256 = createHash('sha256').update(readFileSync(modulePath)).digest('hex');
+const HOST = 'gate.test';
+const URL_START = 'https://gate.test:3443/start';
+const deferred = () => {
+  let release; let fail;
+  const promise = new Promise((yes, no) => { release = yes; fail = no; });
+  // A signal barrier consumes navigation failure even without an explicit client wait.
+  promise.catch(() => {});
+  return { promise, release, fail };
+};
+const configs = [
+  { name: 'positive-click-signal-barrier', deferred: true, control: true },
+  { name: 'failed-Proceed-click', clickError: true, reject: true },
+  { name: 'failed-navigation', navigationError: 'Navigation failed', reject: true },
+  { name: 'navigation-timeout', navigationError: 'Timeout 20000ms exceeded', reject: true },
+  { name: 'null-same-document', nullResponse: true, reject: true },
+  { name: 'wrong-host-response', responseURL: 'https://outside.test/landing', reject: true },
+  { name: 'non-HTTPS-response', responseURL: 'http://gate.test/landing', reject: true },
+  { name: 'not-navigation-request', notNavigation: true, reject: true },
+  { name: 'wrong-frame-response', wrongFrame: true, reject: true },
+  { name: 'same-host-port-redirect', responseURL: 'https://gate.test:443/identity/login' },
+  { name: 'no-interstitial', noInterstitial: true },
+  { name: 'hooks-before-expected-code-refusal', code: 'net::ERR_CERT_DATE_INVALID', reject: true },
+  { name: 'hooks-before-Proceed' },
+  { name: 'prearmed-bounded-main-navigation', requirePrearmed: true },
+  { name: 'failed-Advanced-click', advancedError: true, reject: true },
+  { name: 'hook-refusal-propagates', hookError: true, reject: true },
+];
+const rows = [];
+for (const config of configs) {
+  const failures = [];
+  const events = [];
+  const navigation = deferred();
+  const frame = {};
+  let settled = false; let decision; let error;
+  let proceedClicked = false; let waiterArmed = false; let armedAtClick = false; let waitOptions;
+  const response = config.nullResponse ? null : {
+    url: () => config.responseURL || URL_START,
+    request: () => ({ isNavigationRequest: () => !config.notNavigation, frame: () => config.wrongFrame ? {} : frame }),
+  };
+  const check = (yes, assertion) => { if (!yes) failures.push(assertion); };
+  const page = {
+    mainFrame: () => frame,
+    goto: async () => { events.push('initial-goto'); if (!config.noInterstitial) throw new Error('net::ERR_CERT_AUTHORITY_INVALID'); return response; },
+    waitForSelector: async () => { events.push('warning-selector'); if (config.noInterstitial) throw new Error('warning missing'); },
+    locator: selector => ({
+      count: async () => selector === '#details-button' && !config.noInterstitial ? 1 : 0,
+      textContent: async () => config.code || 'net::ERR_CERT_AUTHORITY_INVALID',
+    }),
+    // The interstitial already loaded. This must not be treated as a future-document wait.
+    waitForLoadState: async () => { events.push('warning-already-load'); },
+    waitForNavigation: options => { events.push('wait-navigation'); waiterArmed = true; waitOptions = options; return navigation.promise; },
+    click: async selector => {
+      events.push(selector === '#details-button' ? 'Advanced' : 'Proceed');
+      if (selector === '#details-button') { if (config.advancedError) throw new Error('Advanced click failed'); return; }
+      proceedClicked = true;
+      armedAtClick = waiterArmed;
+      if (config.clickError) throw new Error('Proceed click failed');
+      if (!config.deferred) {
+        if (config.navigationError) navigation.fail(new Error(config.navigationError));
+        else navigation.release(response);
+      }
+      // PW v1.60 SignalBarrier waits main-frame navigation announced by the click,
+      // and consumes navigation failures. It does not prove the caller's response contract.
+      await navigation.promise.catch(() => {});
+    },
+  };
+  const pending = acceptGateCertificate(page, URL_START, {
+    onAssert: async d => { events.push('onAssert'); check(d.seen && d.decision === 'none', 'assert hook sees warning before decision'); if (config.hookError) throw new Error('hook refused'); },
+    onShot: async d => { events.push('onShot'); check(d.seen && d.decision === 'none', 'shot hook sees warning before decision'); },
+  }).then(value => { decision = value; settled = true; }, reason => { error = reason; settled = true; });
+  // Only microtask observation: no clock delay, browser scheduling or early-return claim.
+  if (config.deferred) {
+    for (let i = 0; i < 64 && !proceedClicked && !settled; i++) await Promise.resolve();
+    check(proceedClicked, 'positive control reached Proceed');
+    check(!settled, 'source-faithful click barrier keeps helper pending');
+    navigation.release(response);
+  }
+  await pending;
+  // Release any unused adapter-only waiter after a failed click or earlier refusal.
+  navigation.release(response);
+  if (config.reject) check(Boolean(error) && !decision, 'failed contract must reject, never report proceeded');
+  else if (config.noInterstitial) check(!error && decision?.decision === 'no-interstitial' && !proceedClicked, 'no-interstitial behavior retained');
+  else check(!error && decision?.decision === 'proceed', 'valid Proceed accepted');
+  if (!config.noInterstitial) {
+    check(events.indexOf('onAssert') >= 0, 'assert hook ran');
+    if (!config.hookError) check(events.indexOf('onShot') > events.indexOf('onAssert'), 'shot follows assertion');
+    if (proceedClicked) check(events.indexOf('onShot') < events.indexOf('Advanced') && events.indexOf('Advanced') < events.indexOf('Proceed'), 'hooks precede Advanced and Proceed');
+  }
+  if (config.code || config.hookError || config.advancedError) check(!proceedClicked, 'earlier refusal never reaches Proceed');
+  if (config.requirePrearmed) {
+    check(armedAtClick, 'future navigation waiter armed before Proceed click');
+    check(waitOptions?.waitUntil === 'load' && waitOptions?.timeout === 20000, 'wait is load-bound and finite');
+  }
+  rows.push({ name: config.name, passed: failures.length === 0, failures, events, result: decision?.decision || null, rejected: Boolean(error), error: error?.message || null });
+}
+const failedAssertions = rows.reduce((sum, row) => sum + row.failures.length, 0);
+console.log(JSON.stringify({ kind: 'controlled shipped-helper contract; no native scheduling claim', modulePath, sha256, gateHostname: HOST, cases: rows.length, failedAssertions, rows }, null, 2));
+if (failedAssertions) process.exitCode = 1;
+'''
+    result = subprocess.run([node, '--input-type=module', '-', str(ROOT / 'scripts/gate/browser-launch.mjs')],
+                            input=source, text=True, capture_output=True, timeout=30)
+    try:
+        summary = json.loads(result.stdout)
+    except ValueError:
+        summary = {}
+    checks.expect(result.returncode == 0 and summary.get('cases') == 16 and summary.get('failedAssertions') == 0,
+                  'Browser certificate Proceed contract failed: ' + result.stdout[-2400:] + result.stderr[-600:])
+
+
+def check_browser_certificate_binding(checks):
+    """Run current-main-browser leaf/cleanup/tracker regressions on the shipped exports."""
+    node = shutil.which('node')
+    if node is None:
+        print('Identity check NOT RUN: browser certificate binding regressions (Node unavailable on this host)', file=sys.stderr)
+        return
+    source = r'''import { EventEmitter } from 'node:events';
+import process from 'node:process';
+import { Buffer } from 'node:buffer';
+import { readFileSync } from 'node:fs';
+import { createHash, X509Certificate } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+
+// Actual shipped exported assertion; only Playwright/CDP boundary state is adapted.
+const source = resolve(process.argv[2] || 'scripts/gate/browser-launch.mjs');
+const lib = await import(pathToFileURL(source).href);
+// Throwaway same-DN leaves are created under harness and removed after this check.
+const a = new X509Certificate(readFileSync(process.argv[3]));
+// A and B have independent keys; no fixture certificate/key is committed.
+const b = new X509Certificate(readFileSync(process.argv[4]));
+const pin = lib.certDigests(a.raw);
+const details = { subjectName: 'gate.test', issuer: 'gate.test', protocol: 'TLS 1.3', validFrom: 1, validTo: 2 };
+const cases = [
+  ['same leaf', {}, true],
+  ['same DN different leaf', { leaf: b.raw }, false],
+  ['empty certificate chain', { chain: [] }, false],
+  ['invalid DER', { chain: [Buffer.from('not a certificate').toString('base64')] }, false],
+  ['neutral security state', { securityState: 'neutral' }, false],
+  ['missing security state', { noState: true }, false],
+  ['enable fails', { fail: 'Security.enable' }, false],
+  ['CDP attach fails', { attachFails: true }, false],
+  ['CDP frame snapshot fails', { fail: 'Page.getFrameTree' }, false],
+  ['frame loader changes', { loaderChanges: true }, false],
+  ['main navigation during sampling', { navigating: true }, false],
+  ['main frame navigation during sampling', { frameNavigating: true }, false],
+  ['main navigation during detach', { navigationOnDetach: true }, false],
+  ['session detach fails', { detachFails: true }, false],
+  ['interstitial main frame', { interstitial: true }, false],
+  ['missing pinned digest', { missingPin: true }, false],
+  ['different current origin', { pageUrl: 'https://other.test/' }, false],
+  ['subframe response', { subframe: true }, false],
+  ['not a navigation response', { notNavigation: true }, false],
+  ['closed page', { closed: true }, false],
+  ['same-origin SPA path', { pageUrl: 'https://gate.test/route#shot' }, true],
+  ['different response subject', { wrongSubject: true }, false],
+];
+const results = [];
+for (const [name, options, expected] of cases) {
+  const calls = [];
+  const page = new EventEmitter();
+  const session = new EventEmitter();
+  let snapshots = 0;
+  let detaches = 0;
+  const frame = { page: () => page, isDetached: () => false };
+  const request = { frame: () => frame, isNavigationRequest: () => !options.notNavigation,
+    redirectedTo: () => null };
+  const url = options.pageUrl || 'https://gate.test/certificate';
+  Object.assign(page, { url: () => url, isClosed: () => !!options.closed,
+    mainFrame: () => options.subframe ? {} : frame,
+    context: () => ({ newCDPSession: async (target) => {
+      if (target !== page) throw new Error('session is not bound to response page');
+      calls.push('attach');
+      if (options.attachFails) throw new Error('attach refused');
+      return session;
+    } }) });
+  session.send = async (method) => {
+    calls.push(method);
+    if (options.fail === method) throw new Error(method + ' refused');
+    if (method === 'Page.getFrameTree') {
+      snapshots++;
+      return { frameTree: { frame: { id: 'main', loaderId: options.loaderChanges && snapshots > 1 ? 'later' : 'current',
+        url: url.split('#')[0], securityOrigin: new URL(url).origin, unreachableUrl: options.interstitial ? url : undefined } } };
+    }
+    if (method === 'Security.enable') {
+      if (!session.listenerCount('Security.visibleSecurityStateChanged')) throw new Error('Security listener installed too late');
+      if (options.navigating) page.emit('request', request);
+      if (options.frameNavigating) page.emit('framenavigated', frame);
+      if (!options.noState) session.emit('Security.visibleSecurityStateChanged', { visibleSecurityState: {
+        securityState: options.securityState || 'insecure-broken',
+        certificateSecurityState: { certificate: options.chain || [(options.leaf || a.raw).toString('base64')] },
+      } });
+      return {};
+    }
+    throw new Error('unexpected protocol method ' + method);
+  };
+  session.detach = async () => {
+    calls.push('detach'); detaches++;
+    if (options.navigationOnDetach) page.emit('request', request);
+    if (options.detachFails) throw new Error('detach refused');
+  };
+  const response = { securityDetails: async () => ({ ...details, subjectName: options.wrongSubject ? 'other.test' : details.subjectName }),
+    request: () => request, url: () => 'https://gate.test/certificate', finished: async () => null };
+  let result = null;
+  let error = null;
+  try { result = await lib.assertServedCertificate(response, options.missingPin ? { ...pin, sha256: '' } : pin, name); }
+  catch (e) { error = String(e.message || e); }
+  const accepted = error === null;
+  const problems = [];
+  if (accepted !== expected) problems.push('expected accepted=' + expected + ', got ' + accepted);
+  if (calls.includes('attach') && !options.attachFails && detaches !== 1) problems.push('owned CDP session not detached exactly once');
+  if (page.eventNames().some(event => page.listenerCount(event))) problems.push('page listeners left behind');
+  if (session.eventNames().some(event => session.listenerCount(event))) problems.push('CDP listeners left behind');
+  results.push({ name, expected, accepted, passed: problems.length === 0, problems, result, error, calls });
+}
+// Actual exported tracker: proof strings must be appended atomically only for a
+// response/count that remained current across asynchronous address/certificate checks.
+for (const mode of ['stable', 'different response', 'same response counted again']) {
+  const page = new EventEmitter();
+  const frame = {};
+  page.mainFrame = () => frame;
+  const request = { isNavigationRequest: () => true, frame: () => frame };
+  const later = { request: () => request };
+  const response = { request: () => request, serverAddr: async () => {
+    if (mode !== 'stable') page.emit('response', mode === 'different response' ? later : response);
+    return { ipAddress: '192.168.64.3', port: 443 };
+  } };
+  const tracker = lib.attachServeTracker(page);
+  page.emit('response', response);
+  const asserted = [];
+  let error = null;
+  try { await tracker.record('192.168.64.3', null, mode, asserted); }
+  catch (e) { error = String(e.message || e); }
+  const expected = mode === 'stable';
+  const accepted = error === null;
+  const problems = [];
+  if (accepted !== expected) problems.push('unexpected tracker verdict');
+  if (asserted.length !== (expected ? 1 : 0)) problems.push('tracker published partial/stale proof');
+  results.push({ name: 'tracker ' + mode, expected, accepted, asserted, error, problems, passed: !problems.length });
+}
+const report = { source, sourceSha256: createHash('sha256').update(readFileSync(source)).digest('hex'),
+  aLeaf: createHash('sha256').update(a.raw).digest('hex'), bLeaf: createHash('sha256').update(b.raw).digest('hex'),
+  results, failures: results.filter(row => !row.passed).length };
+console.log(JSON.stringify(report, null, 2));
+process.exitCode = report.failures ? 1 : 0;
+'''
+    openssl_binary = shutil.which('openssl')
+    if openssl_binary is None:
+        checks.expect(False, 'OpenSSL is required to generate throwaway browser certificate fixtures')
+        return
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='browser-cert-', dir=fixture_base) as fixture_dir:
+        fixture = Path(fixture_dir)
+        for name in ('a', 'b'):
+            made = subprocess.run([openssl_binary, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                                   '-sha256', '-days', '1', '-subj', '/CN=gate.test',
+                                   '-keyout', str(fixture / (name + '.key')), '-out', str(fixture / (name + '.crt'))],
+                                  capture_output=True, text=True, timeout=15)
+            if not checks.expect(made.returncode == 0, f'cannot generate browser leaf {name}: {made.stderr[:200]}'):
+                return
+        run = subprocess.run([node, '--input-type=module', '-', str(ROOT / 'scripts/gate/browser-launch.mjs'),
+                              str(fixture / 'a.crt'), str(fixture / 'b.crt')],
+                             input=source, text=True, capture_output=True, timeout=30)
+        checks.expect(run.returncode == 0, f'Browser certificate/current-main-frame/cleanup/tracker regressions: rc={run.returncode}, stdout={run.stdout!r}, stderr={run.stderr!r}')
+
+
+def check_browser_http_guard(checks):
+    """HTTP redirect decisions use the shipped browser-root guard; this does not prove worker WebSockets."""
+    node = shutil.which('node')
+    if not node:
+        print('check_browser_http_guard: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    program = r"""import { EventEmitter } from 'node:events';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+const file = resolve(process.argv[2] || 'scripts/gate/browser-launch.mjs');
+const { externalAttemptsTracker } = await import(pathToFileURL(file).href);
+const pause = () => new Promise(resolve => setImmediate(resolve));
+const cases = ['allowed', 'redirect', 'malformed', 'missing-owner', 'enable-failure', 'decision-failure', 'session-loss', 'late-attempt', 'close-failure', 'missing-api', 'attach-failure', 'websocket-setup-failure', 'continue-failure', 'response-pause', 'still-connected', 'close-during-enable', 'delayed-decision', 'duplicate-close', 'session-loss-during-close', 'allowed-page-websocket', 'external-page-websocket'];
+let failures = 0;
+for (const condition of cases) {
+  const events = []; const sent = []; const errors = [];
+  let connected = true; let enabled = false; let closeCalls = 0;
+  let websocketPredicate; let websocketHandler; const websocketCloses = [];
+  const session = new EventEmitter();
+  session.send = async (method, params) => {
+    sent.push({method,params}); events.push(method);
+    if (method === 'Fetch.enable') { if (session.listenerCount('Fetch.requestPaused') !== 1) errors.push('enable preceded pause listener'); if (condition === 'enable-failure') throw new Error('synthetic enable failure'); if (condition === 'close-during-enable') session.emit('close'); enabled = true; }
+    if (method === 'Fetch.failRequest' && condition === 'decision-failure') throw new Error('synthetic fail rejection');
+    if (method === 'Fetch.continueRequest' && condition === 'continue-failure') throw new Error('synthetic continue rejection');
+    if (method === 'Fetch.failRequest' && condition === 'delayed-decision') { await pause(); await pause(); events.push('decision-ack'); }
+    return {};
+  };
+  session.detach = async () => { events.push('detach'); };
+  const owner = { newBrowserCDPSession: condition === 'missing-api' ? undefined : async () => { if (condition === 'attach-failure') throw new Error('synthetic attach rejection'); return session; }, isConnected: () => connected };
+  const context = new EventEmitter();
+  context.browser = () => condition === 'missing-owner' ? null : owner;
+  context.route = async () => {}; context.routeWebSocket = async (predicate, handler) => { websocketPredicate = predicate; websocketHandler = handler; if (condition === 'websocket-setup-failure') throw new Error('synthetic websocket setup rejection'); };
+  context.close = async () => {
+    closeCalls++; events.push('browser-close');
+    if (condition === 'late-attempt') session.emit('Fetch.requestPaused', {requestId:'late',request:{url:'http://127.0.0.1:9/path?secret=value'}});
+    if (condition === 'session-loss-during-close') { session.emit('close'); await pause(); await pause(); }
+    if (condition === 'close-failure') throw new Error('synthetic close rejection');
+    connected = condition === 'still-connected'; session.emit('close'); context.emit('close');
+  };
+  const tracker = externalAttemptsTracker('gate.test');
+  let setupFailed = false;
+  try { await tracker.guard(context); } catch { setupFailed = true; }
+  const expectedSetupFailure = ['missing-owner','enable-failure','missing-api','attach-failure','websocket-setup-failure','close-during-enable'].includes(condition);
+  const check = (yes, message) => { if (!yes) errors.push(message); };
+  check(setupFailed === expectedSetupFailure, 'setup verdict');
+  if (!expectedSetupFailure) {
+    check(enabled && session.listenerCount('Fetch.requestPaused') === 1, 'root Fetch armed with listener');
+    check(sent.some(x=>x.method==='Fetch.enable'&&JSON.stringify(x.params)===JSON.stringify({patterns:[{urlPattern:'*',requestStage:'Request'}]})), 'all requests intercepted at Request stage');
+    if (['allowed','continue-failure','duplicate-close'].includes(condition)) session.emit('Fetch.requestPaused',{requestId:'a',request:{url:'https://gate.test:3443/api'}});
+    if (['redirect','decision-failure','delayed-decision'].includes(condition)) {
+      session.emit('Fetch.requestPaused',{requestId:'a',request:{url:'https://gate.test/start'}});
+      session.emit('Fetch.requestPaused',{requestId:'b',redirectedRequestId:'a',request:{url:'http://127.0.0.1:9/outside?secret=value'}});
+    }
+    if (['allowed-page-websocket', 'external-page-websocket'].includes(condition)) {
+      const external = condition === 'external-page-websocket';
+      const url = new URL(external ? 'wss://127.0.0.1:9/outside?secret=value' : 'wss://gate.test:3443/live?secret=value');
+      const intercepted = typeof websocketPredicate === 'function' && websocketPredicate(url);
+      check(intercepted === external, 'page WebSocket gate-host predicate');
+      if (intercepted && typeof websocketHandler === 'function') await websocketHandler({ url: () => url.href, close: async options => { websocketCloses.push(options); } });
+      if (external) {
+        check(websocketCloses.length === 1 && websocketCloses[0].code === 1008, 'external page WebSocket closed with policy code');
+        check(websocketCloses[0]?.reason === 'blocked: not the gate host', 'external page WebSocket fixed close reason');
+        check(tracker.list.some(e => e.host === '127.0.0.1' && e.scheme === 'wss' && e.how === 'websocket-blocked'), 'external page WebSocket sanitized attempt retained');
+      } else check(websocketCloses.length === 0 && tracker.list.length === 0, 'allowed gate WebSocket bypasses handler');
+    }
+    if (condition === 'malformed') session.emit('Fetch.requestPaused',{requestId:'bad',request:{url:'%%%' }});
+    if (condition === 'response-pause') session.emit('Fetch.requestPaused',{requestId:'response',responseStatusCode:200,request:{url:'https://gate.test/'}});
+    if (condition === 'session-loss') session.emit('close');
+    if (condition !== 'delayed-decision') { await pause(); await pause(); }
+  }
+  let terminalFailed = false;
+  try {
+    if (typeof tracker.closeOwnedBrowser !== 'function') throw new Error('missing close lifecycle');
+    await tracker.closeOwnedBrowser(() => context.close());
+  } catch { terminalFailed = true; }
+  if (condition === 'duplicate-close') { try { await tracker.closeOwnedBrowser(() => context.close()); } catch { errors.push('duplicate-close unexpectedly failed'); } }
+  const bad = !['allowed','duplicate-close','allowed-page-websocket'].includes(condition);
+  check(terminalFailed === bad, 'terminal verdict');
+  check(closeCalls === 1, 'owned browser close exactly once');
+  const commands = sent.filter(x=>x.method==='Fetch.continueRequest'||x.method==='Fetch.failRequest');
+  if (condition==='allowed') check(commands.some(x=>x.method==='Fetch.continueRequest'&&x.params.requestId==='a'&&Object.keys(x.params).length===1), 'allowed request unchanged');
+  if (['redirect','decision-failure','late-attempt'].includes(condition)) check(commands.some(x=>x.method==='Fetch.failRequest'&&x.params.requestId===(condition==='late-attempt'?'late':'b')&&x.params.errorReason==='BlockedByClient'), 'external hop failed');
+  if (condition==='malformed') check(commands.some(x=>x.method==='Fetch.failRequest'&&x.params.requestId==='bad'), 'malformed request refused');
+  check(!events.includes('Fetch.disable') && (!events.includes('detach') || events.indexOf('detach')>events.indexOf('browser-close')), 'no guard release before browser close');
+  const evidence = typeof tracker.evidence==='function' ? tracker.evidence() : null;
+  check(evidence && evidence.closed === (!['close-failure','still-connected'].includes(condition)), 'terminal evidence');
+  if (!['allowed','duplicate-close','allowed-page-websocket','external-page-websocket','redirect','late-attempt','delayed-decision'].includes(condition)) check(evidence?.errors?.length>0, 'integrity failure retained');
+  if (['redirect','decision-failure','late-attempt'].includes(condition)) check(tracker.list.some(x=>x.host==='127.0.0.1'), 'sanitized attempt retained');
+  check(!JSON.stringify({evidence,list:tracker.list}).includes('secret=value'), 'sensitive URL absent');
+  if (condition === 'response-pause') check(commands.some(x=>x.method==='Fetch.failRequest'&&x.params.requestId==='response'), 'response-stage pause refused');
+  if (condition === 'delayed-decision') check(events.includes('decision-ack')&&tracker.list.some(x=>x.how==='http-blocked'), 'terminal waits for decision acknowledgement');
+  if (evidence?.closed) check(session.listenerCount('Fetch.requestPaused')===0, 'owned listener removed only after closure');
+  failures += errors.length;
+  console.log(JSON.stringify({condition,errors,events,sent,evidence,list:tracker.list,websocketCloses}));
+}
+console.log(JSON.stringify({cases:cases.length,failedAssertions:failures,sourceSha256:createHash('sha256').update(readFileSync(file)).digest('hex')}));
+process.exitCode=failures?1:0;
+"""
+    result = subprocess.run([node, '--input-type=module', '-e', program, 'canonical-http-guard',
+                             str(ROOT / 'scripts/gate/browser-launch.mjs')], capture_output=True, text=True, timeout=45)
+    try:
+        summary = json.loads(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        summary = {}
+    checks.expect(result.returncode == 0 and summary.get('cases') == 21 and summary.get('failedAssertions') == 0,
+                  'check_browser_http_guard: shipped guard decisions failed: ' + result.stdout[-2400:] + result.stderr[-600:])
+
+
+def check_browser_http_callers(checks):
+    """Exercise shipped terminal fragments and full setup-failure modules, not actual UI behavior."""
+    node = shutil.which('node')
+    if not node:
+        print('check_browser_http_callers: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    payloads = (
+        (15, r"""// Execute the shipped finalizer and following verdict unchanged, in a controlled scope.
+// This checks terminal receipt propagation, not DOM/login correctness or real Chrome exit.
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import vm from 'node:vm';
+import { resolve } from 'node:path';
+
+const root = resolve(process.argv[2] || '.');
+let failures = 0;
+for (const file of ['screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs']) {
+  const source = readFileSync(`${root}/scripts/gate/${file}`, 'utf8');
+  const finalizers = [...source.matchAll(/^\} finally \{$/gm)];
+  if (finalizers.length !== 1) throw new Error(`ambiguous finalizer: ${file}`);
+  const tail = source.slice(finalizers[0].index + 2);
+  for (const condition of ['positive', 'evidence', 'close', 'terminal-attempt', 'browser-write']) {
+    const events = [], logs = [], files = new Map();
+    let closed = false;
+    const process = { exitCode: undefined };
+    const guard = { closed: false, errors: [] };
+    const ext = {
+      list: [], evidence: () => ({ ...guard, errors: [...guard.errors] }),
+      async closeOwnedBrowser(close) {
+        events.push('guard-close');
+        await close();
+        guard.closed = true;
+        if (condition === 'terminal-attempt') {
+          ext.list.push({ host: 'outside.invalid', scheme: 'http', how: 'http-blocked' });
+          guard.errors.push({ stage: 'synthetic terminal attempt' });
+          throw new Error('injected terminal-attempt');
+        }
+      },
+    };
+    const scope = vm.createContext({
+      URL, process, MAC: true, OUT: '/synthetic', PIN: {}, PINPERS: {}, PINPERS_PORT: 3443,
+      page: {}, certDecision: {}, SHOTS_EXPECTED: 1, storySucceeded: true,
+      manifest: [{ asserted: ['controlled prerequisite'] }],
+      browser: { async close() {
+        events.push('browser-close');
+        if (condition === 'close') throw new Error('injected close');
+        closed = true;
+      } },
+      launch: { mode: 'mac', profileDir: '/synthetic-profile', headless: false },
+      ext,
+      async browserEvidence() {
+        events.push('evidence');
+        if (closed) throw new Error('evidence sampled after close');
+        if (condition === 'evidence') throw new Error('injected evidence');
+        return { observedBy: 'controlled-live-boundary' };
+      },
+      writeFileSync(path, data) {
+        const name = path.split('/').pop(); events.push(`write:${name}`);
+        if (condition === 'browser-write') throw new Error('injected browser-write');
+        files.set(name, JSON.parse(data));
+      },
+      chmodSync() {}, cleanProfile(_path, keep) { events.push(`profile:${keep}`); return !keep; },
+      console: { log: (value) => logs.push(String(value)), error: (value) => logs.push(String(value)) },
+    });
+    const module = new vm.SourceTextModule(`try {} ${tail}`, { context: scope });
+    await module.link(() => { throw new Error('unexpected finalizer import'); });
+    let escaped = null;
+    try { await module.evaluate({ timeout: 2000 }); } catch (error) { escaped = String(error); }
+    const errors = [], expect = (ok, message) => { if (!ok) errors.push(message); };
+    expect(escaped === null, 'finalization escaped');
+    expect(events.filter(e => e === 'guard-close').length === 1, 'guard close not exactly once');
+    expect(events.filter(e => e === 'browser-close').length === 1, 'owned close not exactly once');
+    expect(events.indexOf('evidence') < events.indexOf('browser-close'), 'evidence not sampled live');
+    expect(events.indexOf('browser-close') < events.indexOf('write:browser.json'), 'receipt preceded close');
+    const receipt = files.get('browser.json');
+    if (condition !== 'browser-write') {
+      expect(receipt?.networkGuard?.closed === (condition !== 'close'), 'terminal guard state missing');
+      if (condition === 'terminal-attempt') {
+        expect(receipt?.networkGuard?.errors?.length === 1, 'late guard failure absent');
+        // The live receipt extra/list is a reference in production; the final guard status is decisive.
+      }
+    }
+    expect(condition === 'positive' ? process.exitCode !== 1 : process.exitCode === 1, 'terminal failure lost exit status');
+    expect(logs.some(line => line.startsWith('STORY OK:')) === (condition === 'positive'), 'premature/missing success verdict');
+    expect(events.includes(`profile:${condition !== 'positive'}`), 'failed profile retention flag lost');
+    if (condition === 'evidence') expect(receipt?.evidenceFailed && !receipt?.observedBy, 'missing evidence fabricated');
+    failures += errors.length;
+    console.log(JSON.stringify({ file, condition, errors, events, networkGuard: receipt?.networkGuard }));
+  }
+  console.log(JSON.stringify({ file, sourceSha256: createHash('sha256').update(source).digest('hex') }));
+}
+console.log(JSON.stringify({ cases: 15, failedAssertions: failures }));
+process.exitCode = failures ? 1 : 0;
+"""),
+        (3, r"""// Run complete shipped screenshot modules with guard setup failure injected before navigation.
+import { readFileSync } from 'node:fs';
+import { createHmac, createHash, randomInt } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+import { resolve } from 'node:path';
+import vm from 'node:vm';
+
+const root = resolve(process.argv[2] || '.');
+let failures = 0;
+for (const file of ['screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs']) {
+  const source = readFileSync(`${root}/scripts/gate/${file}`, 'utf8');
+  const events = [], files = new Map(), logs = [];
+  let closed = false;
+  const page = { url: () => 'about:blank', async screenshot() {}, async goto() { events.push('navigation'); } };
+  const browser = { pages: () => [page], async newPage() { return page; }, async close() { events.push('close'); closed = true; } };
+  const guard = {
+    list: [], async guard() { events.push('guard'); throw new Error('injected setup failure'); },
+    async assertClean() { throw new Error('injected setup failure'); },
+    async closeOwnedBrowser(close) { events.push('guard-close'); await close(); throw new Error('injected setup failure'); },
+    evidence() { return { closed, errors: [{ stage: 'injected setup failure' }] }; },
+  };
+  const api = {
+    macMode: () => true, requireCertFile: () => ({ pem: 'synthetic' }),
+    async pinGateCertificate() { return {}; },
+    async launchGateBrowser() { return { browser, mode: 'mac', profileDir: '/synthetic-profile' }; },
+    cleanProfile(_path, keep) { events.push(`profile:${keep}`); return !keep; },
+    attachServeTracker() { return { attachContext() {}, async record() {} }; },
+    externalAttemptsTracker: () => guard,
+    async acceptGateCertificate() { events.push('navigation'); throw new Error('navigation reached despite failed guard'); },
+    async browserEvidence() { events.push('evidence'); return { observedBy: 'controlled-live-boundary' }; },
+  };
+  const child = {
+    argv: ['node', file, '--base', 'https://localhost', '--host', 'localhost', '--out', '/synthetic',
+      '--user', 'viewer', '--viewer-user', 'viewer', '--admin-user', 'admin', '--disabled-user', 'disabled', '--nogroup-user', 'nogroup'],
+    env: Object.fromEntries(['GATE_TEMP_PASSWORD', 'GATE_DISABLED_PASSWORD', 'GATE_VIEWER_PASSWORD', 'GATE_ADMIN_PASSWORD',
+      'GATE_NOGROUP_PASSWORD', 'GATE_VIEWER_TOTP', 'GATE_ADMIN_TOTP', 'GATE_NOGROUP_TOTP'].map(name => [name, 'JBSWY3DPEHPK3PXP'])),
+    exitCode: undefined,
+    exit(code) { this.exitCode = code; throw new Error('unexpected process.exit'); },
+  };
+  const context = vm.createContext({ URL, Buffer, process: child,
+    console: { log: text => logs.push(String(text)), error: text => logs.push(String(text)) } });
+  const imports = {
+    './browser-launch.mjs': api,
+    'node:module': { createRequire: () => () => ({ chromium: {} }) },
+    'node:crypto': { createHmac, createHash, randomInt },
+    'node:fs': { mkdirSync() {}, chmodSync() {}, readFileSync: () => Buffer.from('synthetic screenshot bytes'),
+      writeFileSync(path, data) { const name = path.split('/').pop(); events.push(`write:${name}`); files.set(name, name.endsWith('.json') ? JSON.parse(data) : String(data)); } },
+  };
+  const module = new vm.SourceTextModule(source, { context, initializeImportMeta(meta) { meta.url = `file:///shipped/${file}`; } });
+  await module.link(async specifier => {
+    const bindings = imports[specifier];
+    if (!bindings) throw new Error(`unexpected import ${specifier}`);
+    return new vm.SyntheticModule(Object.keys(bindings), function () {
+      for (const [key, value] of Object.entries(bindings)) this.setExport(key, value);
+    }, { context });
+  });
+  let escaped = null;
+  try { await module.evaluate({ timeout: 2000 }); } catch (error) { escaped = String(error); }
+  const errors = [], expect = (ok, message) => { if (!ok) errors.push(message); };
+  expect(escaped === null, 'guard setup escaped protected lifecycle');
+  expect(!events.includes('navigation'), 'navigation reached after failed setup');
+  expect(events.filter(e => e === 'guard-close').length === 1 && events.filter(e => e === 'close').length === 1, 'owned browser not closed exactly once');
+  expect(events.indexOf('evidence') < events.indexOf('close'), 'evidence not sampled live');
+  expect(events.indexOf('close') < events.indexOf('write:browser.json'), 'receipt published before close');
+  expect(files.get('browser.json')?.networkGuard?.closed && files.get('browser.json')?.networkGuard?.errors?.length, 'setup failure absent from terminal receipt');
+  expect(child.exitCode === 1 && !logs.some(line => line.startsWith('STORY OK:')), 'setup failure accepted');
+  expect(events.includes('profile:true'), 'failed profile not retained');
+  failures += errors.length;
+  console.log(JSON.stringify({ file, errors, events, sourceSha256: createHash('sha256').update(source).digest('hex') }));
+}
+console.log(JSON.stringify({ cases: 3, failedAssertions: failures }));
+process.exitCode = failures ? 1 : 0;
+"""),
+    )
+    for count, program in payloads:
+        result = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-e', program,
+                                 'canonical-http-callers', str(ROOT)], capture_output=True, text=True, timeout=30)
+        try:
+            summary = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            summary = {}
+        checks.expect(result.returncode == 0 and summary.get('cases') == count and summary.get('failedAssertions') == 0,
+                      f'check_browser_http_callers: {count} shipped-caller cases failed: ' + result.stdout[-2400:] + result.stderr[-600:])
+
+
+def check_browser_story_ports(checks):
+    """Configured HTTPS pin ports; execute complete shipped modules through API adapters."""
+    node = shutil.which('node')
+    if not node:
+        print('check_browser_story_ports: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    program = r"""import vm from 'node:vm';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+// Execute each complete shipped story through its actual argument and pin setup.
+// The browser boundary stops before launch; no browser, network, files or credentials.
+const storyDir = resolve(process.argv[1] || 'scripts/gate');
+const cases = [
+  { story: 'grafana', flags: ['--base', 'https://fixture.test:14443'], ports: [14443] },
+  { story: 'grafana', flags: [], ports: [443] },
+  { story: 'perses', flags: ['--base', 'https://fixture.test:14443', '--perses-base', 'https://fixture.test:13443'], ports: [14443, 13443] },
+  { story: 'perses', flags: [], ports: [443, 3443] },
+  { story: 'perses', flags: ['--perses-base', 'https://fixture.test:14443'], ports: [443, 14443] },
+];
+let failed = 0;
+for (const test of cases) {
+  const path = resolve(storyDir, `screenshots-${test.story}.mjs`);
+  const pins = []; let stopped = false; let error = null;
+  const context = vm.createContext({ URL, process: {
+    argv: ['node', path, '--host', 'fixture.test', '--resolve-to', '192.0.2.10', '--out', '/owned-output',
+      '--viewer-user', 'v', '--admin-user', 'a', '--disabled-user', 'd', '--nogroup-user', 'n', ...test.flags],
+    env: Object.fromEntries(['VIEWER_PASSWORD','VIEWER_TOTP','ADMIN_PASSWORD','ADMIN_TOTP','DISABLED_PASSWORD','NOGROUP_PASSWORD','NOGROUP_TOTP'].map(x=>['GATE_'+x,'synthetic'])),
+    exit() { throw new Error('unexpected preflight exit'); },
+  }, console });
+  const module = new vm.SourceTextModule(readFileSync(path,'utf8'), { context, identifier: pathToFileURL(path).href,
+    initializeImportMeta(meta) { meta.url = pathToFileURL(path).href; } });
+  await module.link(async specifier => {
+    let ns;
+    if (specifier === './browser-launch.mjs') ns = {
+      launchGateBrowser: async()=>{stopped=true;throw new Error('STOP_AT_BROWSER_BOUNDARY');}, macMode:()=>true,
+      requireCertFile:()=>({pem:'synthetic'}), pinGateCertificate:async x=>{pins.push({host:x.host,port:x.port,connectHost:x.connectHost});return {};},
+      acceptGateCertificate(){},attachServeTracker(){},browserEvidence(){},cleanProfile(){},externalAttemptsTracker(){},
+    };
+    else if (specifier === 'node:module') ns={createRequire:()=>()=>({chromium:{}})};
+    else { ns={...await import(specifier)}; if(specifier==='node:fs')ns.mkdirSync=()=>{}; }
+    const keys=Object.keys(ns);
+    return new vm.SyntheticModule(keys,function(){for(const k of keys)this.setExport(k,ns[k]);},{context});
+  });
+  try { await module.evaluate(); } catch(e) { if(e.message!=='STOP_AT_BROWSER_BOUNDARY') error=String(e); }
+  const ok=stopped && !error && JSON.stringify(pins.map(x=>x.port))===JSON.stringify(test.ports)
+    && pins.every(x=>x.host==='fixture.test'&&x.connectHost==='192.0.2.10');
+  if(!ok)failed++;
+  console.log(JSON.stringify({story:test.story,flags:test.flags,pins,expected:test.ports,ok,error}));
+}
+console.log(JSON.stringify({cases:cases.length,failed}));
+process.exitCode=failed?1:0;
+"""
+    result = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-e', program,
+                             str(ROOT / 'scripts/gate')], capture_output=True, text=True, timeout=30)
+    checks.expect(result.returncode == 0,
+                  'check_browser_story_ports: shipped module regression failed: ' + result.stdout[-1800:] + result.stderr[-600:])
+
+
+
+
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text()
+    scratch = ROOT / 'harness/check-identity'
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='perses-port-argv-', dir=str(scratch)) as temporary:
+        directory = Path(temporary)
+        (directory / 'p4').mkdir()
+        for user in ('p4v', 'p4both', 'p4dis', 'p4nogroup'):
+            (directory / 'p4' / ('kc-' + user + '.json')).write_text(json.dumps(
+                {'password': 'synthetic', 'totp': 'synthetic'}))
+        script = r"""
+STATE="$1"; OUT="$1/out"; ARGS="$1/argv"; BASE="$2"
+BASE_HOST=fixture.test; PERSES_GATE_PORT=13443; GATE_DIR=/synthetic-gate
+PG_IMAGE=synthetic-no-container; SCREENSHOTS=true; CAP=""
+docker() { if [[ "$1" == image ]]; then return 0; fi; printf '192.0.2.10\n'; }
+curl() { printf '302'; }
+add_secret() { :; }
+cap() { printf '%s\n' "$@" > "$ARGS"; return 1; }
+ok_if() { :; }
+""" + function_body(runner, 'phase4_screenshots_x4') + '\nphase4_screenshots_x4 synthetic\n'
+        for base in ('https://fixture.test:14443', 'https://fixture.test'):
+            result = run_bash(script, directory, base)
+            argv = (directory / 'argv').read_text().splitlines() if (directory / 'argv').exists() else []
+            checks.expect(result.returncode == 0 and '--base' in argv
+                          and argv[argv.index('--base') + 1] == base,
+                          f'Perses runner must pass configured realm base {base}; argv={argv}, err={result.stderr}')
+
+def check_browser_probe_lifecycle(checks):
+    """U15 assertions preserve evidence and teardown; execute complete shipped modules through API adapters."""
+    node = shutil.which('node')
+    if not node:
+        print('check_browser_probe_lifecycle: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    program = r"""// Standalone payload for the canonical Python checker. Pass only the shipped file
+// path as argv[2]; no ignored harness file is imported or needed at runtime.
+import { readFileSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+import vm from 'node:vm';
+
+const source = readFileSync(process.argv[1], 'utf8');
+const cases = ['positive', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write', 'guard', 'terminal'];
+let failed = 0;
+for (const condition of cases) {
+  const events = [], files = new Map(), logs = [];
+  const reject = (stage) => { if (condition === stage) throw new Error(`injected ${stage}`); };
+  const page = {
+    url: () => 'https://gate.test/grafana/', on() {}, async goto() {},
+    getByRole() { return { first() { return this; }, async click() {} }; },
+    locator() { return { async count() { return 0; } }; },
+    async waitForSelector() {}, async fill() {}, async click() {}, async waitForURL() {},
+    async waitForLoadState() {}, async waitForTimeout() {}, async screenshot() {},
+  };
+  const context = { pages: () => [page], async newPage() { return page; },
+    async close() { events.push('close'); reject('close'); } };
+  const api = {
+    macMode: () => true, requireCertFile: () => ({ pem: 'synthetic-pin' }),
+    async pinGateCertificate() { return {}; },
+    async launchGateBrowser() { return { browser: context, mode: 'mac', profileDir: 'synthetic-profile', headless: false }; },
+    cleanProfile(_path, keep) { events.push(`profile:${keep}`); return !keep; },
+    attachServeTracker() { return { attachContext() {}, last: () => ({}) }; },
+    externalAttemptsTracker() { return { list: condition === 'external' ? [{host: 'outside.invalid', scheme: 'ws'}] : [],
+      async guard() { reject('guard'); }, async assertClean() { reject('external'); },
+      async closeOwnedBrowser(close) { await close(); reject('external'); reject('terminal'); },
+      evidence() { return { closed: condition !== 'close', errors: condition === 'terminal' ? [{ stage: 'injected terminal' }] : [] }; } }; },
+    async acceptGateCertificate() { return { decision: 'proceed' }; },
+    async assertServedFrom() { reject('address'); return 'synthetic address proof'; },
+    async assertServedCertificate() { reject('certificate'); return 'synthetic certificate proof'; },
+    async browserEvidence() { events.push('evidence'); reject('evidence'); return { observedBy: 'mock-api' }; },
+  };
+  const child = { argv: ['node', 'phase4-browser.mjs', '--base', 'https://gate.test', '--host', 'gate.test', '--out', '/synthetic'],
+    env: { UI15_PASSWORD: 'synthetic', UI15_TOTP: 'JBSWY3DPEHPK3PXP' }, exitCode: 0,
+    exit(code) { this.exitCode = code; throw new Error(`unexpected early exit ${code}`); } };
+  const global = vm.createContext({ URL, Buffer, process: child,
+    console: { log: (text) => logs.push(String(text)), error: (text) => logs.push(String(text)) } });
+  const imports = { './browser-launch.mjs': api, 'node:crypto': { createHmac },
+    'node:module': { createRequire: () => () => ({ chromium: {} }) },
+    'node:fs': { writeFileSync(path, data) { const file = path.split('/').pop(); events.push(`write:${file}`);
+      if ((condition === 'browser-write' && file === 'browser.json') || (condition === 'summary-write' && file === 'ui15-summary.json')) throw new Error(`injected ${condition}`);
+      files.set(file, JSON.parse(data)); }, chmodSync() {} } };
+  const module = new vm.SourceTextModule(source, { context: global, identifier: 'file:///shipped/phase4-browser.mjs',
+    initializeImportMeta(meta) { meta.url = 'file:///shipped/phase4-browser.mjs'; } });
+  await module.link(async (specifier) => {
+    const exports = imports[specifier];
+    if (!exports) throw new Error(`unexpected import ${specifier}`);
+    return new vm.SyntheticModule(Object.keys(exports), function () {
+      for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
+    }, { context: global });
+  });
+  let uncaught = null;
+  try { await module.evaluate({ timeout: 2000 }); } catch (error) { uncaught = String(error.message || error); }
+  const summary = files.get('ui15-summary.json'), browser = files.get('browser.json');
+  const stdout = logs.find((line) => line.startsWith('SUMMARY '));
+  const parsed = stdout ? JSON.parse(stdout.slice('SUMMARY '.length)) : null;
+  const errors = [], expect = (ok, message) => { if (!ok) errors.push(message); };
+  expect(uncaught === null, 'failure escaped lifecycle');
+  expect(condition === 'positive' ? child.exitCode === 0 : child.exitCode !== 0, 'incorrect exit status');
+  expect((!!summary || condition === 'summary-write') && (!!browser || condition === 'browser-write') && !!parsed, 'available summary/browser/stdout evidence missing');
+  expect(events.filter((event) => event === 'close').length === 1, 'close not attempted exactly once');
+  expect(events.includes('evidence') && events.indexOf('evidence') < events.indexOf('close'), 'live evidence not before close');
+  expect(events.indexOf('close') < events.indexOf('write:ui15-summary.json'), 'summary finalized before cleanup');
+  if (condition !== 'positive') {
+    if (condition !== 'summary-write') expect(summary?.failures?.some((failure) => failure.error.includes(`injected ${condition}`)), 'failure not retained in file');
+    expect(parsed?.storyFailed && parsed?.failures?.length > 0, 'failure not retained in stdout');
+    if (!['browser-write', 'summary-write'].includes(condition)) expect(events.includes('profile:true'), 'known failed profile not retained');
+  } else expect(!summary?.storyFailed && !(summary?.failures || []).length, 'positive control fabricated failure');
+  if (condition === 'evidence') expect(!!browser?.evidenceFailed && !browser?.observedBy, 'missing evidence replaced by proof');
+  if (condition === 'external') expect(summary?.externalAttempts?.[0]?.host === 'outside.invalid', 'external evidence lost');
+  if (condition === 'close') expect(browser?.failures?.some((failure) => failure.stage === 'browser cleanup failed'), 'cleanup failure absent from browser receipt');
+  if (condition === 'positive') expect(browser?.networkGuard?.closed && summary?.networkGuard?.closed, 'terminal guard evidence absent from both receipts');
+  if (condition === 'terminal') expect(browser?.networkGuard?.errors?.length && summary?.networkGuard?.errors?.length, 'terminal guard failure absent from receipts');
+  failed += errors.length;
+  console.log(JSON.stringify({ condition, errors }));
+}
+console.log(JSON.stringify({ cases: cases.length, failedAssertions: failed }));
+process.exitCode = failed ? 1 : 0;
+"""
+    result = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-e', program,
+                             str(ROOT / 'scripts/gate/phase4-browser.mjs')], capture_output=True, text=True, timeout=30)
+    checks.expect(result.returncode == 0,
+                  'check_browser_probe_lifecycle: shipped module regression failed: ' + result.stdout[-1800:] + result.stderr[-600:])
+
+
+def check_browser_probe_consumer(checks):
+    """A retained diagnostic summary cannot pass or be erased by a retry."""
+    import ast
+    import types
+
+    tree = ast.parse((ROOT / 'scripts/gate/phase4_grafana.py').read_text())
+    original = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == 'Gate')
+    methods = {'_benign_404', '_network_flake', '_browser_attempt', 'run_browser_probe', 'browser_clean'}
+    members: list[ast.stmt] = [item for item in original.body if (
+        isinstance(item, ast.FunctionDef) and item.name in methods
+        or isinstance(item, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'NET_RETRY_ERRORS'
+                                               for target in item.targets))]
+    # Compile the shipped method ASTs without constructing a cluster-backed Gate.
+    selected = ast.ClassDef(name='ProbeConsumer', bases=[], keywords=[], body=members, decorator_list=[])
+    namespace = {'os': os, 'json': json, 'HERE': str(ROOT / 'scripts/gate'), 'log': lambda _message: None}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[selected], type_ignores=[])),
+                 'shipped-phase4-browser-consumer', 'exec'), namespace)
+    consumer = namespace['ProbeConsumer']()
+    consumer._benign_404 = lambda _item: False
+    clean = {'cspViolations': 0, 'pageErrors': 0, 'failedRequests': [], 'http4xx5xx': []}
+    network = dict(clean, failedRequests=[{'err': 'net::ERR_CONNECTION_RESET'}])
+    e = checks.expect
+    e(consumer.browser_clean(clean), 'clean browser summary must pass')
+    e(consumer._network_flake(network), 'successful child with network-only dirt retains one retry')
+    failure_fields = ({'storyFailed': 'certificate mismatch'},
+                      {'failures': [{'stage': 'browser cleanup failed', 'error': 'closed failed'}]},
+                      {'probeExitCode': 1}, {'probeExitCode': -9})
+    for fields in failure_fields:
+        e(not consumer.browser_clean(dict(clean, **fields)), f'browser_clean must reject {fields}')
+        e(not consumer._network_flake(dict(network, **fields)), f'retry must not erase {fields}')
+
+    consumer.base = 'https://fixture.test'
+    consumer.origin = types.SimpleNamespace(hostname='fixture.test')
+    consumer.totp_steps = types.SimpleNamespace(guard_external_signin=lambda _user: contextlib.nullcontext())
+    consumer.BROWSER_IMAGE = 'synthetic-no-container'
+    consumer.load_state = lambda _user: {'password': 'synthetic', 'totp': 'synthetic'}
+    scratch = ROOT / 'harness/check-identity'
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='browser-consumer-', dir=str(scratch)) as temporary:
+        consumer.scratch_dir = temporary
+        for rc in (0, 1, -9):
+            namespace['p2'] = types.SimpleNamespace(docker=lambda *args, **kwargs:
+                (rc, 'SUMMARY ' + json.dumps(dict(clean, probeExitCode=0)), ''))
+            summary, _steps = consumer._browser_attempt('viewer', 'dash', '192.0.2.10',
+                                                       consumer.load_state('viewer'), temporary)
+            e(summary.get('probeExitCode') == rc, f'actual child exit {rc} must overwrite summary claim')
+            e(consumer.browser_clean(summary) == (rc == 0), f'child exit {rc} must reach verdict')
+        for fields in failure_fields:
+            first = dict(network, **fields)
+            calls = []
+
+            def attempt(*_args):
+                calls.append(True)
+                return (first if len(calls) == 1 else clean), []
+
+            consumer._browser_attempt = attempt
+            summary, _steps, retried = consumer.run_browser_probe('viewer', 'dash', '192.0.2.10')
+            e(len(calls) == 1 and summary is first and retried is None,
+              f'first failure must survive without replacement: {fields}')
+        calls = []
+        consumer._browser_attempt = lambda *_args: (calls.append(True) or
+            ((network if len(calls) == 1 else clean), []))
+        summary, _steps, retried = consumer.run_browser_probe('viewer', 'dash', '192.0.2.10')
+        e(len(calls) == 2 and summary is clean and retried == network['failedRequests'],
+          'network-only successful-child control must retry once and retain first dirt')
+
+def check_mac_ipv4_outcomes(checks):
+    """Inconclusive ports fail; complete shipped sweep and exact report hashes."""
+    node = shutil.which('node')
+    if not node:
+        print('check_mac_ipv4_outcomes: NOT RUN (optional host Node is absent)', file=sys.stderr)
+        return
+    program = r"""import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import vm from 'node:vm';
+
+// The whole shipped entrypoint runs unchanged; only sockets/files/process are boundary adapters.
+const sourcePath = resolve(process.argv[1] || 'scripts/gate/mac/probe.mjs');
+const source = readFileSync(sourcePath, 'utf8');
+const manual = process.argv.includes('--manual');
+const savePath = process.argv.find(a => a.startsWith('--save='))?.slice(7);
+const cases = manual ? [{ name: 'manual non-spot EMFILE', code: 'EMFILE', port: 32000, fail: true }] : [
+  ...['EMFILE', 'ENFILE', undefined, 'EADDRNOTAVAIL', 'ENOTSUP', 'EINVAL', 'ENXIO'].map(code =>
+    ({ name: `non-spot ${code || 'missing errno'}`, code, port: 32000, fail: true })),
+  { name: 'spot EMFILE', code: 'EMFILE', port: 111, fail: true },
+  { name: 'all inconclusive bounded sample', code: 'EMFILE', all: true, fail: true },
+  ...['ECONNREFUSED', 'EHOSTUNREACH', 'ETIMEDOUT', 'open'].map(code =>
+    ({ name: `conclusive ${code}`, code, port: 32000, fail: false })),
+];
+let failures = 0;
+for (const test of cases) {
+  const files = new Map(); const stdout = []; const stderr = []; const connected = [];
+  let rc = 0; let caught;
+  const context = vm.createContext({ process: {
+    argv: ['node', sourcePath, 'sweep', '--ip', '127.0.0.1', '--host', 'fixture.test', '--out', '/owned-output'],
+    stdout: { write(s) { stdout.push(s); } }, exit(n) { rc = n; const e = new Error('process exit'); e.exit = true; throw e; },
+  }, console: { log(s) { stdout.push(s); }, error(s) { stderr.push(s); } } });
+  const module = new vm.SourceTextModule(source, { context, identifier: pathToFileURL(sourcePath).href,
+    initializeImportMeta(meta) { meta.url = pathToFileURL(sourcePath).href; } });
+  const imported = new Map();
+  await module.link(async specifier => {
+    if (imported.has(specifier)) return imported.get(specifier);
+    const namespace = { ...await import(specifier) };
+    if (specifier === 'node:fs') {
+      namespace.mkdirSync = () => {};
+      namespace.writeFileSync = (path, data) => files.set(path, String(data));
+    }
+    if (specifier === 'node:net') namespace.default = { ...namespace.default, connect(options) {
+      connected.push(options.port);
+      const socket = new EventEmitter(); socket.destroy = () => socket;
+      socket.setTimeout = () => socket;
+      queueMicrotask(() => {
+        const selected = test.all || options.port === test.port;
+        if (selected && test.code === 'open') socket.emit('connect');
+        else socket.emit('error', { code: selected ? test.code : 'ECONNREFUSED' });
+      }); return socket;
+    } };
+    const keys = Object.keys(namespace);
+    const linked = new vm.SyntheticModule(keys, function () { for (const key of keys) this.setExport(key, namespace[key]); }, { context });
+    imported.set(specifier, linked); return linked;
+  });
+  try { await module.evaluate({ timeout: 10000 }); } catch (e) { if (!e.exit) caught = String(e.stack || e); }
+  if (savePath && ['non-spot EMFILE', 'conclusive ECONNREFUSED'].includes(test.name)) {
+    const dir = `${savePath}/${test.fail ? 'inconclusive' : 'conclusive'}`;
+    mkdirSync(dir, { recursive: true });
+    for (const [path, bytes] of files) writeFileSync(`${dir}/${path.split('/').pop()}`, bytes);
+  }
+  const raw = files.get('/owned-output/w5-result.json'); const report = raw ? JSON.parse(raw) : null;
+  const output = stdout.join('\n'); const errors = stderr.join('\n'); const problems = [];
+  const check = (yes, message) => { if (!yes) problems.push(message); };
+  if (!manual) {
+    check(!caught, 'unexpected module error: ' + caught);
+    check(rc === (test.fail ? 1 : 0), `exit ${rc}, expected ${test.fail ? 1 : 0}`);
+    check(connected.length === 65535 && new Set(connected).size === 65535, 'complete IPv4 sweep');
+    check(report && Object.values(report.counts).reduce((a,b) => a+b,0) === 65535, 'complete count report');
+    check(report && files.get('/owned-output/w5-result.sha256') === `${createHash('sha256').update(raw).digest('hex')}  w5-result.json\n`, 'report hash');
+    if (test.fail) {
+      check(!output.includes('RESULT W5 rc=0'), 'no success result');
+      check(output.includes('RESULT W5 rc=1'), 'explicit failed result');
+      check(report?.inconclusive?.count === (test.all ? 65535 : 1), 'all inconclusive counted');
+      check(report?.inconclusive?.sample?.length === (test.all ? 8 : 1), 'bounded sample');
+      check(report?.inconclusive?.sample?.[0]?.port === (test.all ? 1 : test.port), 'diagnostic names failing port');
+      check(errors.includes(String(test.all ? 65535 : 1)) && errors.length < 1500, 'bounded diagnostic total');
+    } else check(output.includes('RESULT W5 rc=0'), 'conclusive sweep success');
+  }
+  failures += problems.length;
+  console.log(JSON.stringify({ case: test.name, rc, counts: report?.counts, inconclusive: report?.inconclusive,
+    result: output.split('\n').filter(s => s.startsWith('RESULT')), stderr: errors, caught, problems }));
+}
+console.log(JSON.stringify({ cases: cases.length, failedAssertions: failures, sourceSha256: createHash('sha256').update(source).digest('hex') }));
+process.exitCode = failures ? 1 : 0;
+"""
+    result = subprocess.run([node, '--experimental-vm-modules', '--input-type=module', '-e', program,
+                             str(ROOT / 'scripts/gate/mac/probe.mjs')], capture_output=True, text=True, timeout=30)
+    checks.expect(result.returncode == 0,
+                  'check_mac_ipv4_outcomes: shipped sweep regression failed: ' + result.stdout[-1800:] + result.stderr[-600:])
+
+
+def check_topofix2(checks):
+    """TOPOFIX2 fix round (harness/phase4-completion/w2/TOPOFIX2-BRIEF.md): behaviour pins for the defects the first read of the
+    Mac agent vantage found (PRE-0..PRE-7, F1-F8, G5-G7). Pins are whole-line matches on the code lines (js_lines) or
+    multiline regexes anchored at the line start, each with a mutant in harness/phase4-completion/raw/TOPOFIX2/mutants.log."""
+    e = lambda cond, msg: checks.expect(cond, 'topofix2: ' + msg)  # noqa: E731
+    agent_text = (ROOT / 'scripts/gate/mac/agent.mjs').read_text()
+    agent_lines = js_lines(agent_text)
+    agent_code = '\n'.join(agent_lines)
+    remote_text = (ROOT / 'scripts/gate/browser_remote.py').read_text()
+    topo_runner_text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    topo_runner_lines = sh_lines(topo_runner_text)
+
+    # PRE-0: the rendezvous lives in the GUEST (the VM is --mount-none). Every operation on it is a guest operation
+    # through limactl; nothing in the agent touches a Mac file named after RDV, a claim or a guest temp.
+    for line in (
+        'const GUEST_PATH_RE = /^\\/[A-Za-z0-9._/-]+$/;',
+        "if (typeof p !== 'string' || !GUEST_PATH_RE.test(p) || posix.normalize(p) !== p) {",
+        "function q(p) { return `'${guestPath('guest command path', p)}'`; }",
+        "if (!RDV.startsWith(GUEST_ROOT + '/')) die('--rendezvous must sit under --guest-root');",
+        "return sh('limactl', ['shell', VM, '--', 'sh', '-c', script], { timeout: opts.timeout || 30000, allowFail: opts.allowFail });",
+        "return guestSh(`ls -1A -- ${q(RDV)}`).out.split('\\n').filter((x) => /^req-[0-9]{4}\\.json$/.test(x)).sort();",
+        'const src = `${RDV}/${file}`;',
+        'const claimed = `${src}.claimed-${process.pid}`;',
+        'if (guestSh(`mv -- ${q(src)} ${q(claimed)}`, { allowFail: true }).status !== 0) return null;',
+        'try { parsed = guestReadJson(claimed, RDV); } catch (e) {',
+        "return JSON.parse(guestReadFile(fixedPath, mustBeUnder).toString('utf8'));",
+        "guestPut('agent-hello.json', JSON.stringify(hello, null, 2) + '\\n');",
+        'const guestTmp = `${RDV}/.${name}.${process.pid}.tmp`;',
+        'writeFileSync(local, text, { mode: 0o600 });',
+        'chmodSync(local, 0o600);',
+        "sh('limactl', ['copy', '--backend=scp', local, `${VM}:${guestTmp}`], { timeout: 60000 });",
+        'guestSh(`mv -f -- ${q(guestTmp)} ${q(`${RDV}/${name}`)}`);',
+        'rmSync(local, { force: true });',
+        'dropClaimed(claimedPath);',
+        "if (!Number.isInteger(parsed.id) || parsed.id < 1 || parsed.id > 9999) {",
+    ):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (PRE-0: the rendezvous is a guest directory reached only through limactl; a mutant that keeps it in a comment fails)')
+    e(re.search(r"^const RDV = guestPath\('--rendezvous', ", agent_code, re.M) is not None
+      and re.search(r"^const GUEST_ROOT = guestPath\('--guest-root', ", agent_code, re.M) is not None
+      and re.search(r"^const GUEST_CERT_PATH = guestPath\('--guest-cert', ", agent_code, re.M) is not None,
+      'agent.mjs validates --rendezvous, --guest-root and --guest-cert as guest paths (no resolve(): they are not Mac paths)')
+    e(re.search(r"^try \{ guestSh\(`rm -f -- \$\{q\(claimedPath\)\}`\); \} catch \(e\)", agent_code, re.M) is not None,
+      'agent.mjs removes a claimed request with one guest `rm -f --` (after its response or its refusal)')
+    e(re.search(r"^const poll = setInterval\(\(\) => \{\n(?:.*\n)*?\}, POLL_INTERVAL_MS\);", agent_code, re.M) is not None
+      and 'guestListRequests()' in agent_code,
+      'agent.mjs polls the guest rendezvous through guestListRequests() on POLL_INTERVAL_MS')
+    e(re.search(r"\b(?:writeFileSync|renameSync|readFileSync|readdirSync|rmSync|existsSync|statSync|mkdirSync|copyFileSync|unlinkSync|openSync|chmodSync)\([^;\n]*\b(?:RDV|claimed|claimedPath|guestTmp|src)\b", agent_code) is None,
+      'agent.mjs must not apply a Mac file-system call to the rendezvous (RDV, a claim, a guest temp): PRE-0, the VM is --mount-none')
+    e('renameSync' not in agent_code and 'readdirSync(RDV' not in agent_code and 'resolve(args.rendezvous' not in agent_code
+      and "resolve(args['guest-root']" not in agent_code and 'addSecret' not in agent_code and 'GUEST_STATE_DIR' not in agent_code,
+      'agent.mjs carries no Mac rename, no Mac rendezvous listing, no resolve() of a guest path, no addSecret and no GUEST_STATE_DIR (PRE-0)')
+
+    # PRE-1: the requester sends the int id, waits for resp-<4 digits>.json and compares the int.
+    e(re.search(r"^guestPut\(`resp-\$\{String\(req\.id\)\.padStart\(4, '0'\)\}\.json`, ", agent_code, re.M) is not None,
+      'agent.mjs writes the response as resp-<4 digit id>.json, the name browser_remote.py waits for (PRE-1)')
+    remote_lines = [ln.strip() for ln in remote_text.splitlines()]
+    e('if resp.get("nonce") != nonce or resp.get("id") != int(req_id):' in remote_lines and 'resp.get("id") != req_id' not in remote_text,
+      'browser_remote.py compares the response id with int(req_id): the request carries the int and the file name the padded string (PRE-1)')
+
+    # PRE-2 / PRE-3 / PRE-7: the launcher creates agent-out with the rendezvous, waits for the first hello IN THE GUEST
+    # before it starts the runner, and the guest command is the bound, full-inventory shape of a bundle host.
+    launcher_lines = sh_lines((ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text())
+    wait_lines = (
+        'while (( SECONDS < hello_deadline )); do',
+        'if limactl shell "$VM" -- grep -q -F -- "$NONCE" "$RDV/agent-hello.json" 2>/dev/null; then hello_seen=1; break; fi',
+        'kill -0 "$AGENT_PID" 2>/dev/null || { echo "run-vm-gate: the agent exited before its hello reached $RDV (see $OUT/agent.log)" >&2; exit 2; }',
+        'sleep 2',
+        '(( hello_seen == 1 )) || { echo "run-vm-gate: no agent-hello.json in $RDV within 90 s (see $OUT/agent.log)" >&2; exit 2; }',
+    )
+    mkdir_guest_line = 'limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null || { echo "run-vm-gate: could not create $RDV and $GUEST_ROOT/agent-out in the guest (is $GUEST_ROOT writable?)" >&2; exit 2; }'
+    rm_status_line = ('limactl shell "$VM" -- rm -f "$RDV/runner.rc" "$RDV/runner.pid" 2>/dev/null || { echo "run-vm-gate: could not remove an earlier runner.rc/runner.pid from $RDV in the guest; '
+                      'an earlier exit status would be read as this run\'s" >&2; exit 2; }')
+    for line in (mkdir_guest_line, rm_status_line, 'hello_deadline=$((SECONDS + 90))') + wait_lines:
+        e(line in launcher_lines, f'run-vm-gate.sh must carry the code line {line!r} (PRE-2: wait up to 90 s for the hello in the guest, exit 2 when the agent died or nothing came; PRE-3: agent-out is created with the rendezvous)')
+    guest_cmd = next((ln for ln in launcher_lines if ln.startswith('GUEST_CMD="')), '')
+    if all(line in launcher_lines for line in wait_lines):
+        at = {name: launcher_lines.index(name) for name in ('AGENT_PID=$!', wait_lines[0])}
+        e(at['AGENT_PID=$!'] < at[wait_lines[0]] < launcher_lines.index(guest_cmd) if guest_cmd else False,
+          'run-vm-gate.sh waits for the hello after the agent starts and before the guest runner command is built (PRE-2)')
+    e(re.search(r' --browser agent --rendezvous \$RDV --rendezvous-nonce \$NONCE --candidate \$CANDIDATE --repo \$GUEST_ROOT/repo"$', guest_cmd) is not None,
+      'the launcher\'s guest command carries --candidate $CANDIDATE --repo $GUEST_ROOT/repo, the bound full-inventory shape the guide documents for a bundle host (PRE-7 / F1)')
+    guide_text = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    e(re.search(r"^scripts/gate-identity\.sh --edition-dir /opt/krate/epc --wipe --phase 4c --public-host krate-oi\.test \\\n"
+                r"  --browser agent --rendezvous /home/<guest-user>/gate/rdv --rendezvous-nonce <the launcher's token> \\\n"
+                r"  --candidate <sha> --repo /home/<guest-user>/gate/repo ", guide_text, re.M) is not None,
+      "the guide's launcher example states that the guest command carries --candidate and --repo (PRE-7 / F1)")
+
+    # PRE-5 is exercised against the shipped finalizers by check_browser_http_callers
+    # and against the complete U15 module by check_browser_probe_lifecycle. Those checks
+    # require live evidence before owned close and final guard receipts after close.
+    u15_lines = js_lines((ROOT / 'scripts/gate/phase4-browser.mjs').read_text())
+
+    # G7: the no-interstitial step is persisted before the non-zero exit; the dead throw in onAssert is gone.
+    e("result.steps.push({ t: new Date().toISOString(), name: 'no-interstitial', error: accepted.error });" in u15_lines,
+      'phase4-browser.mjs pushes the no-interstitial step when acceptGateCertificate returns no proceed decision (G7)')
+    e(not any(ln.startswith('if (!d.seen) throw') for ln in u15_lines),
+      'phase4-browser.mjs carries no `if (!d.seen) throw` in onAssert: the hook runs only when the interstitial was seen (G7: dead code)')
+    summary_at = [i for i, ln in enumerate(u15_lines) if ln.startswith('writeFileSync(`${OUT}/ui15-summary.json`, JSON.stringify({ steps: result.steps, ...summary }')]
+    launch_at = next((i for i, ln in enumerate(u15_lines) if ln.startswith('const launch = await launchGateBrowser(')), len(u15_lines))
+    e(len(summary_at) == 1 and not any(ln.startswith('process.exit(') for ln in u15_lines[launch_at:])
+      and "recordFailure('probe ended', e);" in u15_lines,
+      'phase4-browser.mjs retains no-interstitial and assertion failures through shared evidence/cleanup finalization, with no early exit after launch (G7)')
+
+    # PRE-6 + G5: W5's IPv6 leg. The agent passes the guest's GLOBAL address without a zone (a zone only on fe80::/10) and
+    # probe.mjs accepts that shape; the runner derives the docker-published set WITHOUT sshd's 22, the IPv6 rule fails only
+    # an open docker-published port, and 22 over IPv6 is the positive control. The runner's real extracted Python decides
+    # the four shapes (M4: 22 open, the rest refused; 22 refused; 443 open; no vm_g6) exactly as the TR2 G4 battery ran it.
+    for line in (
+        "function v6Target(addr, iface) { return /^fe[89ab][0-9a-f]:/i.test(addr) && iface ? `${addr}%${iface}` : addr; }",
+        "if (STATE.g6) argv.push('--v6', v6Target(STATE.g6, STATE.iface));",
+    ):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (PRE-6: the global IPv6 address goes to the probe without a %iface zone)')
+    probe_lines = js_lines((ROOT / 'scripts/gate/mac/probe.mjs').read_text())
+    e(any(ln.startswith('if (!net.isIPv6(ll) || (linkLocal && !iface) || (!linkLocal && iface)) die(') for ln in probe_lines)
+      and 'const target = iface ? `${ll}%${iface}` : ll;' in probe_lines
+      and 'const r = await connectOnce(target, p, 6, Math.max(timeoutMs, 3000));' in probe_lines,
+      'probe.mjs accepts a global --v6 address without a zone and an fe80::/10 address only with its zone, and connects to that target (PRE-6)')
+    e('docker_csv="$(printf \'%s\\n\' $any_ports | LC_ALL=C sort -n -u | paste -s -d, -)"' in topo_runner_lines
+      and any(ln.startswith('evidence="$(W5_EXPECTED="$expected_csv" W5_DOCKER="$docker_csv" W5_VM_G6="${VM_G6:-}" python3 -I - ') for ln in topo_runner_lines),
+      'the W5 row derives the docker-published set from $any_ports WITHOUT 22 and passes it, with vm_g6, to its Python as W5_DOCKER / W5_VM_G6 (G5)')
+    pyw5 = re.search(r"<<'PYW5' 2>>\"\$RAW\"\n(.*?)\nPYW5\n", topo_runner_text, re.S)
+    e(pyw5 is not None, 'the W5 row keeps its evaluation in the PYW5 heredoc (the pinned cases below run its real text)')
+    if pyw5 is not None:
+        w5_python = pyw5.group(1)
+        w5_docker = '80,443,3443,9092,9093'
+
+        def w5_case(v6_ports, vm_g6, with_v6=True, envelope_leak='ok', result_leak=None, listing='match'):
+            report = {'swept': {'tcpOnly': True}, 'counts': {'open': 6}, 'open': [22, 80, 443, 3443, 9092, 9093],
+                      'spot': [{'port': 111, 'outcome': 'refused'}],
+                      'cert': {'authorized': True, 'protocol': 'TLSv1.3', 'sha256': 'ab12'}}
+            if result_leak is not None:
+                report['mac_leak_scan'] = result_leak   # probe.mjs never writes this; the evaluator must not read it from here (T16)
+            if with_v6:
+                report['v6'] = {'address': 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', 'addressClass': 'global',
+                                'ports': [{'port': port, 'outcome': outcome} for port, outcome in v6_ports]}
+            envelope = {'schema': 1, 'id': 1, 'row': 'W5', 'exit': 0}
+            if envelope_leak == 'ok':
+                envelope['mac_leak_scan'] = {'values': 0, 'hits': 0, 'stores': ['agent.log', 'agent-manifest.tsv']}
+            elif envelope_leak == 'hits':
+                envelope['mac_leak_scan'] = {'values': 1, 'hits': 1, 'stores': ['agent.log']}
+            with tempfile.TemporaryDirectory() as w5_tmp:
+                result_path = Path(w5_tmp) / 'w5-result.json'
+                result_path.write_text(json.dumps(report))
+                # R1: the agent's response lists what it delivered (files[]: name, sha256, bytes); the runner binds the result file to that entry
+                entry = {'name': 'w5-result.json', 'sha256': hashlib.sha256(result_path.read_bytes()).hexdigest(), 'bytes': result_path.stat().st_size}
+                sibling = {'name': 'w5-result.sha256', 'sha256': hashlib.sha256(b'sibling').hexdigest(), 'bytes': 79}
+                if listing == 'match':
+                    envelope['files'] = [sibling, entry]
+                elif listing == 'stale':   # the file under the delivery folder is not the one the agent delivered (scp -r nested the fresh folder)
+                    envelope['files'] = [sibling, dict(entry, sha256=hashlib.sha256(b'an earlier run').hexdigest())]
+                elif listing == 'unlisted':
+                    envelope['files'] = [sibling]
+                elif listing == 'last-char':   # all but the last hex character of the real digest: only a prefix compare accepts it
+                    envelope['files'] = [sibling, dict(entry, sha256=entry['sha256'][:-1] + ('0' if entry['sha256'][-1] != '0' else '1'))]
+                elif listing == 'twice':
+                    envelope['files'] = [entry, entry]
+                elif listing == 'no-files-key':
+                    envelope.pop('files', None)
+                response_path = Path(w5_tmp) / 'w5-agent-response.json'
+                response_path.write_text(json.dumps(envelope))
+                env = dict(os.environ, W5_EXPECTED='22,' + w5_docker, W5_DOCKER=w5_docker, W5_VM_G6=vm_g6)
+                run = subprocess.run([sys.executable, '-I', '-', str(result_path), 'running', str(response_path)], input=w5_python, env=env, text=True, capture_output=True)
+            return run.returncode, run.stdout + run.stderr
+
+        m4_shape = [(22, 'open'), (80, 'refused'), (443, 'refused'), (111, 'refused'), (3443, 'refused'), (9092, 'refused'), (9093, 'refused')]
+        rc_m4, out_m4 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
+        e(rc_m4 == 0 and 'breaches=0' in out_m4 and 'BREACH' not in out_m4 and '22 answers over IPv6 (sshd; M4)' in out_m4,
+          f'W5 on the M4 IPv6 shape (22 open, the docker-published ports refused) has no breach and records the 22 control; got rc {rc_m4}: {out_m4[-200:]!r} (G5)')
+        rc_c, out_c = w5_case([(22, 'refused')] + m4_shape[1:], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
+        e(rc_c == 1 and "IPv6 positive control: sshd's 22 did not answer over IPv6 (refused)" in out_c,
+          f"W5 FAILs when the hello carries a global address and sshd's 22 is refused over IPv6; got rc {rc_c}: {out_c[-200:]!r} (G5/PRE-6)")
+        rc_b, out_b = w5_case([(22, 'open'), (443, 'open')] + m4_shape[1:2] + m4_shape[3:], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
+        e(rc_b == 1 and 'BREACH docker-published port 443 is open over IPv6' in out_b and 'BREACH docker-published port 22' not in out_b,
+          f'W5 breaches on an open docker-published port (443) over IPv6 and never on sshd\'s 22; got rc {rc_b}: {out_b[-200:]!r} (G5)')
+        rc_n, out_n = w5_case([], '', with_v6=False)
+        e(rc_n == 0 and 'v6=not-run (no guest IPv6 global address, vm_g6, in the hello)' in out_n and 'BREACH' not in out_n and 'positive control' not in out_n,
+          f'W5 without a global address in the hello keeps the not-run text and does not decide; got rc {rc_n}: {out_n[-200:]!r} (G5)')
+        rc_s, out_s = w5_case([], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', with_v6=False)
+        e(rc_s == 1 and "IPv6 positive control: sshd's 22 did not answer over IPv6 (not-swept)" in out_s,
+          f'W5 FAILs when the hello carries a global address but the result has no IPv6 pass; got rc {rc_s}: {out_s[-200:]!r} (G5)')
+        # T16: the leak scan is read from the agent's response envelope (probe.mjs never writes it into w5-result.json) and enforced
+        rc_l, out_l = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', envelope_leak='hits', result_leak={'values': 0, 'hits': 0, 'stores': []})
+        e(rc_l == 1 and "the agent's mac leak scan found 1 hit(s) in ['agent.log']" in out_l,
+          f'W5 reads mac_leak_scan from the saved agent response and fails on a hit even when w5-result.json claims none; got rc {rc_l}: {out_l[-200:]!r} (T16)')
+        rc_m, out_m = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', envelope_leak='missing', result_leak={'values': 0, 'hits': 0, 'stores': []})
+        e(rc_m == 1 and 'the agent response carries no valid mac_leak_scan' in out_m,
+          f'W5 fails when the saved agent response carries no valid mac_leak_scan (a scan in w5-result.json does not count); got rc {rc_m}: {out_m[-200:]!r} (T16)')
+        # T03: an inconclusive IPv6 probe (no route or scope, an unknown errno) proves no filtering
+        rc_i, out_i = w5_case([(22, 'open'), (80, 'refused'), (443, 'no-route-or-scope')] + m4_shape[3:], 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
+        e(rc_i == 1 and 'IPv6 probe of port 443 was inconclusive (no-route-or-scope)' in out_i,
+          f'W5 rejects an inconclusive IPv6 probe outcome; got rc {rc_i}: {out_i[-200:]!r} (T03)')
+        # R1: the result file the runner reads must be the one the agent's response lists in files[] (sha256), whatever else sits in the folder
+        for listing, reason in (('stale', 'is not the file this agent response lists'), ('unlisted', 'lists 0 w5-result.json entries'),
+                                ('twice', 'lists 2 w5-result.json entries'), ('no-files-key', 'lists 0 w5-result.json entries')):
+            rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing=listing)
+            e(rc_r1 == 1 and 'breaches=1' in out_r1 and 'BREACH the ' in out_r1 and reason in out_r1
+              and 'observed open set' not in out_r1 and 'open=[' not in out_r1,
+              f'W5 fails closed, evaluating nothing, when the delivered result file is not tied to the agent response ({listing}); got rc {rc_r1}: {out_r1[-240:]!r} (R1)')
+        rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing='match')
+        e(rc_r1 == 0 and 'breaches=0' in out_r1, f'W5 passes when the result file is the one the response lists; got rc {rc_r1}: {out_r1[-200:]!r} (R1)')
+        # N2 (delta review of 2d4c9df, mutant D-R1p): the comparison is on the whole sha256. A listing that agrees with the result file on
+        # every hex character but the last (a prefix compare would accept it) is refused, and the two lines that decide it are pinned whole.
+        rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing='last-char')
+        e(rc_r1 == 1 and 'breaches=1' in out_r1 and 'is not the file this agent response lists' in out_r1 and 'open=[' not in out_r1,
+          f'W5 refuses a listed sha256 that differs from the result file only in its last hex character; got rc {rc_r1}: {out_r1[-200:]!r} (N2)')
+        w5_python_lines = [ln.strip() for ln in w5_python.splitlines()]
+        for pin in ('result_sha = hashlib.sha256(result_bytes).hexdigest()',
+                    'if len(listed) != 1 or listed[0].get("sha256") != result_sha:'):
+            e(pin in w5_python_lines, f'the W5 evaluation carries the whole line {pin!r}: the listed sha256 must equal the full digest of the bytes it read (N2)')
+
+    # PRE-4: the W7 Ubuntu branch decides on the first line of `ufw status`, never on the ufw.service state (a oneshot that reads
+    # `active (exited)` while ufw is inactive). The runner's own lines run against fake sudo/ufw commands.
+    ufw_first_line = next((ln for ln in topo_runner_lines if ln.startswith('ufw_first="$(')), '')
+    case_match = re.search(r'^ {4}case "\$ufw_first" in\n(?: {6}.*\n)+? {4}esac$', topo_runner_text, re.M)
+    e(ufw_first_line == 'ufw_first="$( { sudo -n env LC_ALL=C ufw status 2>/dev/null || LC_ALL=C ufw status 2>/dev/null; } | head -1 || true)"'
+      and case_match is not None and 'ufw_state' not in (case_match.group(0) if case_match else 'ufw_state')
+      and '[[ "$ufw_state" == active ]]' not in topo_runner_text,
+      'W7 (Ubuntu) reads the first line of `ufw status` (sudo -n, then plain; both under LC_ALL=C, T06) and decides on it in a case block that never looks at the ufw.service state (PRE-4)')
+    if case_match is not None and ufw_first_line:
+        def w7_ubuntu(sudo_body, ufw_body, caller_locale=None, first_line=None):
+            with tempfile.TemporaryDirectory() as w7_tmp:
+                fake_bin = Path(w7_tmp)
+                for name, body in (('sudo', sudo_body), ('ufw', ufw_body)):
+                    (fake_bin / name).write_text('#!/bin/sh\n' + body + '\n')
+                    (fake_bin / name).chmod(0o755)
+                script = 'st=0; ufw_reason=""\n' + (first_line or ufw_first_line) + '\n' + case_match.group(0) + '\nprintf "%s|%s|%s\\n" "$st" "$ufw_first" "$ufw_reason"\n'
+                env = dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}')
+                if caller_locale:
+                    env['LC_ALL'] = caller_locale
+                run = subprocess.run(['bash', '-c', script], env=env, text=True, capture_output=True)
+            return run.stdout.strip()
+        # a sudo that takes `-n` the way the runner calls it (a fake `exec "$@"` would try to run a command named -n, fail, and send every
+        # test down the plain fallback arm, leaving the sudo arm of the runner's lines unexercised)
+        pass_sudo = '[ "$1" = -n ] && shift\nexec "$@"'
+        e(w7_ubuntu(pass_sudo, 'echo "Status: inactive"') == '0|Status: inactive|',
+          'W7 (Ubuntu) passes on `Status: inactive` (PRE-4)')
+        e(w7_ubuntu(pass_sudo, 'echo "Status: active"; echo "To  Action  From"') == '1|Status: active|',
+          'W7 (Ubuntu) fails on `Status: active` (as before; PRE-4)')
+        e(w7_ubuntu('exit 1', 'echo "ERROR: You need to be root to run this script" >&2; exit 1') == '1||ufw status unreadable (needs root or passwordless sudo)',
+          'W7 (Ubuntu) fails with the unreadable reason when ufw status cannot be read without root (PRE-4)')
+        e(w7_ubuntu(pass_sudo, 'echo "Status: unknown"') == '1|Status: unknown|ufw status unreadable (needs root or passwordless sudo)',
+          'W7 (Ubuntu) fails on any first line that is neither Status: active nor Status: inactive (PRE-4)')
+        # T06 / R3: ufw's status line is gettext-translated, so the runner reads it under LC_ALL=C. The fake ufw answers in English only when
+        # it sees LC_ALL=C; the caller's locale is German; the fake sudo either passes the environment on or resets it like sudo's env_reset.
+        localized_ufw = 'if [ "$LC_ALL" = C ]; then echo "Status: inactive"; else echo "Estado: inactivo"; fi'
+        resetting_sudo = '[ "$1" = -n ] && shift\nexec env -i PATH="$PATH" "$@"'
+        e(w7_ubuntu(resetting_sudo, localized_ufw, caller_locale='de_DE.UTF-8') == '0|Status: inactive|',
+          'W7 (Ubuntu) reads ufw status under LC_ALL=C through sudo even when sudo resets the caller environment (T06, R3)')
+        e(w7_ubuntu(pass_sudo, localized_ufw, caller_locale='de_DE.UTF-8') == '0|Status: inactive|',
+          'W7 (Ubuntu) reads ufw status under LC_ALL=C when the caller runs in another locale (T06, R3)')
+        e(w7_ubuntu('exit 1', localized_ufw, caller_locale='de_DE.UTF-8') == '0|Status: inactive|',
+          'W7 (Ubuntu) reads ufw status under LC_ALL=C on the plain (no sudo) fallback too (T06, R3)')
+        unfixed_line = 'ufw_first="$( { sudo -n ufw status 2>/dev/null || ufw status 2>/dev/null; } | head -1 || true)"'
+        e(w7_ubuntu(pass_sudo, localized_ufw, caller_locale='de_DE.UTF-8', first_line=unfixed_line) == '1|Estado: inactivo|ufw status unreadable (needs root or passwordless sudo)',
+          'harness control: the old line, without the fixed locale, reads the translated status and fails a correct fixture as unreadable (T06, R3)')
+
+    # F2: --browser knows container and agent only (`local` selected nothing and was only recorded in the receipt row), and the
+    # guide says what the code does: the W5-W7 rows of a 4c agent run need neither image (S4 still renders with the nginx image); the 4a/4b stories keep the guest's container vantage.
+    topo_runner_flat = '\n'.join(topo_runner_lines)
+    e('case "$BROWSER_MODE" in container|agent) ;; *) echo "--browser must be container or agent: $BROWSER_MODE" >&2; exit 2 ;; esac' in topo_runner_lines
+      and 'container)' in topo_runner_lines
+      and 'container|local' not in topo_runner_flat and 'local|container' not in topo_runner_flat and 'container, local' not in topo_runner_flat
+      and 'local (the fixture' not in topo_runner_text,
+      'the runner accepts --browser container or agent only: no `local` in the parser case, the second case, the usage text or the default comment (F2)')
+    # The behaviour is checked on the runner's own refusal line alone, never by running the runner: a runner that wrongly accepted
+    # the mode would go on to start a gate run (a mutant did, and recursed through this check).
+    bash_for_f2 = bash_binary()
+    browser_case = next((ln for ln in topo_runner_lines if ln.startswith('case "$BROWSER_MODE" in ') and ' exit 2 ;; esac' in ln), '')
+    if bash_for_f2 is not None and browser_case:
+        def browser_refusal(mode):
+            run = subprocess.run([bash_for_f2, '-c', 'BROWSER_MODE="$1"\n' + browser_case + '\necho reached', 'bash', mode], text=True, capture_output=True)
+            return run.returncode, run.stdout.strip(), run.stderr.strip()
+        e(browser_refusal('local') == (2, '', '--browser must be container or agent: local'),
+          f'`--browser local` is refused with exit 2 and the message (the runner\'s own refusal line); got {browser_refusal("local")!r} (F2)')
+        e(browser_refusal('container') == (0, 'reached', '') and browser_refusal('agent') == (0, 'reached', ''),
+          'the runner\'s refusal line lets container and agent through (F2)')
+    guide_flat = ' '.join(guide_text.split())
+    e('On a `--phase 4c --browser agent` run on a vzNAT VM fixture its W5–W7 rows need neither image' in guide_flat
+      and 'its S4 row still renders with the nginx image unless `--no-static` is given' in guide_flat
+      and 'needs neither image' not in guide_flat
+      and "The 4a/4b stories (U15, X3, X4) still run in the guest's container vantage and need the archive" in guide_flat
+      and 'their Mac vantage is the story started on the Mac with `GATE_BROWSER_MAC=1`, as the X1 row describes' in guide_flat
+      and 'that archive is no longer loaded into the guest at all' not in guide_flat
+      and 'Only the rows W5 and W6 of slice 4c go through the agent' in guide_flat,
+      'the guide says what the code does: the W5-W7 rows of a 4c agent run need neither image while S4 still renders with the nginx image, the 4a/4b stories keep the guest container vantage and need the archive, only W5/W6 go through the agent (F2, R10)')
+
+    # F7: mac_src_ip must lie inside 10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16 (network membership). The runner's own preflight
+    # Python runs on synthetic hellos; ipaddress.is_private would have accepted 198.18.0.1, 192.0.2.5 and 203.0.113.9.
+    preflight_py = re.search(r"<<'PYPREFLIGHT'\n(.*?)\nPYPREFLIGHT\n", topo_runner_text, re.S)
+    e(preflight_py is not None, 'the agent preflight keeps its Python in the PYPREFLIGHT heredoc (the F7 cases below run its real text)')
+    if preflight_py is not None:
+        def preflight_case(src):
+            with tempfile.TemporaryDirectory() as pf_tmp:
+                hello_path = Path(pf_tmp) / 'agent-hello.json'
+                hello_path.write_text(json.dumps({'schema': 1, 'nonce': 'n0nce', 'clock_skew_ms': 5, 'mac_src_ip': src, 'vm_ip': '192.168.64.2',
+                                                  'gate_files': {}, 'plan': ['W5', 'W6'], 'vm_g6': '', 'mac_iface': 'bridge100'}))
+                run = subprocess.run([sys.executable, '-I', '-', str(hello_path), 'n0nce', pf_tmp], input=preflight_py.group(1), text=True, capture_output=True)
+            return run.returncode, run.stdout, run.stderr
+        for ok_src in ('192.168.64.1', '10.0.0.1', '10.255.255.254', '172.16.0.1', '172.31.255.254', '192.168.255.254'):
+            rc_f7, out_f7, err_f7 = preflight_case(ok_src)
+            e(rc_f7 == 0 and f'MAC_SRC_IP={ok_src}' in out_f7, f'the preflight accepts mac_src_ip {ok_src} (inside 10/8, 172.16/12 or 192.168/16); got rc {rc_f7}: {err_f7.strip()[:120]!r} (F7)')
+        for bad_src in ('198.18.0.1', '192.0.2.5', '203.0.113.9', '169.254.10.1', '172.15.255.255', '172.32.0.1', '100.64.0.1', '127.0.0.1', 'fd00::1', 'not-an-address'):
+            rc_f7, out_f7, err_f7 = preflight_case(bad_src)
+            e(rc_f7 == 2 and 'mac_src_ip' in err_f7 and 'MAC_SRC_IP=' not in out_f7, f'the preflight refuses mac_src_ip {bad_src} (outside the three RFC1918 networks); got rc {rc_f7}: {err_f7.strip()[:120]!r} (F7)')
+
+    # F3: finish() records the vmip row BEFORE it computes the verdict from FAILS (a vmip FAIL must turn the verdict into FAIL).
+    finish_body = re.search(r'^finish\(\) \{\n(.*?)^\}\n', topo_runner_text, re.M | re.S)
+    if finish_body is None:
+        e(False, 'scripts/gate-identity.sh must define finish() (F3)')
+    else:
+        finish_text = finish_body.group(1)
+        vmip_records = [m.start() for m in re.finditer(r'^\s*record vmip "\$\{PHASE\}" W (?:PASS|FAIL) ', finish_text, re.M)]
+        verdict_lines = [m.start() for m in re.finditer(r'^\s*\(\( FAILS == 0 \)\) \|\| verdict=FAIL\s*$', finish_text, re.M)]
+        e(len(vmip_records) == 2 and len(verdict_lines) == 1 and max(vmip_records) < verdict_lines[0],
+          'finish() records both vmip rows (PASS and FAIL branch) before `(( FAILS == 0 )) || verdict=FAIL`, so a vmip FAIL turns the verdict into FAIL (F3)')
+
+    # F5: the Mac package.json carries no line anchor into the runner (the old one, gate-identity.sh:889, points at a kcadm line).
+    mac_package = json.loads((ROOT / 'scripts/gate/mac/package.json').read_text())
+    e(re.search(r'gate-identity\.sh:\d+', mac_package.get('description', '')) is None and mac_package.get('dependencies') == {'playwright': '1.60.0'},
+      'scripts/gate/mac/package.json carries no gate-identity.sh:<line> anchor and still pins playwright 1.60.0 (F5)')
+
+    # F6: the browser vantage receipt row is written in every receipt (same indentation as the host and images rows, outside any
+    # agent condition); only vmip is agent-only. The guide says so.
+    row_indent = {name: re.search(r'^( *)echo "\| ' + name + r' \|', topo_runner_text, re.M) for name in ('host', 'browser vantage', 'images')}
+    e(all(m is not None for m in row_indent.values()) and len({len(m.group(1)) for m in row_indent.values() if m}) == 1,
+      'the receipt header writes the browser vantage row unconditionally, beside the host and images rows (F6)')
+    e('Only an agent run adds a `vmip` row at the end' in guide_flat and 'the `browser vantage` receipt row is written in every receipt' in guide_flat
+      and '| browser vantage | the `--browser` mode of the run' in guide_text and 'The row is written in every receipt, agent run or not' in guide_flat
+      and 'adds a `vmip` row at the end (the fixture\'s NIC address must still be the hello\'s — a change voids the binding) and a receipt `browser vantage` row' not in guide_flat,
+      'the guide says the browser vantage row is in every receipt and only vmip is agent-only, and its field table lists the row (F6)')
+
+    # N: two lint findings of the first read. __doc__ is None under python -OO, so main() prints (__doc__ or "").strip(); the
+    # container launch never used the viewport it destructured (the stories size their own context).
+    e('print((__doc__ or "").strip())' in remote_lines and 'print(__doc__.strip())' not in remote_lines,
+      'browser_remote.py prints (__doc__ or "").strip() in its usage path (N: Pyright reportOptionalMemberAccess)')
+    launch_lines = js_lines((ROOT / 'scripts/gate/browser-launch.mjs').read_text())
+    e('export async function launchGateBrowserContainer(chromium, { host, resolveTo }) {' in launch_lines
+      and 'export async function launchGateBrowserMac(chromium, { host, resolveTo, outDir, viewport = { width: 1440, height: 900 } }) {' in launch_lines,
+      'browser-launch.mjs: the container launch destructures only host and resolveTo (its viewport was unused); the Mac launch keeps its viewport (N)')
+
+    # PRE-0 (guide): the Mac vantage paragraph says where the rendezvous lives and how the agent reaches it.
+    e('the rendezvous directory itself lives in the guest (the VM has no mount)' in guide_flat
+      and 'puts its hello and every response with a `limactl copy --backend=scp` into a dot-temp plus one guest `mv -f`' in guide_flat
+      and 'request ids from 1 to 9999' in guide_flat,
+      'the guide says the rendezvous lives in the guest and how the agent lists, claims, reads, removes and puts (PRE-0)')
+
+    # T08 (review, P1): Response.serverAddr() and Response.securityDetails() return Promises in Playwright 1.60.0
+    # (playwright-core/types/types.d.ts), so the helpers that read them, the tracker's record() and every caller are async.
+    for line in ('export async function assertServedFrom(resp, expected, what) {',
+                 'export async function assertServedCertificate(resp, pinned, what) {',
+                 'const response = state.last;',
+                 'const count = state.count;',
+                 'const proof = [await assertServedFrom(response, expectedIp, what)];',
+                 'if (pinned) proof.push(await assertServedCertificate(response, pinned, what));',
+                 'if (state.last !== response || state.count !== count) throw new Error(`${what}: main-document response changed during served-address/certificate assertions`);',
+                 'asserted.push(...proof);'):
+        e(line in launch_lines, f'browser-launch.mjs must carry the code line {line!r} (T08: the Response helpers are asynchronous)')
+    e(any(ln.startswith('try { addr = await resp.serverAddr(); }') for ln in launch_lines)
+      and any(ln.startswith('try { details = await resp.securityDetails(); }') for ln in launch_lines)
+      and any(ln.startswith('async record(expectedIp, pinned, what, asserted) {') for ln in launch_lines),
+      'browser-launch.mjs awaits Response.serverAddr() and Response.securityDetails() and its serve tracker record() is async (T08)')
+    for story_name in ('screenshots.mjs', 'screenshots-grafana.mjs', 'screenshots-perses.mjs'):
+        e('if (MAC && serve) await serve.record(' in '\n'.join(js_lines((ROOT / 'scripts/gate' / story_name).read_text())),
+          f'{story_name} awaits serve.record() (T08)')
+    e(any(ln.startswith("served_from = (await assertServedFrom(mr, resolveTo, 'main document')) + '; ' + (await assertServedCertificate(mr, PIN, 'main document'));") for ln in u15_lines),
+      'phase4-browser.mjs awaits both served-response assertions of its summary (T08)')
+    unawaited = []
+    for gate_js in sorted((ROOT / 'scripts/gate').rglob('*.mjs')):
+        for gate_line in js_lines(gate_js.read_text()):
+            for call in re.finditer(r'(\bawait\s+)?\b(?!Response\b)[a-z]\w*(?:\.\w+)*\.(?:serverAddr|securityDetails)\(\)', gate_line):
+                if not call.group(1):
+                    unawaited.append(f'{gate_js.name}: {gate_line[:80]}')
+    e(not unawaited, f'no gate script reads Response.serverAddr()/securityDetails() without await (T08); found {unawaited}')
+    node_binary = shutil.which('node')
+    if node_binary:
+        probe_src = (
+            "const lib = await import(process.argv[1]);\n"
+            "const good = { serverAddr: async () => ({ ipAddress: '192.168.64.2', port: 443 }),\n"
+            "};\n"
+            "const out = { from: await lib.assertServedFrom(good, '192.168.64.2', 'x') };\n"
+            "const refuse = async (fn) => { try { await fn(); return false; } catch { return true; } };\n"
+            "out.loopbackRefused = await refuse(() => lib.assertServedFrom({ serverAddr: async () => ({ ipAddress: '127.0.0.1', port: 443 }) }, '192.168.64.2', 'x'));\n"
+            "out.loopbackRefusedWithoutExpectation = await refuse(() => lib.assertServedFrom({ serverAddr: async () => ({ ipAddress: '::1', port: 443 }) }, '', 'x'));\n"
+            "out.emptyRefused = await refuse(() => lib.assertServedFrom({ serverAddr: async () => null }, '192.168.64.2', 'x'));\n"
+            "console.log(JSON.stringify(out));\n"
+        )
+        run_node = subprocess.run([node_binary, '--input-type=module', '-e', probe_src, str(ROOT / 'scripts/gate/browser-launch.mjs')], text=True, capture_output=True)
+        try:
+            node_out = json.loads(run_node.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            node_out = {}
+        e(run_node.returncode == 0 and 'served from 192.168.64.2:443' in node_out.get('from', '')
+          and node_out.get('loopbackRefused') is True and node_out.get('loopbackRefusedWithoutExpectation') is True
+          and node_out.get('emptyRefused') is True,
+          f'the served-address assertion accepts a valid asynchronous Response and refuses loopback and empty ones; browser certificate binding has its own full CDP/DER regression check; got rc {run_node.returncode}: {run_node.stderr.strip()[:200]!r} {node_out!r} (T08)')
+
+    # T01 / T02 / T04: the runner's own functions run in bash against stubs. agent_request takes only the requester's stdout as the
+    # response (its stderr announcement goes to the raw log), w5_published_any_ports reads the service label with a template
+    # `docker inspect` accepts and fails closed, w6_response_fields reads all four lines of the helper's output.
+    bash_t = bash_binary()
+    runner_path = ROOT / 'scripts/gate-identity.sh'
+    if bash_t is not None:
+        import threading
+        import time as _time
+
+        def agent_request_case():
+            with tempfile.TemporaryDirectory() as t01_tmp:
+                base = Path(t01_tmp)
+                rdv = base / 'rdv'
+                rdv.mkdir()
+                (base / 'state').mkdir()
+                nonce = 'topofix2-t01-nonce'
+
+                def responder():
+                    deadline = _time.time() + 45
+                    while _time.time() < deadline:
+                        req = rdv / 'req-0001.json'
+                        if req.exists():
+                            data = json.loads(req.read_text())
+                            envelope = {'schema': 1, 'id': data['id'], 'row': data['row'], 'nonce': data['nonce'], 'exit': 0,
+                                        'stdout_tail': 'RESULT W6 rc=0 status=200 ua=krate-gate-w6-1 issuer=https://krate-oi.test/identity/realms/krate',
+                                        'files': [], 'browser_json_sha256': '', 'mac_leak_scan': {'values': 0, 'hits': 0, 'stores': ['agent.log']},
+                                        'agent_manifest': 'abc', 't_start': 'a', 't_end': 'b'}
+                            (rdv / '.resp.tmp').write_text(json.dumps(envelope))
+                            (rdv / '.resp.tmp').replace(rdv / 'resp-0001.json')
+                            return
+                        _time.sleep(0.1)
+
+                worker = threading.Thread(target=responder, daemon=True)
+                worker.start()
+                script = ('RAW="$1"; STATE="$2"; RENDEZVOUS="$3"; REND_NONCE="$4"; GATE_DIR="$5"\n'
+                          + bash_function_source(runner_path, 'agent_request')
+                          + 'agent_request W6 30; echo "rc=$?" > "$STATE/rc.txt"; printf "%s" "$CAP" > "$STATE/cap.json"\n')
+                subprocess.run([bash_t, '-c', script, 'bash', str(base / 'raw.log'), str(base / 'state'), str(rdv), nonce, str(ROOT / 'scripts/gate')],
+                               text=True, capture_output=True, timeout=90)
+                worker.join(timeout=5)
+                cap_text = (base / 'state/cap.json').read_text() if (base / 'state/cap.json').exists() else ''
+                raw_text = (base / 'raw.log').read_text() if (base / 'raw.log').exists() else ''
+                rc_text = (base / 'state/rc.txt').read_text().strip() if (base / 'state/rc.txt').exists() else ''
+                try:
+                    parsed_cap = json.loads(cap_text)
+                except ValueError:
+                    parsed_cap = None
+            return rc_text, parsed_cap, raw_text, nonce
+
+        def agent_request_nonce_leak_case():
+            with tempfile.TemporaryDirectory() as t01b_tmp:
+                base = Path(t01b_tmp)
+                (base / 'gate').mkdir()
+                (base / 'state').mkdir()
+                (base / 'gate/browser_remote.py').write_text(
+                    'import sys\nnonce = sys.argv[sys.argv.index("--nonce") + 1]\nsys.stderr.write("diagnostic naming " + nonce + "\\n")\nprint(\'{"exit": 0}\')\n')
+                script = ('RAW="$1"; STATE="$2"; RENDEZVOUS="$3"; REND_NONCE="$4"; GATE_DIR="$5"\n'
+                          + bash_function_source(runner_path, 'agent_request')
+                          + 'agent_request W6 5; printf "%s" "$CAP_ERR" > "$STATE/cap.err"\n')
+                subprocess.run([bash_t, '-c', script, 'bash', str(base / 'raw.log'), str(base / 'state'), str(base), 'topofix2-t01b-nonce', str(base / 'gate')], text=True, capture_output=True, timeout=30)
+                raw_text_b = (base / 'raw.log').read_text() if (base / 'raw.log').exists() else ''
+                err_text_b = (base / 'state/cap.err').read_text() if (base / 'state/cap.err').exists() else ''
+            return raw_text_b, err_text_b
+
+        t01b_raw, t01b_err = agent_request_nonce_leak_case()
+        e('diagnostic naming <rendezvous-nonce-redacted>' in t01b_err and 'topofix2-t01b-nonce' not in t01b_raw and 'topofix2-t01b-nonce' not in t01b_err,
+          f'a requester that names the nonce on stderr leaks it neither into CAP_ERR nor into the raw log; got {t01b_err!r} / {t01b_raw[:160]!r} (T01)')
+        t01_rc, t01_cap, t01_raw, t01_nonce = agent_request_case()
+        e(t01_rc == 'rc=0' and isinstance(t01_cap, dict) and t01_cap.get('row') == 'W6' and t01_cap.get('nonce') == '<rendezvous-nonce-redacted>',
+          f"agent_request saves the requester's stdout alone: a JSON response (nonce redacted), not text prefixed by the stderr announcement; got {t01_rc!r} {t01_cap!r} (T01)")
+        e('written (nonce-bound)' in t01_raw and t01_nonce not in t01_raw,
+          'the requester announcement (stderr) lands in the raw log, with the rendezvous nonce redacted (T01)')
+
+        def w5_ports_case(containers):
+            with tempfile.TemporaryDirectory() as t02_tmp:
+                fake_bin = Path(t02_tmp)
+                (fake_bin / 'docker').write_text(
+                    '#!/bin/sh\n'
+                    'case "$1" in\n'
+                    '  ps) case "$*" in *krate-gate1*) printf "%s\\n" ' + ' '.join(containers.get('gate', [])) + ' ;; *monitoring*) printf "%s\\n" ' + ' '.join(containers.get('mon', [])) + ' ;; esac ;;\n'
+                    '  inspect) tpl="$3"; cid="$4"\n'
+                    '    case "$tpl" in *".Label "*) echo "template parsing error: template: :1:2: executing \\"\\" at <.Label>: Label is not a method but has arguments" >&2; exit 1 ;; esac\n'
+                    '    case "$cid" in\n'
+                    '      c1) echo "proxy|0.0.0.0:443 0.0.0.0:80 " ;;\n'
+                    '      c2) echo "kafka|0.0.0.0:9092 127.0.0.1:19090 :::9093 " ;;\n'
+                    '      c3) echo "grafana|127.0.0.1:13000 " ;;\n'
+                    '      *) echo "Error: No such object: $cid" >&2; exit 1 ;;\n'
+                    '    esac ;;\n'
+                    'esac\n')
+                (fake_bin / 'docker').chmod(0o755)
+                script = ('RAW=/dev/null; PROJECT=krate-gate1; MON_PROJECT=krate-epc-monitoring\n' + bash_function_source(runner_path, 'w5_published_any_ports')
+                          + 'out="$(w5_published_any_ports)"; rc=$?; printf "rc=%s\\n%s\\n" "$rc" "$out"\n')
+                run = subprocess.run([bash_t, '-c', script], env=dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}'), text=True, capture_output=True)
+            return run.stdout.strip().splitlines()
+
+        good_ports = w5_ports_case({'gate': ['c1', 'c2'], 'mon': ['c3']})
+        e(good_ports[:1] == ['rc=0'] and sorted(good_ports[1:]) == ['kafka=9092', 'kafka=9093', 'proxy=443', 'proxy=80'],
+          f'w5_published_any_ports derives the any-address published ports with the service labels from a docker inspect template that works; got {good_ports!r} (T02)')
+        failed_ports = w5_ports_case({'gate': ['c1', 'c9'], 'mon': ['c3']})
+        e(failed_ports[:1] == ['rc=1'] and 'docker inspect failed for [c9 ]' in ' '.join(failed_ports),
+          f'w5_published_any_ports fails closed when a container cannot be inspected; got {failed_ports!r} (T02)')
+        none_ports = w5_ports_case({})
+        e(none_ports[:1] == ['rc=1'] and '0 container(s) were inspected' in ' '.join(none_ports),
+          f'w5_published_any_ports fails closed when no container is listed (a derived set of only 22 would be a silent fallback); got {none_ports!r} (T02)')
+
+        with tempfile.TemporaryDirectory() as t04_tmp:
+            response_path = Path(t04_tmp) / 'w6-agent-response.json'
+            response_path.write_text(json.dumps({'stdout_tail': 'RESULT W6 rc=0 status=200 ua=krate-gate-w6-0001 issuer=https://krate-oi.test/identity/realms/krate',
+                                                  'mac_leak_scan': {'values': 0, 'hits': 0, 'stores': ['agent.log']}}))
+            script = ('RAW=/dev/null\n' + bash_function_source(runner_path, 'w6_response_fields')
+                      + 'w6_response_fields "$1" || echo FAILED; printf "%s|%s|%s|%s\\n" "$W6_STATUS" "$W6_UA" "$W6_ISSUER" "$W6_LEAK"\n')
+            w6_fields = subprocess.run([bash_t, '-c', script, 'bash', str(response_path)], text=True, capture_output=True).stdout.strip()
+        e(w6_fields == '200|krate-gate-w6-0001|https://krate-oi.test/identity/realms/krate|0 values, 0 hits',
+          f'w6_response_fields reads all four lines of the helper output (status, ua, issuer, leak); got {w6_fields!r} (T04)')
+
+        # T05 / T17: the runner's own W7 row runs against fake firewall-cmd, systemctl, sudo, ufw and iptables commands. The branch
+        # follows the OS, a RHEL-family host without a running firewalld FAILs, and the docker zone's target must be ACCEPT.
+        os_releases = {
+            'rocky': 'NAME="Rocky Linux"\nID="rocky"\nID_LIKE="rhel centos fedora"\nVERSION_ID="9.8"\n',
+            'alma': 'ID="almalinux"\nID_LIKE="rhel centos fedora"\n',
+            'ubuntu': 'NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"\n',
+            'debian': 'ID=debian\n',
+            'arch': 'ID=arch\n',
+        }
+
+        def w7_case(os_name, firewalld='active', with_firewall_cmd=True, docker_target='ACCEPT', ufw_status='Status: inactive', caller_locale='', sudo_works=True):
+            with tempfile.TemporaryDirectory() as t05_tmp:
+                base = Path(t05_tmp)
+                fake_bin = base / 'bin'
+                fake_bin.mkdir()
+                (base / 'os-release').write_text(os_releases[os_name])
+                scripts_text = {
+                    'sudo': '[ "$1" = -n ] && shift\nexec "$@"' if sudo_works else 'exit 1',
+                    'systemctl': 'case "$*" in "is-active firewalld") echo "${FAKE_FIREWALLD:-inactive}" ;; "is-active ufw") echo active ;; esac',
+                    'ufw': 'if [ -n "$FAKE_LOCALIZED" ] && [ "$LC_ALL" != C ]; then echo "Estado: inactivo"; else echo "$FAKE_UFW_STATUS"; fi',
+                    'iptables': 'echo "-P INPUT ACCEPT"',
+                }
+                if with_firewall_cmd:
+                    scripts_text['firewall-cmd'] = (
+                        'case "$*" in\n'
+                        '  *--get-default-zone*) echo public ;;\n'
+                        '  *--get-zone-of-interface=lima0*) echo public ;;\n'
+                        '  *--get-zone-of-interface=*) echo docker ;;\n'
+                        '  *--list-services*) echo "cockpit dhcpv6-client ssh" ;;\n'
+                        '  *--get-policies*) echo "allow-host-ipv6 docker-forwarding docker-to-host" ;;\n'
+                        '  *--info-zone=docker*) key=target; if [ -n "$FAKE_LOCALIZED" ] && [ "$LC_ALL" != C ]; then key=objetivo; fi\n'
+                        '    printf "docker (active)\\n  %s: %s\\n  icmp-block-inversion: no\\n" "$key" "$FAKE_DOCKER_TARGET" ;;\n'
+                        'esac')
+                for name, body in scripts_text.items():
+                    (fake_bin / name).write_text('#!/bin/sh\n' + body + '\n')
+                    (fake_bin / name).chmod(0o755)
+                (base / 'krate').write_text('#!/bin/sh\necho "[ok] firewalld active, docker zone present (target ACCEPT)"\n')
+                (base / 'krate').chmod(0o755)
+                script = ('section() { :; }\nrecord() { printf "RECORD %s|%s\\n" "$4" "$5"; }\nRAW=/dev/null; KRATE="$1"\n'
+                          'command() { if [[ "$1" == -v && "$2" == firewall-cmd ]]; then [[ -n "${FAKE_FWCMD_PATH:-}" ]] || return 1; echo "$FAKE_FWCMD_PATH"; return 0; fi; builtin command "$@"; }\n'
+                          + bash_function_source(runner_path, 'w7_os_family') + bash_function_source(runner_path, 'phase4_row_w7')
+                          + 'phase4_row_w7 4c "$2"\n')
+                env = dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}', FAKE_FIREWALLD=firewalld, FAKE_DOCKER_TARGET=docker_target, FAKE_UFW_STATUS=ufw_status,
+                           FAKE_FWCMD_PATH=str(fake_bin / 'firewall-cmd') if with_firewall_cmd else '', FAKE_LOCALIZED='1' if caller_locale else '')
+                if caller_locale:
+                    env['LC_ALL'] = caller_locale
+                run = subprocess.run([bash_t, '-c', script, 'bash', str(base / 'krate'), str(base / 'os-release')], env=env, text=True, capture_output=True)
+            return (run.stdout + run.stderr).strip()
+
+        family_script = bash_function_source(runner_path, 'w7_os_family') + 'w7_os_family "$1"\n'
+        for id_only, wanted in (('ID=rhel', 'rhel'), ('ID="rocky"', 'rhel'), ('ID=almalinux', 'rhel'), ('ID=centos', 'rhel'), ('ID=fedora', 'rhel'), ('ID=ol\nID_LIKE="fedora"', 'rhel'),
+                                ('ID=ubuntu', 'debian'), ('ID=debian', 'debian'), ('ID=linuxmint\nID_LIKE="ubuntu debian"', 'debian'), ('ID=arch', 'unknown'), ('NAME=x', 'unknown')):
+            with tempfile.TemporaryDirectory() as fam_tmp:
+                (Path(fam_tmp) / 'os-release').write_text(id_only + '\n')
+                got_family = subprocess.run([bash_t, '-c', family_script, 'bash', str(Path(fam_tmp) / 'os-release')], text=True, capture_output=True).stdout.strip()
+            e(got_family == wanted, f'w7_os_family reads {id_only!r} as {wanted}; got {got_family!r} (T05)')
+        e(w7_case('rocky').startswith('RECORD PASS|') and 'docker zone target [ACCEPT]' in w7_case('rocky'),
+          f'W7 on a Rocky fixture with a running firewalld and the docker zone ACCEPT passes and records the target; got {w7_case("rocky")[:300]!r} (T17)')
+        e(w7_case('alma').startswith('RECORD PASS|'), 'W7 treats AlmaLinux (ID_LIKE rhel) as the firewalld branch (T05)')
+        for bad_target in ('DROP', 'REJECT', ''):
+            out_t = w7_case('rocky', docker_target=bad_target)
+            e(out_t.startswith('RECORD FAIL|') and f'docker zone target [{bad_target or "unknown"}]' in out_t,
+              f'W7 fails when the docker zone target is {bad_target or "unreadable"} instead of ACCEPT; got {out_t[:260]!r} (T17)')
+        out_stopped = w7_case('rocky', firewalld='inactive')
+        e(out_stopped.startswith('RECORD FAIL|') and 'RHEL-family fixture without a running firewalld' in out_stopped,
+          f'W7 FAILs a Rocky fixture whose firewalld stopped instead of falling into the ufw shape; got {out_stopped[:260]!r} (T05)')
+        out_missing = w7_case('rocky', firewalld='inactive', with_firewall_cmd=False)
+        e(out_missing.startswith('RECORD FAIL|') and 'RHEL-family fixture without a running firewalld' in out_missing,
+          f'W7 FAILs a Rocky fixture without firewall-cmd; got {out_missing[:260]!r} (T05)')
+        e(w7_case('ubuntu', firewalld='inactive', with_firewall_cmd=False).startswith('RECORD PASS|'), 'W7 passes an Ubuntu fixture whose ufw is inactive, whatever the ufw.service state says (T05/PRE-4)')
+        e(w7_case('debian', firewalld='inactive', with_firewall_cmd=False, ufw_status='Status: active').startswith('RECORD FAIL|'), 'W7 fails a Debian-family fixture whose ufw is active (T05)')
+        out_unknown = w7_case('arch', firewalld='inactive', with_firewall_cmd=False)
+        e(out_unknown.startswith('RECORD FAIL|') and 'unsupported fixture OS' in out_unknown, f'W7 FAILs an unsupported OS (T05); got {out_unknown[:200]!r}')
+        # T06 / R3 on the whole row: a caller in another locale, a fake firewall-cmd and ufw that answer in a translated form unless LC_ALL=C
+        out_loc_rhel = w7_case('rocky', caller_locale='de_DE.UTF-8')
+        e(out_loc_rhel.startswith('RECORD PASS|') and 'docker zone target [ACCEPT]' in out_loc_rhel,
+          f'W7 on a RHEL-family fixture reads the firewall-cmd output under LC_ALL=C whatever the caller locale is; got {out_loc_rhel[:240]!r} (R3)')
+        out_loc_plain = w7_case('rocky', caller_locale='de_DE.UTF-8', sudo_works=False)
+        e(out_loc_plain.startswith('RECORD PASS|') and 'docker zone target [ACCEPT]' in out_loc_plain,
+          f'W7 on a RHEL-family fixture reads the firewall-cmd output under LC_ALL=C on the no-sudo arm too; got {out_loc_plain[:240]!r} (R3)')
+        out_loc_ubuntu = w7_case('ubuntu', firewalld='inactive', with_firewall_cmd=False, caller_locale='de_DE.UTF-8')
+        e(out_loc_ubuntu.startswith('RECORD PASS|') and 'ufw status first line [Status: inactive]' in out_loc_ubuntu,
+          f'W7 on an Ubuntu fixture reads ufw status under LC_ALL=C whatever the caller locale is; got {out_loc_ubuntu[:240]!r} (T06, R3)')
+        for locale_line in ('fwcmd=(sudo -n env LC_ALL=C firewall-cmd)', 'sudo -n true 2>/dev/null || fwcmd=(env LC_ALL=C firewall-cmd)',
+                            'ufw_status="$( { sudo -n env LC_ALL=C ufw status verbose 2>/dev/null || LC_ALL=C ufw status verbose 2>/dev/null; } | head -4 | tr \'\\n\' \' \' || true)"',
+                            'input_head="$(sudo -n env LC_ALL=C iptables -S INPUT 2>/dev/null | head -1 || true)"'):
+            e(locale_line in topo_runner_lines, f'W7 carries the code line {locale_line!r}: every firewall command whose output it prints or parses runs under LC_ALL=C (T06, R3)')
+        e('every firewall command the row reads runs under `LC_ALL=C`, so a translated ufw or firewalld catalogue cannot change what it parses' in ' '.join(guide_text.split()),
+          'the guide says W7 reads its firewall commands under LC_ALL=C (T06, R3)')
+    e('local os_family fw_active=false' in topo_runner_text and 'elif [[ "$os_family" == rhel ]] && ! $fw_active; then' in topo_runner_text
+      and "docker_target=\"$(\"${fwcmd[@]}\" --info-zone=docker" in topo_runner_text and '[[ "$docker_target" == ACCEPT ]] || st=1' in topo_runner_text,
+      'W7 selects its branch from the OS and checks the docker zone target (T05, T17)')
+
+    # T18 / T11: the agent serves only the selected plan, each row once, and trusts no id before it is an integer 1..9999 equal to
+    # the id of the request's own file name; all of that runs in claimRequest, before execute() and runRow() can use the id in a path.
+    for line in (
+        'for (const planned of PLAN) {',
+        'if (new Set(PLAN).size !== PLAN.length) die(`--rows names a row twice: ${PLAN.join(\',\')}`);',
+        'public_host: PUBLIC_HOST, ports: PORTS, plan: PLAN,',
+        "if (typeof parsed.row !== 'string' || !PLAN.includes(parsed.row)) {",
+        'if (servedRows.has(parsed.row)) {',
+        'servedRows.add(req.row);',
+        'if (parsed.id !== Number(file.slice(4, 8))) {',
+    ):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (T18/T11)')
+    e(any(ln.startswith('if (!Object.hasOwn(ROWS, planned)) die(') for ln in agent_lines) and 'ROWS[parsed.row]' not in agent_code,
+      'agent.mjs refuses a --rows entry that is not an own row of the table and no longer admits a request by ROWS[parsed.row] (T18: --rows W6 must not allow W5; "__proto__" is not a row)')
+    claim_start = agent_lines.index('function claimRequest(file) {') if 'function claimRequest(file) {' in agent_lines else -1
+    claim_end = next((i for i, ln in enumerate(agent_lines) if ln.startswith('return { req: parsed, claimedPath: claimed };')), -1)
+    claim_body = agent_lines[claim_start:claim_end] if 0 <= claim_start < claim_end else []
+    marks = [next((i for i, ln in enumerate(claim_body) if ln.startswith(token)), -1) for token in (
+        'if (!Number.isInteger(parsed.id) || parsed.id < 1 || parsed.id > 9999) {',
+        'if (parsed.id !== Number(file.slice(4, 8))) {',
+        "if (typeof parsed.row !== 'string' || !PLAN.includes(parsed.row)) {",
+        'if (servedRows.has(parsed.row)) {')]
+    e(all(m >= 0 for m in marks) and marks == sorted(marks),
+      'claimRequest validates the id (integer 1..9999, equal to its file name) and then the row (in the plan, not yet served) before it returns a request for execute() (T11, T18)')
+    id_path_uses = [ln for ln in agent_lines if re.search(r'\b(?:req|parsed)\.id\b', ln) and ('join(' in ln or '${' in ln or 'resp-' in ln) and not ln.startswith('return { bad:')]
+    e(len(id_path_uses) == 2 and any(ln.startswith('const outDir = join(TMP, `${req.id}-${sub}`);') for ln in id_path_uses)
+      and any(ln.startswith("guestPut(`resp-${String(req.id).padStart(4, '0')}.json`") for ln in id_path_uses),
+      f'the request id reaches a path in exactly two places, runRow\'s scratch folder and the response name, both after claimRequest validated it; found {id_path_uses!r} (T11)')
+
+    # T07 / T21 / T20: the external-request guard is context-wide and installed before the first navigation of every story (and U15,
+    # whose interstitial acceptance is already a page load); no story registers a tracker late or page by page; a failed evidence
+    # collection fails U15 in the Mac vantage.
+    for line in ('async guard(ownedContext) {',
+                 "session.on('Fetch.requestPaused', onPaused);",
+                 "await command('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });",
+                 'await context.routeWebSocket((url) => url.hostname !== host, (ws) => {',
+                 'attachContext(context) { for (const p of context.pages()) hook(p); context.on(\'page\', hook); return this; },'):
+        e(line in launch_lines, f'browser-launch.mjs must carry the code line {line!r} (T07/T21: browser-root HTTP interception and the existing page-WebSocket layer; worker WebSockets remain unproven)')
+    for guarded, guard_line, ctx_name, first_nav in (
+        ('screenshots.mjs', 'if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }', 'ctx', 'acceptGateCertificate('),
+        ('screenshots-grafana.mjs', 'if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }', 'ctx', 'const decision = await acceptGateCertificate('),
+        ('screenshots-perses.mjs', 'if (ext) { await ext.guard(ctx); serve.attachContext(ctx); }', 'ctx', 'const decision = await acceptGateCertificate('),
+        ('phase4-browser.mjs', 'if (MAC) { await ext.guard(context); serve.attachContext(context); }', 'context', 'const accepted = await acceptGateCertificate('),
+    ):
+        guarded_text = (ROOT / 'scripts/gate' / guarded).read_text()
+        guarded_lines = js_lines(guarded_text)
+        guard_at = guarded_lines.index(guard_line) if guard_line in guarded_lines else -1
+        nav_at = next((i for i, ln in enumerate(guarded_lines) if first_nav in ln and not ln.startswith('import ')), -1)
+        e(guard_at >= 0 and (nav_at < 0 or guard_at < nav_at),
+          f'{guarded} installs the context-wide guard ({guard_line!r}) before its first navigation (T07, T21)')
+        e('ext.onFailed' not in guarded_text and not re.search(r'serve\.attach\(', guarded_text) and not re.search(r"\.on\('requestfailed', \(r\) => ext", guarded_text),
+          f'{guarded} registers no tracker page by page or after a navigation (T07, T21: the Admin and later pages are covered by the context)')
+    e("recordFailure('browser evidence failed', e);" in u15_lines
+      and "recordFailure('browser.json not written', e);" in u15_lines
+      and 'process.exitCode = 1;' in u15_lines,
+      'phase4-browser.mjs (U15) records failed live evidence and browser.json writes through its common nonzero failure path (T20; shipped lifecycle cases execute both)')
+    # The standalone check_browser_http_guard executes the actual shipped export and\n    # redirect pause/terminal lifecycle cases; context.route alone cannot check a redirect hop.\n\n    # R6: the rendezvous nonce binds the run and reaches no log. The agent's stdout and stderr are the Mac receipt's agent.log. Three pins: the
+    # ready line is run with a known nonce in scope and must not print it; the agent code names the nonce in exactly four enumerated lines (its
+    # definition, the hello, the request check, the response), so any new mention, in a log call or elsewhere, needs a conscious pin edit; and
+    # no log call (console, die, throw) dumps a whole object that holds it (the hello, the response, the request, the parsed flags, argv).
+    ready_line = ("console.log(`agent: ready vm=${VM} vm_ip=${STATE.vmIp} mac_src_ip=${srcIp} iface=${iface} g6=${g6 || 'none'} "
+                  "plan=${PLAN.join(',')} nonce=bound`);")
+    e(ready_line in agent_lines, 'agent.mjs prints its ready line with `nonce=bound`, never the value (R6, review N6)')
+    ready_actual = next((ln for ln in agent_lines if ln.startswith('console.log(`agent: ready ')), '')   # whatever the line says, it is what runs below
+    e(bool(ready_actual), 'agent.mjs has a ready line to run (R6)')
+    if node_binary and ready_actual:
+        r6_secret = 'r6-secret-nonce-value-0123456789'
+        r6_run = subprocess.run([node_binary, '-e',
+                                 f"const VM='vm', STATE={{vmIp:'192.168.64.2'}}, srcIp='192.168.64.1', iface='bridge100', g6='', PLAN=['W5','W6'], NONCE='{r6_secret}';\n{ready_actual}\n"],
+                                text=True, capture_output=True)
+        e(r6_run.returncode == 0 and 'nonce=bound' in r6_run.stdout and r6_secret not in r6_run.stdout + r6_run.stderr,
+          f'the agent ready line, run with a nonce in scope, prints nonce=bound and not the nonce; got rc {r6_run.returncode}: {r6_run.stdout.strip()[:200]!r} (R6)')
+    agent_nonce_refs = [ln for ln in agent_lines if re.search(r"\bNONCE\b|args\[.rendezvous-nonce.\]|\.nonce\b", ln)]
+    e(len(agent_nonce_refs) == 4 and agent_nonce_refs[0].startswith("const NONCE = args['rendezvous-nonce'] || die('--rendezvous-nonce is required ")
+      and agent_nonce_refs[1:] == ['schema: 1, t: new Date().toISOString(), seq: ++helloSeq, pid: process.pid, nonce: NONCE,',
+                                   'if (parsed.schema !== 1 || parsed.nonce !== NONCE) {',
+                                   'schema: 1, id: req.id, row: req.row, nonce: NONCE,'],
+      f'agent.mjs names the rendezvous nonce in exactly its definition, the hello, the request check and the response; found {agent_nonce_refs!r} (R6)')
+
+    def code_without_literals(js_line):
+        """A JS line with string literals removed and each template literal reduced to its ${...} expressions (what a log call can print besides fixed text)."""
+        out = re.sub(r"`(?:[^`\\]|\\.)*`", lambda m: ' '.join(re.findall(r"\$\{(.*?)\}", m.group(0))), js_line)
+        return re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", "''", out)
+
+    agent_log_calls = [ln for ln in agent_lines if re.search(r"\bconsole\.(?:log|error|warn|info|debug)\(|\bdie\(|process\.std(?:out|err)\.write\(|\bthrow new Error\(", ln)]
+    agent_dumps = [ln for ln in agent_log_calls
+                   if re.search(r"(?<![\w.])(?:hello|resp|req|parsed|claim|args|SECRETS|argvPairs)\b(?![\w.\[])|process\.argv|process\.env\b(?!\.)", code_without_literals(ln))]
+    e(len(agent_log_calls) >= 10 and not agent_dumps, f'no agent log call (console, die, throw) prints a whole hello, response, request, flags, argv or environment object; found {agent_dumps!r} (R6)')
+    e(not [ln for ln in launcher_lines if not ln.startswith('limactl shell') and re.search(r"\b(?:echo|printf)\b[^;|]*\$\{?(?:NONCE|GUEST_CMD)\b", ln)],
+      'run-vm-gate.sh echoes neither $NONCE nor $GUEST_CMD (the guest command carries the nonce) (R6)')
+
+    # R4: guest-derived text (a file name, a JSON key or value, a command's stderr) reaches agent.log only through clip(): cut to a limit and
+    # JSON-quoted, so a hostile guest can neither fill the log nor start a line that reads like the agent's own (`agent: W6 req=1 exit=0 ...`).
+    clip_line = 'function clip(value, limit = 120) { return JSON.stringify(String(value).slice(0, limit)); }'
+    e(clip_line in agent_lines, 'agent.mjs defines clip(value, limit): the only way guest text reaches its log (R4)')
+    for line in ("return { bad: `refused: unreadable or unparseable request ${file}: ${clip(e.message || e, 80)}` };",
+                 "return { bad: `refused: the guest request carries the keys ${clip(keys)}; the protocol is exactly {schema,id,row,nonce} (F4)` };",
+                 "return { bad: `refused: row ${clip(parsed.row)} is not in this run's plan: ${PLAN.join(', ')}` };"):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (R4: the guest-supplied key list, row and parse message go through clip())')
+    e(not [ln for ln in agent_lines if re.search(r"\be\.message\b", ln) and re.search(r"console\.|\bdie\(|\bbad:", ln) and 'clip(' not in ln],
+      'no agent.mjs log line (console, die, a refusal text) prints an exception message without clip(); the one e.message that is not logged goes into the response tail (R4)')
+    clip_actual = next((ln for ln in agent_lines if ln.startswith('function clip(')), '')
+    if node_binary and clip_actual:
+        clip_run = subprocess.run([node_binary, '-e', clip_actual + r"""
+const forged = 'x\nagent: W6 req=1 exit=0 files=0 manifest=abc\n' + 'A'.repeat(70000);
+const out = clip(forged);
+console.log(JSON.stringify({ length: out.length, newline: out.includes('\n'), parsed: JSON.parse(out).length, small: clip('ab'), num: clip(7, 5) }));
+"""], text=True, capture_output=True)
+        try:
+            clip_out = json.loads(clip_run.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            clip_out = {}
+        e(clip_run.returncode == 0 and clip_out.get('parsed') == 120 and clip_out.get('length', 999) <= 130 and clip_out.get('newline') is False
+          and clip_out.get('small') == '"ab"' and clip_out.get('num') == '"7"',
+          f'clip() cuts a 70 KB guest text with newlines to 120 characters, escapes the newlines and quotes the result; got rc {clip_run.returncode}: {clip_out!r} {clip_run.stderr.strip()[:160]!r} (R4)')
+
+    # R5: the guest read confines the RESOLVED file to the RESOLVED directory by path components (`"$d"/*`), not by a substring match. The
+    # function's own text runs in node against a stub GNU `realpath -e` (macOS has none) in a temp tree: a file inside, a sibling directory
+    # that merely starts with the directory's name, a directory that is itself reached through a symlink, a symlink pointing out, a missing file.
+    e('grep -F -- ${q(mustBeUnder)}' not in agent_code, 'agent.mjs no longer confines a guest read with a substring match (grep -F) (R5)')
+
+    def js_function_source(text, name):
+        match = re.search(r'^function ' + re.escape(name) + r'\([^\n]*\n', text, re.M)
+        if match is None:
+            raise ValueError(f'agent.mjs: function {name} not found')
+        if match.group(0).count('{') == match.group(0).count('}'):
+            return match.group(0)
+        return text[match.start():text.index('\n}\n', match.start()) + 3]
+
+    if node_binary:
+        with tempfile.TemporaryDirectory() as r5_tmp:
+            base = Path(r5_tmp)
+            (base / 'bin').mkdir()
+            (base / 'bin/realpath').write_text('#!/bin/sh\n[ "$1" = -e ] && shift\n[ "$1" = -- ] && shift\nexec "%s" -I -c \'import os, sys\nif not os.path.exists(sys.argv[1]): sys.exit(1)\nprint(os.path.realpath(sys.argv[1]))\' "$1"\n' % sys.executable)
+            (base / 'bin/realpath').chmod(0o755)
+            (base / 'rdv').mkdir()
+            (base / 'rdv/req-0001.json').write_text('{"a":1}')
+            (base / 'rdv-other').mkdir()
+            (base / 'rdv-other/req-0001.json').write_text('{"other":1}')
+            (base / 'real').mkdir()
+            (base / 'real/req-0001.json').write_text('{"a":1}')
+            os.symlink(base / 'real', base / 'link')
+            (base / 'secret.txt').write_text('SECRET')
+            os.symlink(base / 'secret.txt', base / 'rdv/evil')
+            (base / 'cert.pem').write_text('CERT')
+            r5_script = (
+                "import { spawnSync } from 'node:child_process';\nimport { posix } from 'node:path';\nconst READ_CAP_BYTES = 65536;\n"
+                "function die(m) { throw new Error(m); }\n"
+                "function guestSh(script, opts = {}) { const r = spawnSync('sh', ['-c', script], { encoding: 'utf8' }); if (r.status !== 0 && !opts.allowFail) throw new Error('exit ' + r.status); return { out: r.stdout || '', status: r.status }; }\n"
+                + next((ln for ln in agent_lines if ln.startswith('const GUEST_PATH_RE = ')), 'const GUEST_PATH_RE = /(?!)/;') + '\n'
+                + js_function_source(agent_text, 'guestPath') + js_function_source(agent_text, 'q') + js_function_source(agent_text, 'guestReadFile')
+                + "const T = process.argv[1];\nconst out = {};\n"
+                  "const tryRead = (p, under) => { try { return guestReadFile(p, under).toString('utf8'); } catch (e) { return 'THROWS'; } };\n"
+                  "out.inside = tryRead(`${T}/rdv/req-0001.json`, `${T}/rdv`);\n"
+                  "out.siblingWithSamePrefix = tryRead(`${T}/rdv-other/req-0001.json`, `${T}/rdv`);\n"
+                  "out.symlinkedDirectory = tryRead(`${T}/link/req-0001.json`, `${T}/link`);\n"
+                  "out.symlinkPointingOut = tryRead(`${T}/rdv/evil`, `${T}/rdv`);\n"
+                  "out.missing = tryRead(`${T}/rdv/nope.json`, `${T}/rdv`);\n"
+                  "out.unconfined = tryRead(`${T}/cert.pem`, null);\n"
+                  "console.log(JSON.stringify(out));\n")
+            r5_run = subprocess.run([node_binary, '--input-type=module', '-e', r5_script, str(base)], env=dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}'), text=True, capture_output=True, timeout=60)
+            try:
+                r5_out = json.loads(r5_run.stdout.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                r5_out = {}
+            e(r5_out == {'inside': '{"a":1}', 'siblingWithSamePrefix': '', 'symlinkedDirectory': '{"a":1}', 'symlinkPointingOut': '', 'missing': 'THROWS', 'unconfined': 'CERT'},
+              f'the guest read returns a file inside the directory (also one reached through a symlinked directory) and nothing for a sibling that shares the name prefix or a symlink that points out; got rc {r5_run.returncode}: {r5_out!r} {r5_run.stderr.strip()[:200]!r} (R5)')
+
+    # R7: the OS branch of W7 follows an argument, never the operator's environment: the row's one call site passes no file, and an
+    # OS_RELEASE_FILE in the environment changes nothing.
+    e('os_family="$(w7_os_family "${2:-/etc/os-release}")"' in topo_runner_lines and 'OS_RELEASE_FILE' not in topo_runner_text,
+      'W7 takes the os-release file as an argument (default /etc/os-release) and the runner reads no OS_RELEASE_FILE variable (R7)')
+    if bash_t is not None:
+        with tempfile.TemporaryDirectory() as r7_tmp:
+            (Path(r7_tmp) / 'rhel').write_text('ID=rocky\n')
+            (Path(r7_tmp) / 'deb').write_text('ID=ubuntu\n')
+            r7_script = bash_function_source(runner_path, 'w7_os_family') + 'w7_os_family "$1"\n'
+            r7_run = subprocess.run([bash_t, '-c', r7_script, 'bash', str(Path(r7_tmp) / 'deb')], env=dict(os.environ, OS_RELEASE_FILE=str(Path(r7_tmp) / 'rhel')), text=True, capture_output=True)
+        e(r7_run.stdout.strip() == 'debian', f'w7_os_family reads the file it is given and ignores OS_RELEASE_FILE in the environment; got {r7_run.stdout.strip()!r} (R7)')
+
+        # R8: a failed agent request keeps the TAIL of the requester's stderr (the cause, `no response in N s`, comes last, behind the line
+        # it repeats every 2 s while a row runs); `${s: -n}` alone is empty for a string shorter than n, so the cut is a function.
+        tail_src = bash_function_source(runner_path, 'tail_chars')
+
+        def tail_case(count, text):
+            return subprocess.run([bash_t, '-c', tail_src + 'tail_chars "$1" "$2"', 'bash', str(count), text], text=True, capture_output=True).stdout
+
+        e(tail_case(10, 'short') == 'short' and tail_case(5, '12345') == '12345' and tail_case(5, '1234567890') == '...67890' and tail_case(5, '') == '',
+          'tail_chars keeps a short text whole and the last n characters of a long one behind ... (R8)')
+        repeated = 'browser_remote: the request /g/rdv/req-0001.json disappeared without a response (the agent agent log holds the refusal)\n'
+        cause = 'browser_remote: no response in 1500 s (hello age 3 s; heartbeat expected every 15 s)\n'
+        e('no response in 1500 s' in tail_case(300, repeated * 40 + cause) and 'no response in 1500 s' not in (repeated * 40 + cause)[:300],
+          'the failure record keeps the cause at the end of a long requester stderr, which the first 300 characters never reach (R8)')
+        e(topo_runner_text.count('$(tail_chars 300 "$CAP_ERR")') == 2 and '${CAP_ERR:0:' not in topo_runner_text,
+          'the W5 and W6 failure records quote the tail of the requester stderr, not its first 300 characters (R8)')
+
+    # R12: the delivery target is validated twice (it sits under --guest-root, and it is a plain normalized guest path) before it reaches limactl.
+    for line in ("if (!guestDir.startsWith(GUEST_ROOT + '/')) die(`agent: refusing to deliver outside --guest-root: ${guestDir}`);",
+                 "sh('limactl', ['copy', '--backend=scp', '-r', localDir, `${VM}:${guestPath('delivery target', guestDir)}`], { timeout: 180000 });"):
+        e(line in agent_lines, f'agent.mjs must carry the code line {line!r} (R12: the delivery target is a validated guest path under --guest-root)')
+
+    # T14: the launcher returns success only for a candidate-bound PASS: the guest runner's own exit status (written beside its pid when
+    # it ends) and the harvested receipt's verdict row and candidate commit. Its own functions run on receipt fixtures; the launch line
+    # (setsid removed, macOS has none) runs behind a fake limactl to prove the exit status is really recorded.
+    launcher_path = ROOT / 'scripts/gate/mac/run-vm-gate.sh'
+    candidate_sha = '0123456789abcdef0123456789abcdef01234567'
+    if bash_t is not None:
+        launcher_funcs = ''.join(bash_function_source(launcher_path, name) for name in ('receipt_verdict', 'receipt_candidate_ok', 'run_outcome'))
+
+        def outcome_case(runner_rc, receipt_text, candidate=candidate_sha):
+            with tempfile.TemporaryDirectory() as t14_tmp:
+                receipt = Path(t14_tmp) / 'receipt.md'
+                if receipt_text is not None:
+                    receipt.write_text(receipt_text)
+                script = launcher_funcs + 'reason="$(run_outcome "$1" "$2" "$3")"; rc=$?; printf "%s|%s\\n" "$rc" "$reason"\n'
+                run = subprocess.run([bash_t, '-c', script, 'bash', runner_rc, str(receipt), candidate], text=True, capture_output=True)
+            return run.stdout.strip()
+
+        def receipt_text(verdict='PASS', commit=candidate_sha):
+            return (f'| field | value |\n|---|---|\n| verdict | **{verdict}** (PASS 70, FAIL 0, NOT_RUN 0, required missing 0: none; bound: true) |\n'
+                    f'| candidate commit | {commit} (stated as {commit[:7]} and resolved in --repo) |\n')
+
+        e(outcome_case('0', receipt_text()) == '0|', f'a guest runner exit 0 with a PASS receipt of the launcher candidate is a success; got {outcome_case("0", receipt_text())!r} (T14)')
+        e(outcome_case('0', receipt_text(commit=candidate_sha[:7] + 'f' * 33)) .startswith('1|the receipt') and 'candidate commit' in outcome_case('0', receipt_text(commit=candidate_sha[:7] + 'f' * 33)),
+          'a PASS receipt of another candidate commit is a failure (T14)')
+        e(outcome_case('garbage', receipt_text()) == '1|the guest runner left no exit status (it was killed before it finished)',
+          'a runner that left no numeric exit status (killed, stale or garbage) is a failure (T14)')
+        e(outcome_case('', receipt_text()) == '1|the guest runner left no exit status (it was killed before it finished)', 'an empty runner exit status is a failure (T14)')
+        e(outcome_case('1', receipt_text()) == '1|the guest runner exited 1', 'a non-zero runner exit status is a failure even beside a PASS receipt (T14)')
+        e(outcome_case('0', receipt_text('FAIL')) == "1|the receipt verdict is 'FAIL', not PASS", 'a FAIL receipt is a failure (T14)')
+        e(outcome_case('0', receipt_text('INCOMPLETE')) == "1|the receipt verdict is 'INCOMPLETE', not PASS", 'an INCOMPLETE receipt is a failure (T14)')
+        e(outcome_case('0', None) == '1|no harvested receipt.md', 'a missing receipt is a failure (T14)')
+        e(outcome_case('0', '| field | value |\n|---|---|\n| candidate commit | ' + candidate_sha + ' |\n') == "1|the receipt verdict is 'missing', not PASS",
+          'an unfinished receipt without a verdict row is a failure (T14)')
+        launcher_raw = launcher_path.read_text()
+        launch_line = next((ln for ln in launcher_raw.splitlines() if ln.startswith('limactl shell "$VM" -- sh -c "nohup setsid sh -c $(printf')), '')
+        e(bool(launch_line), 'the launcher keeps its detached guest command line (T14 test anchor)')
+        if launch_line:
+            with tempfile.TemporaryDirectory() as t14_launch:
+                base = Path(t14_launch)
+                (base / 'bin').mkdir()
+                (base / 'bin/limactl').write_text('#!/bin/sh\n[ "$1" = shell ] || exit 9\nshift; shift\n[ "$1" = -- ] && shift\nexec "$@"\n')
+                (base / 'bin/limactl').chmod(0o755)
+                (base / 'rdv').mkdir()
+                results = {}
+                # `(exit 7)` fails with the same status in every sh; a failed `cd` is 1 in bash's sh but 2 in dash
+                # (Ubuntu's /bin/sh, as on the CI runner), so that case only has to record some non-zero status.
+                for name, guest_cmd in (('pass', 'true'), ('fail', '(exit 7)'), ('cd', 'cd /nonexistent-for-the-check && true')):
+                    sub_rdv = base / name
+                    sub_rdv.mkdir()
+                    script = ('VM=fake; GUEST_ROOT="$1"; RDV="$2"; CANDIDATE=0123456789abcdef; GUEST_CMD="$3"\n' + launch_line.replace('nohup setsid sh', 'nohup sh') + '\n'
+                              'for _ in $(seq 1 50); do [ -s "$RDV/runner.rc" ] && break; sleep 0.1; done; printf "%s|%s" "$(cat "$RDV/runner.rc" 2>/dev/null)" "$(test -s "$RDV/runner.pid" && echo pid)"\n')
+                    run = subprocess.run([bash_t, '-c', script, 'bash', str(base), str(sub_rdv), guest_cmd], env=dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}'), text=True, capture_output=True, timeout=30)
+                    results[name] = run.stdout.strip()
+            e(results.get('pass') == '0|pid' and results.get('fail') == '7|pid'
+              and re.fullmatch(r'[1-9][0-9]*\|pid', results.get('cd', '')) is not None,
+              f"the launcher's detached guest command records the runner's exit status beside its pid (0 for a pass, the failure status otherwise); got {results!r} (T14)")
+    e('RUNNER_RC="$(limactl shell "$VM" -- cat "$RDV/runner.rc" 2>/dev/null | tr -d \'[:space:]\' || true)"' in launcher_lines, 'the launcher reads the runner exit status from the guest and survives a missing runner.rc (T14, R2)')
+    # T12 (rest): the hello wait is for THIS run's nonce, not any non-empty file (a previous run's hello would pass `test -s`).
+    # T13 (rest): the guest checkout must be at the candidate before the agent starts.
+    e('GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d \'[:space:]\' || true)"' in launcher_lines
+      and 'guest_head_is_candidate "$GUEST_HEAD" "$CANDIDATE" \\' in [ln.strip() for ln in (ROOT / 'scripts/gate/mac/run-vm-gate.sh').read_text().splitlines()]
+      and launcher_lines.index('NONCE="$(openssl rand -hex 16)"') > launcher_lines.index('GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d \'[:space:]\' || true)"'),
+      'the launcher reads the guest checkout HEAD and refuses a checkout that is not the candidate before it starts the agent (T13)')
+    if bash_t is not None:
+        head_funcs = bash_function_source(launcher_path, 'guest_head_is_candidate')
+
+        def head_case(head, candidate):
+            return subprocess.run([bash_t, '-c', head_funcs + 'guest_head_is_candidate "$1" "$2"; echo $?', 'bash', head, candidate], text=True, capture_output=True).stdout.strip()
+
+        e(head_case(candidate_sha, candidate_sha) == '0' and head_case(candidate_sha, candidate_sha[:9]) == '0'
+          and head_case('', candidate_sha) == '1' and head_case('f' + candidate_sha[1:], candidate_sha) == '1' and head_case(candidate_sha, 'f' + candidate_sha[1:]) == '1',
+          'guest_head_is_candidate accepts the candidate (full or abbreviated) and refuses an unreadable or different HEAD (T13)')
+
+        # R1 (launcher half): the delivery folder starts every run empty. `limactl copy -r DIR VM:agent-out/w5` nests DIR inside an
+        # existing agent-out/w5, so a stale w5-result.json from an earlier run would stay where the runner reads it. The launcher's own two
+        # guest lines (the rm and the mkdir) run behind a fake limactl that permits only rm and mkdir under the temp guest root and never
+        # anything else; the delivery itself is stood in for by `cp -R DIR agent-out/w5`, which nests into an existing destination as scp -r
+        # does (observed with scp in harness/phase4-completion/raw/TOPOFIX2-REVIEW/scp-sem). The CONTROL (mkdir line only) must show the
+        # stale file surviving, or this harness would prove nothing.
+        launcher_all = launcher_path.read_text().splitlines()
+        rm_line = next((ln for ln in launcher_all if ln.startswith('limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out" ')), '')
+        mkdir_line = next((ln for ln in launcher_all if ln.startswith('limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" ')), '')
+        e(bool(rm_line) and bool(mkdir_line), 'the launcher keeps its guest rm -rf and mkdir lines for agent-out (R1 test anchor)')
+        if rm_line and mkdir_line:
+            def delivery_after(prelude_lines):
+                with tempfile.TemporaryDirectory() as r1_tmp:
+                    base = Path(r1_tmp)
+                    guest = base / 'guest'
+                    (guest / 'agent-out/w5').mkdir(parents=True)
+                    (guest / 'agent-out/w5/w5-result.json').write_text('STALE')
+                    (guest / 'rdv').mkdir()
+                    (guest / 'rdv/agent-hello.json').write_text('hello')
+                    (guest / 'keep.txt').write_text('keep')
+                    (base / 'bin').mkdir()
+                    (base / 'bin/limactl').write_text(
+                        '#!/bin/sh\n[ "$1" = shell ] || exit 9\nshift; shift; [ "$1" = -- ] && shift\n'
+                        'cmd="$1"; shift\n'
+                        'case "$cmd" in rm|mkdir) ;; *) echo "fake limactl: refused $cmd" >&2; exit 9 ;; esac\n'
+                        'for a in "$@"; do case "$a" in -*) ;; "$FAKE_GUEST"/*) ;; *) echo "fake limactl: refused path $a" >&2; exit 9 ;; esac; done\n'
+                        'exec "$cmd" "$@"\n')
+                    (base / 'bin/limactl').chmod(0o755)
+                    script = 'set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"\n' + '\n'.join(prelude_lines) + '\n'
+                    run = subprocess.run([bash_t, '-c', script, 'bash', str(guest)], env=dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}', FAKE_GUEST=str(guest)),
+                                         text=True, capture_output=True, timeout=30)
+                    fresh = base / 'fresh/1-sweep'
+                    fresh.mkdir(parents=True)
+                    (fresh / 'w5-result.json').write_text('FRESH')
+                    subprocess.run(['cp', '-R', str(fresh), str(guest / 'agent-out/w5')], check=True)
+                    top = guest / 'agent-out/w5/w5-result.json'
+                    return {'rc': run.returncode, 'stderr': run.stderr.strip(), 'top': top.read_text() if top.exists() else None,
+                            'nested': (guest / 'agent-out/w5/1-sweep').exists(), 'keep': (guest / 'keep.txt').exists(), 'hello': (guest / 'rdv/agent-hello.json').exists()}
+            control = delivery_after([mkdir_line])
+            e(control['rc'] == 0 and control['top'] == 'STALE' and control['nested'], f'R1 harness control: with only the mkdir line the stale w5-result.json survives and the fresh folder nests; got {control!r}')
+            fixed = delivery_after([rm_line, mkdir_line])
+            e(fixed == {'rc': 0, 'stderr': '', 'top': 'FRESH', 'nested': False, 'keep': True, 'hello': True},
+              f'the launcher empties the guest agent-out before the run: after its rm and mkdir lines the delivered w5-result.json is the fresh one, nothing nests, and files outside agent-out stay; got {fixed!r} (R1)')
+            rm_at = [i for i, ln in enumerate(launcher_lines) if ln.startswith('limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out"')]
+            mkdir_at = [i for i, ln in enumerate(launcher_lines) if ln.startswith('limactl shell "$VM" -- mkdir -p "$RDV" "$GUEST_ROOT/agent-out" 2>/dev/null')]
+            agent_at = [i for i, ln in enumerate(launcher_lines) if ln == 'AGENT_PID=$!']
+            e(len(rm_at) == 1 and len(mkdir_at) == 1 and len(agent_at) == 1 and rm_at[0] < mkdir_at[0] < agent_at[0],
+              'the launcher empties agent-out before it creates it and before the agent starts (R1)')
+        e(any(ln.startswith('limactl shell "$VM" -- rm -rf -- "$GUEST_ROOT/agent-out" 2>/dev/null || { echo "run-vm-gate: could not empty ') and ln.endswith('exit 2; }') for ln in launcher_lines),
+          'the launcher exits 2 with a reason when it cannot empty the guest agent-out (R1: a stale delivery must not be read as this run\'s)')
+        # N1 (delta review of 2d4c9df): the guest's mkdir and the removal of the previous run's exit status fail loudly. Under `set -e` a bare
+        # failing line ended the launcher silently with rc 1; each of the three guest lines runs behind a limactl whose `shell` always fails and
+        # must end the script with exit 2 and exactly one message line of its own on stderr (nothing on stdout, nothing after it).
+        rm_status = next((ln for ln in launcher_all if ln.startswith('limactl shell "$VM" -- rm -f "$RDV/runner.rc" "$RDV/runner.pid" ')), '')
+        e(bool(rm_status), 'the launcher keeps its guest rm -f line for runner.rc and runner.pid (N1 test anchor)')
+        with tempfile.TemporaryDirectory() as n1_tmp:
+            (Path(n1_tmp) / 'limactl').write_text('#!/bin/sh\nexit 1\n')
+            (Path(n1_tmp) / 'limactl').chmod(0o755)
+            for label, guest_line, word in (('rm -rf', rm_line, 'could not empty'), ('mkdir', mkdir_line, 'could not create'), ('rm -f', rm_status, 'could not remove')):
+                if not guest_line:
+                    continue
+                script = 'set -euo pipefail\nVM=fake; GUEST_ROOT=/g; RDV=/g/rdv\n' + guest_line + '\necho CONTINUED\n'
+                run = subprocess.run([bash_t, '-c', script], env=dict(os.environ, PATH=f'{n1_tmp}:{os.environ["PATH"]}'), text=True, capture_output=True, timeout=30)
+                e(run.returncode == 2 and run.stdout == '' and run.stderr.startswith(f'run-vm-gate: {word} ') and len(run.stderr.strip().splitlines()) == 1,
+                  f'the launcher exits 2 with one message line when its guest {label} fails (N1); got rc {run.returncode}: stdout {run.stdout!r} stderr {run.stderr!r}')
+        # the launcher checks --guest-root with the shape agent.mjs's guestPath accepts before it runs `rm -rf` on a path built from it
+        guest_path_funcs = bash_function_source(launcher_path, 'guest_path_ok')
+
+        def guest_path_case(path):
+            return subprocess.run([bash_t, '-c', guest_path_funcs + 'guest_path_ok "$1"; echo $?', 'bash', path], text=True, capture_output=True).stdout.strip()
+
+        e(all(guest_path_case(good) == '0' for good in ('/home/u/gate', '/opt/g.1/x_y-z', '/a')),
+          'guest_path_ok accepts normalized absolute guest paths of plain characters (R1)')
+        bad_paths = ('', '/', 'gate', 'rel/gate', '/a/../b', '/a/./b', '/a//b', '/a/b/', '/..', '/.', '/a b', "/a'b", '/a$b', '/a`b', '/a;b', '/a\\b', '/a\nb', '/a*', '/a"b', '/é')
+        e(all(guest_path_case(bad) == '1' for bad in bad_paths),
+          f'guest_path_ok refuses relative, empty, non-normalized and non-plain guest paths before a guest rm -rf is built from them; accepted: {[b for b in bad_paths if guest_path_case(b) != "1"]!r} (R1)')
+        e(any(ln.startswith('guest_path_ok "$GUEST_ROOT" || { echo "run-vm-gate: --guest-root must be a normalized absolute guest path') and ln.endswith('exit 2; }') for ln in launcher_lines),
+          'the launcher refuses a --guest-root that is not a plain normalized guest path with exit 2, before any guest command (R1)')
+
+        # R2: the launcher runs under `set -euo pipefail`, so a guest read that FAILS used to end it silently (rc 1) before the message
+        # written for that case: a runner killed before it finished leaves no runner.rc, an unreadable guest checkout fails `git -C`, a
+        # missing receipt fails `test -d`. The launcher's own blocks run behind a fake limactl (shell: ip, git, cat, sh only; copy: cp -R) and
+        # fake route and git commands; each failing case is paired with a control showing the same block reaching its end when it works.
+        def launcher_block(start, end):
+            first = next((i for i, ln in enumerate(launcher_all) if ln.startswith(start)), -1)
+            last = next((i for i in range(first, len(launcher_all)) if end(launcher_all[i])), -1) if first >= 0 else -1
+            return '\n'.join(launcher_all[first:last + 1]) if first >= 0 and last >= 0 else ''
+
+        r2_blocks = {
+            'addr': launcher_block('VM_IP="$(limactl shell', lambda ln: ln == 'fi'),
+            'iface': launcher_block('IFACE="$(route', lambda ln: ln.startswith('[[ -n "$IFACE" ]]')),
+            'head': launcher_block('GUEST_HEAD="$(limactl shell', lambda ln: ln.lstrip().startswith('|| { echo "run-vm-gate: the guest checkout')),
+            'end': launcher_block('VM_IP_END="$(limactl shell', lambda ln: ln == 'fi'),
+            'tail': launcher_block('if ! limactl copy --backend=scp -r "$VM:$GUEST_ROOT/agent-out"', lambda ln: ln == 'exit "$RC"'),
+        }
+        e(all(r2_blocks.values()), f'the launcher keeps the blocks the R2 test runs (VM address, interface, guest HEAD, end address, harvest tail); missing: {[k for k, v in r2_blocks.items() if not v]}')
+        fake_lima_r2 = """#!/bin/sh
+[ -z "$FAKE_FAIL" ] || exit 1
+sub="$1"; shift
+case "$sub" in
+  shell) shift; [ "$1" = -- ] && shift; cmd="$1"; shift
+    case "$cmd" in
+      ip) echo "3: lima0    inet 192.168.64.2/24 brd 192.168.64.255 scope global lima0" ;;
+      cat|sh) exec "$cmd" "$@" ;;
+      git) if [ -n "$FAKE_HEAD" ]; then echo "$FAKE_HEAD"; else echo "fatal: cannot change to '/g/repo': No such file or directory" >&2; exit 128; fi ;;
+      *) echo "fake limactl: refused $cmd" >&2; exit 9 ;;
+    esac ;;
+  copy) while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
+    exec cp -R "${1#*:}" "$2" ;;
+  *) exit 9 ;;
+esac
+"""
+        fake_route_r2 = '#!/bin/sh\nif [ -n "$FAKE_IFACE" ]; then echo "   interface: $FAKE_IFACE"; exit 0; fi\necho "route: writing to routing socket: not in table" >&2\nexit 1\n'
+
+        def r2_run(prelude, block, epilogue='', runner_rc=None, receipt=False, **fake_env):
+            with tempfile.TemporaryDirectory() as r2_tmp:
+                base = Path(r2_tmp)
+                (base / 'bin').mkdir()
+                (base / 'bin/limactl').write_text(fake_lima_r2)
+                (base / 'bin/route').write_text(fake_route_r2)
+                for tool in ('limactl', 'route'):
+                    (base / 'bin' / tool).chmod(0o755)
+                guest, out = base / 'guest', base / 'out'
+                (guest / 'rdv').mkdir(parents=True)
+                (guest / 'agent-out').mkdir()
+                out.mkdir()
+                if runner_rc is not None:
+                    (guest / 'rdv/runner.rc').write_text(runner_rc + '\n')
+                if receipt:
+                    (guest / 'receipt-x').mkdir()
+                    (guest / 'receipt-x/receipt.md').write_text(receipt_text())
+                script = ('set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"; OUT="$2"; GUEST_RECEIPT="$1/receipt-x"; CANDIDATE="$3"; RC=0; PHASE=4a\n'
+                          + prelude + '\n' + block + '\n' + epilogue + '\n')
+                env = dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}', FAKE_FAIL='', FAKE_HEAD='', FAKE_IFACE='')
+                env.update({k.upper(): v for k, v in fake_env.items()})
+                run = subprocess.run([bash_t, '-c', script, 'bash', str(guest), str(out), candidate_sha], env=env, text=True, capture_output=True, timeout=30)
+            return run.returncode, run.stdout, run.stderr
+
+        if all(r2_blocks.values()):
+            rc_a, out_a, err_a = r2_run('', r2_blocks['addr'], fake_fail='1')
+            e(rc_a == 2 and 'no IPv4 address on the guest lima0' in err_a, f'an unreachable guest ends the VM address read in its message (exit 2), not silently; got rc {rc_a}: {err_a[:160]!r} (R2)')
+            rc_a, out_a, err_a = r2_run('', r2_blocks['addr'], 'echo "VM_IP=$VM_IP"')
+            e(rc_a == 0 and 'VM_IP=192.168.64.2' in out_a, f'control: a reachable guest gives its lima0 address; got rc {rc_a}: {out_a!r} {err_a[:160]!r} (R2)')
+            rc_b, out_b, err_b = r2_run('VM_IP=192.168.64.2', r2_blocks['iface'])
+            e(rc_b == 2 and 'names no interface' in err_b, f'a failing `route -n get` ends in its message (exit 2), not silently; got rc {rc_b}: {err_b[:160]!r} (R2)')
+            rc_b, out_b, err_b = r2_run('VM_IP=192.168.64.2', r2_blocks['iface'], 'echo "IFACE=$IFACE"', fake_iface='bridge100')
+            e(rc_b == 0 and 'IFACE=bridge100' in out_b, f'control: the interface of the route is taken; got rc {rc_b}: {out_b!r} (R2)')
+            rc_c, out_c, err_c = r2_run(head_funcs, r2_blocks['head'])
+            e(rc_c == 2 and "is at 'unreadable'" in err_c,
+              f"a guest checkout that cannot be read ends the launcher with the message `is at 'unreadable'` (exit 2); got rc {rc_c}: {err_c[:200]!r} (R2, T13)")
+            rc_c, out_c, err_c = r2_run(head_funcs, r2_blocks['head'], 'echo head-ok', fake_head=candidate_sha)
+            e(rc_c == 0 and 'head-ok' in out_c, f'control: a guest checkout at the candidate passes; got rc {rc_c}: {err_c[:160]!r} (R2)')
+            rc_d, out_d, err_d = r2_run('VM_IP=192.168.64.2', r2_blocks['end'], 'echo "RC=$RC"', fake_fail='1')
+            e(rc_d == 0 and 'RC=3' in out_d and 'the guest lima0 address changed during the run' in err_d,
+              f'an unreadable address at the end of the run is reported as a changed address (RC 3), not a silent exit; got rc {rc_d}: {out_d!r} {err_d[:160]!r} (R2)')
+            rc_d, out_d, err_d = r2_run('VM_IP=192.168.64.2', r2_blocks['end'], 'echo "RC=$RC"')
+            e(rc_d == 0 and 'RC=0' in out_d and 'unchanged at the end' in out_d, f'control: an unchanged address leaves RC 0; got rc {rc_d}: {out_d!r} (R2)')
+            tail_prelude = ''.join(bash_function_source(launcher_path, name) for name in ('receipt_verdict', 'receipt_candidate_ok', 'run_outcome'))
+            rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'], receipt=True)
+            e(rc_e == 16 and 'the guest runner left no exit status (it was killed before it finished)' in err_e and 'receipt harvested' in out_e,
+              f'a runner that left no runner.rc is reported by its message and bit 16 (T14: "left no exit status" is reachable); got rc {rc_e}: {err_e[:200]!r} (R2)')
+            rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'], runner_rc='0', receipt=True)
+            e(rc_e == 0 and 'candidate-bound PASS' in out_e, f'control: runner exit 0 with a PASS receipt of the candidate is a success; got rc {rc_e}: {out_e[-200:]!r} {err_e[:160]!r} (R2)')
+            rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'], runner_rc='1', receipt=True)
+            e(rc_e == 16 and 'the guest runner exited 1' in err_e, f'a runner exit 1 keeps bit 16 and its reason; got rc {rc_e}: {err_e[:160]!r} (R2)')
+            rc_e, out_e, err_e = r2_run(tail_prelude, r2_blocks['tail'])
+            e(rc_e == 24 and 'the named guest receipt' in err_e and 'does not exist' in err_e and 'left no exit status' in err_e,
+              f'a guest with neither receipt nor runner.rc reports both reasons and bits 8 and 16 (S3, T14); got rc {rc_e}: {err_e[:300]!r} (R2)')
+
+            # R9: the hello wait is bounded by the clock (90 s), not by a number of passes: each pass costs a limactl round trip and a sleep. Both are
+            # stood in for by functions that advance SECONDS (a round trip takes 5 s, a sleep its argument); the real loop runs, in no real time.
+            hello_wait = launcher_block('hello_seen=0', lambda ln: ln.startswith('(( hello_seen == 1 )) || {'))
+            e(bool(hello_wait), 'the launcher keeps the hello wait block the R9 test runs')
+
+            def hello_wait_case(seen_on_call):
+                script = ('set -euo pipefail\nVM=fake; RDV=/g/rdv; NONCE=n; OUT=/o; AGENT_PID=$$; calls=0; SEEN="$1"\n'
+                          'limactl() { calls=$((calls + 1)); SECONDS=$((SECONDS + 5)); [[ -n "$SEEN" && $calls -ge $SEEN ]]; }\n'
+                          'sleep() { SECONDS=$((SECONDS + $1)); }\n'
+                          'trap \'echo "calls=$calls" >&2\' EXIT\n' + hello_wait + '\necho passed\n')
+                run = subprocess.run([bash_t, '-c', script, 'bash', str(seen_on_call or '')], text=True, capture_output=True, timeout=30)
+                found = re.search(r'calls=(\d+)', run.stderr)
+                return run.returncode, run.stdout.strip(), run.stderr, int(found.group(1)) if found else -1
+
+            if hello_wait:
+                rc_h, out_h, err_h, calls_h = hello_wait_case(None)
+                e(rc_h == 2 and 'no agent-hello.json' in err_h and 'within 90 s' in err_h and 10 <= calls_h <= 14,
+                  f'with 7 s per pass the hello wait gives up after about 90 s (13 passes), not after 45 passes; got rc {rc_h}, {calls_h} passes: {err_h[:200]!r} (R9)')
+                rc_h, out_h, err_h, calls_h = hello_wait_case(3)
+                e(rc_h == 0 and out_h == 'passed' and calls_h == 3, f'control: a hello seen on the third pass ends the wait; got rc {rc_h}, {calls_h} passes: {out_h!r} (R9)')
+    e("The launcher empties the guest's `agent-out` folder before every run" in guide_flat
+      and "W5 evaluates its result file only when that file's sha256 equals the `w5-result.json` entry in the `files[]` of the agent's response" in guide_flat,
+      'the guide says the launcher empties the guest agent-out and W5 binds its result file to the response files[] sha256 (R1)')
+    # the guide says what the review fixes made true (T16, T03, T02, T05, T17, T14, T13)
+    guide_flat = ' '.join((ROOT / 'sso/guides/identity-gate.md').read_text().split())
+    for sentence in ("read from the saved agent response, where the scan lives, and required to be present and valid",
+                     "built from `docker inspect` of every container of both Compose projects; a failed inspect fails the row",
+                     "a probe that found no route or scope proves nothing and fails",
+                     "the branch follows the fixture's OS (`/etc/os-release` `ID`/`ID_LIKE`: RHEL-family fixtures must run firewalld and fail without it",
+                     "whose target is `ACCEPT` as `firewall-cmd --info-zone=docker` reports it",
+                     "the launcher returns success only for a candidate-bound PASS",
+                     "and the guest checkout is at that candidate before anything starts"):
+        e(sentence in guide_flat, f'the guide must say: {sentence!r} (review T02/T03/T05/T13/T14/T16/T17)')
+    e('RC=$((RC | 16))' in launcher_lines and any(ln.startswith('if OUTCOME_REASON="$(run_outcome "$RUNNER_RC"') for ln in launcher_lines),
+      'the launcher turns a run that is not a candidate-bound PASS into a non-zero exit (T14)')
+    e("agent_request" in topo_runner_text and 'CAP="$(python3 -I "$GATE_DIR/browser_remote.py" request' in topo_runner_text
+      and '2>&1)"; rc=$?\n  if [[ -n "$REND_NONCE" ]]' not in topo_runner_text,
+      'agent_request no longer merges the requester stderr into CAP (T01)')
+    e("{{index .Config.Labels \"com.docker.compose.service\"}}" in topo_runner_text and "{{.Label \"com.docker.compose.service\"}}|{{range" not in topo_runner_text,
+      'the W5 inspect template reads the service label from .Config.Labels (T02)')
+    e('IFS=$\'\\n\' read -r status ua issuer leak' not in topo_runner_text and 'mapfile -t fields <<<"$parsed"' in topo_runner_text,
+      'W6 takes each helper output line into its own variable (mapfile), not one `read` (T04)')
 
 
 def check_k37_wiring(checks):
@@ -1414,6 +3885,15 @@ def load_configure_dual():
     return module
 
 
+def example_site(**changes):
+    """sso/dual-example.json with its two claim placeholders replaced by a real claim: the shipped file is refused as it is
+    (the placeholders must be edited), so every case that needs a valid PingFederate site starts from this one."""
+    site = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    site.update(mfa_claim_name='amr', mfa_claim_value='otp')
+    site.update(changes)
+    return site
+
+
 def check_configure_dual(checks):
     """auth configure FILE writes the same runtime.yml as the local planner plus the identity-provider plan; the realm file belongs to identity up."""
     e = checks.expect
@@ -1421,9 +3901,9 @@ def check_configure_dual(checks):
     e('"keycloak/krate-realm.json"' not in source, 'configure-dual.py: must not write keycloak/krate-realm.json (owned by krate identity up)')
     for key in ('allow-shared-login', 'shared-role'):
         e(key not in source, f'configure-dual.py: must not mention {key} (no shared form login in Keycloak mode)')
-    example = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    example = example_site()
     for key in MOVED_SITE_KEYS:
-        e(key not in example, f'sso/dual-example.json: {key} moved to .env and must not be in the example')
+        e(key not in json.loads((ROOT / 'sso/dual-example.json').read_text()), f'sso/dual-example.json: {key} moved to .env and must not be in the example')
     module = load_configure_dual()
     result = module.configs(example, SYNTHETIC)
     e(set(result) == {'ui/runtime.yml', 'keycloak/pingfederate-idp.json'},
@@ -1709,7 +4189,7 @@ def check_broker_plan_shape(checks, idp):
       'no execution allows user setup')
     e(idp.get('truststore') == 'local', f'the plan declares truststore local by default (site key idp_truststore); got {idp.get("truststore")!r}')
     module = load_configure_dual()
-    example = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    example = example_site()
     e(module.configs(dict(example, idp_truststore='system'), SYNTHETIC)['keycloak/pingfederate-idp.json'].get('truststore') == 'system',
       'idp_truststore: system is carried into the plan as truststore system')
     try:
@@ -1801,7 +4281,7 @@ def truststore_pem(site, name='enterprise-ca.pem', mode=0o644):
 
 def check_runtime_preflight(checks):
     """preflight --mode runtime.yml accepts the planned site (local planner and configure-dual alike) and refuses what widens access."""
-    settings = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    settings = example_site()
     settings['public_url'] = 'https://' + PUBLIC_HOST
     for edition, ping in zip(EDITIONS, (False, True)):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1835,6 +4315,569 @@ def check_runtime_preflight(checks):
                 check_broker_refusals(checks, edition, site, env, rendered)
             else:
                 check_local_mode_unchanged(checks, edition, site, env, rendered)
+
+
+def check_probe_diagnostic_privacy(checks):
+    """Actual probe.main() must not log credential-bearing URLs or arbitrary server/library text.
+
+    Manual CLI RED is harness/progress/codex-probe-codeql/MANUAL-BASELINE.json. These isolated
+    cases replace file, trust, resolver, signal and HTTP boundaries; no request or real alarm runs.
+    Cause categories, safe public host, file references and repair hints remain observable.
+    """
+    import email.message
+    import http.client
+    import signal
+    import socket
+    import ssl
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import urlsplit
+    from unittest import mock
+
+    spec = importlib.util.spec_from_file_location('probe_privacy', ROOT / 'sso/probe.py')
+    assert spec is not None and spec.loader is not None, 'sso/probe.py missing'
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    origin = f'https://{PUBLIC_HOST}'
+    issuer = origin + '/identity/realms/krate'
+    user = 'privacy-user-codeql15'
+    password = 'privacy-password-codeql15'
+    query = 'privacy-query-codeql15'
+    fragment = 'privacy-fragment-codeql15'
+    path_token = 'privacy-path-codeql15'
+    external_text = 'privacy-external-codeql15'
+    markers = (user, password, query, fragment, path_token, external_text)
+    unsafe_url = f'https://{user}:{password}@outside.example.test/{path_token}?token={query}#{fragment}'
+    runtime_file = 'auth/ui/runtime.yml'
+    cert_file = 'certs/server.crt'
+    document = {'issuer': issuer, **{key: issuer + '/' + key for key in probe.ENDPOINT_KEYS}}
+    rows = []
+
+    def add(title, configured=issuer, error=None, reply=None, lookups=None, required=(), forbidden=(), request_expected=True):
+        rows.append((title, configured, error, reply, lookups, required, forbidden, request_expected))
+
+    invalid_hints = (runtime_file, 'KEYCLOAK_PUBLIC_URL', 'krate auth configure')
+    add('malformed credential-bearing issuer', f'https://{user}:{password}@[broken', required=invalid_hints, request_expected=False)
+    add('valid userinfo issuer', f'https://{user}:{password}@{PUBLIC_HOST}/identity/realms/krate',
+        error=HTTPError(issuer, 502, external_text, email.message.Message(), None),
+        required=invalid_hints, request_expected=False)
+    for label, configured in (
+            ('query', issuer + '?token=' + query), ('fragment', issuer + '#' + fragment),
+            ('path', origin + '/' + path_token)):
+        add('configured issuer ' + label, configured,
+            error=HTTPError(configured, 502, external_text, email.message.Message(), None),
+            required=invalid_hints if label != 'path' else ('HTTP 502', PUBLIC_HOST, 'Keycloak'),
+            request_expected=label == 'path')
+    for field in ('issuer',) + probe.ENDPOINT_KEYS:
+        add('server ' + field + ' contains credentials', reply=dict(document, **{field: unsafe_url}),
+            required=('KEYCLOAK_PUBLIC_URL', runtime_file, 'krate auth configure',
+                      'issuer' if field == 'issuer' else field))
+    add('HTTP reason contains arbitrary secret',
+        error=HTTPError(issuer, 503, external_text + ' ' + unsafe_url, email.message.Message(), None),
+        required=('HTTP 503', PUBLIC_HOST, 'Keycloak'))
+    invalid_url_text = 'nonnumeric port: ' + unsafe_url + ' ' + external_text
+    for label, error in (('raw', http.client.InvalidURL(invalid_url_text)),
+                         ('wrapped', URLError(http.client.InvalidURL(invalid_url_text)))):
+        add(label + ' InvalidURL contains secret', error=error,
+            required=('is invalid', runtime_file, 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
+            forbidden=('nothing was contacted', 'the issuer URL'))
+    add('OSError text contains secret', error=URLError(OSError(113, external_text + unsafe_url)),
+        required=('no connection', PUBLIC_HOST, 'proxy must be running'))
+    add('SSL error text contains secret', error=URLError(ssl.SSLError(1, external_text + unsafe_url)),
+        required=('TLS error', PUBLIC_HOST, cert_file))
+    verification = ssl.SSLCertVerificationError(1, external_text + unsafe_url)
+    verification.verify_code, verification.verify_message = 62, external_text + unsafe_url
+    add('SSL verify_message contains secret', error=URLError(verification),
+        required=('certificate verification failed', PUBLIC_HOST, cert_file, 'must cover', '62'))
+    add('redirect credential-like invalid lookup', error=URLError(socket.gaierror(-2, external_text)),
+        lookups=((PUBLIC_HOST, 443), (f'{user}:{password}@outside.example.test', 8443)),
+        required=('cannot resolve', 'DNS', 'redirect', PUBLIC_HOST))
+    add('proxy URL-like invalid lookup', error=URLError(ConnectionRefusedError(111, external_text)),
+        lookups=((PUBLIC_HOST, 443), (unsafe_url, 8443)),
+        required=('no connection', 'proxy must be running', 'proxy setting', PUBLIC_HOST))
+    add('generic library reason contains secret', error=URLError(external_text + unsafe_url),
+        required=('request', 'failed', PUBLIC_HOST, 'proxy'))
+    add('unexpected exception contains secret', error=RuntimeError(external_text + unsafe_url),
+        required=('unexpected readiness error', PUBLIC_HOST), forbidden=('RuntimeError',))
+    # Positive cause controls use native error objects but never contact their named endpoints.
+    add('ordinary DNS cause', error=URLError(socket.gaierror(-2, 'Name or service not known')),
+        required=('cannot resolve', PUBLIC_HOST, 'DNS', '/etc/hosts'), forbidden=('no connection',))
+    add('ordinary refusal cause', error=URLError(ConnectionRefusedError(111, 'Connection refused')),
+        required=('no connection', PUBLIC_HOST, 'proxy must be running', '111'), forbidden=('cannot resolve',))
+    add('ordinary connected read stall', error=socket.timeout('The read operation timed out'),
+        required=('accepted the connection but did not answer in time', PUBLIC_HOST, 'Keycloak'), forbidden=('no connection',))
+    add('ordinary deadline', error=TimeoutError('Readiness deadline exceeded'),
+        required=('no answer within 15 s', PUBLIC_HOST, 'Keycloak'), forbidden=('no connection',))
+    add('ordinary invalid redirect after issuer lookup', error=http.client.InvalidURL('nonnumeric port: hidden'),
+        required=('is invalid', runtime_file, 'redirect or proxy target'), forbidden=('nothing was contacted', 'hidden'))
+    add('ordinary plain HTTP compatibility', configured=f'http://{PUBLIC_HOST}/identity/realms/krate',
+        error=HTTPError(issuer, 502, 'Bad Gateway', email.message.Message(), None),
+        lookups=((PUBLIC_HOST, 80),), required=('HTTP 502', f'http://{PUBLIC_HOST}', 'Keycloak'))
+    add('ordinary IPv6 origin', configured='https://[2001:db8::1]:8443/identity/realms/krate',
+        error=URLError(ConnectionRefusedError(111, 'Connection refused')),
+        lookups=(('2001:db8::1', 8443),), required=('no connection', '[2001:db8::1]:8443', 'proxy must be running'))
+    add('ordinary redirected destination', error=URLError(ConnectionRefusedError(111, 'Connection refused')),
+        lookups=((PUBLIC_HOST, 443), ('outside.example.test', 8443)),
+        required=('no connection to outside.example.test:8443', 'redirect', PUBLIC_HOST),
+        forbidden=(f'no connection to {PUBLIC_HOST}',))
+    add('configured multiple DNS root dots', configured=f'https://{PUBLIC_HOST}.../identity/realms/krate',
+        required=invalid_hints, forbidden=(PUBLIC_HOST + '...',), request_expected=False)
+    add('configured scoped IPv6', configured='https://[fe80::1%25privacy-password-codeql15]/identity/realms/krate',
+        required=invalid_hints, forbidden=('fe80::1%',), request_expected=False)
+    add('redirect multiple DNS root dots', error=URLError(socket.gaierror(-2, external_text)),
+        lookups=((PUBLIC_HOST, 443), ('outside.example.test...', 8443)),
+        required=('cannot resolve <invalid host>', 'redirect', PUBLIC_HOST), forbidden=('outside.example.test...',))
+    add('redirect scoped IPv6', error=URLError(socket.gaierror(-2, external_text)),
+        lookups=((PUBLIC_HOST, 443), ('fe80::1%privacy-password-codeql15', 8443)),
+        required=('cannot resolve <invalid host>', 'redirect', PUBLIC_HOST), forbidden=('fe80::1%',))
+    add('ordinary single DNS root dot', configured=f'https://{PUBLIC_HOST}./identity/realms/krate',
+        error=URLError(ConnectionRefusedError(111, 'Connection refused')),
+        lookups=((PUBLIC_HOST + '.', 443),), required=('no connection', PUBLIC_HOST, '111'), forbidden=('redirect',))
+    add('ordinary valid discovery', reply=document)
+
+    class Reply:
+        def __init__(self, value):
+            self.body = json.dumps(value).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, size):
+            return self.body[:size]
+
+    for title, configured, error, reply, lookups, required, forbidden, request_expected in rows:
+        reads, alarms, requests = [], [], []
+        runtime = json.dumps({'auth': {'oauth2': {'client': {'keycloak': {
+            'issuer-uri': configured, 'client-secret': password}}}}})
+
+        def read_runtime(file, *_args, **_kwargs):
+            reads.append(str(file))
+            assert str(file).endswith(runtime_file), 'only runtime.yml may be read'
+            return runtime
+
+        def request(*args, **kwargs):
+            requests.append((args, kwargs))
+            for host, port in lookups if lookups is not None else ((PUBLIC_HOST, 443),):
+                socket.getaddrinfo(host, port)
+            if error is not None:
+                raise error
+            return Reply(reply if reply is not None else document)
+
+        def resolver(*_args, **_kwargs):
+            return []
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(Path, 'read_text', read_runtime), \
+                mock.patch.object(probe, 'urlopen', request), \
+                mock.patch.object(ssl, 'create_default_context', return_value=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)), \
+                mock.patch.object(socket, 'getaddrinfo', resolver), \
+                mock.patch.object(signal, 'signal'), \
+                mock.patch.object(signal, 'alarm', side_effect=lambda seconds: alarms.append(seconds) or 0), \
+                mock.patch.object(sys, 'argv', ['probe.py', '--directory', '/privacy-fixture']), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = probe.main()
+            restored = socket.getaddrinfo is resolver
+        output = out.getvalue() + err.getvalue()
+        label = 'probe diagnostic privacy (' + title + ')'
+        success = title == 'ordinary valid discovery'
+        checks.expect(status == (0 if success else 1), f'{label}: failure stays exit1; only valid discovery exits0; got {status}')
+        checks.expect(all(marker not in output for marker in markers), f'{label}: no credentials, URL tokens or external text may be printed; got {output!r}')
+        displayed_urls = re.findall(r'https?://[^\s)>,;]+', output)
+        try:
+            parts = [urlsplit(value.rstrip(':')) for value in displayed_urls]
+            origin_only = all(value.hostname and not any((value.username, value.password, value.path, value.query, value.fragment))
+                              for value in parts)
+        except ValueError:
+            origin_only = False
+        checks.expect(origin_only,
+                      f'{label}: diagnostic URLs expose only the safe origin, never userinfo/path/query/fragment; got {output!r}')
+        checks.expect(success or (out.getvalue() == '' and err.getvalue().startswith('Public SSO readiness failed: ')
+                                  and err.getvalue().count('\n') == 1 and err.getvalue()[:-1].isprintable()),
+                      f'{label}: failure remains one printable stderr line and no stdout; got {output!r}')
+        for needle in required:
+            checks.expect(needle in output, f'{label}: cause/file/repair detail {needle!r} must remain; got {output!r}')
+        for needle in forbidden:
+            checks.expect(needle not in output, f'{label}: must not misattribute {needle!r}; got {output!r}')
+        checks.expect(reads == ['/privacy-fixture/' + runtime_file] and restored and alarms == [15, 0],
+                      f'{label}: read only runtime.yml, cancel the deadline and restore the resolver')
+        if request_expected:
+            checks.expect(len(requests) == 1 and requests[0][0] == (configured + '/.well-known/openid-configuration',),
+                          f'{label}: sanitizing the displayed address must not rewrite the actual discovery request target; got {requests!r}')
+        else:
+            checks.expect(not requests, f'{label}: malformed/private issuer is refused before any request')
+        if success:
+            checks.expect(len(requests) == 1 and out.getvalue() == 'Public HTTPS identity discovery verified.\n' and not err.getvalue(),
+                          f'{label}: valid discovery still reaches the real main success contract')
+
+
+def check_probe_causes(checks):
+    """sso/probe.py, the public sign-in check `krate auth apply` ends with, names the actual cause of a failure (its real main(),
+    urlopen replaced by stubs that raise real exception objects; nothing connects): one stderr line that keeps the
+    'Public SSO readiness failed: ' prefix, the safe public host/origin involved and what to check, exit status 1, no file content, no raw
+    server values or library text (status-line reason, fetched issuer/endpoints, error messages), the
+    host named in a lookup failure being the one looked up (a redirect target), a read stall told from a failed connection,
+    an invalid issuer URL told from a dead proxy, the alarm armed for 15 s and cancelled on every path, getaddrinfo restored.
+    Found on 2026-10-17 on an Ubuntu server that could not resolve its own public name: the old line listed four possible
+    causes and not that one."""
+    import email.message
+    import http.client
+    import pathlib
+    import signal
+    import socket
+    import ssl
+    import urllib.error
+    spec = importlib.util.spec_from_file_location('probe', ROOT / 'sso/probe.py')
+    assert spec is not None and spec.loader is not None, 'sso/probe.py missing'
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    e = checks.expect
+    secret = SYNTHETIC['KEYCLOAK_KAFBAT_CLIENT_SECRET']
+    prefix = 'Public SSO readiness failed: '
+    old_message = 'verify application DNS, HTTPS certificate, proxy identity route and realm issuer'
+    issuer = f'https://{PUBLIC_HOST}/identity/realms/krate'
+    url = issuer + '/.well-known/openid-configuration'
+    display = f'https://{PUBLIC_HOST}:443'  # diagnostics expose an origin; requests retain the complete URL
+    other = 'https://other.example.test/identity/realms/krate'
+    endpoints = ('authorization_endpoint', 'token_endpoint', 'jwks_uri')
+    document = {'issuer': issuer, 'authorization_endpoint': issuer + '/protocol/openid-connect/auth',
+                'token_endpoint': issuer + '/protocol/openid-connect/token', 'jwks_uri': issuer + '/protocol/openid-connect/certs'}
+    verify_text = f"Hostname mismatch, certificate is not valid for '{PUBLIC_HOST}'."
+    mismatch = ssl.SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1129)')
+    mismatch.verify_code, mismatch.verify_message = 62, verify_text  # set by the ssl module on a real handshake failure
+    deadline = 'Readiness deadline exceeded'  # the text the SIGALRM handler raises in a TimeoutError
+    hostile_reason = 'Bad\nGate\x1b[2J\x07way ' + 'A' * 5000  # a server's status-line reason phrase: 17 characters, then a flood
+    hostile_value = other + '/' + 'Z' * 5000  # a fetched issuer or endpoint far beyond the limit
+    hostile_library = 'Refused\x1b[2J ' + 'R' * 5000  # an OS or ssl error text: 12 characters, then a flood
+    hostile_verify = ssl.SSLCertVerificationError(1, 'certificate verify failed (_ssl.c:1129)')
+    hostile_verify.verify_code, hostile_verify.verify_message = 62, 'Hostile\x1b[2J ' + 'V' * 5000
+    hostile_name = 'evil\x1b[2J.' + 'H' * 5000  # a redirect target's host name: 9 characters, then a flood
+    as_directory = object()
+    detour_lookups = ((PUBLIC_HOST, 443), ('elsewhere.example.test', 443))  # the issuer's host first, then where a redirect led
+    calls, lookups, cafiles, alarms, hooks = [], [], [], [], {}
+    real_context, real_alarm, real_read_text = ssl.create_default_context, signal.alarm, pathlib.Path.read_text
+
+    class Reply:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def read(self, size=-1):
+            return self.body[:size]
+
+    def raising(error, lookup=((PUBLIC_HOST, 443),)):
+        def fail(*call_args, **call_kwargs):
+            calls.append((call_args, call_kwargs))
+            for pair in lookup:  # what urlopen does first, including the name a redirect leads to
+                socket.getaddrinfo(*pair)
+            raise error
+        return fail
+
+    def answering(body, lookup=((PUBLIC_HOST, 443),)):
+        def answer(*call_args, **call_kwargs):
+            calls.append((call_args, call_kwargs))
+            for pair in lookup:
+                socket.getaddrinfo(*pair)
+            return Reply(body)
+        return answer
+
+    def runtime(client):
+        return json.dumps({'auth': {'oauth2': {'client': {'keycloak': client}}}})
+
+    def with_issuer(value):
+        return runtime({'issuer-uri': value, 'client-secret': secret})
+
+    def fake_getaddrinfo(host, service, *_address_args, **_address_kwargs):
+        lookups.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (host, service))]
+
+    def bare_context(*context_args, **context_kwargs):
+        """create_default_context without the partial-chain flag that Python 3.13+ sets by default: probe.py must set it itself."""
+        if 'context' in hooks:
+            raise hooks['context']
+        cafiles.append(context_kwargs.get('cafile'))
+        bare = real_context(*context_args, **context_kwargs)
+        if hasattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN'):
+            bare.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
+        return bare
+
+    def counting_alarm(seconds):
+        alarms.append(seconds)
+        return real_alarm(seconds)
+
+    def failing_read_text(_path, *_read_args, **_read_kwargs):
+        raise hooks['read_text']
+
+    def run(directory, urlopen_stub: 'Callable[..., object]', arguments):
+        """probe.main() for `directory`: exit status, stdout, stderr, alarm still pending, getaddrinfo restored, the alarm calls
+        main made, and what the SIGALRM handler it installed raises."""
+        real_argv, real_urlopen, real_getaddrinfo = sys.argv, getattr(probe, 'urlopen'), socket.getaddrinfo
+        real_handler = signal.getsignal(signal.SIGALRM)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        sys.argv = ['probe.py', '--directory', str(directory), *arguments]
+        setattr(probe, 'urlopen', urlopen_stub)
+        socket.getaddrinfo, ssl.create_default_context, signal.alarm = fake_getaddrinfo, bare_context, counting_alarm
+        if 'read_text' in hooks:
+            setattr(pathlib.Path, 'read_text', failing_read_text)
+        del alarms[:]
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    status = probe.main()
+                except BaseException as exc:  # a mutant that raises is a finding, not a crash of the check
+                    status = f'raised {type(exc).__name__}: {exc}'
+            signal.alarm = real_alarm
+            left = real_alarm(0)
+            installed = signal.getsignal(signal.SIGALRM)
+            try:
+                if callable(installed):
+                    installed(signal.SIGALRM, None)
+                handler_text = 'raised nothing'
+            except BaseException as exc:
+                handler_text = f'{type(exc).__name__}: {exc}'
+        finally:
+            resolver_restored = socket.getaddrinfo is fake_getaddrinfo
+            socket.getaddrinfo, ssl.create_default_context, signal.alarm = real_getaddrinfo, real_context, real_alarm
+            setattr(pathlib.Path, 'read_text', real_read_text)
+            sys.argv = real_argv
+            setattr(probe, 'urlopen', real_urlopen)
+            real_alarm(0)
+            signal.signal(signal.SIGALRM, real_handler)
+        return {'status': status, 'out': stdout.getvalue(), 'err': stderr.getvalue(), 'left': left, 'resolver': resolver_restored,
+                'alarms': list(alarms), 'handler': handler_text}
+
+    def place(path, content):
+        """None removes `path`, as_directory makes a directory there, any other value is its text."""
+        if path.is_dir():
+            path.rmdir()
+        else:
+            path.unlink(missing_ok=True)
+        if content is as_directory:
+            path.mkdir()
+        elif content is not None:
+            path.write_text(content)
+
+    def case(title, runtime_text, stub=None, extra=(), required=(), forbidden=(), cert: 'object' = True, hook=None):
+        """One failure: runtime.yml text, certs/server.crt (True: a real one, None: absent, text: that), the urlopen stub (None: must not
+        be reached), extra arguments, substrings the message must and must not hold, an optional ('context' | 'read_text', error)."""
+        return {'title': title, 'runtime': runtime_text, 'cert': cert, 'stub': stub, 'extra': extra, 'required': required,
+                'forbidden': forbidden, 'hook': hook}
+
+    keycloak = {'issuer-uri': issuer, 'client-secret': secret}
+    cases = [
+        case('runtime.yml missing', None, required=('auth/ui/runtime.yml', 'is missing', 'krate auth configure')),
+        case('runtime.yml not JSON', 'not json ' + secret, required=('auth/ui/runtime.yml', 'not valid JSON', 'krate auth configure')),
+        case('runtime.yml unreadable (a directory)', as_directory, required=('auth/ui/runtime.yml', 'cannot be read', 'krate auth configure'),
+             forbidden=('is missing',)),
+        case('runtime.yml without issuer-uri', runtime({'client-secret': secret}),
+             required=('auth/ui/runtime.yml', 'auth.oauth2.client.keycloak.issuer-uri', 'krate auth configure')),
+        case('runtime.yml with an empty issuer-uri', runtime({'issuer-uri': '', 'client-secret': secret}),
+             required=('auth.oauth2.client.keycloak.issuer-uri', 'krate auth configure')),
+        case('issuer without a host name', with_issuer('https:///identity/realms/krate'),
+             required=('auth/ui/runtime.yml', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
+        case('issuer without a host name, with line breaks', with_issuer('https:///identity/\n\nrealms\t/krate'),
+             required=('no host name', 'KEYCLOAK_PUBLIC_URL')),
+        case('issuer with an unbalanced IPv6 bracket', with_issuer('https://[::1/identity/realms/krate'),
+             required=('auth/ui/runtime.yml', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
+        case('issuer with a port that is not a number', with_issuer(f'https://{PUBLIC_HOST}:notaport/identity/realms/krate'),
+             required=('auth/ui/runtime.yml', 'no host name', 'KEYCLOAK_PUBLIC_URL')),
+        case('certs/server.crt missing', runtime(keycloak), cert=None, required=('certs/server.crt', 'is missing', 'krate gen-cert')),
+        case('certs/server.crt unusable', runtime(keycloak), cert='not a certificate\n' + secret + '\n',
+             required=('certs/server.crt', 'cannot be used as the trust anchor', 'krate gen-cert'), forbidden=('is missing',)),
+        case('host name does not resolve', runtime(keycloak),
+             raising(urllib.error.URLError(socket.gaierror(-2, 'Name or service not known'))),
+             required=(f'this server cannot resolve {PUBLIC_HOST}', 'resolver error code -2', '/etc/hosts', 'DNS'),
+             forbidden=('no connection', 'certificate', 'no answer', 'redirect')),
+        case('redirect target does not resolve', runtime(keycloak),
+             raising(urllib.error.URLError(socket.gaierror(-2, 'Name or service not known')), detour_lookups),
+             required=('this server cannot resolve elsewhere.example.test', 'add elsewhere.example.test to DNS', 'redirect', PUBLIC_HOST),
+             forbidden=(f'cannot resolve {PUBLIC_HOST}', f'add {PUBLIC_HOST} to DNS')),
+        case('connection refused', runtime(keycloak), raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused'))),
+             required=(f'no connection to {PUBLIC_HOST}:443', 'operating system error 111', 'proxy must be running', f'{PUBLIC_HOST} must point at this server'),
+             forbidden=('cannot resolve', 'certificate', 'redirect', 'accepted the connection')),
+        case('connection refused, host looked up in capitals', runtime(keycloak),
+             raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused')), ((PUBLIC_HOST.upper(), 443),)),
+             required=(f'no connection to {PUBLIC_HOST}:443',), forbidden=('redirect',)),
+        case('connection refused by a redirect target on another port', runtime(keycloak),
+             raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused')),
+                     ((PUBLIC_HOST, 443), ('elsewhere.example.test', 8443))),
+             required=('no connection to elsewhere.example.test:8443', 'redirect', PUBLIC_HOST), forbidden=(f'no connection to {PUBLIC_HOST}',)),
+        case('connection refused by another port of the issuer host', runtime(keycloak),
+             raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused')), ((PUBLIC_HOST, 443), (PUBLIC_HOST, 8443))),
+             required=(f'no connection to {PUBLIC_HOST}:8443', 'redirect')),
+        case('redirect target with a hostile name', runtime(keycloak),
+             raising(urllib.error.URLError(socket.gaierror(-2, 'Name or service not known')), ((PUBLIC_HOST, 443), (hostile_name, 443))),
+             required=('cannot resolve <invalid host>', 'redirect'), forbidden=('\x1b', 'H' * 192)),
+        case('connection refused, IPv6 issuer', with_issuer('https://[::1]:8443/identity/realms/krate'),
+             raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused')), (('::1', 8443),)),
+             required=('no connection to [::1]:8443',), forbidden=('redirect',)),
+        case('connection refused, with --connect-ip', runtime(keycloak),
+             raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused'))), extra=('--connect-ip', '127.0.0.1'),
+             required=(f'no connection to {PUBLIC_HOST}:443',), forbidden=('redirect', '127.0.0.1')),
+        case('connection refused, issuer over plain http', runtime({'issuer-uri': f'http://{PUBLIC_HOST}/identity/realms/krate'}),
+             raising(urllib.error.URLError(ConnectionRefusedError(111, 'Connection refused')), ()),
+             required=(f'no connection to {PUBLIC_HOST}:80',), forbidden=(':443',)),
+        case('library error text far beyond the limit', runtime(keycloak),
+             raising(urllib.error.URLError(ConnectionRefusedError(111, hostile_library))),
+             required=('operating system error 111', 'no connection'), forbidden=('\x1b', 'R' * 189)),
+        case('host unreachable', runtime(keycloak), raising(urllib.error.URLError(OSError(113, 'No route to host'))),
+             required=(f'no connection to {PUBLIC_HOST}:443', 'operating system error 113', 'proxy must be running'), forbidden=('cannot resolve',)),
+        case('timeout while connecting', runtime(keycloak), raising(urllib.error.URLError(socket.timeout('timed out'))),
+             required=(f'no connection to {PUBLIC_HOST}:443', 'timeout', 'proxy must be running'),
+             forbidden=('cannot resolve', 'no answer within', 'accepted the connection')),
+        case('connected, then no answer in time (read stall)', runtime(keycloak), raising(socket.timeout('The read operation timed out')),
+             required=(f'{PUBLIC_HOST}:443 accepted the connection but did not answer in time', 'timeout', 'Keycloak'),
+             forbidden=('no connection to', 'must point at this server', 'no answer within')),
+        case('connection dropped without an answer', runtime(keycloak),
+             raising(http.client.RemoteDisconnected('Remote end closed connection without response')),
+             required=(f'{PUBLIC_HOST}:443', 'did not answer with valid HTTP', 'HTTP protocol error'), forbidden=('cannot resolve',)),
+        case('invalid request URL before a lookup', runtime(keycloak),
+             raising(http.client.InvalidURL("URL can't contain control characters. '/iden tity' (found at least ' ')"), ()),
+             required=(f'a URL used while checking {display}', 'auth/ui/runtime.yml', 'is invalid', 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
+             forbidden=('the issuer URL', 'nothing was contacted', 'did not answer with valid HTTP', 'request had been sent on')),
+        # Observed with a real loopback TLS302: the issuer answered, then the redirect's nonnumeric port raised InvalidURL
+        # before a second lookup. Recording only the issuer lookup cannot establish that nothing was contacted.
+        case('invalid redirect URL after the issuer answered', runtime(keycloak),
+             raising(http.client.InvalidURL("nonnumeric port: 'notaport'"), ((PUBLIC_HOST, 443),)),
+             required=(f'a URL used while checking {display}', 'invalid URL', 'is invalid', 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
+             forbidden=('the issuer URL', 'nothing was contacted', 'did not answer with valid HTTP', 'request had been sent on')),
+        case('wrapped invalid request URL', runtime(keycloak),
+             raising(urllib.error.URLError(http.client.InvalidURL("nonnumeric port: 'notaport'")), ()),
+             required=(f'a URL used while checking {display}', 'is invalid', 'redirect or proxy target'),
+             forbidden=('the issuer URL', 'nothing was contacted', 'did not answer with valid HTTP')),
+        case('invalid URL with hostile library text', runtime(keycloak),
+             raising(http.client.InvalidURL('Bad\x1b[2J ' + 'U' * 5000), ((PUBLIC_HOST, 443),)),
+             required=('invalid URL', 'redirect or proxy target'),
+             forbidden=('\x1b', 'U' * 193, 'nothing was contacted')),
+        case('certificate verification failed', runtime(keycloak), raising(urllib.error.URLError(mismatch)),
+             required=(f'certificate verification failed for {PUBLIC_HOST}', 'certificate verification code 62', 'certs/server.crt', f'must cover {PUBLIC_HOST}'),
+             forbidden=('cannot resolve', 'no connection')),
+        case('certificate verify_message far beyond the limit', runtime(keycloak), raising(urllib.error.URLError(hostile_verify)),
+             required=('certificate verification code 62',), forbidden=('\x1b', 'V' * 189)),
+        case('certificate verification failed, no verify_message', runtime(keycloak),
+             raising(urllib.error.URLError(ssl.SSLCertVerificationError(1, 'certificate has expired'))),
+             required=(f'certificate verification failed for {PUBLIC_HOST}', 'certificate verification code unavailable', 'certs/server.crt'),
+             forbidden=('unexpected',)),
+        case('other TLS error', runtime(keycloak),
+             raising(urllib.error.URLError(ssl.SSLError(1, '[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1129)'))),
+             required=('TLS error', f'{PUBLIC_HOST}:443', 'TLS error code 1', 'certs/server.crt'),
+             forbidden=('certificate verification failed', 'cannot resolve')),
+        case('HTTP error status from the proxy', runtime(keycloak),
+             raising(urllib.error.HTTPError(url, 502, 'Bad Gateway', email.message.Message(), None)),
+             required=(display, 'HTTP 502', '/identity'), forbidden=('cannot resolve', 'no connection', 'redirect')),
+        case('HTTP error status with a hostile reason phrase', runtime(keycloak),
+             raising(urllib.error.HTTPError(url, 502, hostile_reason, email.message.Message(), None)),
+             required=(display, 'HTTP 502', '/identity'), forbidden=('\x1b', 'A' * 184)),
+        case('host name that urllib cannot encode', runtime(keycloak), raising(UnicodeError('label empty or too long')),
+             required=(display, 'not a usable address', 'request error', 'KEYCLOAK_PUBLIC_URL'), forbidden=('unexpected',)),
+        case('host name that urllib cannot encode, after a redirect', runtime(keycloak),
+             raising(UnicodeError('label empty or too long'), detour_lookups),
+             required=(display, 'not a usable address', 'redirect', 'elsewhere.example.test')),
+        case('URLError with a text reason', runtime(keycloak), raising(urllib.error.URLError('no host given')),
+             required=(f'the request to {display}', f'{PUBLIC_HOST} points at this server')),
+        case('anything unanticipated', runtime(keycloak), raising(RuntimeError('boom ' + secret)),
+             required=('unexpected readiness error', display), forbidden=('boom',)),
+        case('answer is not JSON', runtime(keycloak), answering(b'<html>502</html>'),
+             required=(display, 'not an OpenID configuration'), forbidden=('<html>', 'redirect')),
+        case('answer from a redirect target is not JSON', runtime(keycloak), answering(b'<html>502</html>', detour_lookups),
+             required=(display, 'not an OpenID configuration', 'redirect', 'elsewhere.example.test')),
+        case('answer lacks the endpoints', runtime(keycloak), answering(json.dumps({'issuer': issuer}).encode()),
+             required=(display, 'not an OpenID configuration', 'authorization_endpoint', 'token_endpoint', 'jwks_uri')),
+        case('answer from a redirect target lacks the endpoints', runtime(keycloak),
+             answering(json.dumps({'issuer': issuer}).encode(), detour_lookups),
+             required=(display, 'not an OpenID configuration', 'redirect', 'elsewhere.example.test')),
+        case('answer is not an object', runtime(keycloak), answering(b'["issuer"]'), required=(display, 'not an OpenID configuration')),
+        case('issuer differs', runtime(keycloak), answering(json.dumps(dict(document, issuer=other)).encode()),
+             required=('different issuer', display, 'KEYCLOAK_PUBLIC_URL'), forbidden=('redirect',)),
+        case('issuer differs, from a redirect target', runtime(keycloak),
+             answering(json.dumps(dict(document, issuer=other)).encode(), detour_lookups),
+             required=('different issuer', display, 'KEYCLOAK_PUBLIC_URL', 'redirect', 'elsewhere.example.test')),
+        case('issuer differs, hostile value', runtime(keycloak), answering(json.dumps(dict(document, issuer=hostile_value)).encode()),
+             required=('different issuer', display, 'KEYCLOAK_PUBLIC_URL'), forbidden=(hostile_value[:201],)),
+        case('issuer differs, control characters', runtime(keycloak), answering(json.dumps(dict(document, issuer=other + '\n\x1b[2J')).encode()),
+             required=('different issuer', display, 'KEYCLOAK_PUBLIC_URL'), forbidden=('\x1b',)),
+    ]
+    for key in endpoints:
+        outside = other + '/protocol/openid-connect/x'
+        cases.append(case(f'{key} outside the issuer', runtime(keycloak), answering(json.dumps(dict(document, **{key: outside})).encode()),
+                          required=('outside the configured issuer', key, 'auth/ui/runtime.yml', 'KEYCLOAK_PUBLIC_URL'), forbidden=('redirect',)))
+    cases.append(case('endpoint outside the issuer, from a redirect target', runtime(keycloak),
+                      answering(json.dumps(dict(document, jwks_uri=other + '/x')).encode(), detour_lookups),
+                      required=('jwks_uri', 'outside the configured issuer', 'redirect', 'elsewhere.example.test')))
+    cases.append(case('endpoint outside the issuer, hostile value', runtime(keycloak),
+                      answering(json.dumps(dict(document, jwks_uri=hostile_value)).encode()),
+                      required=('jwks_uri', 'outside the configured issuer', 'KEYCLOAK_PUBLIC_URL'), forbidden=(hostile_value[:201],)))
+    cases += [
+        case('deadline inside URLError', runtime(keycloak), raising(urllib.error.URLError(TimeoutError(deadline))),
+             required=('no answer within 15 s', display), forbidden=('no connection', 'cannot resolve')),
+        case('deadline raised directly', runtime(keycloak), raising(TimeoutError(deadline)),
+             required=('no answer within 15 s', display), forbidden=('no connection', 'cannot resolve')),
+        case('deadline while the trust anchor loads', runtime(keycloak), hook=('context', TimeoutError(deadline)),
+             required=('no answer within 15 s', display), forbidden=('trust anchor', 'unexpected')),
+        case('deadline while runtime.yml is read', runtime(keycloak), hook=('read_text', TimeoutError(deadline)),
+             required=('no answer within 15 s from the identity route',), forbidden=('cannot be read', 'unexpected')),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        site = Path(tmp)
+        (site / 'auth/ui').mkdir(parents=True)
+        self_signed(site / 'certs', PUBLIC_HOST)
+        certificate = (site / 'certs/server.crt').read_text()
+        for row in cases:
+            place(site / 'certs/server.crt', certificate if row['cert'] is True else row['cert'])
+            place(site / 'auth/ui/runtime.yml', row['runtime'])
+            hooks.clear()
+            if row['hook']:
+                hooks[row['hook'][0]] = row['hook'][1]
+            del calls[:], lookups[:], cafiles[:]
+            result = run(site, row['stub'] or raising(AssertionError('urlopen must not be reached')), row['extra'])
+            err = result['err']
+            what = f'probe.py ({row["title"]})'
+            e(result['status'] == 1, f'{what}: the exit status stays 1; got {result["status"]!r}')
+            e(result['out'] == '' and err.startswith(prefix) and err.endswith('\n') and err.count('\n') == 1,
+              f'{what}: stdout stays empty and stderr is exactly one line starting {prefix!r}; got stdout {result["out"]!r}, stderr {err!r}')
+            e(err[:-1].isprintable(), f'{what}: the line holds only printable characters; got {err!r}')
+            e(old_message not in err, f'{what}: the four-causes catch-all must be gone; got {err.strip()!r}')
+            for needle in row['required']:
+                e(needle in err, f'{what}: the message must name {needle!r}; got {err.strip()!r}')
+            for needle in row['forbidden']:
+                e(needle not in err, f'{what}: the message must not say {needle!r}; got {err.strip()!r}')
+            e(secret not in result['out'] + err, f'{what}: the output must not carry file content')
+            for untrusted in (verify_text, hostile_reason[:30], hostile_value[:30], hostile_library[:30],
+                              'Bad Gateway', 'no host given', 'nonnumeric port:', 'Name or service not known',
+                              'Connection refused', 'No route to host', 'WRONG_VERSION_NUMBER', other):
+                e(untrusted not in err, f'{what}: raw server/library/URL text must not be echoed: {untrusted!r}')
+            e(result['left'] == 0 and result['resolver'], f'{what}: the alarm must be cancelled and socket.getaddrinfo restored on a failure')
+            e(result['alarms'][:1] == [15] and result['alarms'][-1:] == [0],
+              f'{what}: the 15 s alarm is armed first and cancelled last; main made the calls {result["alarms"]!r}')
+            e(result['handler'] == f'TimeoutError: {deadline}', f'{what}: the SIGALRM handler raises TimeoutError({deadline!r}); got {result["handler"]!r}')
+            e(bool(calls) == (row['stub'] is not None), f'{what}: urlopen must be reached exactly when the file checks pass; calls {len(calls)}')
+        hooks.clear()
+        # The unchanged success path, with and without --connect-ip (the gate's route: KRATE_PROBE_CONNECT_IP).
+        place(site / 'auth/ui/runtime.yml', runtime(keycloak))
+        place(site / 'certs/server.crt', certificate)
+        for connect_args in ((), ('--connect-ip', '127.0.0.1')):
+            del calls[:], lookups[:], cafiles[:]
+            result = run(site, answering(json.dumps(document).encode(), ((PUBLIC_HOST.upper(), 443), ('elsewhere.example.test', 443))), connect_args)
+            what = f'probe.py (success {" ".join(connect_args) or "without --connect-ip"})'
+            e((result['status'], result['out'], result['err']) == (0, 'Public HTTPS identity discovery verified.\n', ''),
+              f'{what}: exit 0, the verified line on stdout, nothing on stderr; got {(result["status"], result["out"], result["err"])!r}')
+            e(result['left'] == 0 and result['resolver'], f'{what}: the alarm must be cancelled and socket.getaddrinfo restored')
+            e(result['alarms'] == [15, 0], f'{what}: the 15 s alarm is armed and cancelled once; got {result["alarms"]!r}')
+            urlopen_args, urlopen_kwargs = calls[0] if calls else ((None,), {})
+            urlopen_context = urlopen_kwargs.get('context')
+            e(urlopen_args == (url,) and urlopen_kwargs.get('timeout') == 10 and isinstance(urlopen_context, ssl.SSLContext)
+              and urlopen_context.check_hostname and urlopen_context.verify_mode == ssl.CERT_REQUIRED
+              and (not hasattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN') or urlopen_context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN),
+              f'{what}: urlopen gets the discovery URL, a 10 s timeout and a verifying context with partial chains allowed')
+            e(cafiles == [str(site / 'certs/server.crt')], f'{what}: the trust anchor is certs/server.crt; got {cafiles!r}')
+            e(lookups == (['127.0.0.1'] if connect_args else [PUBLIC_HOST.upper()]) + ['elsewhere.example.test'],
+              f'{what}: --connect-ip maps the issuer host (any case) to that address and no other name; resolver saw {lookups!r}')
 
 
 def check_local_mode_unchanged(checks, edition, site, env, rendered):
@@ -2002,6 +5045,31 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     expect_refusal('an unreadable plan file', 'not valid JSON')
     identity.write_file(plan_file, plan_original, 0o644)
     expect_pass('the ping site restored')
+    # The MFA stance (enforce-if-asserted): a plan that states neither stance is refused by name, in both preflight modes —
+    # this is what makes a site's forgotten choice block `auth apply` and `identity up` instead of failing open there.
+    # The example plan carries the claim pair, so "neither" removes the three provider keys.
+    mutated_plan(lambda p: [p['identityProviders'][0]['config'].pop(key) for key in identity.MFA_FILTER_KEYS])
+    expect_refusal('a plan without an MFA stance', 'no MFA stance')
+    expect_refusal('the stance refusal names both options', 'mfa_claim_name')
+    expect_refusal('the stance refusal names the opt-out', 'mfa_not_asserted')
+    expect_refusal('the stance refusal names the way back', 'then run krate auth configure <site.json>')
+    outcome = preflight(site, 'runtime.yml', rendered)
+    checks.expect(outcome.stderr.count('regenerate') == 0 and outcome.stderr.count('remove auth/ui/runtime.yml') == 1,
+                  f'{edition}: the stance refusal is complete: it must not repeat the generic regenerate hint; got {outcome.stderr.strip()}')
+    outcome = preflight(site, 'identity', rendered)
+    checks.expect(outcome.returncode == 1 and 'no MFA stance' in outcome.stderr,
+                  f'{edition}: identity-mode preflight (identity up) must refuse a plan without an MFA stance; got exit {outcome.returncode}: {outcome.stderr.strip()}')
+    # The opt-out (mfa_not_asserted, no claim keys) is the accepted alternative; so is the claim pair (restored below).
+    mutated_plan(lambda p: ([p['identityProviders'][0]['config'].pop(key) for key in identity.MFA_FILTER_KEYS], p.__setitem__(identity.MFA_NOT_ASSERTED_KEY, True)))
+    expect_pass('an opted-out plan (mfa_not_asserted)')
+    # A claim filter that is switched off or Java-ambiguous is refused at preflight too (the plan validator is the single rule).
+    identity.write_file(plan_file, plan_original, 0o644)
+    mutated_plan(lambda p: p['identityProviders'][0]['config'].__setitem__('filteredByClaim', 'false'))
+    expect_refusal('filteredByClaim "false" with a claim name and value', 'string "true"')
+    mutated_plan(lambda p: p['identityProviders'][0]['config'].__setitem__('claimFilterValue', '(?<n>x)'))
+    expect_refusal('a claim value outside the literal subset', 'literals separated by |')
+    identity.write_file(plan_file, plan_original, 0o644)
+    expect_pass('the claim-pair plan restored')
 
 
 def check_runtime_refusals(checks, edition, site, env, rendered):
@@ -3350,7 +6418,7 @@ def check_broker_apply(checks):
           f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
     if bash_binary() is None:
         return
-    plan = load_configure_dual().configs(json.loads((ROOT / 'sso/dual-example.json').read_text()), SYNTHETIC)['keycloak/pingfederate-idp.json']
+    plan = load_configure_dual().configs(example_site(), SYNTHETIC)['keycloak/pingfederate-idp.json']
     secret = RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']
     script = BASH_STUBS + bash_functions(ROOT / 'kraft/krate', *APPLY_FUNCTIONS) + r'''
 SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; IDENTITY_REALM=krate; IDENTITY_CHANGED=false; IDENTITY_BROWSER_KEPT=""
@@ -3492,6 +6560,34 @@ echo "changed=$IDENTITY_CHANGED"
         kinds = sorted(set((c[0], c[1].split('/')[0] + ('/' + c[1].split('/')[1] if c[1].startswith('authentication/') else '')) for c in mutating(calls)))
         e(('create', 'authentication/flows') not in kinds and ('create', 'identity-provider') not in kinds, f'{label}: nothing is recreated; got {kinds}')
         e('up reconciled identity provider pingfederate' in journal.read_text().splitlines()[-1], f'{label}: the journal line names the command (up)')
+        # F1 (MFA review): the three claim-filter keys are managed. The site switched from the claim pair to the opt-out; the live
+        # provider still carries the filter, the plan does not: apply must UPDATE the provider (never print No changes), the update
+        # replaces the configuration so the keys are gone, and the next apply has nothing to do.
+        optout_plan = json.loads(json.dumps(plan))
+        for key in identity.MFA_FILTER_KEYS:
+            optout_plan['identityProviders'][0]['config'].pop(key)
+        optout_plan[identity.MFA_NOT_ASSERTED_KEY] = True
+        plan_file.write_text(json.dumps(optout_plan, indent=2) + '\n')
+        state_file.write_text(json.dumps(state))
+        result, calls, state_withdrawn = run()
+        label = 'apply after the site switched from the claim pair to mfa_not_asserted'
+        updates = [c for c in calls if c[0] == 'update' and c[1] == 'identity-provider/instances/pingfederate']
+        kept = [key for key in identity.MFA_FILTER_KEYS if key in (state_withdrawn['provider'] or {}).get('config', {})]
+        e(result.returncode == 0 and len(updates) == 1 and 'provider updated' in result.stdout and 'No changes' not in result.stdout
+          and 'changed=true' in result.stdout and kept == [],
+          f'{label}: must update the provider and leave none of the claim-filter keys; got exit {result.returncode} updates {len(updates)} kept {kept} {result.stdout.strip()[-220:]!r}')
+        e('reconciled identity provider pingfederate: provider updated' in journal.read_text().splitlines()[-1], f'{label}: the journal records the provider update; got {journal.read_text().splitlines()[-1]!r}')
+        result, calls, state_settled = run()
+        e(result.returncode == 0 and 'No changes' in result.stdout and mutating(calls) == [] and state_settled == state_withdrawn,
+          f'{label} (second run): nothing left to do; got {mutating(calls)} {result.stdout.strip()[-160:]!r}')
+        offline = json.loads(json.dumps(state_withdrawn))
+        offline['provider']['config']['filteredByClaim'] = 'false'
+        state_file.write_text(json.dumps(offline))
+        result, calls, state_off = run()
+        e(result.returncode == 0 and 'No changes' in result.stdout and mutating(calls) == [] and state_off == offline,
+          f'{label}: a live filteredByClaim "false" is a filter that is off and is left alone; got {mutating(calls)} {result.stdout.strip()[-160:]!r}')
+        plan_file.write_text(json.dumps(plan, indent=2) + '\n')
+        state_file.write_text(json.dumps(state))
         # B2: a failing or empty helper answer must stop the apply, never read as "same" and print No changes.
         for label, extra, needle in (('config GET fails', {'KC_FAIL_GET': 'authentication/config/'}, 'configuration'),
                                      ('config GET answers nothing', {'KC_EMPTY_GET': 'authentication/config/'}, 'configuration'),
@@ -3848,6 +6944,730 @@ def check_broker_docs(checks):
     dual = (ROOT / 'sso/guides/dual-login.md').read_text()
     checks.expect('In `local.yml` mode the command recreates only the UI' in dual,
                   'dual-login.md: the switch-back paragraph must scope "recreates only the UI" to local.yml mode')
+
+
+def check_mfa_choice(checks):
+    """The MFA stance (enforce-if-asserted): the site file states exactly one of the
+    two stances, `auth configure` and the plan validator refuse neither, the claim value is a subset both Java and Python
+    read the same way, and the three claim-filter keys are managed by the plan (the reconcile clears a filter the plan lost)."""
+    e = checks.expect
+    refuse_value = identity.MFA_VALUE_RULE
+
+    def refuses(name, value, needle):
+        try:
+            identity.validate_mfa_filter(name, value)
+            e(False, f'identity.validate_mfa_filter must refuse {name!r}/{value!r} naming {needle!r}')
+        except ValueError as exc:
+            e(needle in str(exc), f'identity.validate_mfa_filter must refuse {name!r}/{value!r} naming {needle!r}; got {exc}')
+
+    for name in ('acr', 'amr', 'OTP', 'my_claim1'):
+        try:
+            identity.validate_mfa_filter(name, 'gold')
+        except ValueError as exc:
+            e(False, f'identity.validate_mfa_filter must accept the claim name {name!r}; got {exc}')
+    for name in ('user.name', 5, '', 'a b', '1x'):
+        refuses(name, 'gold', 'top-level identifier')
+    e(set(identity.MFA_TYPED_CLAIMS) == {'jti', 'iss', 'aud', 'sub', 'typ', 'azp', 'exp', 'nbf', 'iat'},
+      f'identity.MFA_TYPED_CLAIMS must be the nine registered JsonWebToken fields; got {identity.MFA_TYPED_CLAIMS}')
+    for name in identity.MFA_TYPED_CLAIMS:
+        refuses(name, 'gold', 'registered JWT field')
+    # F4: the value is a literal or a |-list of literals; everything else is refused on every interpreter (Java and Python
+    # disagree on the rest of the grammar), so the answer cannot depend on the Python that runs the check.
+    for value in ('otp', 'OTP', 'a|b', 'pwd|otp|mfa', 'urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport',
+                  'http://schemas.openid.net/pape/policies/2007/06/multi-factor', 'mfa-1_x/y.z',
+                  '2', '0|1|2'):
+        try:
+            identity.validate_mfa_filter('acr', value)
+        except ValueError as exc:
+            e(False, f'identity.validate_mfa_filter must accept the literal value {value!r}; got {exc}')
+    for value in ('.*', '.+', '(.*)', '.*.*', '^.*$', '(?s).*', '[\\s\\S]*', '.', '...', '..|a', 'a||b', '|a', 'a|', 'a b', 'a\tb', 'a$', 'a\n',
+                  '(?P<n>x)', 'a{,3}', '{x}', '(?#c)', '(?<n>x)', '\\p{L}+', '\\h', 'a*+', '(?>x)', 'a[(', 'ａｂ',
+                  'a+', 'a++', 'a?', 'a*', 'a(b)'):
+        refuses('acr', value, refuse_value)
+    refuses('acr', '', 'nonempty string')
+    refuses('acr', 9, 'nonempty string')
+    example = json.loads((ROOT / 'sso/dual-example.json').read_text())
+    module = load_configure_dual()
+    # F7.2: the shipped example states the claim pair with placeholders; it does not carry the weakest stance.
+    e('mfa_claim_name' in example and 'mfa_claim_value' in example and identity.MFA_NOT_ASSERTED_KEY not in example,
+      'sso/dual-example.json must carry the placeholder claim pair and not the opt-out (a copy must not state "enforced at Ping only" unread)')
+    # N3: the placeholders are refused as they are (a forgotten edit must not apply a filter on a claim no token carries, which
+    # would refuse every brokered sign-in): by the site validator, by `krate auth configure`, and by the plan reader.
+    e(identity.MFA_PLACEHOLDER in example.get('mfa_claim_name', '') and identity.MFA_PLACEHOLDER in example.get('mfa_claim_value', ''),
+      f'sso/dual-example.json must carry {identity.MFA_PLACEHOLDER}_... placeholders for the claim name and value')
+    site = example_site()
+    for label, candidate, needle in (('the shipped example as it is', example, 'mfa_claim_name still holds the example placeholder'),
+                                     ('a placeholder claim name', dict(site, mfa_claim_name=example['mfa_claim_name']), 'mfa_claim_name still holds the example placeholder'),
+                                     ('a placeholder claim value', dict(site, mfa_claim_value=example['mfa_claim_value']), 'mfa_claim_value still holds the example placeholder')):
+        try:
+            module.configs(candidate, SYNTHETIC)
+            e(False, f'configure-dual must refuse {label}')
+        except ValueError as exc:
+            e(needle in str(exc) and 'mfa_not_asserted' in str(exc), f'configure-dual refusing {label} must name {needle!r} and the opt-out; got {exc}')
+    with tempfile.TemporaryDirectory() as tmp:
+        settings_file = Path(tmp) / 'site.json'
+        settings_file.write_text(json.dumps(example))
+        outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/configure-dual.py'), '--settings', str(settings_file),
+                                  '--output-dir', str(Path(tmp) / 'out')], text=True, capture_output=True)
+        e(outcome.returncode == 1 and 'example placeholder' in outcome.stderr and not (Path(tmp) / 'out/keycloak').exists()
+          and not (Path(tmp) / 'out/ui').exists(),
+          f'configure-dual.py on the unedited example must exit 1 naming the placeholder and write nothing; got exit {outcome.returncode} {outcome.stderr.strip()[:160]}')
+    pair_plan = module.configs(site, SYNTHETIC)['keycloak/pingfederate-idp.json']
+    config = pair_plan['identityProviders'][0]['config']
+    e(all(config.get(key) == value for key, value in zip(identity.MFA_FILTER_KEYS, ('true', site['mfa_claim_name'], site['mfa_claim_value'])))
+      and identity.MFA_NOT_ASSERTED_KEY not in pair_plan,
+      f"configure-dual: the opted-in plan's config must carry filteredByClaim \"true\", claimFilterName and claimFilterValue from the site file ({ {k: config.get(k) for k in identity.MFA_FILTER_KEYS} })")
+    optout_site = {key: value for key, value in site.items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
+    plan = module.configs(optout_site, SYNTHETIC)['keycloak/pingfederate-idp.json']
+    e(plan.get(identity.MFA_NOT_ASSERTED_KEY) is True,
+      f'configure-dual: a site file with mfa_not_asserted must write the plan key {identity.MFA_NOT_ASSERTED_KEY} true')
+    e(not any(key in plan['identityProviders'][0]['config'] for key in identity.MFA_FILTER_KEYS),
+      'configure-dual: the opt-out stance must not put the claim-filter keys on the provider config')
+    e(set(plan) == IDP_PLAN_KEYS | {identity.MFA_NOT_ASSERTED_KEY},
+      f'configure-dual: the opted-out plan must carry exactly the plan keys plus {identity.MFA_NOT_ASSERTED_KEY}; got {sorted(plan)}')
+    # F7: `auth configure` itself refuses a site file that states neither stance, with the complete message.
+    bare_site = {key: value for key, value in site.items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    for label, stanceless_site in (('no stance key at all', bare_site), ('mfa_not_asserted false', dict(bare_site, mfa_not_asserted=False))):
+        try:
+            module.configs(stanceless_site, SYNTHETIC)
+            e(False, f'configure-dual must refuse a site file with {label}')
+        except identity.MfaStanceError as exc:
+            message = str(exc)
+            e('no MFA stance' in message and 'mfa_claim_name' in message and 'mfa_not_asserted' in message and 'run krate auth configure again' in message,
+              f'configure-dual refusing {label} must name both options and the way back; got {message}')
+        except ValueError as exc:
+            e(False, f'configure-dual refusing {label} must raise MfaStanceError; got {exc}')
+    with tempfile.TemporaryDirectory() as tmp:
+        settings_file = Path(tmp) / 'site.json'
+        settings_file.write_text(json.dumps(bare_site))
+        outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/configure-dual.py'), '--settings', str(settings_file),
+                                  '--output-dir', str(Path(tmp) / 'out')], text=True, capture_output=True)
+        e(outcome.returncode == 1 and 'no MFA stance' in outcome.stderr and not (Path(tmp) / 'out/keycloak').exists()
+          and not (Path(tmp) / 'out/ui').exists(),
+          f'configure-dual.py with a stance-less site file must exit 1 naming the stance and write nothing; got exit {outcome.returncode} {outcome.stderr.strip()[:160]}')
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'plan.json'
+        for label, planned in (('opted-out', plan), ('claim-filter', pair_plan)):
+            path.write_text(json.dumps(planned))
+            try:
+                identity.broker_plan(path)
+            except ValueError as exc:
+                e(False, f'identity.broker_plan must accept the {label} planned file; got {exc}')
+
+        def plan_refusal(label, base, mutation: 'Callable[[dict], object]', *needles):
+            mutated = json.loads(json.dumps(base))
+            mutation(mutated)
+            path.write_text(json.dumps(mutated))
+            try:
+                identity.broker_plan(path)
+                e(False, f'identity.broker_plan must refuse {label}')
+            except ValueError as exc:
+                e(all(needle in str(exc) for needle in needles),
+                  f'identity.broker_plan refusing {label} must name {needles[0]!r}; got {exc}')
+
+        def provider_config(p):
+            return p['identityProviders'][0]['config']
+        plan_refusal('no MFA stance at all', plan, lambda p: p.pop(identity.MFA_NOT_ASSERTED_KEY),
+                     'no MFA stance', 'mfa_claim_name', 'mfa_not_asserted', 'remove auth/ui/runtime.yml', 'then run krate auth configure <site.json>')
+        plan_refusal('mfa_not_asserted written as a string', plan, lambda p: p.__setitem__(identity.MFA_NOT_ASSERTED_KEY, 'true'), 'boolean true')
+        plan_refusal('mfa_not_asserted false', plan, lambda p: p.__setitem__(identity.MFA_NOT_ASSERTED_KEY, False), 'boolean true')
+        plan_refusal('the marker beside the filter keys', pair_plan, lambda p: p.__setitem__(identity.MFA_NOT_ASSERTED_KEY, True), 'exactly one')
+        plan_refusal('filteredByClaim without the claim name', pair_plan, lambda p: provider_config(p).pop('claimFilterName'),
+                     'must set all three config keys together')
+        for label, value in (('the boolean true', True), ('the string "false"', 'false'), ('the string "TRUE"', 'TRUE'), ('the string "True"', 'True')):
+            plan_refusal(f'filteredByClaim as {label}', pair_plan, lambda p, v=value: provider_config(p).__setitem__('filteredByClaim', v), 'string "true"')
+        plan_refusal('a claimFilterValue of .*', pair_plan, lambda p: provider_config(p).__setitem__('claimFilterValue', '.*'), refuse_value)
+        plan_refusal('an invalid claimFilterValue', pair_plan, lambda p: provider_config(p).__setitem__('claimFilterValue', 'a[('), refuse_value)
+        plan_refusal('a claimFilterName that is not an identifier', pair_plan, lambda p: provider_config(p).__setitem__('claimFilterName', 'a b'),
+                     'top-level identifier')
+        plan_refusal('a claimFilterName that is a registered JWT field', pair_plan, lambda p: provider_config(p).__setitem__('claimFilterName', 'sub'),
+                     'registered JWT field')
+        plan_refusal('a claimFilterName that is the example placeholder', pair_plan,
+                     lambda p: provider_config(p).__setitem__('claimFilterName', 'REPLACE_WITH_ASSERTED_CLAIM'), 'mfa_claim_name still holds the example placeholder')
+        plan_refusal('a claimFilterValue that is the example placeholder', pair_plan,
+                     lambda p: provider_config(p).__setitem__('claimFilterValue', 'REPLACE_WITH_ASSERTED_VALUE'), 'mfa_claim_value still holds the example placeholder')
+    # The site validator (sso/configure.py). `broker=True` is the PingFederate broker plan, the only consumer of the keys.
+    spec = importlib.util.spec_from_file_location('configure_validations', ROOT / 'sso/configure.py')
+    assert spec is not None and spec.loader is not None
+    module_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module_config)
+    for label, accepted in (('the example with its placeholders replaced (the claim pair)', site), ('the opt-out site', optout_site)):
+        try:
+            module_config.validate(accepted, 'kafbat', broker=True)
+        except ValueError as exc:
+            e(False, f'configure.validate must accept {label} for the broker plan; got {exc}')
+    try:
+        module_config.validate(example, 'kafbat', broker=True)
+        e(False, 'configure.validate must refuse the shipped example as it is (its claim placeholders are not a claim)')
+    except ValueError as exc:
+        e('example placeholder' in str(exc), f'configure.validate refusing the shipped example must name the example placeholder; got {exc}')
+    pair = {'mfa_claim_name': 'acr', 'mfa_claim_value': 'otp'}
+    site_cases = (
+        ('mfa_claim_name alone', dict(bare_site, mfa_claim_name='acr', mfa_not_asserted=False), 'together or neither'),
+        ('mfa_claim_value alone', dict(bare_site, mfa_claim_value='otp', mfa_not_asserted=False), 'together or neither'),
+        ('the opt-out beside the pair', dict(bare_site, **pair, mfa_not_asserted=True), 'excludes'),
+        ('mfa_not_asserted as a string', dict(bare_site, mfa_not_asserted='true'), 'mfa_not_asserted must be boolean'),
+        ('mfa_not_asserted as a string beside the pair', dict(bare_site, **pair, mfa_not_asserted='true'), 'mfa_not_asserted must be boolean'),
+        ('mfa_claim_value .*', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='.*'), refuse_value),
+        ('a claim name that is not an identifier', dict(bare_site, mfa_claim_name='user.name', mfa_claim_value='otp'), 'top-level identifier'),
+        # text() is the first guard of both values: it names the precise reason before the claim rules run.
+        ('a claim value with $', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='o$tp'), 'configuration interpolation characters'),
+        ('a claim value with {', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='o{tp'), 'configuration interpolation characters'),
+        ('a claim value with a control character', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='o\ntp'), 'mfa_claim_value must be a nonempty single-line string'),
+        ('a blank claim value', dict(bare_site, mfa_claim_name='acr', mfa_claim_value='   '), 'mfa_claim_value must be a nonempty single-line string'),
+        ('a claim name with $', dict(bare_site, mfa_claim_name='a$cr', mfa_claim_value='otp'), 'configuration interpolation characters'),
+        ('a blank claim name', dict(bare_site, mfa_claim_name='  ', mfa_claim_value='otp'), 'mfa_claim_name must be a nonempty single-line string'),
+    )
+    for label, candidate, needle in site_cases:
+        try:
+            module_config.validate(candidate, 'kafbat', broker=True)
+            e(False, f'configure.validate must refuse {label}')
+        except ValueError as exc:
+            e(needle in str(exc), f'configure.validate refusing {label} must name {needle!r}; got {exc}')
+    # F9: every other generator of this program refuses the keys (rejected, not ignored), whatever the app.
+    for app in ('kafbat', 'grafana', 'perses'):
+        settings = {'issuer': 'https://realm.example.test', 'public_url': 'https://realm.example.test', 'client_id': 'id',
+                    'viewer_group': 'VIEW', 'admin_group': 'ADMIN', 'groups_claim': 'groups', 'scopes': ['openid'], 'clusters': CLUSTERS}
+        for keys in (pair, {'mfa_not_asserted': True}):
+            try:
+                module_config.validate(dict(settings, **keys), app)
+                e(False, f'configure.validate must refuse {sorted(keys)} for {app} without the broker plan')
+            except ValueError as exc:
+                e('PingFederate broker plan' in str(exc) and 'remove them from this settings file' in str(exc),
+                  f'configure.validate refusing {sorted(keys)} for {app} must name the PingFederate broker plan; got {exc}')
+    with tempfile.TemporaryDirectory() as tmp:
+        settings_file = Path(tmp) / 'site.json'
+        settings_file.write_text(json.dumps(dict(json.loads((ROOT / 'sso/example.json').read_text()), **pair)))
+        outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/configure.py'), '--app', 'kafbat', '--settings', str(settings_file),
+                                  '--output', str(Path(tmp) / 'kafbat.yml')], text=True, capture_output=True)
+        e(outcome.returncode == 1 and 'PingFederate broker plan' in outcome.stderr and not (Path(tmp) / 'kafbat.yml').exists(),
+          f'sso/configure.py --app kafbat must refuse the mfa keys (they have no effect there) and write nothing; got exit {outcome.returncode} {outcome.stderr.strip()[:160]}')
+
+
+def check_mfa_reconcile(checks):
+    """F1: the three claim-filter keys are managed. A live provider that still carries a filter the plan does not is a difference,
+    and the update the CLI sends (the plan's representation, no merge) leaves none of the keys."""
+    e = checks.expect
+    module = load_configure_dual()
+    example = example_site()
+    optout_site = {key: value for key, value in example.items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
+    trio = {'filteredByClaim': 'true', 'claimFilterName': 'amr', 'claimFilterValue': 'otp'}
+    with tempfile.TemporaryDirectory() as tmp:
+        files = {}
+        for name, site in (('pair', example), ('optout', optout_site)):
+            files[name] = Path(tmp) / f'{name}.json'
+            files[name].write_text(json.dumps(module.configs(site, SYNTHETIC)['keycloak/pingfederate-idp.json']))
+        plans = {name: identity.broker_plan(path) for name, path in files.items()}
+
+        def live_of(name, extra=None, drop=()):
+            rep = json.loads(json.dumps(plans[name]['identityProviders'][0]))
+            rep['config']['clientSecret'] = '**********'
+            rep.update({'internalId': 'x', 'types': ['USER_AUTHENTICATION']})
+            for key in drop:
+                rep['config'].pop(key, None)
+            rep['config'].update(extra or {})
+            return rep
+        cases = (
+            ('the opt-out plan against a live provider equal to it', 'optout', live_of('optout'), False),
+            ('the opt-out plan against a live provider that still carries the whole filter (the site switched from the pair)', 'optout', live_of('optout', trio), True),
+            ('the opt-out plan against a live claimFilterName alone', 'optout', live_of('optout', {'claimFilterName': 'amr'}), True),
+            ('the opt-out plan against a live claimFilterValue alone', 'optout', live_of('optout', {'claimFilterValue': 'otp'}), True),
+            ('the opt-out plan against a live filteredByClaim "true"', 'optout', live_of('optout', {'filteredByClaim': 'true'}), True),
+            ('the opt-out plan against a live filteredByClaim "TRUE"', 'optout', live_of('optout', {'filteredByClaim': 'TRUE'}), True),
+            ('the opt-out plan against a live filteredByClaim "false" (a filter that is off)', 'optout', live_of('optout', {'filteredByClaim': 'false'}), False),
+            ('the opt-out plan against a live filteredByClaim "FALSE" (Boolean.parseBoolean reads any casing)', 'optout', live_of('optout', {'filteredByClaim': 'FALSE'}), False),
+            ('the opt-out plan against a live filteredByClaim "false" plus a live claimFilterName', 'optout', live_of('optout', {'filteredByClaim': 'false', 'claimFilterName': 'amr'}), True),
+            ('the opt-out plan, live filter plus another drifted key', 'optout', live_of('optout', dict(trio, tokenUrl='https://other.example/t')), True),
+            ('the pair plan against a live provider equal to it', 'pair', live_of('pair'), False),
+            ('the pair plan against a live provider without the filter', 'pair', live_of('pair', drop=identity.MFA_FILTER_KEYS), True),
+            ('the pair plan against a changed live claim value', 'pair', live_of('pair', {'claimFilterValue': 'other'}), True),
+        )
+        for label, name, live, wanted in cases:
+            got = identity.provider_differs(plans[name], live)
+            e(got is wanted, f'identity.provider_differs: {label} must be {"a difference" if wanted else "no difference"}; got {got}')
+            outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/identity.py'), 'broker', '--plan', str(files[name]), 'provider-differs'],
+                                     input=json.dumps(live), text=True, capture_output=True)
+            e(outcome.returncode == 0 and outcome.stdout.strip() == ('differs' if wanted else 'same'),
+              f'identity.py broker provider-differs (the verdict auth apply reads): {label} must answer {"differs" if wanted else "same"}; got {outcome.stdout.strip()!r} {outcome.stderr.strip()[:120]}')
+        # The update body is the plan's whole representation: with no pair planned, none of the three keys is in it.
+        body = identity.broker_provider(plans['optout'])
+        e(not any(key in body['config'] for key in identity.MFA_FILTER_KEYS) and 'clientSecret' not in body['config'],
+          f'the opt-out provider body (what kcadm update -f - sends) must carry none of the claim-filter keys; got {sorted(body["config"])}')
+        outcome = subprocess.run([sys.executable, '-I', '-B', str(ROOT / 'sso/identity.py'), 'broker', '--plan', str(files['optout']), 'provider'],
+                                 text=True, capture_output=True)
+        sent = json.loads(outcome.stdout or '{}')
+        e(outcome.returncode == 0 and not any(key in sent.get('config', {}) for key in identity.MFA_FILTER_KEYS),
+          f'identity.py broker provider (the update body) for the opt-out plan must carry none of the claim-filter keys; got {outcome.stdout[:120]!r}')
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        put = function_body(cli, 'identity_put_idp_provider')
+        e('kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" -f -' in put and '--merge' not in put and ' -m ' not in put
+          and ' -s ' not in put,
+          f'{edition}/krate: the provider update must send the plan as the whole body (-f -), never merged or patched with -s (the filter keys leave only through a replace)')
+
+
+P18_MODEL = r'''
+# The product as the P18 block's stubs model it: the REAL identity.py (broker_plan, provider_differs, broker_provider)
+# decides the preflight and the reconcile; the realm, the stand-in IdP and the browser are stubs (INJECT perturbs one effect).
+import json, os, sys
+sys.path.insert(0, os.environ['ROOT'] + '/sso')
+import identity
+S = os.environ['S']
+INJ = set(filter(None, os.environ.get('INJECT', '').split(',')))
+live_path = S + '/live.json'
+
+
+def live():
+    return json.load(open(live_path)) if os.path.exists(live_path) else None
+
+
+def counter(name, bump=0):
+    path = S + '/' + name
+    value = int(open(path).read() or 0) if os.path.exists(path) else 0
+    if bump:
+        open(path, 'w').write(str(value + bump))
+    return value
+
+
+def write_live(plan):
+    rep = json.loads(json.dumps(plan['identityProviders'][0]))
+    rep['config']['clientSecret'] = '**********'
+    json.dump(rep, open(live_path, 'w'))
+
+
+def add_user():
+    open(S + '/users', 'a').write('ping-mfa 11111111-2222-3333-4444-555555555555\n')
+
+
+def verdict(plan, current):
+    if 'f1_bug' in INJ:  # the pre-fix reconcile: only the planned keys are compared
+        return identity.differs(identity.broker_provider(plan), current)
+    return identity.provider_differs(plan, current)
+
+
+cmd = sys.argv[1]
+if cmd == 'seed':
+    write_live(identity.broker_plan(sys.argv[2]))
+elif cmd == 'validate':
+    if 'preflight_accepts' in INJ:
+        sys.exit(0)
+    try:
+        identity.broker_plan(sys.argv[2])
+    except identity.MfaStanceError as exc:
+        print(f'Authentication preflight failed: {exc}'); sys.exit(1)
+    except ValueError as exc:
+        print(f'Authentication preflight failed: {exc}; regenerate it'); sys.exit(1)
+elif cmd == 'apply':
+    n = counter('applies', 1) + 1
+    try:
+        plan = identity.broker_plan(sys.argv[2])
+    except ValueError as exc:
+        print(f'{exc}'); sys.exit(1)
+    current = live()
+    if current is None or verdict(plan, current):
+        if n == 2 and 'withdraw_keys_stay' in INJ:
+            pass
+        else:
+            write_live(plan)
+        if n == 2 and 'withdraw_says_no_changes' in INJ:
+            print('Identity provider pingfederate: No changes')
+        else:
+            print('Identity provider pingfederate applied to realm krate (1 change(s): provider updated)')
+    else:
+        print('Identity provider pingfederate: No changes')
+elif cmd == 'expect':
+    if 'realm_mismatch_once' in INJ and counter('expects', 1) == 0:
+        print('phase3_realm: provider.config.filteredByClaim: planned true, live None'); sys.exit(1)
+    plan, current = json.load(open(sys.argv[2])), live()
+    if current is None:
+        print('phase3_realm: provider pingfederate is not in the realm'); sys.exit(1)
+    bad = [k for k, v in plan['identityProviders'][0]['config'].items() if k != 'clientSecret' and str(v) != str(current['config'].get(k))]
+    for k in bad:
+        print(f'phase3_realm: provider.config.{k} differs')
+    sys.exit(1 if bad else 0)
+elif cmd == 'login':
+    user, current = sys.argv[2], live()
+    cfg = (current or {}).get('config', {})
+    if user == 'ping-viewer':
+        print('error\tping-viewer: error 502 at /identity/realms/krate/broker/pingfederate/endpoint' if 'control_fails' in INJ
+              else 'ok\tping-viewer: ok 200 at /; federated identities 1; hops: 302 x')
+    elif cfg.get('filteredByClaim') == 'true' and not ('withdraw_keys_stay' in INJ and counter('applies') >= 2):
+        counter('events', 2 if 'two_events' in INJ else 1)
+        if 'created_on_refusal' in INJ:
+            add_user()
+        status = '500' if 'refused_not_502' in INJ else '502'
+        print(f'error\tping-mfa: error {status} at /identity/realms/krate/broker/pingfederate/endpoint (Unexpected error); federated identities 0; hops: 302 x')
+    elif 'relogin_fails' in INJ:
+        print('unexpected\tping-mfa: unexpected landed 200 /login')
+    else:
+        add_user()
+        print('ok\tping-mfa: ok 200 at /; federated identities 1; hops: 302 x')
+elif cmd == 'users':
+    if 'users_query_fails' in INJ:
+        sys.exit(1)
+    if 'preexisting_once' in INJ and counter('user-queries', 1) == 0:
+        print('99999999-2222-3333-4444-555555555555'); sys.exit(0)
+    if os.path.exists(S + '/users'):
+        for line in open(S + '/users'):
+            print(line.split()[1])
+elif cmd == 'events':
+    if 'events_query_fails' in INJ:
+        sys.exit(1)
+    for _ in range(counter('events') + (250 if 'events_cap' in INJ else 3)):
+        print('IDENTITY_PROVIDER_LOGIN_ERROR,identity_provider_login_failure')
+elif cmd == 'idp':
+    if 'idp_get_fails' in INJ or live() is None:
+        sys.exit(1)
+    print(json.dumps(live(), indent=2))
+elif cmd == 'delete-users':
+    open(S + '/users', 'w').write('')
+'''
+
+P18_DRIVER = r'''set -uo pipefail
+S="$1"; export S
+plan="$S/pingfederate-idp.json"; RAW="$S/raw.log"; : > "$RAW"; STATE="$S/st"; PROJECT=stubproj; STUB_DIR="$S"; KRATE="$S/krate-stub"; STUB="$S/stub-stub"
+mkdir -p "$STATE"; cp "$S/plan.optout.json" "$plan"; cp "$plan" "$STATE/plan.saved"
+python3 -I -B "$S/model.py" seed "$plan"
+cap() { local rc; CAP="$("$@" 2>&1)"; rc=$?; printf -- '--- %s (exit %s)\n%s\n' "$*" "$rc" "$CAP" >> "$RAW"; return $rc; }
+sleep() { :; }
+preflight_runtime() { python3 -I -B "$S/model.py" validate "$plan"; }
+realm_state() { [[ "$1" == --expect ]] || return 2; python3 -I -B "$S/model.py" expect "$2"; }
+realm_diffs() { printf '%s\n' "$1" | grep -E '^phase3_realm:' | sed 's/^phase3_realm: //' | head -3 | tr '\n' ';'; }
+login_probe() { python3 -I -B "$S/model.py" login "$1"; }
+kcadm_master() {
+  case "$1 $2" in
+    "get users") python3 -I -B "$S/model.py" users ;;
+    "get events") python3 -I -B "$S/model.py" events ;;
+    "get identity-provider/instances/pingfederate") python3 -I -B "$S/model.py" idp ;;
+    "delete users/"*) python3 -I -B "$S/model.py" delete-users ;;
+    *) echo "stub kcadm: unhandled: $*" >&2; return 3 ;;
+  esac
+}
+printf '#!/usr/bin/env bash\n[[ "$1 $2" == "auth apply" ]] || exit 2\nexec python3 -I -B "$S/model.py" apply "$S/pingfederate-idp.json"\n' > "$KRATE"
+printf '#!/usr/bin/env bash\n[[ "${INJECT:-}" == *adduser_fails* ]] && { echo "stub: could not create stub user"; exit 1; }\nexit 0\n' > "$STUB"
+chmod +x "$KRATE" "$STUB"
+ok_if() { if [[ "$4" == 0 ]]; then echo "RESULT $1 PASS"; else echo "RESULT $1 FAIL"; fi; echo "EVIDENCE ${5:0:600}"; }
+run() {
+@@LOCALS@@
+  plan="$S/pingfederate-idp.json"
+@@BLOCK@@
+}
+run
+'''
+
+# Each injection perturbs exactly one effect of the P18 block's world and must turn the row to FAIL; the term it isolates is named.
+P18_INJECTIONS = (
+    ('preflight_accepts', 'a: the stance-less plan must be refused by the preflight'),
+    ('realm_mismatch_once', 'b: the claim-filter plan must be applied (realm matches the plan)'),
+    ('control_fails', 'c: the positive control must sign in'),
+    ('adduser_fails', 'd: the fresh stand-in user must be created'),
+    ('preexisting_once', 'e: no realm user may exist before the refused attempt'),
+    ('created_on_refusal', 'f: no realm user may exist after the refused attempt'),
+    ('refused_not_502', 'g: the refused attempt must end error 502 under the realm'),
+    ('two_events', 'h: exactly one more error event'),
+    ('events_cap', 'h: the event read must stay below its cap'),
+    ('events_query_fails', 'h: a failing event read is a failure'),
+    ('users_query_fails', 'e/f: a failing user read is a failure'),
+    ('withdraw_says_no_changes', 'w: the withdrawing apply must update the provider, not print No changes'),
+    ('withdraw_keys_stay', 'k: the live provider must lose the three keys'),
+    ('idp_get_fails', 'k: a failing provider read is a failure'),
+    ('relogin_fails', 'l: the same user must sign in after the withdrawal'),
+    ('f1_bug', 'w/k/l: the reconcile that compares only planned keys (the F1 defect) must fail the row'),
+)
+
+
+def check_p18_logic(checks):
+    """P18's decision logic against stubs: the runner's own block (extracted verbatim) runs in a bash driver whose effects are stubs
+    and whose product logic (preflight, reconcile) is the real identity.py. NOT a live observation: it pins that every term of the
+    row's pass condition can fail alone, so dropping or weakening a term is caught, and that the F1 defect shape fails the row."""
+    e = checks.expect
+    if bash_binary() is None:
+        return
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text().split('\n')
+    try:
+        start = next(i for i, line in enumerate(runner) if line.startswith('  # ── P18:'))
+        end = next(i for i, line in enumerate(runner) if line.startswith('  ok_if P18 3 P'))
+        locals_ = [line for line in runner if line.startswith('  local ') and ' refused stance ' in line or line.startswith('  local rc rc2 rc3 ev before')]
+    except StopIteration:
+        e(False, 'check_p18_logic: the P18 block (from its comment header to its ok_if line) was not found in scripts/gate-identity.sh')
+        return
+    driver = P18_DRIVER.replace('@@LOCALS@@', '\n'.join(locals_)).replace('@@BLOCK@@', '\n'.join(runner[start:end + 1]))
+    example = example_site()
+    optout_site = {key: value for key, value in example.items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
+    optout_plan = load_configure_dual().configs(optout_site, SYNTHETIC)['keycloak/pingfederate-idp.json']
+
+    def run(inject):
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp)
+            (scratch / 'model.py').write_text(P18_MODEL)
+            (scratch / 'plan.optout.json').write_text(json.dumps(optout_plan, indent=2) + '\n')
+            (scratch / 'driver.sh').write_text(driver)
+            (scratch / 'events').write_text('0')
+            environment = dict(os.environ, ROOT=str(ROOT), INJECT=inject)
+            outcome = subprocess.run([bash_binary() or 'bash', str(scratch / 'driver.sh'), str(scratch)], text=True, capture_output=True, env=environment, timeout=120)
+        return outcome.stdout, outcome.stderr, outcome.returncode
+    out, err, rc = run('')
+    e('RESULT P18 PASS' in out, f'check_p18_logic: the happy path of the P18 block must PASS against the stubs; got {out.strip()[-500:]!r} {err.strip()[-300:]!r}')
+    e(not any(secret in out + err for secret in ALL_SECRETS), 'check_p18_logic: the P18 stub run must not print a secret')
+    for inject, why in P18_INJECTIONS:
+        out, err, rc = run(inject)
+        e('RESULT P18 FAIL' in out, f'check_p18_logic: with {inject} the P18 block must FAIL ({why}); got {out.strip()[-300:]!r} {err.strip()[-200:]!r}')
+
+
+ROTATE_DRIVER = r"""
+SCRIPT_DIR="$1"; ENV_FILE="$1/.env"; ENV_TEMPLATE="$1/.env.template"; IDENTITY_REALM=krate; IDENTITY_TIMEOUT=5
+IDENTITY_IDP_PLAN=auth/keycloak/pingfederate-idp.json; IDENTITY_IDP_ALIAS=pingfederate
+PING_SECRET_RULE="must be a PingFederate secret"
+sso_dir() { echo "$SSO_DIR"; }
+# Everything that changes state or reaches Keycloak or Docker is recorded in $EFFECTS (names and paths, never a value).
+require_compose() { :; }
+require_compose_file() { :; }
+require_sso_compose() { :; }
+# The real preparation runs chmod and this image-pin boundary. Record its write so an early
+# mutation cannot hide behind a no-op prepare_identity_env stub.
+sync_image_pins() { echo prepare_identity_env >> "$EFFECTS"; echo PREPARED=true >> "$1"; }
+require_env() { :; }
+identity_lock() { :; }
+identity_state() { echo existing; }
+identity_verify_admin() { :; }
+identity_verify_cli() { echo "identity_verify_cli" >> "$EFFECTS"; }
+identity_journal() { printf 'journal %s %s %s\n' "$1" "$2" "$3" >> "$EFFECTS"; }
+kcadm_login() { echo "kcadm_login" >> "$EFFECTS"; }
+kcadm_logout() { :; }
+kcadm_client_id() { echo client-id-1; }
+random_secret() { echo "generated0123456789abcdefghij"; }
+compose_cmd() { echo "compose_cmd $*" >> "$EFFECTS"; }
+identity_compose() { echo "identity_compose $*" >> "$EFFECTS"; }
+identity_up_service() { echo "identity_up_service $*" >> "$EFFECTS"; }
+kcadm() {
+  while [[ $# -gt 0 && "$1" != -- ]]; do shift; done
+  shift
+  echo "kcadm $1 $2" >> "$EFFECTS"
+  if [[ "${KCADM_STDIN:-}" == 1 ]]; then cat > /dev/null; fi
+  if [[ "$1" == get ]]; then echo '{"alias":"pingfederate"}'; fi
+  return 0
+}
+cmd_identity_rotate "${@:2}"
+"""
+
+
+def check_rotate_stance(checks):
+    """N1 (MFA re-review): `identity rotate` of a secret the PingFederate plan travels with refuses a plan that states no MFA stance
+    BEFORE the first change. The real cmd_identity_rotate of both editions runs against stubs that record every effect: on a
+    refusal .env is byte-identical and nothing was written to Keycloak, recreated or journaled; with a valid plan the same
+    harness reaches every write (so the refusal case is not vacuous)."""
+    e = checks.expect
+    if bash_binary() is None:
+        return
+    module = load_configure_dual()
+    pair_plan = module.configs(example_site(), SYNTHETIC)['keycloak/pingfederate-idp.json']
+    stanceless = json.loads(json.dumps(pair_plan))
+    for key in identity.MFA_FILTER_KEYS:
+        stanceless['identityProviders'][0]['config'].pop(key)
+    e(identity.MFA_NOT_ASSERTED_KEY not in stanceless, 'the stance-less rotate fixture must carry neither the pair nor the opt-out')
+    optout_site = {key: value for key, value in example_site().items() if key not in ('mfa_claim_name', 'mfa_claim_value')}
+    optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
+    optout_plan = module.configs(optout_site, SYNTHETIC)['keycloak/pingfederate-idp.json']
+    rotated = 'synthetic-rotated-ping-secret-7a1b2c3d4e'
+    writes = ('prepare_identity_env', 'kcadm update', 'kcadm create', 'kcadm delete', 'compose_cmd', 'identity_compose', 'identity_up_service', 'journal', 'identity_verify_cli')
+    for edition in EDITIONS:
+        cli_text = (ROOT / edition / 'krate').read_text()
+        has_check = re.search(r'^identity_rotate_plan_check\(\) \{$', cli_text, re.M) is not None
+        e(has_check, f'{edition}/krate: identity_rotate_plan_check must exist (the plan is read before the first change of identity rotate)')
+        functions = bash_functions(ROOT / edition / 'krate', 'prepare_identity_env', 'env_value', 'replace_env_file', 'set_env_file_value', 'ping_secret_valid',
+                                   'identity_put_idp_provider', 'identity_rotate_ping_secret', *(['identity_rotate_plan_check'] if has_check else []), 'cmd_identity_rotate')
+        script = BASH_STUBS + functions + ROTATE_DRIVER
+
+        def rotate(plan, key, mode='runtime.yml', stdin=None):
+            with tempfile.TemporaryDirectory() as tmp:
+                site = Path(tmp)
+                (site / 'auth/keycloak').mkdir(parents=True)
+                if plan is not None:
+                    (site / 'auth/keycloak/pingfederate-idp.json').write_text(json.dumps(plan, indent=2) + '\n')
+                write_env(site, dict(SYNTHETIC, KAFKA_UI_AUTH_CONFIG=mode, PING_KEYCLOAK_CLIENT_SECRET=RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']))
+                before = (site / '.env').read_bytes()
+                effects = site / 'effects.log'
+                effects.write_text('')
+                environment = dict(os.environ, EFFECTS=str(effects), SSO_DIR=str(ROOT / 'sso'))
+                outcome = run_bash(script, site, key, *(['--value'] if stdin else []), env=environment, stdin=stdin)
+                result = (outcome, before, (site / '.env').read_bytes(), effects.read_text().splitlines())
+            return result
+
+        for key, mode, stdin in (('PING_KEYCLOAK_CLIENT_SECRET', 'runtime.yml', rotated + '\n'), ('KEYCLOAK_KAFBAT_CLIENT_SECRET', 'runtime.yml', None)):
+            label = f'{edition}: identity rotate {key} ({mode}) on a plan that states no MFA stance'
+            outcome, env_before, env_after, effects = rotate(stanceless, key, mode, stdin)
+            e(outcome.returncode != 0 and 'no MFA stance' in outcome.stderr and 'Nothing was rotated' in outcome.stderr,
+              f'{label} must refuse naming the stance and that nothing was rotated; got exit {outcome.returncode} {outcome.stderr.strip()[-200:]!r}')
+            e(env_after == env_before, f'{label}: .env must be byte-identical after the refusal')
+            e(not any(line.startswith(prefix) for line in effects for prefix in writes) and 'kcadm_login' not in effects,
+              f'{label}: nothing may be written to Keycloak, recreated, verified or journaled before the refusal; got {effects}')
+            e(rotated not in outcome.stdout + outcome.stderr, f'{label}: the secret is never printed')
+            # The same harness reaches every write with a valid plan (and with the opt-out, the other valid stance).
+            for stance, good in (('the claim pair', pair_plan), ('the opt-out', optout_plan)):
+                outcome, env_before, env_after, effects = rotate(good, key, mode, stdin)
+                wanted = (['kcadm update identity-provider/instances/pingfederate', 'identity_up_service keycloak'] if key.startswith('PING')
+                          else ['kcadm update clients/client-id-1', 'compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout 5 kafka-ui'])
+                e(outcome.returncode == 0 and env_after != env_before and 'prepare_identity_env' in effects and all(item in effects for item in wanted),
+                  f'{edition}: identity rotate {key} on a plan with {stance} must reach its writes ({wanted}); got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        # The check is exactly as wide as the commands that read the plan.
+        outcome, env_before, env_after, effects = rotate(stanceless, 'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'local.yml', None)
+        e(outcome.returncode == 0 and env_after != env_before and 'kcadm update clients/client-id-1' in effects and not any(l.startswith('compose_cmd') for l in effects),
+          f'{edition}: identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET in local.yml mode recreates nothing and never reads the plan; it must not be refused; got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        outcome, env_before, env_after, effects = rotate(stanceless, 'KEYCLOAK_CLI_CLIENT_SECRET', 'runtime.yml', None)
+        e(outcome.returncode == 0 and env_after != env_before and 'kcadm update clients/client-id-1' in effects,
+          f'{edition}: identity rotate KEYCLOAK_CLI_CLIENT_SECRET does not read the plan; it must not be refused; got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        outcome, env_before, env_after, effects = rotate(None, 'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'runtime.yml', None)
+        e(outcome.returncode == 0 and env_after != env_before and 'kcadm update clients/client-id-1' in effects,
+          f'{edition}: identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET with no plan file (a site without PingFederate) must not be refused; got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        for key, needle in (('NOT_A_KEY', 'Usage: krate identity rotate'), ('PING_KEYCLOAK_CLIENT_SECRET', 'is issued by PingFederate')):
+            outcome, env_before, env_after, effects = rotate(stanceless, key)
+            e(outcome.returncode != 0 and needle in outcome.stderr and 'no MFA stance' not in outcome.stderr and env_after == env_before and not effects,
+              f'{edition}: invalid key or missing --value must retain its argument error before the plan check or preparation; got exit {outcome.returncode} {outcome.stderr.strip()[-160:]!r} {effects}')
+        body = function_body((ROOT / edition / 'krate').read_text(), 'cmd_identity_rotate')
+        guard = '  identity_rotate_plan_check "$key"\n'
+        e(body.count(guard) == 1 and body.index(guard) < body.index('prepare_identity_env; require_env')
+          and body.index(guard) < body.index('read -rsp') and body.index(guard) < body.index('set_env_file_value')
+          and body.index(guard) < body.index('kcadm_login'),
+          f'{edition}/krate: cmd_identity_rotate must run identity_rotate_plan_check before preparation, reading a value, writing .env or logging in to Keycloak')
+
+
+def check_mfa_docs(checks):
+    """The guides state what the code does and no more: the commands that refuse a stance-less plan, the withdrawal procedure,
+    the measured/asserted wording of P18 and the deprovisioning figures, and the Keycloak anchor lines."""
+    e = checks.expect
+    dual = (ROOT / 'sso/guides/dual-login.md').read_text()
+    flat = ' '.join(dual.split())
+
+    def between(text, start, stop):
+        """The text from `start` up to `stop`; empty when `start` is missing, so the assertions below fail with their own message."""
+        begin = text.find(start)
+        if begin < 0:
+            return ''
+        end = text.find(stop, begin)
+        return text[begin:end if end >= 0 else len(text)]
+    # F3: the upgrade paragraph lists every command that refuses a plan without a stance; each is tied to the code below.
+    upgrade = between(flat, 'A PingFederate site whose plan file was written before the MFA stance existed', '## Company SSO through PingFederate')
+    for command in ('./krate start', './krate install', './krate auth apply', './krate identity up',
+                    './krate identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET', './krate identity rotate PING_KEYCLOAK_CLIENT_SECRET'):
+        e(command in upgrade, f'dual-login.md: the upgrade paragraph must list {command} among the commands that refuse a plan without an MFA stance')
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        compose = function_body(cli, 'compose_cmd')
+        e('preflight.py' in compose and '--mode runtime.yml' in compose and '== up' in compose,
+          f'{edition}/krate: compose_cmd must run the runtime.yml preflight on `up` (it is how start, install and the rotate recreate refuse a plan)')
+        for name in ('cmd_start', 'cmd_install'):
+            e('compose_cmd up' in function_body(cli, name), f'{edition}/krate: {name} must go through compose_cmd up (the preflight)')
+        rotate = function_body(cli, 'cmd_identity_rotate')
+        e('compose_cmd up' in rotate and 'identity_rotate_ping_secret' in rotate,
+          f'{edition}/krate: cmd_identity_rotate must recreate kafka-ui through compose_cmd up and update the provider through identity_rotate_ping_secret')
+        e('identity.py" broker --plan "$plan" provider --with-secret' in function_body(cli, 'identity_put_idp_provider'),
+          f'{edition}/krate: the provider update must read the plan through identity.py broker (broker_plan)')
+    e('python3 "$sso_dir/preflight.py" --directory "$SCRIPT_DIR" --mode "$mode"' in (ROOT / 'sso/activate.sh').read_text(),
+      'sso/activate.sh: apply_auth must run the preflight (auth apply)')
+    e('preflight.py" --directory "$SCRIPT_DIR" --mode identity' in (ROOT / 'kraft/krate').read_text(),
+      'kraft/krate: identity up must run the identity-mode preflight')
+    e("`./krate auth configure` refuses a site file that states neither" in flat and 'first refusing' not in flat,
+      'dual-login.md: step 3 must say that `auth configure` refuses a site file that states neither stance')
+    # F1: the operator's way to change or withdraw the filter.
+    e('### Changing or withdrawing the MFA claim filter' in dual, 'dual-login.md must carry the section "Changing or withdrawing the MFA claim filter"')
+    section = between(flat, '### Changing or withdrawing the MFA claim filter', '### Rotating the PingFederate client secret')
+    for needle in ('"mfa_not_asserted": true', 'remove `auth/ui/runtime.yml` and `auth/keycloak/pingfederate-idp.json`', './krate auth configure /path/to/site.json',
+                   './krate auth apply', 'provider updated', 'not `No changes`', 'kcadm update -f -', 'merges nothing', 'federated-identity links',
+                   'removing the plan file and applying'):
+        e(needle in section, f'dual-login.md: the withdrawal section must state {needle!r}')
+    # F8: figures and tenses the evidence supports.
+    e('measured for a local user: gone within 5 s, gate row U25' in flat, 'dual-login.md: the U25 figure is a local-user measurement and must say so')
+    e('gate row P18 tests' not in flat and '(gate row P18)' not in flat, 'dual-login.md must not cite gate row P18 as proof of a behavior the row has not yet shown live')
+    gate = (ROOT / 'sso/guides/identity-gate.md').read_text()
+    row = next((line for line in gate.splitlines() if line.startswith('| P18 |')), '')
+    e('not yet observed on a live fixture' in row and 'not yet been observed on a live fixture' in ' '.join(gate.split()),
+      'identity-gate.md must state that P18 has not yet been observed on a live fixture')
+    e('no Kafbat `SESSION` cookie' not in row and '(`ok`, session, realm user)' not in row,
+      'the identity-gate.md P18 row must not claim a Kafbat session or a realm user it does not measure')
+    for needle in ('provider updated', 'Identity provider pingfederate: No changes', 'both counts below the 200-event read cap'):
+        e(needle in row, f'the identity-gate.md P18 row must state {needle!r}')
+    # N1: both rotates read the plan before their first change (check_rotate_stance runs it); the guide says exactly that.
+    for needle in ('read it before their first change and refuse it without touching `.env`, Keycloak or any container',
+                   'after a reboot `start` brings up no container until the plan is regenerated'):
+        e(needle in upgrade, f'dual-login.md: the upgrade paragraph must state {needle!r}')
+    # N3: step 2 tells the operator that the example's placeholders are refused.
+    e('refuses a file that still holds the `REPLACE_WITH_...` placeholders and writes nothing' in flat,
+      'dual-login.md: step 2 must say that `./krate auth configure` refuses a site file that still holds the placeholders')
+    # N4: no citation of an untracked design or tracker identifier in a shipped file (the tokens are split so this file does not contain them).
+    untracked = ('PF-' 'AMR', 'D12-' 'D13-DESIGN', "design's " 'forge', 'design ' 'cites', 'DESIGN ' '4.5', 'design file is ' 'a historical')
+    for rel in ('scripts/gate-identity.sh', 'scripts/gate/stub_idp.sh', 'scripts/check-identity.py', 'sso/identity.py', 'sso/configure.py', 'sso/configure-dual.py',
+                'sso/preflight.py', 'sso/guides/dual-login.md', 'sso/guides/identity-gate.md', 'sso/guides/identity-foundation.md', 'sso/guides/pingfederate-iam-guide.md',
+                'README.md'):
+        text = (ROOT / rel).read_text()
+        e(not any(token in text for token in untracked), f'{rel}: must not cite a design or tracker identifier that no tracked file carries')
+    # N5: the merge decision is cited where the code takes it (AbstractRequestCmd), not at kcadm's help text (UpdateCmd).
+    for rel in ('sso/identity.py', 'sso/guides/identity-gate.md'):
+        text = ' '.join((ROOT / rel).read_text().split())
+        e('AbstractRequestCmd.java' in text and ':171 and :244' in text and 'UpdateCmd' not in text,
+          f'{rel}: kcadm merge mode must be cited at AbstractRequestCmd.java :171 and :244, not at UpdateCmd.java help text')
+    # N6: identity-foundation.md says where identity up refuses a plan without a stance.
+    foundation = ' '.join((ROOT / 'sso/guides/identity-foundation.md').read_text().split())
+    e('refuses one that states no MFA stance' in foundation and 'step 4 has already refused a plan that states no MFA stance' in foundation,
+      'identity-foundation.md must say that the identity preflight (step 4) refuses a plan without an MFA stance and that step 10 relies on it')
+    e('Before step 1, for `KEYCLOAK_KAFBAT_CLIENT_SECRET` in `runtime.yml` mode and for `PING_KEYCLOAK_CLIENT_SECRET`' in foundation
+      and 'stops it with `Nothing was rotated`' in foundation and 'stops the command with `Nothing was rotated`' in flat,
+      'identity-foundation.md and dual-login.md must say that identity rotate reads the plan before its first change and stops with `Nothing was rotated`')
+    # N7: the withdrawal says what not to do exactly, and the replace semantics are stated as read from source, not observed.
+    e('without regenerating it' in section and 'has not yet been observed on a running Keycloak' in section,
+      'dual-login.md: the withdrawal section must say "without regenerating it" and that the replace semantics are not yet observed on a running Keycloak')
+    e('exercised by the row' not in row and 'not yet observed on a running Keycloak' in row,
+      'identity-gate.md: the P18 row must state the provider-update semantics as read from source and not yet observed on a running Keycloak')
+    # F10: the filter code is at OIDCIdentityProvider.java 490-512, not 479-512.
+    for rel in ('sso/identity.py', 'scripts/gate-identity.sh', 'sso/guides/identity-gate.md', 'sso/guides/dual-login.md'):
+        e('479-512' not in (ROOT / rel).read_text(), f'{rel}: the claim filter is at OIDCIdentityProvider.java 490-512 (479 is the passMaxAge block)')
+    e('MFA stance' in (ROOT / 'README.md').read_text(), 'README.md must mention that the PingFederate site file states the MFA stance')
+    e('mfa_not_asserted' in (ROOT / 'sso/guides/pingfederate-iam-guide.md').read_text(), 'pingfederate-iam-guide.md must ask IAM for the MFA claim or the statement that none is asserted')
+    # F5: P18 must not write the journal line P14 looks for, and P14 must require a NEW line.
+    runner = (ROOT / 'scripts/gate-identity.sh').read_text()
+    p18_block = between(runner, '  # ── P18:', '  ok_if P18 3 P')
+    p14_block = between(runner, '  # ── P14:', '  ok_if P14 3 P')
+    e(p18_block != '' and 'rm -f "$plan"' not in p18_block,
+      'P18 must not remove the plan file: that apply would write the journal line P14 checks and drop the brokered users\' links')
+    counted = p14_block.find("jb=\"$(grep -c ' apply removed identity provider'")
+    e(0 <= counted < p14_block.find('cap "$KRATE" auth apply') and '-gt "${jb:-0}"' in p14_block,
+      "P14's journal term must compare the line count after its own apply with the count taken before it")
+
+    # The row's wiring and the guide's counts (carried over from round 1; the inventory arithmetic is derived from the runner's arrays).
+    e('P18' in runner and re.search(r'^REQUIRED_P3=\(.*\bP18\b.*\)$', runner, re.M) is not None, 'the runner inventory REQUIRED_P3 must carry P18')
+    e(len([line for line in runner.splitlines() if line.startswith('  ok_if P18 3 P')]) == 1, 'the runner must hold exactly one ok_if P18 3 P row')
+    e('IDENTITY_PROVIDER_LOGIN_ERROR' in runner and runner.count('login_probe ping-mfa') == 2,
+      'the P18 row must drive the refusal through the runner login_probe twice (the refused attempt and the sign-in after the withdrawal)')
+    e(row != '', 'identity-gate.md must have a row for the gate row P18')
+    for needle in ('502', 'IDENTITY_PROVIDER_LOGIN_ERROR', 'mfa_not_asserted', 'no realm user', 'identity_provider_login_failure', 'keycloak_login_flow.py:132'):
+        e(needle in row, f'the identity-gate.md P18 row must state {needle!r}')
+    e('enforce-if-asserted' in gate and 'mfa_not_asserted' in gate and 'MFA enforced at Ping only' in gate,
+      'identity-gate.md must state the enforce-if-asserted decision and the opt-out wording')
+    e(re.search(r'`REQUIRED_P3` is P1–P16, P18 and Z3 \(18 ids\)', gate) is not None, 'identity-gate.md must count P18 in REQUIRED_P3 (18 ids)')
+
+    def required(name):
+        found = re.search(r'^REQUIRED_%s=\((.*)\)$' % name, runner, re.M)
+        return found.group(1).split() if found else []
+    sizes = {name: required(name) for name in ('P1', 'P2', 'P3', 'X')}
+    total = sum(len(ids) for ids in sizes.values())
+    static = len([i for i in sizes['P1'] if i.startswith('S')])
+    gate_flat = ' '.join(gate.split())
+    e(f'is {total} ids ({total - 1} where J7 leaves the inventory' in gate_flat
+      and f'`--no-static --no-screenshots` {total - static - 1}, {total - static - 2} without J7' in gate_flat
+      and f'AG1–AG5 add five ({total + 5}, {total + 4}, {total - static + 4}, {total - static + 3})' in gate_flat,
+      f'identity-gate.md must state the --phase 3/all inventory as {total} ids ({total - 1} without J7; {total - static - 1}/{total - static - 2} with --no-static --no-screenshots; '
+      f'{total + 5}/{total + 4}/{total - static + 4}/{total - static + 3} on a bundle host with AG1-AG5)')
+    e('### Deprovisioning a PingFederate user' in dual and 'users disable' in dual and 'users logout' in dual
+      and 'P20' in dual and '8 hours' in dual and '15 minutes' in dual,
+      'dual-login.md must carry the decided deprovisioning contract (two-step, upstream alone ends nothing, the bounds, P20)')
+    e("State the site's MFA stance explicitly, one of the two (enforce-if-asserted):" in dual
+      and 'mfa_claim_name' in dual and 'mfa_claim_value' in dual and 'mfa_not_asserted' in dual,
+      'dual-login.md must document the site-file MFA stance keys and the explicit choice (enforce-if-asserted)')
+    e('"mfa_not_asserted": True' in (ROOT / 'scripts/gate/stub_idp.sh').read_text(),
+      'stub_idp.sh must write the stand-in site file with the explicit mfa_not_asserted stance')
+
 
 def check_health(checks):
     """N4: health names the Compose service of a crash-looping container (RestartCount, Restarting) and survives a vanished one."""
@@ -4756,6 +8576,241 @@ def check_grafana_realm_plan(checks):
         e(identity.client_differs(client, dict(same, **{field: flipped})) is True,
           f'client_differs: a changed {field} is a difference (the client-mode fields take part in the verdict)')
 
+def check_build_certificate_hint(checks):
+    """kafbat-ui/build.py and scripts/collect-sources.py turn a failed certificate verification anywhere in an
+    exception chain into one line that names the cause and the remedy (a Python without a certificate store, e.g.
+    the python.org installer on macOS, or a proxy CA), instead of a traceback; every other failure still raises and
+    the exit codes stay. The collector, which records per-component failures as unresolved, prints the same line
+    after its totals. Found by a wiki walk of `krate package` on 2026-10-17 (CERTIFICATE_VERIFY_FAILED)."""
+    import ast
+    import ssl
+    import threading
+    import types
+    import urllib.error
+    e = checks.expect
+    verify = ssl.SSLCertVerificationError(1, 'certificate verify failed: unable to get local issuer certificate')
+    verify.verify_message = 'unable to get local issuer certificate'
+
+    def explicit():
+        try:
+            raise urllib.error.URLError(verify)
+        except urllib.error.URLError as inner:
+            raise RuntimeError('download failed') from inner
+
+    def implicit():
+        try:
+            raise urllib.error.URLError(verify)
+        except urllib.error.URLError:
+            raise RuntimeError('download failed')  # only __context__ links the cause
+
+    def bare():
+        try:
+            raise verify  # http.client and ssl raise it unwrapped, without a URLError around it
+        except ssl.SSLCertVerificationError:
+            raise RuntimeError('download failed')
+
+    def cyclic():
+        a, b = RuntimeError('a'), RuntimeError('b')
+        a.__cause__, b.__cause__ = b, a
+        raise a
+
+    def exit_three():
+        try:
+            raise urllib.error.URLError(verify)
+        except urllib.error.URLError:
+            raise SystemExit(3)  # an exit of main() whose context happens to be a certificate failure
+
+    for rel, prog in (('kafbat-ui/build.py', 'build.py'), ('scripts/collect-sources.py', 'collect-sources.py')):
+        text = (ROOT / rel).read_text()
+        tree = ast.parse(text)
+        lifted = ('certificate_failure', 'certificate_summary') if prog == 'collect-sources.py' else ('certificate_failure',)
+        wanted: list[ast.stmt] = [node for node in tree.body
+                                  if (isinstance(node, ast.FunctionDef) and node.name in lifted)
+                                  or (isinstance(node, ast.Assign)
+                                      and any(getattr(t, 'id', '') == 'CERTIFICATE_HINT' for t in node.targets))]
+        guard = [node for node in tree.body if isinstance(node, ast.If) and "__name__ == '__main__'" in ast.unparse(node.test)]
+        if not e(len(wanted) == len(lifted) + 1 and len(guard) == 1,
+                 f'{rel}: defines {", ".join(lifted)}, CERTIFICATE_HINT and one __main__ guard at top level'):
+            continue
+        namespace: dict = {'ssl': ssl}
+        exec(compile(ast.Module(body=wanted, type_ignores=[]), rel, 'exec'), namespace)
+        failure, hint = namespace['certificate_failure'], namespace['CERTIFICATE_HINT']
+
+        def bounded(chain):
+            """certificate_failure(chain) in a daemon thread: a walk that a cycle never stops fails here in
+            seconds instead of hanging the whole check."""
+            answer = []
+            worker = threading.Thread(target=lambda: answer.append(failure(chain)), daemon=True)
+            worker.start()
+            worker.join(5)
+            return answer[0] if answer else 'no answer within 5 s'
+
+        for maker, expected in ((explicit, verify), (implicit, verify), (bare, verify), (cyclic, None)):
+            try:
+                maker()
+            except RuntimeError as error:
+                got = bounded(error)
+            else:
+                got = 'no RuntimeError raised'
+            e(got is expected, f'{rel}: certificate_failure on the {maker.__name__} chain gives {got!r}')
+        e(bounded(verify) is verify, f'{rel}: certificate_failure returns the verification error itself')
+        e(failure(urllib.error.URLError('timed out')) is None and failure(ValueError('checksum mismatch')) is None
+          and failure(None) is None, f'{rel}: certificate_failure is None for unrelated errors')
+        message = hint % (prog, 'unable to get local issuer certificate')
+        e(message.startswith(prog + ': ') and 'unable to get local issuer certificate' in message
+          and 'Install Certificates.command' in message and '/etc/ssl/cert.pem' in message
+          and '/etc/ssl/certs/ca-certificates.crt' in message, f'{rel}: the hint names the cause and the remedies; got {message!r}')
+
+        def run_guard(stub_main: 'Callable[[], object]'):
+            """The file's own `if __name__ == '__main__':` block, run against a stub main()."""
+            body = ast.Module(body=guard[0].body, type_ignores=[])
+            scope: dict = {'main': stub_main, 'sys': sys, 'certificate_failure': failure, 'CERTIFICATE_HINT': hint}
+            try:
+                exec(compile(body, rel, 'exec'), scope)
+            except SystemExit as stop:
+                return 'exit', stop.code
+            except BaseException as raised:  # noqa: B036  # the guard must let these through unchanged
+                return 'raised', type(raised).__name__
+            return 'returned', None
+
+        cert = run_guard(explicit)
+        e(cert[0] == 'exit' and isinstance(cert[1], str) and cert[1].startswith(prog + ': ')
+          and 'unable to get local issuer certificate' in cert[1], f'{rel}: a certificate failure exits with the hint; got {cert}')
+        e(run_guard(lambda: (_ for _ in ()).throw(ValueError('x'))) == ('raised', 'ValueError'),
+          f'{rel}: any other failure still raises')
+        e(run_guard(lambda: (_ for _ in ()).throw(KeyboardInterrupt())) == ('raised', 'KeyboardInterrupt'),
+          f'{rel}: Ctrl-C still raises')
+        e(run_guard(exit_three) == ('exit', 3), f'{rel}: an exit of main() keeps its code even with a certificate failure '
+                                                 f'as its context; got {run_guard(exit_three)}')
+        if prog == 'collect-sources.py':
+            e(run_guard(lambda: 2) == ('exit', 2) and run_guard(lambda: 0) == ('exit', 0),
+              f'{rel}: the exit code of main() is kept (2 on unresolved sources)')
+            summary = namespace['certificate_summary']
+            failing = 'Tree API failed: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed>'
+            comps = [types.SimpleNamespace(reason=reason) for reason in (failing, None, 'checksum mismatch', failing)]
+            line = summary(comps)
+            e(summary([types.SimpleNamespace(reason=None), types.SimpleNamespace(reason='HTTP 404')]) is None
+              and isinstance(line, str) and line.startswith('collect-sources.py: ')
+              and 'CERTIFICATE_VERIFY_FAILED in 2 components' in line,
+              f'{rel}: certificate_summary is None without a certificate failure and counts the failed components; got {line!r}')
+            start = text.find("log(f'{args.edition}: {manifest[\"totals\"]}')")
+            tail = text[start:text.find('def certificate_summary')] if start >= 0 else ''
+            printed, returned = tail.find('print(hint, file=sys.stderr'), tail.find('return 2')
+            e('hint = certificate_summary(comps)\n    if hint:\n        print(hint, file=sys.stderr' in tail
+              and 0 <= printed < returned,
+              f'{rel}: the summary prints certificate_summary() on stderr when there is one, before the exit code')
+        else:
+            e(run_guard(lambda: None) == ('returned', None), f'{rel}: a successful build returns normally')
+
+
+def check_monitor_logins(checks):
+    """`krate credentials` and `monitor ui` (monitor_logins) print the Grafana and Perses addresses and sign-ins
+    that work: with Krate sign-in Grafana is at https://<public authority>/grafana/ and both UIs say "Krate sign-in";
+    a company site file keeps "company SSO". Before, monitor_logins printed http://<host>:3000 and "company SSO"
+    in realm mode (a 2026-10-17 wiki review of the credentials output)."""
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        e(cli.count('ok "Grafana:    $(grafana_address)"') == 1, f'{edition}/krate: monitor up must print grafana_address')
+        e('echo "Grafana:  $(grafana_address)"' in function_body(cli, 'monitor_logins'),
+          f'{edition}/krate: monitor_logins must print grafana_address')
+    if bash_binary() is None:
+        return
+    for edition in EDITIONS:
+        script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'env_value', 'env_value_file', 'public_url_host',
+                                             'public_url_authority', 'grafana_address', 'perses_address',
+                                             'monitor_logins') + r"""
+ENV_FILE="$1/.env"; MONITOR_DIR="$1/monitoring"; IDENTITY_REALM=krate
+hostname() { echo build-host.local; }
+monitor_logins | grep -E '^(Grafana|Perses|Sign-in):'
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp)
+            (site / 'monitoring').mkdir()
+            cases = (
+                ({'GRAFANA_AUTH_CONFIG': 'realm.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': 'krate'},
+                 'https://krate.example.com/identity',
+                 ['Grafana:  https://krate.example.com/grafana/',
+                  "Sign-in:  Krate sign-in (realm krate); the user below is Grafana's own login, kept for the rollback on this host",
+                  'Perses:   https://krate.example.com:3443', 'Sign-in:  Krate sign-in (realm krate)']),
+                ({'GRAFANA_AUTH_CONFIG': 'realm.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': 'krate'},
+                 'https://krate.example.com:8443/identity',
+                 ['Grafana:  https://krate.example.com:8443/grafana/',
+                  "Sign-in:  Krate sign-in (realm krate); the user below is Grafana's own login, kept for the rollback on this host",
+                  'Perses:   https://krate.example.com:3443', 'Sign-in:  Krate sign-in (realm krate)']),
+                ({'GRAFANA_AUTH_CONFIG': 'local.ini', 'PERSES_AUTH_MODE': 'local'},
+                 'https://krate.example.com/identity',
+                 ['Grafana:  http://build-host.local:3000', 'Perses:   https://build-host.local:3443']),
+                ({'GRAFANA_AUTH_CONFIG': 'local.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': ''},
+                 'https://krate.example.com/identity',
+                 ['Grafana:  http://build-host.local:3000', 'Perses:   https://build-host.local:3443',
+                  'Sign-in:  company SSO (native mode)']),
+                ({'GRAFANA_AUTH_CONFIG': 'realm.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': 'krate'}, '',
+                 ['Grafana:  http://build-host.local:3000',
+                  "Sign-in:  Krate sign-in (realm krate); the user below is Grafana's own login, kept for the rollback on this host",
+                  'Perses:   https://build-host.local:3443', 'Sign-in:  Krate sign-in (realm krate)']),
+            )
+            for monitor_env, url, expected in cases:
+                write_env(site, {'KEYCLOAK_PUBLIC_URL': url})
+                write_env(site / 'monitoring', dict(monitor_env, GRAFANA_PASSWORD='not-a-secret-in-this-test',
+                                                    PERSES_ADMIN_PASSWORD='not-a-secret-in-this-test'))
+                out = run_bash(script, site)
+                got = out.stdout.strip().splitlines()
+                e(out.returncode == 0 and got == expected,
+                  f'{edition}/krate monitor_logins ({monitor_env}, {url}): expected {expected}; got {out.returncode} {got} {out.stderr.strip()[:120]}')
+            # The two `monitor up` summary lines themselves, run as written.
+            cli = (ROOT / edition / 'krate').read_text()
+            up_lines = [line.strip() for line in cli.splitlines() if line.strip().startswith(('ok "Grafana:', 'ok "Perses:'))]
+            e(len(up_lines) == 2, f'{edition}/krate: monitor up prints exactly one Grafana and one Perses line; got {up_lines}')
+            up_script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'env_value', 'env_value_file', 'public_url_host',
+                                                    'public_url_authority', 'grafana_address', 'perses_address') + (
+                '\nENV_FILE="$1/.env"; MONITOR_DIR="$1/monitoring"\nhostname() { echo build-host.local; }\n' + '\n'.join(up_lines) + '\n')
+            write_env(site, {'KEYCLOAK_PUBLIC_URL': 'https://krate.example.com/identity'})
+            write_env(site / 'monitoring', {'GRAFANA_AUTH_CONFIG': 'realm.ini', 'PERSES_AUTH_MODE': 'native', 'PERSES_IDP': 'krate'})
+            out = run_bash(up_script, site)
+            want = ['  ok Grafana:    https://krate.example.com/grafana/', '  ok Perses:     https://krate.example.com:3443 (native sign-in)']
+            e(out.returncode == 0 and out.stdout.splitlines() == want,
+              f'{edition}/krate monitor up summary (realm): expected {want}; got {out.returncode} {out.stdout.splitlines()} {out.stderr.strip()[:120]}')
+
+
+def check_perses_address(checks):
+    """monitor up and monitor logins print the Perses address that signs in: the public name with the
+    Krate realm (PERSES_IDP=krate), this machine's host name otherwise. Realm mode printed the host
+    name before (a 2026-10-17 walk: `https://<mac>.local:3443`, where the realm client cannot sign in)."""
+    e = checks.expect
+    for edition in EDITIONS:
+        cli = (ROOT / edition / 'krate').read_text()
+        e('echo "Perses:   $(perses_address)"' in function_body(cli, 'monitor_logins'),
+          f'{edition}/krate: monitor_logins must print perses_address')
+        e(cli.count('ok "Perses:     $(perses_address) (') == 1, f'{edition}/krate: monitor up must print perses_address')
+        e(':$(env_value_file "$MONITOR_DIR/.env" PERSES_PORT 3443)' not in cli,
+          f'{edition}/krate: no Perses address may be built outside perses_address')
+    if bash_binary() is None:
+        return
+    for edition in EDITIONS:
+        script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'env_value', 'env_value_file', 'public_url_host',
+                                             'perses_address') + r"""
+ENV_FILE="$1/.env"; MONITOR_DIR="$1/monitoring"
+hostname() { echo build-host.local; }
+perses_address
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            site = Path(tmp)
+            (site / 'monitoring').mkdir()
+            for idp, perses_mode, url, port, expected in (
+                    ('krate', 'native', 'https://Krate.Example.COM/identity', '3443', 'https://krate.example.com:3443'),
+                    ('krate', 'native', 'https://[FD00::5]:8443/identity', '4443', 'https://[fd00::5]:4443'),
+                    ('', 'native', 'https://krate.example.com/identity', '3443', 'https://build-host.local:3443'),
+                    ('', 'local', 'https://krate.example.com/identity', '3443', 'https://build-host.local:3443'),
+                    ('krate', 'native', '', '3443', 'https://build-host.local:3443')):
+                write_env(site, {'KEYCLOAK_PUBLIC_URL': url})
+                write_env(site / 'monitoring', {'PERSES_IDP': idp, 'PERSES_AUTH_MODE': perses_mode, 'PERSES_PORT': port})
+                out = run_bash(script, site)
+                e(out.returncode == 0 and out.stdout.strip() == expected,
+                  f'{edition}/krate perses_address (PERSES_IDP={idp or "empty"}, {perses_mode}, {url or "no public URL"}): expected {expected}; '
+                  f'got {out.returncode} {out.stdout.strip()!r} {out.stderr.strip()[:120]}')
+
+
 def check_perses_clients(checks):
     """Phase 4 commit 8's generators, landed with the Grafana ones because they share groups_mapper,
     checked_origin and env_secret: the two Perses realm clients."""
@@ -4788,6 +8843,81 @@ def check_perses_clients(checks):
       'client_differs: the perses-sync readback with Keycloak additions and a masked secret is not a difference')
     e(identity.client_differs(guard, dict(sync_readback, serviceAccountsEnabled=False)) is True,
       'client_differs: turning off the perses-sync service account is a difference')
+
+
+def check_perses_sync_scopes(checks):
+    """The repeated `krate-perses-sync: its scopes differ from the plan` warning: Keycloak 26.1.0+
+    assigns the realm scope `service_account` to every client with serviceAccountsEnabled
+    (ClientManager.enableServiceAccount, tag 26.8.0), so the readback of the sync client carries a
+    scope the plan did not list and the second `krate monitor up` (the first one creates the
+    clients and compares nothing) and every later one reported drift nobody made. The plan states
+    the scope for the service-account client; a real drift is still reported."""
+    e = checks.expect
+    origin, port = 'https://krate.example.test', '3443'
+    scope = identity.SERVICE_ACCOUNT_SCOPE
+    e(scope == 'service_account', f'identity.SERVICE_ACCOUNT_SCOPE must be Keycloak\'s realm scope name; got {scope!r}')
+
+    def verdict(name, current):
+        """The two verdict lines `identity.py perses-clients client-differs` prints, as the CLI reads them."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            identity.client_verdict(identity.perses_rep(name, origin, port), current)
+        return buffer.getvalue().split()
+
+    def readback(plan, default, optional=()):
+        """The shape Keycloak's GET clients/<id> returns: the plan, Keycloak's own additions, the
+        secret masked, the scope lists in an order of Keycloak's choosing (not the plan's)."""
+        return dict(plan, id='3f1c7a52-0b6d-4c1e-9d2a-5e8b4a7c6d10', surrogateAuthRequired=False, bearerOnly=False,
+                    consentRequired=False, alwaysDisplayInConsole=False, fullScopeAllowed=True,
+                    nodeReRegistrationTimeout=-1, access={'view': True, 'configure': True, 'manage': True},
+                    secret=identity.KEYCLOAK_SECRET_MASK, defaultClientScopes=list(default),
+                    optionalClientScopes=list(optional))
+
+    sync = identity.perses_rep('krate-perses-sync', origin, port)
+    main_client = identity.perses_rep('krate-perses', origin, port)
+    e(sync['serviceAccountsEnabled'] is True and scope in sync['defaultClientScopes']
+      and sync['defaultClientScopes'].count(scope) == 1
+      and sorted(sync['defaultClientScopes']) == sorted(identity.DEFAULT_SCOPES + [scope]),
+      f'the krate-perses-sync plan must list the scopes of the krate-perses client and {scope} once; got {sync["defaultClientScopes"]}')
+    e(identity.DEFAULT_SCOPES == ['profile', 'email', 'roles', 'web-origins', 'basic'],
+      'identity.DEFAULT_SCOPES is shared by every client plan: the service-account scope is added to the sync plan only')
+    e(main_client['serviceAccountsEnabled'] is False and scope not in main_client['defaultClientScopes'],
+      f'the krate-perses client has no service account, so Keycloak gives it no {scope} scope and its plan must not list it')
+    e(identity.perses_rep('krate-perses-sync', origin, port, False)['defaultClientScopes']
+      == identity.perses_rep('krate-perses-sync', origin, port)['defaultClientScopes'],
+      'the sync plan scopes must not depend on the secret flag')
+    # Every client plan the CLI compares (the verdict is reached from cmd_grafana_client and
+    # cmd_perses_clients only) must state what Keycloak does for it.
+    for plan in identity.perses_clients(origin, port) + [identity.grafana_client(origin)]:
+        has_scope = scope in plan['defaultClientScopes']
+        e(has_scope == bool(plan['serviceAccountsEnabled']),
+          f'{plan["clientId"]}: its plan lists {scope} exactly when serviceAccountsEnabled is true; got '
+          f'serviceAccountsEnabled={plan["serviceAccountsEnabled"]} scopes={plan["defaultClientScopes"]}')
+
+    # Keycloak's readback of the sync client right after Krate created it: the plan's scopes plus
+    # service_account, in an order of Keycloak's own.
+    live_order = [scope, 'web-origins', 'roles', 'basic', 'profile', 'email']
+    got = verdict('krate-perses-sync', readback(sync, live_order))
+    e(got == ['same'], f'the sync client as Keycloak reads it back (the plan plus {scope}) must compare as same; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, reversed(live_order)))
+    e(got == ['same'], f'the scope order of the readback must not matter; got {got}')
+    # Real drift is still reported.
+    without = [item for item in live_order if item != scope]
+    got = verdict('krate-perses-sync', readback(sync, without))
+    e(got == ['same', 'scopes-differ'], f'a sync client without {scope} is a real drift to report; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, live_order + ['offline_access']))
+    e(got == ['same', 'scopes-differ'], f'a sync client with an extra default scope is a real drift to report; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, live_order + ['phone']))
+    e(got == ['same', 'scopes-differ'], f'a sync client with an extra unrelated scope is a real drift to report; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, without, optional=[scope]))
+    e(got == ['same', 'scopes-differ'], f'{scope} as an optional scope instead of a default one is a real drift to report; got {got}')
+    got = verdict('krate-perses-sync', readback(sync, live_order, optional=['offline_access']))
+    e(got == ['same', 'scopes-differ'], f'an extra optional scope on the sync client is a real drift to report; got {got}')
+    # The client without a service account: Keycloak adds nothing, so the scope appearing is drift.
+    got = verdict('krate-perses', readback(main_client, list(identity.DEFAULT_SCOPES)))
+    e(got == ['same'], f'the krate-perses readback with the plan scopes must compare as same; got {got}')
+    got = verdict('krate-perses', readback(main_client, list(identity.DEFAULT_SCOPES) + [scope]))
+    e(got == ['same', 'scopes-differ'], f'{scope} on a client without a service account is a real drift to report; got {got}')
 
 
 def load_grafana_admin():
@@ -4965,6 +9095,18 @@ def check_render_writes(checks):
     })
     e(ipv6_site['public_url'] == 'https://[2001:db8::10]:3443',
       f'realm Perses origin must retain IPv6 brackets; got {ipv6_site["public_url"]}')
+    # Realm mode is Krate's own sign-in: the Perses button says what Grafana's says, while a
+    # company site file keeps its own name or the "Company sign-in" default.
+    e(ipv6_site.get('display_name') == identity.GRAFANA_SIGNIN_NAME,
+      f'realm Perses provider must be named {identity.GRAFANA_SIGNIN_NAME!r}; got {ipv6_site.get("display_name")!r}')
+    realm_conf = mod.perses_config('native', ipv6_site)
+    e('name: "%s"' % identity.GRAFANA_SIGNIN_NAME in realm_conf,
+      'the rendered realm Perses config must name its provider "%s"' % identity.GRAFANA_SIGNIN_NAME)
+    site_conf = mod.perses_config('native', {k: v for k, v in ipv6_site.items() if k != 'display_name'})
+    e('name: "Company sign-in"' in site_conf,
+      'a Perses site without display_name must keep the "Company sign-in" default')
+    named_conf = mod.perses_config('native', dict(ipv6_site, display_name='Acme sign-in'))
+    e('name: "Acme sign-in"' in named_conf, 'a Perses site file keeps its own display_name')
 
     chmods, chowns, opens = [], [], []
     real_chmod, real_chown, real_open = os.chmod, os.chown, os.open
@@ -5203,20 +9345,620 @@ def check_airgap_rows(checks):
     e('AG1 AG2 AG3 AG4 AG5' in '\n'.join(runner), 'required_ids must hold AG1-AG5 for a bundle host')
 
 
+def check_grafana_sessions_cli(checks):
+    """Deterministic shipped session decisions; installed logout/browser proof is separate."""
+    import os
+    import signal
+
+    bash = bash_binary()
+    if not checks.expect(bash is not None, 'Grafana sessions regressions require Bash 4.4 or newer on PATH'):
+        return
+    # Exact reviewed adapter, self-contained at runtime; no ignored harness import.
+    program = (
+        '"""Focused shipped Grafana session helpers, with no Docker/network/VM calls.\n'
+        '\n'
+        'The controller runs one bounded worker. The worker imports the supplied complete\n'
+        'admin module and extracts complete functions from each supplied CLI. Stand-ins\n'
+        'supply API and Docker/Compose boundaries, not replacement decision algorithms.\n'
+        'Run only after per-file static prerequisites and root admission.\n'
+        '"""\n'
+        'import argparse\n'
+        'import contextlib\n'
+        'import copy\n'
+        'import hashlib\n'
+        'import importlib.util\n'
+        'import io\n'
+        'import json\n'
+        'import os\n'
+        'from pathlib import Path\n'
+        'import re\n'
+        'import subprocess\n'
+        'import sys\n'
+        'import tempfile\n'
+        'import time\n'
+        'from types import SimpleNamespace\n'
+        'from typing import Any, Optional\n'
+        '\n'
+        'PURPOSE = Path(__file__).resolve().parent\n'
+        "CLI_NAMES = ('env_value', 'env_value_file', 'replace_env_file', 'set_env_file_value',\n"
+        "             'monitor_grafana_auth_running', 'monitor_grafana_class',\n"
+        "             'monitor_grafana_holders', 'monitor_grafana_session_plan',\n"
+        "             'monitor_grafana_record_holders', 'monitor_grafana_end_sessions', 'cmd_monitor')\n"
+        "OWN_ID = 'a' * 64\n"
+        "OTHER_ID = 'b' * 64\n"
+        "STUBS = r'''\n"
+        'set -euo pipefail\n'
+        'MONITOR_DIR="$1/monitoring"; ENV_FILE="$1/.env"; KRATE_VARIANT="$2"; IDENTITY_REALM=krate\n'
+        'STATE="$1/grafana.state"; LOG="$1/calls.log"; ADAPTER_ERROR="$1/adapter.error"\n'
+        'export LOG\n'
+        'info() { printf \'info %s\\n\' "$*"; }\n'
+        'ok() { printf \'ok %s\\n\' "$*"; }\n'
+        'warn() { printf \'%s\\n\' "$*" >&2; }\n'
+        'die() { printf \'%s\\n\' "$*" >&2; exit 1; }\n'
+        'require_compose() { :; }; require_compose_file() { :; }; require_env() { :; }\n'
+        'adopt_legacy_project() { echo prepare >> "$LOG"; }\n'
+        'ensure_cert() { :; }; monitor_prepare() { :; }; monitor_realm_refresh() { :; }\n'
+        'identity_reconcile_perses_clients() { :; }; monitor_port_conflicts() { :; }; note_smtp() { :; }\n'
+        'grafana_address() { echo http://grafana.example.test/; }; perses_address() { echo https://perses.example.test/; }\n'
+        'monitor_network() { [[ "$FAKE_CLUSTER" == up ]] && echo owned_net; }\n'
+        'mktemp() {\n'
+        '  echo record-temp >> "$LOG"\n'
+        '  [[ "$FAKE_RECORD" != fail ]] || return 7\n'
+        '  if [[ "$FAKE_RECORD" == second && "$(grep -c \'^record-temp$\' "$LOG")" == 2 ]]; then return 7; fi\n'
+        '  command mktemp "$@"\n'
+        '}\n'
+        'adapter_fault() { printf \'%s\\n\' UNEXPECTED_ADAPTER_COMMAND >> "$ADAPTER_ERROR"; return 97; }\n'
+        'monitor_compose() {\n'
+        '  printf \'compose %s\\n\' "$*" >> "$LOG"\n'
+        '  case "$1" in\n'
+        '    rm) [[ "$FAKE_COMPOSE" != rm-fail ]] || return 7 ;;\n'
+        '    up)\n'
+        '      [[ "$FAKE_COMPOSE" != fail-before ]] || return 7\n'
+        '      env_value_file "$MONITOR_DIR/.env" GRAFANA_AUTH_CONFIG local.ini > "$STATE"\n'
+        '      [[ "$FAKE_COMPOSE" != fail-after ]] || return 7 ;;\n'
+        '    down)\n'
+        '      [[ "$FAKE_COMPOSE" != down-fail ]] || return 7\n'
+        '      echo absent > "$STATE" ;;\n'
+        '    *) adapter_fault; return 97 ;;\n'
+        '  esac\n'
+        '}\n'
+        'grafana_admin() {\n'
+        '  printf \'admin %s\\n\' "$*" >> "$LOG"\n'
+        '  [[ "$(cat "$STATE")" != absent && "$(cat "$STATE")" != realm.ini && "$FAKE_BASIC" != fail ]] \\\n'
+        "    || { echo 'grafana-admin: end-sessions: HTTP 401 for GET /api/user' >&2; return 1; }\n"
+        '  [[ "$FAKE_BASIC" != malformed ]] || { echo \'{}\'; return 0; }\n'
+        '  echo \'{"scope":"synthetic","users_in_scope":4,"users_ended":3,"sessions_ended":5}\'\n'
+        '}\n'
+        'docker() {\n'
+        '  # Command responses model selected manual outputs; the decision remains in the shipped function.\n'
+        '  if [[ "$1 $2" == \'container ls\' ]]; then\n'
+        '    printf \'inventory %s\\n\' "$*" >> "$LOG"\n'
+        '    [[ "$*" == *\'--all --no-trunc --filter name=krate-\'* && "$*" == *"--format {{.ID}} {{.Names}}" ]] || { adapter_fault; return 97; }\n'
+        '    case "$FAKE_INVENTORY" in\n'
+        '      fail) printf \'%s %s\\n\' "$OWN_ID" "krate-${KRATE_VARIANT}-monitoring-grafana"; return 7 ;;\n'
+        '      malformed) echo invalid-row ;;\n'
+        '      short-id) echo "abc krate-${KRATE_VARIANT}-monitoring-grafana" ;;\n'
+        '      duplicate) printf \'%s %s\\n\' "$OWN_ID" "krate-${KRATE_VARIANT}-monitoring-grafana" "$OTHER_ID" "krate-${KRATE_VARIANT}-monitoring-grafana" ;;\n'
+        '      neighbour) printf \'%s %s\\n\' "$OTHER_ID" "krate-${KRATE_VARIANT}-monitoring-grafana-old" ;;\n'
+        '      normal)\n'
+        '        if [[ "$(cat "$STATE")" != absent ]]; then\n'
+        '          printf \'%s %s\\n\' "$OTHER_ID" "krate-${KRATE_VARIANT}-monitoring-grafana-old" "$OWN_ID" "krate-${KRATE_VARIANT}-monitoring-grafana"\n'
+        '        fi ;;\n'
+        '      *) adapter_fault; return 97 ;;\n'
+        '    esac\n'
+        '    return 0\n'
+        '  fi\n'
+        '  [[ "$1 $2" == \'container inspect\' && "$3" == -f ]] || { adapter_fault; return 97; }\n'
+        '  local template="$4" selected="${5:-}" running\n'
+        '  printf \'inspect %s\\n\' "$selected" >> "$LOG"\n'
+        '  running="$(cat "$STATE")"\n'
+        '  if [[ "$template" == *\'.State.Status\'* ]]; then\n'
+        '    [[ "$selected" == "$OWN_ID" ]] || { adapter_fault; return 97; }\n'
+        '    if [[ -n "$FAKE_SELECTED" ]]; then printf \'%s\\n\' "$FAKE_SELECTED"\n'
+        '    else printf \'%s\\nGF_PATHS_CONFIG=/etc/krate/auth/%s\\n\' "$FAKE_STATE" "$running"; fi\n'
+        '    [[ "$FAKE_INSPECT" == ok ]] || return 7\n'
+        '    return 0\n'
+        '  fi\n'
+        '  # Historical cd50 uses name + path-only inspect. Keep its real old contract reachable.\n'
+        '  [[ "$selected" == "krate-${KRATE_VARIANT}-monitoring-grafana" ]] || { adapter_fault; return 97; }\n'
+        '  [[ "$running" != absent && "$FAKE_INSPECT" == ok ]] || return 7\n'
+        '  printf \'/etc/krate/auth/%s\\n\' "$running"\n'
+        '}\n'
+        "'''\n"
+        '\n'
+        '\n'
+        'def digest(raw):\n'
+        '    return hashlib.sha256(raw).hexdigest()\n'
+        '\n'
+        '\n'
+        'def complete_function(text, name):\n'
+        "    found = list(re.finditer(r'^' + re.escape(name) + r'\\(\\) \\{\\n.*?^\\}\\n', text, re.M | re.S))\n"
+        '    if len(found) != 1:\n'
+        "        raise ValueError('expected exactly one complete ' + name)\n"
+        "    return found[0].group(), text[:found[0].start()].count('\\n') + 1\n"
+        '\n'
+        '\n'
+        'def result_row(label, source, raw, assertions, **observed):\n'
+        '    return dict(condition=label, source=str(source), source_sha256=digest(raw),\n'
+        "                assertions=[{'assertion': name, 'passed': bool(ok)} for name, ok in assertions],\n"
+        '                failed_assertions=sum(not ok for _, ok in assertions), **observed)\n'
+        '\n'
+        '\n'
+        'def json_document(text):\n'
+        '    try:\n'
+        '        return json.loads(text)\n'
+        '    except ValueError:\n'
+        '        return None\n'
+        '\n'
+        '\n'
+        'def population():\n'
+        "    users = [{'id': 1, 'login': 'synthetic-admin', 'authLabels': []},\n"
+        "             {'id': 2, 'login': 'synthetic-local', 'authLabels': []},\n"
+        "             {'id': 3, 'login': 'synthetic-external', 'authLabels': ['OAuth']},\n"
+        "             {'id': 4, 'login': 'synthetic-service', 'isServiceAccount': True},\n"
+        "             {'id': 5, 'login': 'synthetic-unused', 'authLabels': []},\n"
+        "             {'id': 6, 'login': 'synthetic-disabled-external', 'authLabels': ['OAuth'], 'isDisabled': True},\n"
+        "             {'id': 7, 'login': 'synthetic-no-sessions', 'authLabels': []}]\n"
+        '    tokens = {1: [11, 12], 2: [21], 3: [31, 32], 4: [41], 6: [61]}\n'
+        '    return users, tokens\n'
+        '\n'
+        '\n'
+        'def admin_rows(path, raw):\n'
+        "    spec = importlib.util.spec_from_file_location('focused_grafana_admin', str(path))\n"
+        '    if spec is None or spec.loader is None:\n'
+        "        raise ValueError('admin module loader unavailable')\n"
+        '    admin = importlib.util.module_from_spec(spec)\n'
+        '    spec.loader.exec_module(admin)\n'
+        '    rows = []\n'
+        '\n'
+        '    class SessionApi:\n'
+        '        def __init__(self, users=None, tokens=None, own_id=1, keep=False, gone=(), health=0, fail_path=None):\n'
+        '            defaults, default_tokens = population()\n'
+        '            self.users = copy.deepcopy(defaults if users is None else users)\n'
+        '            self.tokens = copy.deepcopy(default_tokens if tokens is None else tokens)\n'
+        '            self.own_id, self.keep, self.gone = own_id, keep, set(gone)\n'
+        '            self.health, self.fail_path, self.calls = health, fail_path, []\n'
+        '\n'
+        '        def request(self, method, endpoint, body=None):\n'
+        '            self.calls.append((method, endpoint, body))\n'
+        '            if endpoint == self.fail_path:\n'
+        "                raise admin.HttpFailure(403, method, endpoint, 'synthetic-private-response')\n"
+        "            if (method, endpoint) == ('GET', '/api/health'):\n"
+        '                if self.health:\n'
+        '                    self.health -= 1\n'
+        '                    if self.health % 2:\n'
+        "                        raise admin.HttpFailure(503, method, endpoint, 'synthetic-starting')\n"
+        "                    raise admin.OperationError('synthetic-connection-refused')\n"
+        "                return 200, {'database': 'ok'}\n"
+        "            if (method, endpoint) == ('GET', '/api/user'):\n"
+        "                return 200, {'id': self.own_id}\n"
+        "            match = re.fullmatch(r'/api/users\\?perpage=(\\d+)&page=(\\d+)', endpoint)\n"
+        "            if method == 'GET' and match:\n"
+        '                size, page = map(int, match.groups())\n'
+        '                return 200, self.users[(page - 1) * size:page * size]\n'
+        "            match = re.fullmatch(r'/api/users/(\\d+)', endpoint)\n"
+        "            if method == 'GET' and match:\n"
+        "                user = next(item for item in self.users if item['id'] == int(match.group(1)))\n"
+        "                return 200, user.get('profile', {'id': user['id'], 'isExternal': bool(user.get('authLabels'))})\n"
+        "            match = re.fullmatch(r'/api/admin/users/(\\d+)/(auth-tokens|logout|revoke-auth-token)', endpoint)\n"
+        '            if match:\n'
+        '                uid, action = int(match.group(1)), match.group(2)\n'
+        "                if method == 'GET' and action == 'auth-tokens':\n"
+        "                    return 200, [{'id': item} for item in self.tokens.get(uid, [])]\n"
+        "                if method == 'POST' and action == 'logout':\n"
+        '                    if uid == self.own_id:\n'
+        "                        raise admin.HttpFailure(400, method, endpoint, 'synthetic-self-logout-refused')\n"
+        '                    if not self.keep:\n'
+        '                        self.tokens[uid] = []\n'
+        "                    return 200, {'message': 'User logged out'}\n"
+        "                if method == 'POST' and action == 'revoke-auth-token':\n"
+        "                    if not isinstance(body, dict) or body.get('authTokenId') not in self.tokens.get(uid, []):\n"
+        "                        raise ValueError('adapter received an invalid revoke request')\n"
+        "                    token = body['authTokenId']\n"
+        '                    self.tokens[uid].remove(token)\n'
+        '                    if token in self.gone:\n'
+        "                        raise admin.HttpFailure(404, method, endpoint, 'synthetic-already-gone')\n"
+        "                    return 200, {'message': 'User auth token revoked'}\n"
+        "            raise ValueError('adapter received an unexpected API request')\n"
+        '\n'
+        "    def invoke(label: str, api: SessionApi, scope='all', wait=0, expected_error: Optional[str] = None,\n"
+        '               verify: Any = None, via_main=False):\n'
+        '        output, error_output = io.StringIO(), io.StringIO()\n'
+        '        domain_error, exit_code = None, 0\n'
+        '        saved_config, saved_api = admin.resolve_config, admin.Api\n'
+        '        try:\n'
+        '            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error_output):\n'
+        '                if via_main:\n'
+        "                    setattr(admin, 'resolve_config', lambda operation: ('http://synthetic.example.test', 'synthetic', None))\n"
+        "                    setattr(admin, 'Api', lambda *unused: api)\n"
+        '                    try:\n'
+        "                        exit_code = admin.main(['end-sessions', '--scope', scope, '--wait-seconds', str(wait)])\n"
+        '                    except SystemExit as exc:\n'
+        '                        exit_code = exc.code if isinstance(exc.code, int) else 2\n'
+        '                else:\n'
+        '                    try:\n'
+        '                        admin.cmd_end_sessions(api, scope, wait)\n'
+        '                    except (admin.OperationError, admin.HttpFailure) as exc:\n'
+        '                        domain_error = type(exc).__name__\n'
+        '        finally:\n'
+        "            setattr(admin, 'resolve_config', saved_config)\n"
+        "            setattr(admin, 'Api', saved_api)\n"
+        "        checks = [('expected domain refusal', domain_error == expected_error)]\n"
+        '        if expected_error:\n'
+        "            checks.append(('refusal emits no success document', output.getvalue() == ''))\n"
+        '        if verify:\n'
+        '            checks.extend(verify(api, output.getvalue(), error_output.getvalue(), exit_code))\n'
+        '        rows.append(result_row(label, path, raw, checks, stdout=output.getvalue(), stderr=error_output.getvalue(),\n'
+        '                               domain_error=domain_error, exit_code=exit_code, calls=api.calls, remaining_tokens=api.tokens))\n'
+        '\n'
+        '    def all_verify(api: SessionApi, out: str, _err: str, _rc: int):\n'
+        '        payload = json_document(out)\n'
+        "        posts = [(endpoint, body) for method, endpoint, body in api.calls if method == 'POST']\n"
+        "        expected = [('/api/admin/users/1/revoke-auth-token', {'authTokenId': 11}),\n"
+        "                    ('/api/admin/users/1/revoke-auth-token', {'authTokenId': 12}),\n"
+        "                    ('/api/admin/users/2/logout', None), ('/api/admin/users/3/logout', None),\n"
+        "                    ('/api/admin/users/6/logout', None)]\n"
+        "        return [('all humans counted', payload == {'scope': 'all', 'users_in_scope': 6, 'users_ended': 4, 'sessions_ended': 6}),\n"
+        "                ('self admin individually revoked; others logged out', sorted(posts, key=str) == sorted(expected, key=str)),\n"
+        "                ('service account never read or changed', not any('/users/4/' in c[1] for c in api.calls) and api.tokens[4] == [41]),\n"
+        "                ('all scope has no profile dependency', not any(re.fullmatch(r'/api/users/\\d+', c[1]) for c in api.calls)),\n"
+        "                ('all human sessions empty', all(not ids for uid, ids in api.tokens.items() if uid != 4)),\n"
+        "                ('no user names in output', 'synthetic-' not in out)]\n"
+        '\n'
+        "    invoke('all-humans-admin-and-service-account', SessionApi(), verify=all_verify)\n"
+        "    invoke('self-token-already-gone-404', SessionApi(gone=[11]), verify=all_verify)\n"
+        "    invoke('external-users-including-disabled-preserve-local', SessionApi(), scope='external', verify=lambda api, out, _err, _rc: [\n"
+        "        ('external counts', json_document(out) == {'scope': 'external', 'users_in_scope': 2, 'users_ended': 2, 'sessions_ended': 3}),\n"
+        "        ('only external users logged out', [c[1] for c in api.calls if c[0] == 'POST'] == ['/api/admin/users/3/logout', '/api/admin/users/6/logout']),\n"
+        "        ('local and service sessions preserved', api.tokens[1] == [11, 12] and api.tokens[2] == [21] and api.tokens[4] == [41]),\n"
+        "        ('external sessions empty', api.tokens[3] == [] and api.tokens[6] == [])])\n"
+        "    invoke('no-user-identity-uses-logout', SessionApi(own_id=0), verify=lambda api, _out, _err, _rc: [\n"
+        "        ('all users use logout when caller is no user', ('POST', '/api/admin/users/1/logout', None) in api.calls\n"
+        "         and not any('revoke-auth-token' in c[1] for c in api.calls))])\n"
+        "    invoke('revocation-postcheck-refuses-retained-session', SessionApi(keep=True), expected_error='OperationError', verify=lambda api, _out, _err, _rc: [\n"
+        "        ('positive retained session discriminates postcheck', api.tokens[2] == [21])])\n"
+        '    for label, labels, profile in [\n'
+        "        ('missing-labels', 'MISSING', {'isExternal': True}),\n"
+        "        ('null-labels', None, {'isExternal': True}),\n"
+        "        ('string-labels', 'OAuth', {'isExternal': True}),\n"
+        "        ('nonstring-label', [1], {'isExternal': True}),\n"
+        "        ('blank-label', [' '], {'isExternal': True}),\n"
+        "        ('missing-profile-flag', ['OAuth'], {}),\n"
+        "        ('nonboolean-profile-flag', ['OAuth'], {'isExternal': 'true'}),\n"
+        "        ('profile-not-object', ['OAuth'], []),\n"
+        "        ('external-labels-false-profile', ['OAuth'], {'isExternal': False}),\n"
+        "        ('empty-labels-true-profile', [], {'isExternal': True}),\n"
+        '    ]:\n'
+        "        user = {'id': 2, 'login': 'synthetic-metadata-user', 'profile': profile}\n"
+        "        if labels != 'MISSING':\n"
+        "            user['authLabels'] = labels\n"
+        "        invoke('metadata-' + label, SessionApi([user], {2: [21]}), scope='external', expected_error='OperationError',\n"
+        "               verify=lambda api, _out, _err, _rc: [('unknown metadata never revokes or silently skips',\n"
+        "                   api.tokens[2] == [21] and not any(c[0] == 'POST' for c in api.calls))])\n"
+        '    clock = [0.0]\n'
+        '    original_time = admin.time\n'
+        "    setattr(admin, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))\n"
+        '    try:\n'
+        "        invoke('health-startup-polls-then-revokes', SessionApi(health=2), wait=30, verify=lambda api, _out, _err, _rc: [\n"
+        "            ('health precedes user access', [c[1] for c in api.calls[:4]] == ['/api/health'] * 3 + ['/api/user'])])\n"
+        "        invoke('health-timeout-never-mutates', SessionApi(health=100), wait=6, expected_error='OperationError', verify=lambda api, _out, _err, _rc: [\n"
+        "            ('timeout before all user reads and writes', all(c[1] == '/api/health' for c in api.calls))])\n"
+        '    finally:\n'
+        "        setattr(admin, 'time', original_time)\n"
+        "    invoke('actual-cli-main-success', SessionApi(), via_main=True, verify=lambda api, out, err, rc: all_verify(api, out, err, rc) + [('CLI success exit', rc == 0 and err == '')])\n"
+        "    invoke('actual-cli-main-refused-user-list', SessionApi(fail_path='/api/users?perpage=1000&page=1'), via_main=True,\n"
+        "           verify=lambda _api, out, err, rc: [('CLI sanitized failure', rc == 1 and out == '' and err == 'grafana-admin: end-sessions: HTTP 403 for GET /api/users?perpage=1000&page=1\\n')])\n"
+        "    for argv in [['end-sessions', '--scope', 'nobody'], ['end-sessions', '--scope', 'all', '--wait-seconds', '-1']]:\n"
+        '        stderr = io.StringIO()\n'
+        '        code = None\n'
+        '        with contextlib.redirect_stderr(stderr):\n'
+        '            try:\n'
+        '                admin.build_parser().parse_args(argv)\n'
+        '            except SystemExit as exc:\n'
+        '                code = exc.code\n'
+        "        rows.append(result_row('parser-' + argv[-1], path, raw, [('invalid arguments refused before API', code == 2)], exit_code=code))\n"
+        '    return rows\n'
+        '\n'
+        '\n'
+        'def cli_rows(path, raw):\n'
+        '    text = raw.decode()\n'
+        '    functions = [complete_function(text, name)[0] for name in CLI_NAMES]\n'
+        "    program = '\\n'.join(functions) + '\\n' + STUBS\n"
+        '    rows = []\n'
+        "    edition = 'epc' if 'epc' in str(path) else 'kraft'\n"
+        '\n'
+        "    def run_context_case(label, target='realm.ini', record='local', running='local.ini', steps=None, direct=None, context='conditional', **faults):\n"
+        "        with tempfile.TemporaryDirectory(prefix='focused-sessions-', dir=PURPOSE) as tmp:\n"
+        '            site = Path(tmp)\n'
+        "            (site / 'monitoring').mkdir()\n"
+        "            (site / '.env').write_text('KEYCLOAK_PUBLIC_URL=https://synthetic.example.test/identity\\n')\n"
+        "            (site / 'monitoring' / '.env').write_text('GRAFANA_AUTH_CONFIG=' + target + '\\nGRAFANA_AUTH_APPLIED=' + record + '\\nPERSES_AUTH_MODE=local\\n')\n"
+        '            (site / \'monitoring\' / \'seed-alerting.py\').write_text(\'import os\\nwith open(os.environ["LOG"], "a") as handle: handle.write("seed\\\\n")\\n\')\n'
+        "            state = site / 'grafana.state'\n"
+        "            state.write_text(running + '\\n')\n"
+        "            log = site / 'calls.log'\n"
+        '            for number, step in enumerate(steps or [{}], 1):\n'
+        "                log.write_text('')\n"
+        "                env = dict(PATH=str(Path(sys.executable).parent) + os.pathsep + os.defpath, LANG='C', LC_ALL='C',\n"
+        "                           FAKE_INVENTORY='normal', FAKE_INSPECT='ok', FAKE_STATE='running', FAKE_SELECTED='',\n"
+        "                           FAKE_COMPOSE='ok', FAKE_BASIC='ok', FAKE_CLUSTER='up', FAKE_RECORD='ok', OWN_ID=OWN_ID, OTHER_ID=OTHER_ID)\n"
+        '                env.update({key: str(value) for key, value in faults.items()})\n'
+        "                env.update({key: str(value) for key, value in step.get('faults', {}).items()})\n"
+        "                if 'target' in step:\n"
+        "                    content = (site / 'monitoring' / '.env').read_text()\n"
+        "                    content = re.sub(r'^GRAFANA_AUTH_CONFIG=.*$', 'GRAFANA_AUTH_CONFIG=' + step['target'], content, flags=re.M)\n"
+        "                    (site / 'monitoring' / '.env').write_text(content)\n"
+        "                call = direct or ('cmd_monitor ' + step.get('verb', 'up'))\n"
+        '                # Compare the normal CLI context with conditional-errexit suppression.\n'
+        '                tail = (\'\\nif \' + call + \'; then outcome=0; else outcome=$?; fi\\nexit "$outcome"\\n\'\n'
+        "                        if context == 'conditional' else '\\n' + call + '\\n')\n"
+        '                started = time.monotonic()\n'
+        "                child = subprocess.run(['/bin/bash', '-c', program + tail, 'focused-sessions', str(site), edition],\n"
+        '                                       text=True, capture_output=True, env=env, timeout=5, check=False)\n'
+        "                if (site / 'adapter.error').exists() or child.returncode in (2, 97, 126, 127) or child.returncode < 0 or re.search(\n"
+        "                        r'command not found|unbound variable|syntax error|bad substitution', child.stderr):\n"
+        "                    raise ValueError('adapter shell/protocol failure')\n"
+        '                calls = log.read_text().splitlines()\n'
+        "                recorded = next((line.partition('=')[2] for line in (site / 'monitoring' / '.env').read_text().splitlines()\n"
+        "                                 if line.startswith('GRAFANA_AUTH_APPLIED=')), '')\n"
+        "                checks = [('exact expected product exit', child.returncode == step.get('rc', 0))]\n"
+        '                if direct:\n'
+        "                    checks.append(('exact discovery stdout', child.stdout == step.get('stdout', 'realm.ini\\n')))\n"
+        "                    if step.get('no_inspect'):\n"
+        "                        checks.append(('absence does not inspect', not any(c.startswith('inspect ') for c in calls)))\n"
+        '                else:\n'
+        "                    ended = [c for c in calls if c.startswith('admin ')]\n"
+        "                    expected_scope = step.get('ended')\n"
+        "                    expected_ended = [] if expected_scope is None else ['admin end-sessions --scope %s --wait-seconds %s' %\n"
+        "                                      (expected_scope, 30 if expected_scope == 'all' else 120)]\n"
+        "                    checks.extend([('exact revocation scope/count', ended == expected_ended),\n"
+        "                                   ('Compose up attempted as expected', ('compose up -d' in calls) == step.get('up', True)),\n"
+        "                                   ('owed record retained/narrowed as expected', recorded == step.get('record', 'realm'))])\n"
+        "                    if 'state' in step:\n"
+        "                        checks.append(('container sign-in state as expected', state.read_text().strip() == step['state']))\n"
+        "                    if 'seed' in step:\n"
+        "                        checks.append(('seed only after completed transition', ('seed' in calls) == step['seed']))\n"
+        "                    if 'rm' in step:\n"
+        "                        checks.append(('removal attempted as expected', any(c.startswith('compose rm ') for c in calls) == step['rm']))\n"
+        "                    if step.get('no_prepare'):\n"
+        "                        checks.append(('UNKNOWN before preparation and mutation', not any(c == 'prepare' or c.startswith(('compose ', 'admin ')) for c in calls)))\n"
+        "                    if expected_scope and ended and 'compose up -d' in calls:\n"
+        "                        checks.append(('revocation before/after startup', (calls.index(ended[0]) < calls.index('compose up -d')) == (expected_scope == 'all')))\n"
+        "                    if not step.get('no_prepare') and child.returncode == 0:\n"
+        "                        checks.append(('one discovery snapshot per command', sum(c.startswith('inventory ') for c in calls) == 1))\n"
+        "                checks.append(('no synthetic credential output', 'synthetic-secret' not in child.stdout + child.stderr))\n"
+        "                rows.append(result_row(label + '/' + context + '/run-' + str(number), path, raw, checks, exit_code=child.returncode,\n"
+        '                                       stdout=child.stdout, stderr=child.stderr, calls=calls, record=recorded,\n'
+        '                                       container_config=state.read_text().strip(), elapsed_seconds=time.monotonic() - started))\n'
+        '\n'
+        '    def run_case(label, **options):\n'
+        "        for context in ('ordinary', 'conditional'):\n"
+        '            run_context_case(label, context=context, **options)\n'
+        '\n'
+        "    run_case('forward-and-no-change', steps=[{'ended': 'all', 'state': 'realm.ini', 'seed': True}, {'ended': None, 'seed': True}])\n"
+        "    run_case('reverse-and-no-change', target='local.ini', record='realm', running='realm.ini', steps=[\n"
+        "        {'ended': 'external', 'record': 'local', 'state': 'local.ini', 'seed': True}, {'ended': None, 'record': 'local'}])\n"
+        "    run_case('forward-refused-retried', steps=[{'faults': {'FAKE_BASIC': 'fail'}, 'rc': 1, 'ended': 'all', 'up': False, 'record': 'local', 'state': 'local.ini', 'seed': False}, {'ended': 'all', 'seed': True}])\n"
+        "    run_case('reverse-refused-retried', target='local.ini', record='', running='realm.ini', steps=[\n"
+        "        {'faults': {'FAKE_BASIC': 'fail'}, 'rc': 1, 'ended': 'external', 'record': 'local,realm', 'state': 'local.ini', 'seed': False},\n"
+        "        {'ended': 'external', 'record': 'local', 'seed': True}, {'ended': None, 'record': 'local'}])\n"
+        "    for target, record, running in [('realm.ini', '', 'local.ini'), ('realm.ini', '', 'site.ini'), ('site.ini', 'realm', 'realm.ini')]:\n"
+        "        forward = target == 'realm.ini'\n"
+        "        run_case('pre-record-or-site-' + target + '-' + running, target=target, record=record, running=running,\n"
+        "                 steps=[{'ended': 'all' if forward else 'external', 'record': 'realm' if forward else 'local'}])\n"
+        "    for target in ['local.ini', 'realm.ini']:\n"
+        "        cls = 'realm' if target == 'realm.ini' else 'local'\n"
+        "        run_case('first-start-' + cls, target=target, record='', running='absent', steps=[{'record': cls, 'state': target}])\n"
+        "        run_case('unchanged-' + cls, target=target, record='', running=target, steps=[{'record': cls}])\n"
+        "    run_case('stopped-cluster-forward', FAKE_CLUSTER='down', steps=[{'rc': 1, 'ended': None, 'up': False, 'record': 'local', 'state': 'local.ini', 'rm': False}])\n"
+        "    run_case('malformed-revocation-count-refuses-before-start', FAKE_BASIC='malformed', steps=[\n"
+        "        {'rc': 1, 'ended': 'all', 'up': False, 'record': 'local', 'state': 'local.ini', 'seed': False}])\n"
+        "    run_case('forward-record-write-refuses-before-start', FAKE_RECORD='fail', steps=[\n"
+        "        {'rc': 1, 'ended': 'all', 'up': False, 'record': 'local', 'seed': False}])\n"
+        "    run_case('reverse-widen-write-refuses-before-start', target='local.ini', record='realm', running='realm.ini', FAKE_RECORD='fail', steps=[\n"
+        "        {'rc': 1, 'ended': None, 'up': False, 'record': 'realm', 'seed': False}])\n"
+        "    run_case('down-record-write-refuses-before-removal', target='local.ini', record='local', running='realm.ini', FAKE_RECORD='fail', steps=[\n"
+        "        {'verb': 'down', 'rc': 1, 'ended': None, 'up': False, 'record': 'local', 'state': 'realm.ini'}])\n"
+        "    run_case('reverse-narrow-write-fails-retains-debt-and-retries', target='local.ini', record='realm', running='realm.ini', steps=[\n"
+        "        {'faults': {'FAKE_RECORD': 'second'}, 'rc': 1, 'ended': 'external', 'record': 'local,realm', 'state': 'local.ini', 'seed': False},\n"
+        "        {'ended': 'external', 'record': 'local', 'seed': True}])\n"
+        "    for mode in ['rm-fail', 'fail-before', 'fail-after']:\n"
+        "        run_case('reverse-compose-' + mode + '-retry', target='local.ini', record='realm', running='realm.ini', steps=[\n"
+        "            {'faults': {'FAKE_COMPOSE': mode}, 'rc': 1, 'ended': None, 'up': mode != 'rm-fail', 'record': 'local,realm', 'seed': False,\n"
+        "             'state': 'local.ini' if mode == 'fail-after' else 'realm.ini'},\n"
+        "            {'ended': 'external', 'record': 'local', 'seed': True}])\n"
+        "    for mode in ['fail-before', 'fail-after']:\n"
+        "        run_case('forward-compose-' + mode + '-retry', steps=[\n"
+        "            {'faults': {'FAKE_COMPOSE': mode}, 'rc': 1, 'ended': 'all', 'record': 'realm', 'seed': False},\n"
+        "            {'ended': 'all' if mode == 'fail-before' else None, 'record': 'realm', 'seed': True}])\n"
+        "    run_case('down-retains-realm-debt', target='realm.ini', record='realm', running='realm.ini', steps=[\n"
+        "        {'verb': 'down', 'ended': None, 'up': False, 'record': 'realm', 'state': 'absent'},\n"
+        "        {'target': 'local.ini', 'ended': 'external', 'record': 'local', 'state': 'local.ini'}])\n"
+        "    run_case('down-retains-widened-debt', target='local.ini', record='local,realm', running='local.ini', steps=[\n"
+        "        {'verb': 'down', 'ended': None, 'up': False, 'record': 'local,realm', 'state': 'absent'},\n"
+        "        {'ended': 'external', 'record': 'local'}])\n"
+        "    run_case('down-compose-refused-preserves-debt', target='local.ini', record='local', running='realm.ini', steps=[\n"
+        "        {'verb': 'down', 'faults': {'FAKE_COMPOSE': 'down-fail'}, 'rc': 7, 'ended': None, 'up': False, 'record': 'local,realm', 'state': 'realm.ini'}])\n"
+        "    for mode in ['fail', 'malformed', 'short-id', 'duplicate']:\n"
+        "        for verb in ['up', 'down']:\n"
+        "            run_case('UNKNOWN-inventory-' + mode + '-' + verb, target='local.ini', record='realm', running='realm.ini', FAKE_INVENTORY=mode,\n"
+        "                     steps=[{'verb': verb, 'rc': 1, 'ended': None, 'up': False, 'record': 'realm', 'no_prepare': True, 'rm': False}])\n"
+        "    for verb in ['up', 'down']:\n"
+        "        run_case('UNKNOWN-inspect-' + verb, target='local.ini', record='realm', running='realm.ini', FAKE_INSPECT='fail',\n"
+        "                 steps=[{'verb': verb, 'rc': 1, 'ended': None, 'up': False, 'record': 'realm', 'no_prepare': True}])\n"
+        "    for status in ['created', 'running', 'paused', 'restarting', 'removing', 'exited', 'dead']:\n"
+        "        run_case('discover-known-state-' + status, running='realm.ini', direct='monitor_grafana_auth_running', FAKE_STATE=status)\n"
+        "    run_case('discover-exact-neighbour-not-owned', running='realm.ini', direct='monitor_grafana_auth_running', FAKE_INVENTORY='neighbour',\n"
+        "             steps=[{'stdout': '', 'no_inspect': True}])\n"
+        "    run_case('discover-confirmed-absence', running='absent', direct='monitor_grafana_auth_running', steps=[{'stdout': '', 'no_inspect': True}])\n"
+        "    selected_cases = [('missing-key', 'running\\n'), ('duplicate-key', 'running\\nGF_PATHS_CONFIG=/etc/krate/auth/realm.ini\\nGF_PATHS_CONFIG=/etc/krate/auth/local.ini'),\n"
+        "                      ('wrong-root', 'running\\nGF_PATHS_CONFIG=/other/realm.ini'), ('extra-equals', 'running\\nINVALID_SELECTED_ENV_SHAPE'),\n"
+        "                      ('dot', 'running\\nGF_PATHS_CONFIG=/etc/krate/auth/.'), ('dotdot', 'running\\nGF_PATHS_CONFIG=/etc/krate/auth/..'),\n"
+        "                      ('invalid-state', 'unknown\\nGF_PATHS_CONFIG=/etc/krate/auth/realm.ini')]\n"
+        '    for label, selected in selected_cases:\n'
+        "        run_case('discover-UNKNOWN-' + label, running='realm.ini', direct='monitor_grafana_auth_running', FAKE_SELECTED=selected,\n"
+        "                 steps=[{'rc': 1, 'stdout': ''}])\n"
+        '    return rows\n'
+        '\n'
+        '\n'
+        'def worker(args):\n'
+        "    result = {'rows': [], 'harness_errors': [], 'source_unchanged': True}\n"
+        '    sources = [args.admin, *args.cli]\n'
+        '    before = {str(path): path.read_bytes() for path in sources}\n'
+        '    for path in sources:\n'
+        '        raw = before[str(path)]\n'
+        '        try:\n'
+        "            result['rows'].extend(admin_rows(path, raw) if path == args.admin else cli_rows(path, raw))\n"
+        '        except Exception as exc:\n'
+        "            result['harness_errors'].append({'source': str(path), 'kind': type(exc).__name__})\n"
+        "    result['source_unchanged'] = all(path.read_bytes() == before[str(path)] for path in sources)\n"
+        "    result['failed_assertions'] = sum(row['failed_assertions'] for row in result['rows'])\n"
+        "    result['assertion_count'] = sum(len(row['assertions']) for row in result['rows'])\n"
+        "    result['source_hashes'] = {key: digest(raw) for key, raw in before.items()}\n"
+        "    result['status'] = 'HARNESS_ERROR' if result['harness_errors'] or not result['source_unchanged'] else ('FAIL' if result['failed_assertions'] else 'PASS')\n"
+        '    print(json.dumps(result, indent=2))\n'
+        "    return 2 if result['status'] == 'HARNESS_ERROR' else (1 if result['status'] == 'FAIL' else 0)\n"
+        '\n'
+        '\n'
+        'def main():\n'
+        '    parser = argparse.ArgumentParser(description=__doc__)\n'
+        "    parser.add_argument('--admin', type=Path, required=True)\n"
+        "    parser.add_argument('--cli', type=Path, action='append', required=True)\n"
+        "    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)\n"
+        '    args = parser.parse_args()\n'
+        '    if args.worker:\n'
+        '        return worker(args)\n'
+        "    command = [sys.executable, '-I', '-B', str(Path(__file__).resolve()), '--worker', '--admin', str(args.admin.resolve())]\n"
+        '    for path in args.cli:\n'
+        "        command.extend(['--cli', str(path.resolve())])\n"
+        '    try:\n'
+        '        completed = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)\n'
+        '        sys.stdout.write(completed.stdout)\n'
+        '        if completed.stderr:\n'
+        '            sys.stderr.write(completed.stderr)\n'
+        '            return 2\n'
+        '        return completed.returncode\n'
+        '    except subprocess.TimeoutExpired:\n'
+        "        print(json.dumps({'status': 'HARNESS_ERROR', 'harness_errors': [{'kind': 'ControllerTimeout'}]}))\n"
+        '        return 2\n'
+        '\n'
+        '\n'
+        "if __name__ == '__main__':\n"
+        '    sys.exit(main())\n'
+    )
+    old_command = "['/bin/bash', '-c', program + tail"
+    if not checks.expect(program.count(old_command) == 1, 'Grafana sessions adapter has one Bash invocation boundary'):
+        return
+    # Only the shell executable changes; no source decisions or fixture predicates change.
+    program = program.replace(old_command, '[' + repr(bash) + ", '-c', program + tail", 1)
+    fixture_base = ROOT / 'harness/check-identity'
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='grafana-sessions-', dir=fixture_base) as directory:
+        fixture = Path(directory)
+        runner = fixture / 'focused-sessions.py'
+        runner.write_text(program)
+        source_paths = [ROOT / 'monitoring/grafana-admin.py', *(ROOT / edition / 'krate' for edition in EDITIONS)]
+        before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths}
+        command = [sys.executable, '-I', '-B', str(runner), '--admin', str(source_paths[0])]
+        for path in source_paths[1:]:
+            command.extend(['--cli', str(path)])
+        try:
+            child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, start_new_session=True)
+        except OSError:
+            checks.expect(False, 'Grafana sessions adapter could not start its owned process group')
+            return
+        timed_out = False
+        cleanup_ok = True
+        stdout = stderr = ''
+        try:
+            stdout, stderr = child.communicate(timeout=70)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            # Retire only this new session's process group, including any Bash left by
+            # the inner controller's timeout or HARNESS_ERROR; never target a global PID.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                cleanup_ok = False
+            try:
+                # Reap the direct child and drain its pipes after group retirement.
+                # A failed cleanup is a check failure, never a successful receipt.
+                stdout, stderr = child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                cleanup_ok = False
+                child.kill()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    cleanup_ok = False
+        if not checks.expect(cleanup_ok, 'Grafana sessions owned process group cleanup did not finish'):
+            return
+        if not checks.expect(not timed_out, 'Grafana sessions adapter exceeded its70-second bound'):
+            return
+        if not checks.expect(stderr == '', 'Grafana sessions adapter produced unexpected controller stderr'):
+            return
+        try:
+            report = json.loads(stdout)
+        except ValueError:
+            checks.expect(False, 'Grafana sessions adapter did not return a JSON receipt')
+            return
+        if not checks.expect(isinstance(report, dict) and not report.get('harness_errors')
+                             and report.get('status') in ('PASS', 'FAIL') and child.returncode in (0, 1),
+                             'Grafana sessions adapter failed before a semantic result'):
+            return
+        checks.expect(report.get('source_unchanged') is True and report.get('source_hashes') == before,
+                      'Grafana sessions adapter must bind unchanged complete current sources')
+        checks.expect(before == {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths},
+                      'Grafana sessions sources changed during the check')
+        rows = report.get('rows', [])
+        if not checks.expect(isinstance(rows, list) and len(rows) == 277
+                             and all(isinstance(row, dict) for row in rows),
+                             'Grafana sessions adapter must retain all277 planned rows'):
+            return
+        expected_counts = {str(source_paths[0]): 21, str(source_paths[1]): 128, str(source_paths[2]): 128}
+        actual_counts = {path: sum(row.get('source') == path for row in rows) for path in before}
+        checks.expect(actual_counts == expected_counts, 'Grafana sessions admin and both edition case counts must be retained')
+        checks.expect(len({(row.get('source'), row.get('condition')) for row in rows}) == 277,
+                      'Grafana sessions condition/source receipt keys must be unique')
+        failure_count = 0
+        for row in rows:
+            checks.expect(row.get('source_sha256') == before.get(row.get('source')),
+                          'Grafana sessions row must bind the exact current source')
+            assertions = row.get('assertions', [])
+            if not checks.expect(isinstance(assertions, list) and assertions
+                                 and all(isinstance(item, dict) and type(item.get('passed')) is bool for item in assertions),
+                                 'Grafana sessions row must retain explicit boolean assertions'):
+                continue
+            failures = sum(not item['passed'] for item in assertions)
+            failure_count += failures
+            checks.expect(row.get('failed_assertions') == failures, 'Grafana sessions row failure accounting must agree')
+            for item in assertions:
+                checks.expect(item['passed'], 'Grafana sessions: %s: %s: %s' %
+                              (Path(row['source']).parent.name, row.get('condition'), item.get('assertion')))
+        checks.expect(report.get('failed_assertions') == failure_count,
+                      'Grafana sessions aggregate failure count must agree with actual assertions')
+        checks.expect((child.returncode, report.get('status')) == (0, 'PASS') and failure_count == 0,
+                      'Grafana sessions decisions require actual semantic PASS')
+
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
                   check_prometheus_reload, check_loki_gateway, check_grafana_realm_compose, check_grafana_front,
-                  check_grafana_realm_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients,
+                  check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
-                  check_plan_and_preflight, check_configure_dual, check_runtime_preflight,
+                  check_plan_and_preflight, check_configure_dual, check_runtime_preflight, check_probe_causes, check_probe_diagnostic_privacy,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
                   check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip, check_public_cert_permissions,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
-                  check_broker_apply, check_truststore_env, check_broker_docs):
+                  check_broker_apply, check_truststore_env, check_broker_docs, check_mfa_choice, check_mfa_reconcile, check_rotate_stance, check_mfa_docs, check_p18_logic):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others
@@ -5228,7 +9970,7 @@ def main():
           'monitoring binds, logrotate drop-in, CLI Kafbat wiring and parity, zk frozen, writers and renewal, preflight (identity and '
           'runtime.yml incl. refusals), configure-dual, stub_idp.sh down, proxy environment and edge rules, release permissions, RPM dependency '
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
-          'PingFederate broker plan/apply/removal, truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
+          'PingFederate broker plan/apply/removal, the MFA stance (site keys, plan, claim-filter reconcile, P18 logic against stubs), truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
           'Prometheus lifecycle off and the SIGHUP reload result, the read-only Loki gateway, '
           'the Grafana realm switch (compose, proxy front, CLI, realm.ini and clients).')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence

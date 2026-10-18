@@ -176,8 +176,11 @@ PY
     python3 -I - "$OUT/site.json" "$ISSUER" "$BASE" "$CLIENT" "$VIEWERS" "$ADMINS" "$CLUSTER" "$BACK" <<'PY'
 import json, sys
 out, issuer, base, client, viewers, admins, cluster, back = sys.argv[1:9]
+# The explicit MFA stance (gate row P18): the stand-in asserts no claim Krate requires yet
+# (no amr mapper; an unobserved acr value), so its site file opts out until a walk observes one.
 site = {"issuer": issuer, "public_url": base, "client_id": client, "viewer_group": viewers, "admin_group": admins,
         "groups_claim": "groups", "scopes": ["openid", "profile", "email"], "clusters": [cluster],
+        "mfa_not_asserted": True,
         "authorization_url": issuer + "/protocol/openid-connect/auth", "token_url": back + "/token",
         "userinfo_url": back + "/userinfo", "jwks_url": back + "/certs"}
 open(out, "w").write(json.dumps(site, indent=2) + "\n")
