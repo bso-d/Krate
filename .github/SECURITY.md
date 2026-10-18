@@ -33,7 +33,7 @@ Please submit vulnerability reports through GitHub's Private Vulnerability Repor
 
 If Private Vulnerability Reporting is unavailable, contact the repository maintainers directly:
 - Contact via the [repository maintainer profile](https://github.com/bso-d).
-- Alternatively, open an issue requesting a private reporting channel **without disclosing any incident details, vulnerability descriptions, or system specifics**. Maintainers will establish a secure communication channel.
+- Alternatively, open an issue using the [Request Private Reporting Channel](https://github.com/bso-d/Krate/issues/new?template=private_channel_request.yml) template **without disclosing any incident details, vulnerability descriptions, or system specifics**. Maintainers will establish a secure communication channel.
 
 ## Information to Include
 
