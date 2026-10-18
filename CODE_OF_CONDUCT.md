@@ -29,8 +29,9 @@ represents the project.
 
 Report concerns to the repository maintainers. Start with the
 [repository owner's GitHub profile](https://github.com/bso-d) and use a private
-contact method if one is available. If no private method is listed, open an
-issue asking for a private reporting channel **without including incident
+contact method if one is available. If no private method is listed, open an issue using the
+[Request Private Reporting Channel](https://github.com/bso-d/Krate/issues/new?template=private_channel_request.yml)
+template asking for a private reporting channel **without including incident
 details, names, or personal information**. Do not post sensitive reports publicly.
 
 Once a private channel is established, include relevant links, dates, and a

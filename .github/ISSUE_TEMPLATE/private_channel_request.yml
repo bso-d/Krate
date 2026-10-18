@@ -8,11 +8,13 @@ body:
       value: |
         ### Request a Private Reporting Channel
 
-        Use this form **only** when GitHub Private Vulnerability Reporting is unavailable and you need maintainers to establish a private, confidential communication channel (for sensitive security vulnerabilities or Code of Conduct concerns).
+        Use this form to request a private, confidential communication channel with the maintainers:
+        - **For security vulnerabilities**: Use this form if [GitHub Private Vulnerability Reporting](https://github.com/bso-d/Krate/security/advisories/new) is unavailable or you need an alternative private reporting route.
+        - **For Code of Conduct concerns**: Use this form if no private contact method is listed on the maintainer's profile (per [CODE_OF_CONDUCT.md](https://github.com/bso-d/Krate/blob/main/CODE_OF_CONDUCT.md)).
 
-        > **CRITICAL SECURITY NOTICE**:
-        > **DO NOT include any vulnerability details, reproduction steps, error logs, incident specifics, or names in this issue.**
-        > This issue is publicly visible. Maintainers will establish a secure private channel with you to receive the report.
+        > **CRITICAL PRIVACY & SECURITY NOTICE**:
+        > **DO NOT include any vulnerability details, reproduction steps, incident specifics, names, or personal information in this public issue.**
+        > This issue is publicly visible. Maintainers will establish a secure private channel with you to receive the details.
 
   - type: textarea
     id: contact_preference
@@ -28,5 +30,5 @@ body:
     attributes:
       label: Confirmations
       options:
-        - label: "I confirm that I have NOT included any incident details, vulnerability descriptions, credentials, private keys, or system specifics in this public issue."
+        - label: "I confirm that I have NOT included any incident details, vulnerability descriptions, personal information, names, credentials, or private keys in this public issue."
           required: true
