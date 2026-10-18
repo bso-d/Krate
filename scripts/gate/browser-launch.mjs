@@ -200,7 +200,7 @@ export function refuseSystemProxy() {
   if (process.platform !== 'darwin') return false;
   let raw = '';
   try { raw = execFileSync('scutil', ['--proxy'], { encoding: 'utf8' }); } catch { return false; }
-  const on = PROXY_KEYS.split(' ').filter((k) => new RegExp(`^\\s*${k}\\s*=\\s*1\\s*$`, 'm').test(raw));
+  const on = PROXY_KEYS.split(' ').filter((k) => new RegExp(`^\\s*${k}\\s*:\\s*1\\s*$`, 'm').test(raw));
   if (on.length) exit2(`launchGateBrowser: the Mac runs a system proxy (${on.join(', ')}) and --host-resolver-rules does not apply to proxy-resolved names; turn it off or run the container vantage`);
   return true;
 }
