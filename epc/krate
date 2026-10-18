@@ -3910,9 +3910,10 @@ print(data["sessions_ended"], data["users_ended"])')" \
 # Local Grafana users whose e-mail a realm user also has: after the switch Grafana
 # refuses that sign-in ("User sync failed"), and taking the local user over is not
 # an option (harness/phase4/lab4 Q1: e-mail linking handed the local account the
-# server admin role). So each collision is listed with the command that retires it.
+# server admin role). Every match remains visible; only corroborated local accounts
+# receive the explicit retirement command. External linkage ownership stays unknown.
 grafana_list_collisions() {
-  local users emails page parsed rows offset
+  local users emails page parsed rows offset matches login email state auth_class
   users="$(grafana_admin local-users)" || die "Grafana refused its user list"
   kcadm_login "$IDENTITY_REALM" client krate-cli "$(env_value KEYCLOAK_CLI_CLIENT_SECRET)" \
     || die "Keycloak refused the krate-cli client login. Check: krate identity status"
@@ -3937,7 +3938,8 @@ try:
         if not isinstance(user, dict):
             raise ValueError()
         email = user.get("email")
-        if email is not None and not isinstance(email, str):
+        if email is not None and (not isinstance(email, str)
+                or any(char in email for char in "\x00\t\r\n")):
             raise ValueError()
         if email and email.strip():
             emails.append(email.strip().lower())
@@ -3956,20 +3958,46 @@ print("\n".join(emails))
     offset=$((offset + 100))
   done
   kcadm_logout
-  # Disabled local users count: Grafana still looks a realm user up by e-mail and finds them,
-  # and the sign-in then fails (the live walk reproduced "User sync failed" on exactly that).
-  printf '%s' "$users" | KRATE_REALM_EMAILS="$emails" python3 -c '
+  # Preserve every human match. Only corroborated local accounts get retirement advice.
+  matches="$(printf '%s' "$users" | KRATE_REALM_EMAILS="$emails" python3 -c '
 import json, os, sys
-realm = {line.strip() for line in os.environ["KRATE_REALM_EMAILS"].splitlines() if line.strip()}
-for user in json.load(sys.stdin):
-    email = (user.get("email") or "").strip().lower()
-    if email and email in realm:
-        state = "disabled" if user.get("isDisabled") else "enabled"
-        print("%s\t%s\t%s" % (user.get("login"), email, state))' \
-    | while IFS=$'\t' read -r login email state; do
-    warn "Local Grafana user $login ($state) holds the e-mail of realm user $email: that sign-in fails until the local user is retired"
-    echo "         krate monitor grafana-user retire $login"
-  done
+try:
+    users = json.load(sys.stdin)
+    if not isinstance(users, list):
+        raise ValueError()
+    realm = {line.strip() for line in os.environ["KRATE_REALM_EMAILS"].splitlines() if line.strip()}
+    matches = []
+    for user in users:
+        if not isinstance(user, dict):
+            raise ValueError()
+        login, email = user.get("login"), user.get("email")
+        disabled, auth_class = user.get("isDisabled"), user.get("authClass")
+        if (not isinstance(login, str) or not login.strip()
+                or not isinstance(email, str) or type(disabled) is not bool
+                or auth_class not in ("local", "external")
+                or any(char in login or char in email for char in "\x00\t\r\n")):
+            raise ValueError()
+        email = email.strip().lower()
+        if email and email in realm:
+            matches.append("%s\t%s\t%s\t%s" %
+                           (login, email, "disabled" if disabled else "enabled", auth_class))
+except (ValueError, TypeError):
+    sys.exit("Grafana collision inventory has an invalid JSON shape")
+print("\n".join(matches))')" || die "Grafana returned an invalid collision inventory"
+  [[ -n "$matches" ]] || return 0
+  while IFS=$'\t' read -r login email state auth_class; do
+    case "$auth_class" in
+      local)
+        # Disabled local users still hold the address; preserve the observed remedy.
+        warn "Local Grafana user $login ($state) holds the e-mail of realm user $email: that sign-in fails until the local user is retired"
+        printf '         krate monitor grafana-user retire %q\n' "$login"
+        ;;
+      external)
+        warn "External Grafana user $login ($state) shares the e-mail $email with a realm user. Its ownership by this realm is unknown; verify its authentication linkage before changing this account."
+        ;;
+      *) die "Grafana returned an invalid authentication class" ;;
+    esac
+  done <<< "$matches"
 }
 
 # Grafana's address: with Krate sign-in (GRAFANA_AUTH_CONFIG=realm.ini) the cluster proxy

@@ -69,13 +69,15 @@ and reconciles the client, so there is nothing to re-run by hand. In order it:
 4. creates the `krate-seed` service account (Admin) and a 90-day token, writes them to
    `monitoring/auth/secrets/grafana-seed.token` and `…/grafana-seed.meta` (directory 0700,
    files 0600, host only) and sets `GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE`;
-5. lists every local Grafana user whose e-mail a realm user also has, each with the command
-   that retires it;
+5. lists every human Grafana user whose e-mail a realm user also has. Corroborated local
+   accounts retain the retirement command; external accounts remain visible with an
+   ownership-unknown warning, so their authentication linkage must be verified first;
 6. creates the realm client `krate-grafana` (confidential, standard flow with PKCE S256,
    redirect `<origin>/grafana/login/generic_oauth`, no back-channel logout URL — Grafana has
    no such endpoint) and writes `monitoring/auth/realm.ini`.
 
-Then retire the collisions it listed, one by one:
+Then retire only the accounts explicitly classified local, one by one. An external match
+does not establish ownership by this realm and is not a retirement recommendation:
 
 ```bash
 ./krate monitor grafana-user retire <login>

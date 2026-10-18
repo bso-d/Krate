@@ -40,7 +40,9 @@ Subcommands (the contract implemented for the krate Bash callers):
 
   local-users
       [{"login": str, "email": str, "isDisabled": bool,
-        "isGrafanaAdmin": bool}, ...]
+        "isGrafanaAdmin": bool, "authClass": "local"|"external"}, ...]
+      Legacy command name: all human users remain visible. Corroborates list
+      authLabels with profile isExternal; unknown/conflicting metadata refuses.
       GET /api/users, then GET /api/users/:id per user because the list DTO
       carries only the org-admin flag (isAdmin), not isGrafanaAdmin.
 
@@ -416,20 +418,45 @@ def list_users(api):
         page += 1
 
 
+def classify_user_auth(user, profile, user_id):
+    """Corroborate profile external status with independent global-list labels."""
+    labels = user.get('authLabels')
+    external = profile.get('isExternal')
+    if (not isinstance(labels, list)
+            or any(not isinstance(label, str) or not label.strip() for label in labels)
+            or type(external) is not bool):
+        raise OperationError('unexpected Grafana authentication metadata for user %d' % user_id)
+    if bool(labels) != external:
+        raise OperationError('conflicting Grafana authentication metadata for user %d' % user_id)
+    return 'external' if external else 'local'
+
+
 def cmd_local_users(api):
+    # Legacy command name: retain every human for collision review, including external users.
     users = list_users(api)
     out = []
     for user in users:
         if not isinstance(user, dict) or 'id' not in user:
             raise OperationError('unexpected response shape: GET /api/users list entry')
+        if user.get('isServiceAccount') is True:
+            continue
         user_id = as_int(user['id'], 'user id')
         _, profile = api.request('GET', '/api/users/%d' % user_id)
         if not isinstance(profile, dict):
             raise OperationError('unexpected response shape: GET /api/users/%d' % user_id)
-        out.append({'login': profile.get('login', user.get('login')),
-                    'email': profile.get('email', user.get('email')),
-                    'isDisabled': bool(profile.get('isDisabled', user.get('isDisabled'))),
-                    'isGrafanaAdmin': bool(profile.get('isGrafanaAdmin'))})
+        auth_class = classify_user_auth(user, profile, user_id)
+        login = profile.get('login', user.get('login'))
+        email = profile.get('email', user.get('email'))
+        disabled = profile.get('isDisabled', user.get('isDisabled'))
+        if email is None:
+            email = ''
+        if (not isinstance(login, str) or not login.strip()
+                or not isinstance(email, str) or type(disabled) is not bool
+                or any(char in login or char in email for char in '\x00\t\r\n')):
+            raise OperationError('unexpected Grafana collision metadata for user %d' % user_id)
+        out.append({'login': login, 'email': email, 'isDisabled': disabled,
+                    'isGrafanaAdmin': bool(profile.get('isGrafanaAdmin')),
+                    'authClass': auth_class})
     print_json(out)
 
 
@@ -693,20 +720,9 @@ def cmd_end_sessions(api, scope, wait_seconds):
             _, profile = api.request('GET', '/api/users/%d' % user_id)
             if not isinstance(profile, dict):
                 raise OperationError('unexpected response shape: GET /api/users/%d' % user_id)
-            # The profile endpoint defaults isExternal to false if its auth-info lookup
-            # fails (Grafana 12.2 user.go). Corroborate it with the independent list
-            # authLabels shape; disagreement is UNKNOWN, never a local-user exemption.
-            labels = user.get('authLabels')
-            external = profile.get('isExternal')
-            if (not isinstance(labels, list)
-                    or any(not isinstance(label, str) or not label.strip() for label in labels)
-                    or type(external) is not bool):
-                raise OperationError('unexpected Grafana authentication metadata for user %d'
-                                     % user_id)
-            if bool(labels) != external:
-                raise OperationError('conflicting Grafana authentication metadata for user %d'
-                                     % user_id)
-            if not external:
+            # A failed profile auth-info lookup may default false; the shared classifier
+            # corroborates it with the independent list labels and refuses UNKNOWN.
+            if classify_user_auth(user, profile, user_id) == 'local':
                 continue
         in_scope += 1
         ended = end_user_sessions(api, user_id, own_id)
@@ -746,7 +762,7 @@ def build_parser():
 
     add('reads', 'preflight reads for krate monitor realm: sso-settings source, '
                  'public-dashboard count, snapshot count')
-    add('local-users', 'list local users with login, email, isDisabled, isGrafanaAdmin')
+    add('local-users', 'list human users with login, email, isDisabled, isGrafanaAdmin, authClass')
 
     retire = add('retire-user', 'set a user e-mail to <login base><suffix> and disable the user')
     retire.add_argument('--login', required=True, help='exact login of the user to retire')
