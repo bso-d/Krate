@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Reporting
+    url: https://github.com/bso-d/Krate/security/advisories/new
+    about: Please report security vulnerabilities privately through GitHub Security Advisories.
+  - name: Security Policy
+    url: https://github.com/bso-d/Krate/blob/main/.github/SECURITY.md
+    about: Review supported versions, vulnerability disclosure procedures, and reporting guidelines.
+  - name: Operator Guides & Documentation
+    url: https://github.com/bso-d/Krate/tree/main/sso/guides
+    about: Browse deployment guides, SSO setup, monitoring configuration, and everyday commands.
