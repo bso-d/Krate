@@ -10829,6 +10829,433 @@ def check_grafana_collision_warning_rendering(checks):
         checks.expect((child.returncode, report.get('status'), failed) == (0, 'PASS', 0),
                       'Grafana warning rendering requires actual semantic PASS')
 
+def check_mac_system_proxy(checks):
+    """Exercise the shipped JS refusal and complete Mac preflight proxy block."""
+    import signal
+    node = shutil.which('node')
+    if node is None:
+        print('Identity check NOT RUN: Mac system proxy regressions (Node unavailable)', file=sys.stderr)
+        return
+    bash = shutil.which('bash')
+    if bash is None:
+        checks.expect(False, 'Bash is required for Mac system proxy regressions')
+        return
+    source = r'''// Source-bound parser regression only: no native scutil, launcher, browser or network.
+import process from 'node:process';
+import { Buffer } from 'node:buffer';
+import { readFileSync, mkdirSync, mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import vm from 'node:vm';
+
+const launcherPath = resolve(process.argv[2] || 'scripts/gate/browser-launch.mjs');
+const runnerPath = resolve(process.argv[3] || 'scripts/gate/mac/run-vm-gate.sh');
+const bash = process.argv[4];
+const fixtureBase = resolve(process.argv[5] || 'harness/progress/codex-scutil-review');
+const keys = ['HTTPEnable', 'HTTPSEnable', 'SOCKSEnable', 'ProxyAutoConfigEnable', 'ProxyAutoDiscoveryEnable'];
+const dictionary = text => '<dictionary> {\n' + text + '\n}\n';
+const cases = keys.flatMap(key => [
+  { name: key + '-enabled', body: dictionary('  ' + key + ' : 1'), enabled: [key] },
+  { name: key + '-disabled', body: dictionary('  ' + key + ' : 0'), enabled: [] },
+]);
+cases.push(
+  { name: 'compact-colon', body: dictionary('HTTPSEnable:1'), enabled: ['HTTPSEnable'] },
+  { name: 'tab-whitespace', body: dictionary('\tHTTPSEnable\t:\t1\t'), enabled: ['HTTPSEnable'] },
+  { name: 'trailing-spaces', body: dictionary('  HTTPSEnable : 1   '), enabled: ['HTTPSEnable'] },
+  { name: 'prefixed-key', body: dictionary('  XHTTPSEnable : 1'), enabled: [] },
+  { name: 'suffixed-key', body: dictionary('  HTTPSEnableExtra : 1'), enabled: [] },
+  { name: 'leading-text', body: dictionary('text HTTPSEnable : 1'), enabled: [] },
+  { name: 'value-ten', body: dictionary('  HTTPSEnable : 10'), enabled: [] },
+  { name: 'value-eleven', body: dictionary('  HTTPSEnable : 11'), enabled: [] },
+  { name: 'negative-value', body: dictionary('  HTTPSEnable : -1'), enabled: [] },
+  { name: 'suffixed-value', body: dictionary('  HTTPSEnable : 1x'), enabled: [] },
+  { name: 'native-array-unrelated', body: dictionary('  ExceptionsList : <array> {\n    0 : *.local\n    1 : 169.254/16\n  }\n  FTPPassive : 1'), enabled: [] },
+  { name: 'native-array-enabled', body: dictionary('  ExceptionsList : <array> {\n    0 : *.local\n  }\n  HTTPSEnable : 1'), enabled: ['HTTPSEnable'] },
+  { name: 'all-enabled', body: dictionary(keys.slice().reverse().map(key => '  ' + key + ' : 1').join('\n')), enabled: keys },
+  { name: 'empty-dictionary', body: dictionary(''), enabled: [] },
+  { name: 'disabled-whitespace', body: dictionary('\tHTTPEnable\t:\t0\t '), enabled: [] },
+);
+const sha256 = text => createHash('sha256').update(text).digest('hex');
+const rows = [];
+let fixture;
+let sourceHashes = {};
+let harnessError = null;
+let cleanupObserved = false;
+
+function unique(text, expression, label) {
+  const matches = [...text.matchAll(expression)];
+  if (matches.length !== 1) throw new Error('source-shape-' + label);
+  return matches[0][0];
+}
+
+function jsCase(program, config, platform) {
+  const diagnostics = [];
+  let calls = 0;
+  let adapterError = false;
+  let returned;
+  let exit = null;
+  const exitSignal = {};
+  const sandbox = {
+    process: { platform, exit(code) { exit = code; throw exitSignal; } },
+    console: { error(message) { diagnostics.push(String(message)); } },
+    execFileSync(command, args, options) {
+      calls++;
+      if (command !== 'scutil' || JSON.stringify(args) !== '["--proxy"]' || options === null || typeof options !== 'object' || options.encoding !== 'utf8') {
+        adapterError = true;
+        throw new Error('unexpected-scutil-boundary');
+      }
+      return config.body;
+    },
+  };
+  vm.createContext(sandbox);
+  try { returned = vm.runInContext(program + '\nrefuseSystemProxy();', sandbox, { timeout: 500 }); }
+  catch (error) { if (error !== exitSignal) throw new Error('javascript-product-exception'); }
+  if (adapterError) throw new Error('javascript-adapter-error');
+  const refusal = platform === 'darwin' && config.enabled.length > 0;
+  const checks = {
+    producer_calls: calls === (platform === 'darwin' ? 1 : 0),
+    decision: refusal ? exit === 2 : exit === null && returned === (platform === 'darwin'),
+    no_return_after_refusal: !refusal || returned === undefined,
+    diagnostic: refusal
+      ? diagnostics.length === 1 && diagnostics[0].startsWith('launchGateBrowser: the Mac runs a system proxy (')
+        && diagnostics[0].includes('(' + config.enabled.join(', ') + ')')
+      : diagnostics.length === 0,
+  };
+  return { edge: 'javascript', condition: config.name + (platform === 'darwin' ? '' : '-nonDarwin'), checks,
+    observed: { producer_calls: calls, exit, returned: returned === undefined ? null : returned, diagnostics } };
+}
+
+function shellCase(block, config, index) {
+  const marker = join(fixture, 'adapter-' + index);
+  const script = 'set -euo pipefail\nPREFLIGHT_FAIL=0\nscutil() {\n'
+    + '  if [[ $# != 1 || $1 != --proxy ]]; then printf ADAPTER_ERROR > "$ADAPTER_MARKER"; return 97; fi\n'
+    + '  printf "%s" "$SCUTIL_BODY"\n}\n' + block
+    + '\nprintf "PREFLIGHT_FAIL=%s\\n" "$PREFLIGHT_FAIL"\n';
+  const result = spawnSync(bash, ['-c', script], { encoding: 'utf8', timeout: 2000, killSignal: 'SIGKILL',
+    maxBuffer: 32768, env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C',
+      SCUTIL_BODY: config.body, ADAPTER_MARKER: marker } });
+  if (result.error || result.signal || result.status !== 0 || existsSync(marker)) throw new Error('shell-harness-error');
+  const refusal = config.enabled.length > 0;
+  const diagnostic = 'run-vm-gate: refuse: the Mac runs a system proxy; --host-resolver-rules would not apply to proxy-resolved names (TOPOFIX F3)\n';
+  if (result.stderr !== '' && result.stderr !== diagnostic) throw new Error('shell-unexpected-stderr');
+  const checks = {
+    terminal_status: result.status === 0,
+    decision: result.stdout === 'PREFLIGHT_FAIL=' + (refusal ? '1' : '0') + '\n',
+    diagnostic: result.stderr === (refusal ? diagnostic : ''),
+    adapter_clean: !existsSync(marker),
+  };
+  return { edge: 'shell', condition: config.name, checks,
+    observed: { rc: result.status, stdout: result.stdout, stderr: result.stderr } };
+}
+
+try {
+  if (!bash || !bash.startsWith('/') || process.argv.length > 6) throw new Error('arguments');
+  const launcher = readFileSync(launcherPath, 'utf8');
+  const runner = readFileSync(runnerPath, 'utf8');
+  sourceHashes = { launcher: sha256(launcher), runner: sha256(runner) };
+  const declaration = unique(launcher, /^const PROXY_KEYS = .*;$/gm, 'proxy-keys');
+  const exitHelper = unique(launcher, /^function exit2\(msg\) \{[^\n]*}$/gm, 'exit-helper');
+  const refusalFunction = unique(launcher, /^export function refuseSystemProxy\(\) \{\n[\s\S]*?^}/gm, 'refusal-function');
+  const block = unique(runner, /^if scutil --proxy [^\n]*\n[\s\S]*?^fi\n/gm, 'shell-block');
+  const program = declaration + '\n' + exitHelper + '\n' + refusalFunction.replace('export ', '');
+  mkdirSync(fixtureBase, { recursive: true });
+  fixture = mkdtempSync(join(fixtureBase, 'scutil-focused-'));
+  for (const [index, config] of cases.entries()) {
+    rows.push(jsCase(program, config, 'darwin'));
+    rows.push(shellCase(block, config, index));
+  }
+  rows.push(jsCase(program, cases[2], 'linux'));
+  if (sha256(readFileSync(launcherPath, 'utf8')) !== sourceHashes.launcher
+      || sha256(readFileSync(runnerPath, 'utf8')) !== sourceHashes.runner) throw new Error('source-changed');
+} catch (error) {
+  harnessError = error instanceof Error && /^[a-z-]+$/.test(error.message) ? error.message : 'unexpected-harness-error';
+} finally {
+  try {
+    if (fixture) rmSync(fixture, { recursive: true, force: false });
+    cleanupObserved = !fixture || !existsSync(fixture);
+  } catch { harnessError = 'fixture-cleanup-error'; }
+}
+const failedAssertions = rows.reduce((sum, row) => sum + Object.values(row.checks).filter(value => !value).length, 0);
+const status = harnessError ? 'HARNESS_ERROR' : failedAssertions ? 'FAIL' : 'PASS';
+const summary = { status, sourceHashes, node: process.versions.node, bash, cases: rows.length,
+  assertions: rows.reduce((sum, row) => sum + Object.keys(row.checks).length, 0), failedAssertions,
+  harnessError, cleanupObserved, rows };
+const output = JSON.stringify(summary, null, 2);
+if (Buffer.byteLength(output) > 100000) throw new Error('report-size');
+console.log(output);
+process.exitCode = harnessError ? 2 : failedAssertions ? 1 : 0;
+'''
+    launcher = ROOT / 'scripts/gate/browser-launch.mjs'
+    runner = ROOT / 'scripts/gate/mac/run-vm-gate.sh'
+    child = subprocess.Popen([node, '--input-type=module', '-', str(launcher), str(runner), bash,
+                              str(ROOT / 'harness/check-identity')],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, start_new_session=True)
+    stdout, stderr = '', ''
+    timed_out = False
+    cleanup_failed = False
+    try:
+        stdout, stderr = child.communicate(source, timeout=20)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    finally:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            cleanup_failed = True
+        try:
+            if timed_out:
+                stdout, stderr = child.communicate(timeout=5)
+            else:
+                child.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            cleanup_failed = True
+    if timed_out or cleanup_failed or stderr or len(stdout) > 100000:
+        checks.expect(False, 'Mac proxy regression lifecycle or output refused')
+        return
+    try:
+        report = json.loads(stdout)
+    except ValueError:
+        checks.expect(False, 'Mac proxy regression produced no JSON report')
+        return
+    if not isinstance(report, dict) or not isinstance(report.get('rows'), list):
+        checks.expect(False, 'Mac proxy regression report shape refused')
+        return
+    rows = report['rows']
+    keys = ['HTTPEnable', 'HTTPSEnable', 'SOCKSEnable', 'ProxyAutoConfigEnable', 'ProxyAutoDiscoveryEnable']
+    names = [key + '-' + state for key in keys for state in ('enabled', 'disabled')]
+    names += ['compact-colon', 'tab-whitespace', 'trailing-spaces', 'prefixed-key', 'suffixed-key',
+              'leading-text', 'value-ten', 'value-eleven', 'negative-value', 'suffixed-value',
+              'native-array-unrelated', 'native-array-enabled', 'all-enabled', 'empty-dictionary',
+              'disabled-whitespace']
+    expected = {(edge, name) for edge in ('javascript', 'shell') for name in names}
+    expected.add(('javascript', 'HTTPSEnable-enabled-nonDarwin'))
+    inventory = []
+    failed = 0
+    assertions = 0
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('checks'), dict):
+            checks.expect(False, 'Mac proxy regression row shape refused')
+            return
+        edge, condition = row.get('edge'), row.get('condition')
+        if not isinstance(edge, str) or not isinstance(condition, str):
+            checks.expect(False, 'Mac proxy regression row identity refused')
+            return
+        inventory.append((edge, condition))
+        results = row['checks']
+        required = ({'producer_calls', 'decision', 'no_return_after_refusal', 'diagnostic'}
+                    if edge == 'javascript' else {'terminal_status', 'decision', 'diagnostic', 'adapter_clean'})
+        if set(results) != required or any(type(value) is not bool for value in results.values()):
+            checks.expect(False, 'Mac proxy regression assertion shape refused')
+            return
+        failures = [name for name, value in results.items() if not value]
+        failed += len(failures)
+        assertions += len(results)
+        checks.expect(not failures, 'Mac proxy %s/%s: %s' % (edge, condition, ', '.join(failures)))
+    checks.expect(len(inventory) == 51 and set(inventory) == expected,
+                  'Mac proxy regression requires all 51 unique JS/shell conditions')
+    checks.expect(report.get('sourceHashes') == {
+        'launcher': hashlib.sha256(launcher.read_bytes()).hexdigest(),
+        'runner': hashlib.sha256(runner.read_bytes()).hexdigest()},
+        'Mac proxy regression must bind the actual shipped source files')
+    checks.expect(report.get('assertions') == assertions == 204 and report.get('failedAssertions') == failed,
+                  'Mac proxy regression aggregate accounting must agree')
+    checks.expect(child.returncode == 0 and report.get('status') == 'PASS' and failed == 0
+                  and report.get('cases') == 51 and report.get('harnessError') is None
+                  and report.get('cleanupObserved') is True,
+                  'Mac proxy regressions require semantic PASS and owned fixture cleanup')
+
+def check_mac_w6_curl_invocation(checks):
+    """Run complete shipped W6 with a capture-only curl boundary; native transport is separate."""
+    import signal
+    node = shutil.which('node')
+    if node is None:
+        print('Identity check NOT RUN: Mac W6 curl invocation (Node unavailable)', file=sys.stderr)
+        return
+    source = r'''// Complete shipped W6 invocation regression; fake curl captures argv only, with no transport interpretation.
+import process from 'node:process';
+import { Buffer } from 'node:buffer';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+
+const sourcePath = resolve(process.argv[2] || 'scripts/gate/mac/probe.mjs');
+const fixtureBase = resolve(process.argv[3] || 'harness/progress/codex-w6-curl-review');
+const cases = ['empty-config', 'private-insecure-config', 'HTTPS_PROXY', 'ALL_PROXY'];
+const sha = value => createHash('sha256').update(value).digest('hex');
+const fakeTemplate = "#!/REPLACE_NODE\n'use strict';\nconst fs = require('node:fs');\nconst argv = process.argv.slice(2);\nconst fail = () => { fs.writeFileSync(process.env.ADAPTER_MARKER, 'W6_ADAPTER_ERROR', {mode:0o600,flag:'wx'}); process.exit(97); };\nconst positions = argv.flatMap((x,i) => x === '--output' ? [i] : []);\nif (positions.length !== 1 || argv[positions[0]+1] !== process.env.EXPECT_BODY) fail();\nfs.writeFileSync(process.env.CAPTURE, JSON.stringify({argv, executable:process.execPath, version:process.version, curlHome:process.env.CURL_HOME, httpsProxy:!!process.env.HTTPS_PROXY, allProxy:!!process.env.ALL_PROXY}), {mode:0o600,flag:'wx'});\nfs.writeFileSync(process.env.EXPECT_BODY, process.env.FIXED_BODY, {mode:0o600,flag:'wx'});\nprocess.stdout.write('200');\n";
+const rows = [];
+let fixture;
+let sourceHash = null;
+let harnessError = null;
+let cleanupObserved = false;
+const runtime = { executable: process.execPath, version: process.version };
+try {
+  if (process.argv.length > 4 || /\s/.test(process.execPath)) throw new Error('arguments-or-node-path');
+  const original = readFileSync(sourcePath);
+  sourceHash = sha(original);
+  mkdirSync(fixtureBase, {recursive:true,mode:0o700});
+  fixture = mkdtempSync(join(fixtureBase, 'curl-invocation-'));
+  for (const [index, condition] of cases.entries()) {
+    const directory = join(fixture, String(index));
+    const bin = join(directory, 'bin');
+    const curlHome = join(directory, 'curl-home');
+    const out = join(directory, 'out');
+    for (const name of [directory, bin, curlHome, out]) mkdirSync(name, {mode:0o700});
+    const capturePath = join(directory, 'capture.json');
+    const marker = join(directory, 'adapter-error');
+    const bodyPath = join(out, 'w6-discovery.json');
+    const certPath = join(directory, 'public-placeholder.crt');
+    const body = JSON.stringify({issuer:'https://w6-curl.test:51443/identity/realms/krate'});
+    writeFileSync(certPath, 'PUBLIC PLACEHOLDER: mock does not parse TLS', {mode:0o600,flag:'wx'});
+    writeFileSync(join(curlHome, '.curlrc'), condition === 'private-insecure-config' ? 'insecure\n' : '', {mode:0o600,flag:'wx'});
+    writeFileSync(join(bin, 'curl'), fakeTemplate.replace('#!/REPLACE_NODE', '#!' + process.execPath), {mode:0o700,flag:'wx'});
+    const ua = 'krate-gate-w6-capture-' + index;
+    const url = 'https://w6-curl.test:51443/identity/realms/krate/.well-known/openid-configuration';
+    const env = {PATH:bin,LANG:'C',LC_ALL:'C',CURL_HOME:curlHome,CAPTURE:capturePath,
+      ADAPTER_MARKER:marker,EXPECT_BODY:bodyPath,FIXED_BODY:body};
+    if (condition === 'HTTPS_PROXY' || condition === 'ALL_PROXY') {
+      env[condition] = 'http://127.0.0.1:9';
+      env.no_proxy = '';
+      env.NO_PROXY = '';
+    }
+    const child = spawnSync(process.execPath, [sourcePath, 'clientaddr', '--ip','127.0.0.1',
+      '--host','w6-curl.test','--port','51443','--cert',certPath,'--ua',ua,
+      '--xff','203.0.113.9','--out',out], {env,encoding:'utf8',timeout:5000,killSignal:'SIGKILL',maxBuffer:32768});
+    if (child.error || child.signal || child.status !== 0 || child.stderr !== '' || existsSync(marker)
+        || !existsSync(capturePath) || !existsSync(join(out,'w6-result.json'))) throw new Error('child-or-adapter-boundary');
+    const captured = JSON.parse(readFileSync(capturePath,'utf8'));
+    /** @type {{row:string,status:number,port:number,resolve:string,url:string,ua:string,xff:string,issuer:string,body_bytes:number}} */
+    const report = JSON.parse(readFileSync(join(out,'w6-result.json'),'utf8'));
+    if (!Array.isArray(captured.argv) || captured.argv.some(value => typeof value !== 'string')
+        || captured.executable !== process.execPath || captured.version !== process.version) throw new Error('capture-or-runtime');
+    const argv = captured.argv;
+    const positions = name => argv.flatMap((value,i) => value === name ? [i] : []);
+    const pair = (name,value) => positions(name).length === 1 && argv[positions(name)[0]+1] === value;
+    const headerPositions = positions('--header');
+    const checks = {
+      default_config_disabled_first: argv[0] === '-q' && positions('-q').length === 1,
+      proxies_bypassed_literal: pair('--noproxy','*'),
+      ca_preserved: pair('--cacert',certPath) && !argv.some(value => ['-k','--insecure','--proxy-insecure'].includes(value)),
+      resolve_preserved: pair('--resolve','w6-curl.test:51443:127.0.0.1'),
+      https_url_preserved: argv.at(-1) === url && positions(url).length === 1,
+      headers_preserved: headerPositions.length === 2 && argv[headerPositions[0]+1] === 'X-Forwarded-For: 203.0.113.9'
+        && argv[headerPositions[1]+1] === 'Accept: application/json' && pair('--user-agent',ua),
+      deadline_preserved: pair('--max-time','20') && positions('--silent').length === 1 && positions('--show-error').length === 1,
+      output_preserved: pair('--output',bodyPath) && pair('--write-out','%{http_code}'),
+      result_preserved: report.row === 'W6' && report.status === 200 && report.port === 51443
+        && report.resolve === 'w6-curl.test:51443:127.0.0.1' && report.url === url && report.ua === ua
+        && report.xff === '203.0.113.9' && report.issuer === JSON.parse(body).issuer
+        && report.body_bytes === Buffer.byteLength(body),
+      stdout_preserved: child.stdout.startsWith('RESULT W6 rc=0 status=200 issuer=' + JSON.parse(body).issuer + ' ua=' + ua)
+        && child.stdout.endsWith('\n'),
+      boundary_environment: captured.curlHome === curlHome && captured.httpsProxy === (condition === 'HTTPS_PROXY')
+        && captured.allProxy === (condition === 'ALL_PROXY'),
+    };
+    rows.push({condition, checks, runtime:{executable:captured.executable,version:captured.version},
+      observed:{argv,rc:child.status,status:report.status}});
+  }
+  if (sha(readFileSync(sourcePath)) !== sourceHash) throw new Error('source-changed');
+} catch (error) {
+  harnessError = error instanceof Error ? error.message : 'unknown-harness-error';
+} finally {
+  if (fixture) {
+    try { rmSync(fixture,{recursive:true,force:true}); cleanupObserved = !existsSync(fixture); }
+    catch { harnessError = harnessError || 'fixture-cleanup'; }
+  }
+}
+const assertions = rows.reduce((sum,row) => sum + Object.keys(row.checks).length,0);
+const failedAssertions = rows.reduce((sum,row) => sum + Object.values(row.checks).filter(value => !value).length,0);
+const status = harnessError ? 'HARNESS_ERROR' : failedAssertions || rows.length !== 4 || !cleanupObserved ? 'FAIL' : 'PASS';
+const report = {status,sourceHash,runtime,rows,cases:rows.length,assertions,failedAssertions,harnessError,cleanupObserved,
+  evidenceScope:'Actual complete shipped clientaddr invocation and report; curl boundary captures arguments only. Native TLS/config/proxy behavior is separate manual evidence.'};
+const output = JSON.stringify(report);
+if (Buffer.byteLength(output) > 65536) { process.stdout.write('{"status":"HARNESS_ERROR","harnessError":"output-limit"}\n'); process.exitCode = 2; }
+else { process.stdout.write(output + '\n'); process.exitCode = status === 'PASS' ? 0 : status === 'FAIL' ? 1 : 2; }
+'''
+    probe = ROOT / 'scripts/gate/mac/probe.mjs'
+    child = subprocess.Popen([node, '--input-type=module', '-', str(probe),
+                              str(ROOT / 'harness/check-identity')],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, start_new_session=True)
+    stdout, stderr = '', ''
+    timed_out = False
+    cleanup_failed = False
+    try:
+        stdout, stderr = child.communicate(source, timeout=30)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    finally:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            cleanup_failed = True
+        try:
+            if timed_out:
+                stdout, stderr = child.communicate(timeout=5)
+            else:
+                child.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            cleanup_failed = True
+    if timed_out or cleanup_failed or stderr or len(stdout) > 65536:
+        checks.expect(False, 'Mac W6 curl invocation lifecycle or output refused')
+        return
+    try:
+        report = json.loads(stdout)
+    except ValueError:
+        checks.expect(False, 'Mac W6 curl invocation produced no JSON report')
+        return
+    if not isinstance(report, dict) or not isinstance(report.get('rows'), list):
+        checks.expect(False, 'Mac W6 curl invocation report shape refused')
+        return
+    rows = report['rows']
+    expected = {'empty-config', 'private-insecure-config', 'HTTPS_PROXY', 'ALL_PROXY'}
+    required = {'default_config_disabled_first', 'proxies_bypassed_literal', 'ca_preserved',
+                'resolve_preserved', 'https_url_preserved', 'headers_preserved', 'deadline_preserved',
+                'output_preserved', 'result_preserved', 'stdout_preserved', 'boundary_environment'}
+    inventory = []
+    assertions, failed = 0, 0
+    runtime = report.get('runtime')
+    if not isinstance(runtime, dict) or not isinstance(runtime.get('executable'), str) or not isinstance(runtime.get('version'), str):
+        checks.expect(False, 'Mac W6 curl invocation runtime shape refused')
+        return
+    try:
+        runtime_bound = Path(runtime['executable']).resolve() == Path(node).resolve()
+    except OSError:
+        runtime_bound = False
+    if not runtime_bound:
+        checks.expect(False, 'Mac W6 curl invocation must use the selected Node executable')
+        return
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('condition'), str) or not isinstance(row.get('checks'), dict):
+            checks.expect(False, 'Mac W6 curl invocation row shape refused')
+            return
+        results = row['checks']
+        if set(results) != required or any(type(value) is not bool for value in results.values()) or row.get('runtime') != runtime:
+            checks.expect(False, 'Mac W6 curl invocation assertion or runtime shape refused')
+            return
+        inventory.append(row['condition'])
+        failures = [name for name, value in results.items() if not value]
+        assertions += len(results)
+        failed += len(failures)
+        checks.expect(not failures, 'Mac W6 curl invocation %s: %s' % (row['condition'], ', '.join(failures)))
+    checks.expect(len(inventory) == 4 and set(inventory) == expected,
+                  'Mac W6 curl invocation requires all four unique conditions')
+    checks.expect(report.get('sourceHash') == hashlib.sha256(probe.read_bytes()).hexdigest(),
+                  'Mac W6 curl invocation must bind the actual complete shipped module')
+    checks.expect(report.get('assertions') == assertions == 44 and report.get('failedAssertions') == failed,
+                  'Mac W6 curl invocation aggregate accounting must agree')
+    checks.expect(child.returncode == 0 and report.get('status') == 'PASS' and failed == 0
+                  and report.get('cases') == 4 and report.get('harnessError') is None
+                  and report.get('cleanupObserved') is True,
+                  'Mac W6 curl invocation requires semantic PASS and owned fixture cleanup')
+
 def main():
     checks = Checks()
     for check in (check_templates, check_realm_contract, check_runtime_contract, check_names, check_compose, check_monitoring_binds,
@@ -10836,7 +11263,7 @@ def main():
                   check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_collision_classification, check_grafana_collision_warning_rendering, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight, check_probe_causes, check_probe_diagnostic_privacy,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,

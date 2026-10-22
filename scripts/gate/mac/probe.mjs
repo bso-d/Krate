@@ -194,6 +194,7 @@ async function subClientaddr() {
   const bodyPath = join(OUT, 'w6-discovery.json');
   try {
     const { stdout } = await execFileP('curl', [
+      '-q', '--noproxy', '*',
       '--silent', '--show-error', '--max-time', '20', '--cacert', certPath,
       '--resolve', `${host}:${port}:${ip}`,
       '--user-agent', ua, '--header', `X-Forwarded-For: ${xff}`, '--header', 'Accept: application/json',

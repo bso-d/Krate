@@ -134,7 +134,7 @@ check_playwright() { # PW_MODULES must carry the gate's pin 1.60.0
   fi
 }
 check_playwright || PREFLIGHT_FAIL=1
-if scutil --proxy 2>/dev/null | grep -E '^\s*(HTTPEnable|HTTPSEnable|SOCKSEnable|ProxyAutoConfigEnable|ProxyAutoDiscoveryEnable)\s*=\s*1$' | grep -q .; then
+if scutil --proxy 2>/dev/null | grep -E '^[[:space:]]*(HTTPEnable|HTTPSEnable|SOCKSEnable|ProxyAutoConfigEnable|ProxyAutoDiscoveryEnable)[[:space:]]*:[[:space:]]*1[[:space:]]*$' | grep -q .; then
   echo "run-vm-gate: refuse: the Mac runs a system proxy; --host-resolver-rules would not apply to proxy-resolved names (TOPOFIX F3)" >&2
   PREFLIGHT_FAIL=1
 fi
