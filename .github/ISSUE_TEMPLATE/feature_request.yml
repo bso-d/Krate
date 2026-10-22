@@ -1,0 +1,70 @@
+name: Feature Proposal
+description: Propose a new feature, capability, or operational improvement for Krate.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Krate! Krate focuses on portable, air-gapped, and reliable Kafka cluster packaging on Ubuntu and RHEL virtual machines.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Target Edition or Area
+      description: Which edition or component does this feature target?
+      options:
+        - "kraft (KRaft cluster edition)"
+        - "epc (EPC RHEL edition)"
+        - "monitoring (Observability stack)"
+        - "sso (Keycloak SSO / Kafbat auth integration)"
+        - "offline packaging (Bundle generation, Makefile, Docker packages)"
+        - "cli (krate CLI commands & automation)"
+        - "all / cross-cutting"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement / Motivation
+      description: Is this proposal related to a problem, limitation, or operational pain point?
+      placeholder: "A clear and concise description of the problem or limitation..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution or Capability
+      description: Describe the solution, CLI command, configuration, or architectural change you would like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: offline_impact
+    attributes:
+      label: Offline / Air-gap & Compatibility Impact
+      description: |
+        How does this proposal impact offline / air-gapped deployments?
+        - Does it introduce new container images (which must be digest-pinned with `@sha256:...`)?
+        - Does it comply with Krate's offline policy (no outbound calls, telemetry, or update checks)?
+        - Does it affect backward compatibility (especially for EPC or ZooKeeper)?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions or workarounds you've considered.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Add any other context, reference links, architecture diagrams, or screenshots.
+    validations:
+      required: false

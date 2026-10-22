@@ -1,0 +1,34 @@
+name: Request Private Reporting Channel
+description: Request a confidential channel for security or Code of Conduct disclosures (no incident details).
+title: "[Confidential]: Request for private communication channel"
+labels: ["security", "confidential"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Request a Private Reporting Channel
+
+        Use this form to request a private, confidential communication channel with the maintainers:
+        - **For security vulnerabilities**: Use this form if [GitHub Private Vulnerability Reporting](https://github.com/bso-d/Krate/security/advisories/new) is unavailable or you need an alternative private reporting route.
+        - **For Code of Conduct concerns**: Use this form if no private contact method is listed on the maintainer's profile (per [CODE_OF_CONDUCT.md](https://github.com/bso-d/Krate/blob/main/CODE_OF_CONDUCT.md)).
+
+        > **CRITICAL PRIVACY & SECURITY NOTICE**:
+        > **DO NOT include any vulnerability details, reproduction steps, incident specifics, names, or personal information in this public issue.**
+        > This issue is publicly visible. Maintainers will establish a secure private channel with you to receive the details.
+
+  - type: textarea
+    id: contact_preference
+    attributes:
+      label: Preferred Contact Method (Optional)
+      description: If you have a preferred secure contact method (e.g., GPG key ID, secure email), specify it here. Otherwise, maintainers will follow up via your GitHub profile.
+      placeholder: "e.g., Please reach out via email / GPG / private communication."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmations
+      options:
+        - label: "I confirm that I have NOT included any incident details, vulnerability descriptions, personal information, names, credentials, or private keys in this public issue."
+          required: true

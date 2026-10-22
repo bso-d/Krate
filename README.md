@@ -467,4 +467,6 @@ See the [contributing guidelines](CONTRIBUTING.md) for setup, validation, and pu
 
 Participation in Krate is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). Please read it before contributing or joining project discussions.
 
+For security concerns or vulnerability reporting, see the [Security Policy](.github/SECURITY.md).
+
 <p align="right"><a href="#readme-top">Back to top</a></p>

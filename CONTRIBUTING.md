@@ -5,11 +5,13 @@ Read the [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 ## Report issues and propose changes
 
 Use [GitHub issues](https://github.com/bso-d/Krate/issues) for reproducible bugs
-and feature proposals. Include the affected variant (`zk`, `kraft`, or `epc`),
-CPU architecture, host OS, Docker and Compose versions, reproduction steps,
-and expected versus actual behavior. Redact credentials, private hostnames,
-and sensitive data from logs. Follow the Code of Conduct's reporting process
-for conduct concerns.
+and feature proposals using the provided issue templates. Include the affected
+variant (`zk`, `kraft`, or `epc`), CPU architecture, host OS, Docker and Compose
+versions, reproduction steps, and expected versus actual behavior. Redact
+credentials, private hostnames, and sensitive data from logs. For security
+vulnerabilities, do not open a public issue; follow the [Security Policy](.github/SECURITY.md)
+to report them privately. Follow the Code of Conduct's reporting process for
+conduct concerns.
 
 Discuss substantial changes before implementation. Keep pull requests focused
 on one problem and explain any compatibility or operational impact.
@@ -62,8 +64,12 @@ Krate is licensed under [AGPL-3.0](LICENSE). By submitting a contribution you ag
 
 ## Open a pull request
 
-Target `main` with a descriptive title and focused commits. Explain the problem,
+Target `main` with a descriptive title and focused commits following the
+[pull request template](.github/pull_request_template.md). Explain the problem,
 what changes for users, why the change is needed, and the validation performed.
-Call out breaking changes, deployment steps, and data-loss risks when applicable.
-Update relevant documentation alongside behavior changes. Resolve review
-feedback and check the CI results before requesting a merge.
+Keep the description structured: overview with candidate commit and honest state,
+changes grouped by product area, split verification (automated CI vs formal
+acceptance gates), and pointers for reviewers on highest-risk areas. Call out
+breaking changes, deployment steps, and data-loss risks when applicable. Update
+relevant documentation alongside behavior changes. Resolve review feedback and
+check the CI results before requesting a merge.

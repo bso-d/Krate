@@ -1,0 +1,128 @@
+name: Bug Report
+description: Report a reproducible problem or unexpected behavior in Krate.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue!
+
+        > **Security Warning**: If you discovered a security vulnerability or credential leak, please **do not** open a public issue. Follow our [Security Policy](https://github.com/bso-d/Krate/blob/main/.github/SECURITY.md) to report it privately via [GitHub Security Advisories](https://github.com/bso-d/Krate/security/advisories/new).
+
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Affected Edition / Component
+      description: Which part of Krate does this issue affect?
+      options:
+        - "kraft (KRaft 4-broker cluster edition)"
+        - "epc (2-node combined broker/controller RHEL edition)"
+        - "zk (ZooKeeper legacy edition)"
+        - "monitoring (Prometheus / Grafana / Loki / Fluent Bit)"
+        - "sso (Keycloak / Kafbat auth / PingFederate)"
+        - "bundle (Offline package building / Makefile)"
+        - "docker (Broker Dockerfiles / custom Kafbat UI image)"
+        - "cli (krate / kafka Bash command scripts)"
+        - "other"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Krate Version or Commit SHA
+      description: The release version (e.g., v2, v4) or git commit SHA.
+      placeholder: "e.g., v2 (kraft), package-epc-v4, or git commit 1a2b3c4"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Host Operating System & Version
+      description: Which operating system and version is running on the host?
+      placeholder: "e.g., Ubuntu 24.04 LTS (noble), RHEL 9.4, Rocky Linux 9.4"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arch
+    attributes:
+      label: CPU Architecture
+      description: Which processor architecture is running?
+      options:
+        - "amd64 (x86_64)"
+        - "arm64 (aarch64)"
+        - "other"
+    validations:
+      required: true
+
+  - type: input
+    id: docker_version
+    attributes:
+      label: Docker & Docker Compose Versions
+      description: Output of `docker --version` and `docker compose version`.
+      placeholder: "e.g., Docker version 27.3.1, Docker Compose version v2.29.7"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem Description
+      description: A clear and concise description of the bug or error encountered.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps or commands to reproduce the problem.
+      placeholder: |
+        1. In `kraft/`, run `./krate gen-cert`
+        2. Run `./krate start`
+        3. See error ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior & Relevant Logs
+      description: |
+        Paste command outputs, CLI error messages, or container logs.
+        **CRITICAL**: Redact all passwords, certificates, private keys, tokens, and sensitive hostnames.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic Output (Optional)
+      description: Output from `./krate health`, `./krate status`, `make check`, or `scripts/check-offline.py`.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmation
+      options:
+        - label: "I have searched existing issues and confirmed this is not a duplicate."
+          required: true
+        - label: "I have redacted sensitive credentials, keys, certificates, and private hostnames from all logs and output."
+          required: true
+        - label: "I confirm this is not a security vulnerability (see Security Policy)."
+          required: true
