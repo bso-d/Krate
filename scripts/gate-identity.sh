@@ -3034,15 +3034,27 @@ runner_guard() { # the CLI's own identity lock: a live holder means another run 
   # launched while the 04:39 run still had rows running; its compose down removed the other run's
   # keycloak between two B rows). A stale lock (its holder pid is gone) is cleared by fixture_reset.
   # The lock exists only while an identity CLI command runs, so a second layer also refuses a
-  # second gate-identity process on this guest (the review's D2 window); its own shell and its
-  # parent (the launcher's detached wrapper, whose argv carries the script name) are exempt.
-  local h="" other
+  # second gate-identity process on this guest (the review's D2 window). The launcher's detached
+  # chain (its sh -c wrappers) carries the script name in argv by design, so the whole ancestor
+  # chain of THIS runner is exempt — not only the immediate parent (its own launch refused itself
+  # once that way, receipt 2026-10-23T062651Z naming pid 921453).
+  local h="" other anc="" walk line
   if [[ -f "$ED/auth/.identity.lock/pid" ]]; then h="$(cat "$ED/auth/.identity.lock/pid" 2>/dev/null || true)"; fi
   if [[ -n "$h" ]] && kill -0 "$h" 2>/dev/null; then
     log "REFUSING: the fixture's identity lock is held by a live run (pid $h); wait for its receipt or stop that run"
     exit 2
   fi
-  if other="$(pgrep -f 'scripts/gate-identity.sh' 2>/dev/null | grep -vw "$$" | grep -vw "${PPID:-}" || true)" && [[ -n "$other" ]]; then
+  walk="$$"
+  for _ in 1 2 3 4 5 6; do
+    walk="$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')" || break
+    [[ -n "$walk" && "$walk" != 1 ]] || break
+    anc="$anc $walk"
+  done
+  other="$(pgrep -f 'scripts/gate-identity.sh' 2>/dev/null | grep -vw "$$" || true)"
+  for line in $anc; do
+    other="$(printf '%s\n' "$other" | grep -vw "$line" || true)"
+  done
+  if [[ -n "$other" ]]; then
     log "REFUSING: another gate runner is already live on this guest: $(echo "$other" | tr '\n' ' ')"
     exit 2
   fi
