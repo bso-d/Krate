@@ -64,7 +64,10 @@ addition, a `git` executable and that separate checkout (a `git clone -b
 check: the pinned `nginx:1.27-alpine@sha256:…` reference does not resolve after
 `docker load` (the registry digest is not preserved), so set
 `KRATE_CHECK_NGINX_IMAGE` to the image the bundle loaded (the `NGINX_IMAGE`
-value of the installed `.env.template`); the check names the image it rendered with in the
+value of the installed `.env.template`); the runner derives that reference itself
+from the loaded template for the rows that need it (the S1 `gmake check` chain
+and the S4 checker row), and
+the check names the image it rendered with in the
 run log, and the S4 evidence reads `check-identity rc=…; py_compile of N gate helpers rc=…`. X1 needs the
 `krate-harness/playwright:1.60.0` image loaded from a saved archive (3.8 GB on
 disk, 0.94 GB gzipped, arm64), and J7 needs root. On a `--phase 4c --browser agent` run
@@ -111,6 +114,19 @@ with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 state directory (`.state`, mode 0700: the stand-in's material and the enrolled
 users' state including `secrets.txt`, mode 600) inside the receipt folder for the
 kept fixture's post-run consumers.
+
+The runner's fixture reset removes the run's own state (`.env`,
+`auth/keycloak`, `auth/ui/runtime.yml`, the journal, the identity lock,
+`certs/`, the monitoring `.env`); a path left root-owned by an earlier run is
+then removed with `sudo -n rm -rf` too, and when even that fails the run
+refuses with the path in its log instead of continuing on an unclean fixture.
+The reason such leftovers can exist at all is the docker daemon creating an
+absent bind-mount source root-owned at container create, so the editions'
+Compose files mount the `auth/` and `certs` sources with
+`create_host_path: false` — a start without the CLI's own prep refuses, and no
+daemon-created directories appear. One run at a time: a second runner refuses
+while the fixture's identity lock is still held for a live run, and the Mac
+launcher checks for a still-live runner on the guest before spawning another.
 
 ## What a receipt binds the results to
 
