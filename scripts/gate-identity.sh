@@ -2939,10 +2939,13 @@ restore_prometheus_config() {
 }
 teardown() {
   section "teardown"
-  # release the per-fixture run lock before anything else: the --keep and not-owned early
-  # returns below must not strand it, and every exit path (on_exit, on_signal, the
-  # pre-trap refusal EXIT trap) comes through here or releases on its own
-  run_lock_release || true
+  # both run locks stay HELD through this whole function (children, prometheus restore,
+  # compose down -v, volume/auth/cert removal) and past receipt finalization: a second
+  # runner must not start its fixture while this one is still deleting those resources
+  # (thread r4359042087: releasing first left an unlocked destructive window, and the
+  # Mac local mode has no /proc scan to see the tearing runner). The release runs in
+  # finish(), after the receipt is written — so the --keep and not-owned early returns
+  # below still release (they return to finish, not exit).
   [[ -z "$CHILD" ]] || { kill "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; CHILD=""; }
   local phase4_child
   for phase4_child in "${PHASE4_CHILDREN[@]}"; do
@@ -3075,9 +3078,20 @@ PYEOF
     echo "| id | phase | criterion | result | evidence |"; echo "|---|---|---|---|---|"
     tail -n +2 "$RECEIPT" | awk -F'\t' '{gsub(/\|/, "\\|", $5); printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5}'
   } > "$OUT/receipt.md"
-  chmod 644 "$OUT/receipt.md" "$OUT/receipt.tsv" "$OUT/run.log" 2>/dev/null; chmod 755 "$OUT"; [[ -d "$OUT/screenshots" ]] && chmod 755 "$OUT/screenshots" && chmod 644 "$OUT"/screenshots/* 2>/dev/null
+  chmod 644 "$OUT/receipt.md" "$OUT/receipt.tsv" "$OUT/run.log" 2>/dev/null || true; chmod 755 "$OUT" 2>/dev/null || true; [[ -d "$OUT/screenshots" ]] && chmod 755 "$OUT/screenshots" && chmod 644 "$OUT"/screenshots/* 2>/dev/null || true
   log ""; log "VERDICT: $verdict  (PASS $PASSES, FAIL $FAILS, NOT_RUN $NOTRUN, required missing: ${missing[*]:-none}, bound: $BOUND)"
   log "receipt: $OUT/receipt.md"
+  # the last lock release, after receipt finalization and at the very end of finish:
+  # finish is the script's last command, so its final line (`[[ "$verdict" == PASS ]]`)
+  # is what sets the exit status — a release placed AFTER the finish() call would either
+  # clobber that status (run_lock_release || true returns 0, masking a FAIL verdict) or
+  # be skipped by the signal path's `exit 130` right after finish. Every path that
+  # reached finish (the main flow, on_signal, on_exit) releases here (thread r4359042087);
+  # the traps are already cleared on all of them, so nothing after this can strand the
+  # locks. Refusal paths that never reach finish keep their own EXIT-trap release in
+  # gate_run_lock. (The script is `set -uo pipefail`, not errexit — no mid-finish abort
+  # exists; the release must simply precede the verdict line.)
+  run_lock_release || true
   [[ "$verdict" == PASS ]]
 }
 
@@ -3204,7 +3218,9 @@ gate_run_lock() { # take both scopes; refuse (exit 2) while another run holds ei
   fi
   RUN_LOCK_DIRS+=("$project_lock")
   # provisional EXIT trap: covers the refusals between here (inside runner_guard) and
-  # the main trap on_exit below; on_exit/on_signal both call teardown, which releases first
+  # the main trap on_exit below — no fixture work has started yet, so releasing on EXIT
+  # directly is safe (on_exit/on_signal hold the locks through teardown and finish, and
+  # release only after receipt finalization)
   trap run_lock_release EXIT
   # A default-disposition signal death between the take and the main on_signal traps
   # below runs no trap at all, stranding both locks until the 60 s grace and the stale

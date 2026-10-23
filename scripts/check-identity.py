@@ -1366,6 +1366,51 @@ def check_phase4_w3_controls(checks):
           f'no-LL: inconclusive bad recorded; out={out!r}')
 
 
+def check_run_lock_order(checks):
+    """Run-lock release ordering (PR #52 thread r4359042087): the locks are held through
+    teardown's destructive work (children, prometheus restore, compose down -v, volume/auth/
+    cert removal) and past receipt finalization, and release inside finish() at its very
+    end. finish is the script's last command and its final line (`[[ "$verdict" == PASS ]]`)
+    sets the exit status (the script is `set -uo pipefail`, not errexit), so a release
+    placed after the finish() call would either clobber that status (run_lock_release ||
+    true returns 0, masking a FAIL verdict) or be skipped by on_signal's `exit 130` —
+    the release belongs inside finish, before the verdict line. Releasing at teardown's
+    start instead left an unlocked destructive window: on the Mac local mode (no /proc
+    scan) a second runner could start its fixture while the first was still deleting
+    those resources."""
+    text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e = lambda cond, msg: checks.expect(cond, 'run-lock order: ' + msg)  # noqa: E731
+    teardown_body = text[text.index('\nteardown() {'):]
+    teardown_body = teardown_body[:teardown_body.index('\nfinish() {')]
+    e('run_lock_release' not in teardown_body,
+      'teardown holds the run locks through its destructive work (no release inside it)')
+    finish_body = text[text.index('\nfinish() {'):]
+    finish_body = finish_body[:finish_body.index('\nFINISHED=false')]
+    e('run_lock_release || true' in finish_body,
+      'finish() releases the run locks (the only release on the normal/signal/unexpected paths)')
+    receipt_line = finish_body.find('log "receipt: $OUT/receipt.md"')
+    release_line = finish_body.find('run_lock_release || true')
+    verdict_line = finish_body.rfind('[[ "$verdict" == PASS ]]')  # rfind: the earlier hits are the verdict computation
+    e(-1 < receipt_line < release_line < verdict_line,
+      'the release sits after the receipt write and before the verdict exit')
+    on_signal = text[text.index('on_signal() {'):]
+    on_signal = on_signal[:on_signal.index('\n')]
+    e(on_signal == 'on_signal() { log "interrupted"; trap - EXIT HUP INT TERM; FINISHED=true; teardown; finish; exit 130; }',
+      f'the signal path runs teardown then finish (which releases); got {on_signal!r}')
+    on_exit = text[text.index('on_exit() {'):]
+    on_exit = on_exit[:on_exit.index('\n')]
+    e(on_exit == 'on_exit() { $FINISHED || { log "unexpected exit"; FINISHED=true; teardown; finish; }; }',
+      f'the unexpected-exit path runs teardown then finish (which releases); got {on_exit!r}')
+    tail = text[text.rindex('\nairgap_after_rows'):]
+    e(tail.endswith('\nFINISHED=true\ntrap - EXIT HUP INT TERM\nteardown\nfinish\n'),
+      f'the main flow ends in teardown then finish (dropping finish here would strand the '
+      f'locks on every normal run — finish is also the last command, so its verdict line '
+      f'sets the exit status); got {tail[-80:]!r}')
+    # the refusal paths that never reach finish keep their own EXIT-trap release
+    e('trap run_lock_release EXIT' in text,
+      'the provisional EXIT trap still releases on pre-fixture refusals')
+
+
 def check_start_cluster_monitor_realm(checks):
     """W1 fix round (PR #52): the 4c fixture bring-up finishes the product's Grafana realm
     switch (monitor realm, config set GRAFANA_AUTH_CONFIG=realm.ini, monitor up again), so
@@ -2118,9 +2163,12 @@ const source = readFileSync(process.argv[1], 'utf8');
 // 'viewer-redirect': the stock-RBAC redirect shape (the browser lands on Home after the
 //   explore navigation — the Viewer p4v run, walk log 147): the story must record the
 //   redirect and stay green instead of timing out on a Live click Home never offers.
+// 'login-redirect': the explore navigation lands on a Grafana login page (session loss
+//   or an auth regression) — the redirect exception must not accept it: the story fails
+//   naming the destination, instead of passing as the Viewer's stock shape.
 // 'live-positive': the browser stayed on /grafana/explore (the Admin shape) and the Live
 //   tail step runs. 'live-button': the Live click itself fails — a real story failure.
-const cases = ['positive', 'viewer-redirect', 'live-positive', 'live-button', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write', 'guard', 'terminal'];
+const cases = ['positive', 'viewer-redirect', 'login-redirect', 'live-positive', 'live-button', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write', 'guard', 'terminal'];
 const cleanStory = ['positive', 'viewer-redirect', 'live-positive'];
 let failed = 0;
 for (const condition of cases) {
@@ -2128,8 +2176,10 @@ for (const condition of cases) {
   const reject = (stage) => { if (condition === stage) throw new Error(`injected ${stage}`); };
   const page = {
     // the goto stub does not navigate, so page.url() models where the browser ended up
-    // after the explore navigation: Home (redirect) or still on the explore page
-    url: () => ((condition === 'live-button' || condition === 'live-positive')
+    // after the explore navigation: Home (redirect), the login page (auth regression),
+    // or still on the explore page
+    url: () => (condition === 'login-redirect' ? 'https://gate.test/grafana/login'
+      : (condition === 'live-button' || condition === 'live-positive')
       ? 'https://gate.test/grafana/explore?schemaVersion=1' : 'https://gate.test/grafana/'),
     on() {}, async goto() {},
     getByRole(role, sel) {
@@ -2194,13 +2244,20 @@ for (const condition of cases) {
   expect(events.includes('evidence') && events.indexOf('evidence') < events.indexOf('close'), 'live evidence not before close');
   expect(events.indexOf('close') < events.indexOf('write:ui15-summary.json'), 'summary finalized before cleanup');
   if (!cleanStory.includes(condition)) {
-    if (condition !== 'summary-write') expect(summary?.failures?.some((failure) => failure.error.includes(`injected ${condition}`)), 'failure not retained in file');
+    if (!['summary-write', 'login-redirect'].includes(condition)) expect(summary?.failures?.some((failure) => failure.error.includes(`injected ${condition}`)), 'failure not retained in file');
     expect(parsed?.storyFailed && parsed?.failures?.length > 0, 'failure not retained in stdout');
     if (!['browser-write', 'summary-write'].includes(condition)) expect(events.includes('profile:true'), 'known failed profile not retained');
   } else expect(!summary?.storyFailed && !(summary?.failures || []).length, 'positive control fabricated failure');
   if (condition === 'viewer-redirect') {
     expect(summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'), 'redirect step not recorded for the redirected Viewer');
     expect(!summary?.steps?.some((s) => s.name === 'explore live tail 20 s'), 'live tail ran for the redirected Viewer');
+  }
+  if (condition === 'login-redirect') {
+    expect(!summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'),
+      'a login-page destination was recorded as the stock Viewer redirect');
+    expect(summary?.failures?.some((failure) => failure.error.includes('/grafana/login')
+      && failure.error.includes("not the Viewer's stock Home")),
+      'the login-redirect failure does not name the destination and the stock-Home rule');
   }
   if (condition === 'live-positive') {
     expect(summary?.steps?.some((s) => s.name === 'explore live tail 20 s'), 'live tail step not recorded for the explore run');
@@ -11485,7 +11542,7 @@ def main():
                   check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_collision_classification, check_grafana_collision_warning_rendering, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_phase4_w3_controls, check_start_cluster_monitor_realm, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_phase4_w3_controls, check_run_lock_order, check_start_cluster_monitor_realm, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight, check_probe_causes, check_probe_diagnostic_privacy,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,

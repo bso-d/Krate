@@ -138,7 +138,12 @@ its first 60 seconds: a lock younger than that reads as live even with a dead
 pid, so an operator who kills a run and restarts at once is refused with the
 dead pid for that minute (the write window between the pid write and the atomic
 rename) instead of the restart silently stealing the lock. A live one makes the
-second runner refuse with the holder's pid and exit 2.
+second runner refuse with the holder's pid and exit 2. The locks are held through
+teardown and receipt finalization — a runner keeps them while it stops children,
+runs `compose down -v`, removes the volumes, auth state and certificates, and
+writes its receipt — and releases them in `finish()` after the receipt is on disk,
+so a second runner cannot start its fixture while the first is still deleting those
+resources (the Mac local mode has no `/proc` scan to see a tearing runner).
 
 ## What a receipt binds the results to
 
