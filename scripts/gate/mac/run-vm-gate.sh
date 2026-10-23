@@ -265,8 +265,11 @@ if [[ -f "$OUT/agent-manifest.tsv" && -d "$OUT/agent-from-guest" ]]; then
   BAD=0
   while IFS=$'\t' read -r rid row rsha files _; do # the TSV: id, row, request sha, file digests, chrome version
     [[ "$rid" == request_id || -z "$files" ]] && continue
-    # shellcheck disable=SC2086  # the files column holds space-separated 12-hex digests
-    for d in $files; do
+    # The files column holds space-separated 12-hex digests. The while's IFS is tab-only and its
+    # setting survives inside the body, so `for d in $files` keeps the column one token (run a3c
+    # 2026-10-23: W6's two digests verified as one string and the delivery verified false); split
+    # on words deliberately via a word-split.
+    for d in $(printf '%s' "$files" | tr '\t' ' '); do
       if ! find "$OUT/agent-from-guest" -type f -exec shasum -a 256 {} + 2>/dev/null | grep -q "^${d}[0-9a-f]*  "; then
         echo "run-vm-gate: manifest row $row/$rid (request ${rsha:-?}) names a file whose digest ($d) is not in the harvested evidence" >&2
         BAD=1
