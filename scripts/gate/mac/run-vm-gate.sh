@@ -2,7 +2,8 @@
 # Mac launcher for the identity gate on a vzNAT VM fixture (TOPOFIX-DESIGN 3.6 table
 # `scripts/gate/mac/run-vm-gate.sh`, amendments TOPOFIX-REVIEW F7/F8).
 #
-# One launcher for one heavy stack: it refuses on battery, keeps the display awake
+# One launcher for one heavy stack: it refuses on a battery below 30% (the available charge decides;
+# AC is never a requirement), keeps the display awake
 # (caffeinate), pins the story's tooling (installed Google Chrome, PW_MODULES playwright
 # 1.60.0), creates a Mac worktree of the candidate (its ledger row is printed for the
 # operator; rule 3), discovers the guest's lima0 address and the Mac's owning interface,
@@ -112,8 +113,12 @@ candidate_worktree_ok() { # worktree candidate: fail closed on either unreadable
 
 # ── preconditions ──
 PREFLIGHT_FAIL=0
-if ! pmset -g batt 2>/dev/null | grep -q 'AC Power'; then
-  echo "run-vm-gate: refuse: the Mac is not on AC Power (a heavy stack must not be run on battery)" >&2
+# Power rule (owner instruction 2026-10-23): the battery's available charge decides; AC is never a
+# requirement. Refuse only on a battery that is present AND under 30%; a Mac with no battery (desktop)
+# has no charge to lose and runs.
+batt_pct="$(pmset -g batt 2>/dev/null | awk '/InternalBattery/ {pct=$3; gsub(/[^0-9]/, "", pct); print pct+0}')" || true
+if [ -n "$batt_pct" ] && [ "$batt_pct" -lt 30 ]; then
+  echo "run-vm-gate: refuse: the Mac's available charge is ${batt_pct}% (the rule: 30% or more)" >&2
   PREFLIGHT_FAIL=1
 fi
 CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
