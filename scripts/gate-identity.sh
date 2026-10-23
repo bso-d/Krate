@@ -744,10 +744,10 @@ run_static() {
     local s1_render_kv
     s1_render_kv="$(s1_render_env)"
     if [[ -n "$s1_render_kv" ]]; then
-      # shellcheck disable=SC2086  # the single KEY=value word, deliberate
-      env $s1_render_kv gmake_check_in "$TOPLEVEL"
+      # a function cannot run under env(1); the shell's own VAR=value prefix sets it for this call
+      KRATE_CHECK_NGINX_IMAGE="${s1_render_kv#KRATE_CHECK_NGINX_IMAGE=}" cap gmake_check_in "$TOPLEVEL"
     else
-      gmake_check_in "$TOPLEVEL"
+      cap gmake_check_in "$TOPLEVEL"
     fi
     st=$?; ok_if S1 static S "$st" "gmake check (syntax, lint, compose-check, offline-check, identity-check): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
   else
