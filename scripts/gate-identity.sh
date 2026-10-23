@@ -754,9 +754,11 @@ run_static() {
     for id in S1 S2 S3 S4; do record "$id" static S NOT_RUN "--no-static (outside the inventory)"; done
     return
   fi
+  local s1_render_kv
+  s1_render_kv="$(s1_render_env)"  # computed once here, for BOTH checker rows: S1's gmake
+                                   # chain above and S4's direct invocation below; a bundle
+                                   # host has no Makefile for S1 but still runs the checker
   if [[ -f "$TOPLEVEL/Makefile" ]]; then
-    local s1_render_kv
-    s1_render_kv="$(s1_render_env)"
     if [[ -n "$s1_render_kv" ]]; then
       # a function cannot run under env(1); the shell's own VAR=value prefix sets it for this call
       KRATE_CHECK_NGINX_IMAGE="${s1_render_kv#KRATE_CHECK_NGINX_IMAGE=}" cap gmake_check_in "$TOPLEVEL"
@@ -774,14 +776,12 @@ run_static() {
   else
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
-  local st_identity st_py=0 py_failed="" py_count=0 helper s4_render_kv="${s1_render_kv:-}"
-  if [[ -n "$s4_render_kv" ]]; then
-    # the same loaded-image override S1's gmake chain runs its checkers with: the checker's
-    # own nginx -t renders cannot resolve the pinned ref on an offline-only store either
-    # (attempt 8, 2026-10-23: 'nginx -t must pass; exit 125: … registry-1.docker.io …
-    # operation not permitted'), and S4's direct invocation has no Makefile layer to
-    # inherit one from.
-    KRATE_CHECK_NGINX_IMAGE="${s4_render_kv#KRATE_CHECK_NGINX_IMAGE=}" cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
+  local st_identity st_py=0 py_failed="" py_count=0 helper
+  # S4's own render: the checker cannot resolve the pinned ref on an offline-only store
+  # (attempt 8, 2026-10-23: 'nginx -t must pass; exit 125: … registry-1.docker.io …
+  # operation not permitted'); s1_render_kv carries the loaded retag for bundle hosts too.
+  if [[ -n "$s1_render_kv" ]]; then
+    KRATE_CHECK_NGINX_IMAGE="${s1_render_kv#KRATE_CHECK_NGINX_IMAGE=}" cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
   else
     cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
   fi
@@ -3033,10 +3033,17 @@ runner_guard() { # the CLI's own identity lock: a live holder means another run 
   # interleaved second runner killed a live run's fixture mid-row (2026-10-23: the 04:43 attempt
   # launched while the 04:39 run still had rows running; its compose down removed the other run's
   # keycloak between two B rows). A stale lock (its holder pid is gone) is cleared by fixture_reset.
-  local h=""
+  # The lock exists only while an identity CLI command runs, so a second layer also refuses a
+  # second gate-identity process on this guest (the review's D2 window); its own shell and its
+  # parent (the launcher's detached wrapper, whose argv carries the script name) are exempt.
+  local h="" other
   if [[ -f "$ED/auth/.identity.lock/pid" ]]; then h="$(cat "$ED/auth/.identity.lock/pid" 2>/dev/null || true)"; fi
   if [[ -n "$h" ]] && kill -0 "$h" 2>/dev/null; then
     log "REFUSING: the fixture's identity lock is held by a live run (pid $h); wait for its receipt or stop that run"
+    exit 2
+  fi
+  if other="$(pgrep -f 'scripts/gate-identity.sh' 2>/dev/null | grep -vw "$$" | grep -vw "${PPID:-}" || true)" && [[ -n "$other" ]]; then
+    log "REFUSING: another gate runner is already live on this guest: $(echo "$other" | tr '\n' ' ')"
     exit 2
   fi
 }

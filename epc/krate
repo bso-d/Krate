@@ -1233,7 +1233,7 @@ prepare_identity_files() {
     if [[ -d "$SCRIPT_DIR/auth/keycloak/db-tls/$f" ]]; then artifact="$artifact $f"; fi
   done
   if [[ -n "$artifact" ]]; then
-    for f in ca.key server.key server.crt pg_hba.conf; do
+    for f in ca.key ca.crt server.key server.crt pg_hba.conf; do
       if [[ -f "$SCRIPT_DIR/auth/keycloak/db-tls/$f" ]]; then
         die "auth/keycloak/db-tls holds directory leftovers (${artifact# }) beside real material ($f); remove the directories by hand (root may own them), keep the material, and run again"
       fi

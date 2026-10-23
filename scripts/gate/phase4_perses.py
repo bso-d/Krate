@@ -2155,9 +2155,12 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                 elif changed:
                     recorded.append(note)
 
-        for service in ('keycloak', 'kafka-ui', 'proxy'):
-            compare(service, strict=False)  # keycloak/proxy may change by the slice's own rows
-        for service in ('keycloak-db',):
+        # kafka-ui (Kafbat), keycloak-db and the brokers are STRICT (the walk's ledger:
+        # krate-kafbat UNCHANGED); keycloak and the proxy are the slice's own changes
+        # (recorded in the evidence, not failed — walk live4b logs/120).
+        for service in ('keycloak', 'proxy'):
+            compare(service, strict=False)
+        for service in ('kafka-ui', 'keycloak-db'):
             compare(service)
         brokers = broker_services(initial)
         current_brokers = broker_services(curr_cluster)
