@@ -172,6 +172,18 @@ IFACE="$(route -n get "$VM_IP" 2>/dev/null | awk '/interface:/ {print $2; exit}'
 nc -z -G 3 "$VM_IP" 22 >/dev/null 2>&1 || { echo "run-vm-gate: no ssh to $VM_IP:22 from the Mac (Local Network prompt? launch from Terminal.app, F7)" >&2; exit 2; }
 echo "run-vm-gate: vm_ip=$VM_IP via $IFACE; preflight ok"
 
+# ── one gate run on the fixture at a time ──
+# An interleaved second runner kills the first run's live fixture mid-row (2026-10-23: the 04:43
+# attempt was launched while the 04:39 run still had rows running; its reset's compose down
+# removed the other run's keycloak between two rows and the 04:39 ledger's B-block failed with
+# 'Keycloak is not running'). Refuse while any gate runner is still live on the guest.
+live_runners="$(limactl shell "$VM" -- sh -c "pgrep -af 'scripts/gate-identity' | grep -v pgrep || true" 2>/dev/null || true)"
+if [[ -n "$live_runners" ]]; then
+  echo "run-vm-gate: refuse: a gate runner is already live on $VM (wait for its receipt or stop it first):" >&2
+  echo "$live_runners" >&2
+  exit 2
+fi
+
 # ── agent + guest runner ──
 GUEST_HEAD="$(limactl shell "$VM" -- git -C "$GUEST_ROOT/repo" rev-parse HEAD 2>/dev/null | tr -d '[:space:]' || true)"
 guest_head_is_candidate "$GUEST_HEAD" "$CANDIDATE" \
@@ -265,12 +277,14 @@ if [[ -f "$OUT/agent-manifest.tsv" && -d "$OUT/agent-from-guest" ]]; then
   BAD=0
   while IFS=$'\t' read -r rid row rsha files _; do # the TSV: id, row, request sha, file digests, chrome version
     [[ "$rid" == request_id || -z "$files" ]] && continue
-    # The files column holds space-separated 12-hex digests. The while's IFS is tab-only and its
-    # setting survives inside the body, so `for d in $files` keeps the column one token (run a3c
-    # 2026-10-23: W6's two digests verified as one string and the delivery verified false); split
-    # on words deliberately via a word-split. The digest lines: `sha256sum` everywhere (the Mac has
-    # it via coreutils; the guest has sha256sum and no shasum — run a3c's own selftest on the guest
-    # failed exactly there: shasum's own "command not found" swallowed and the grep read nothing).
+    # The files column holds space-separated 12-hex digests (agent.mjs builds it with
+    # join(' '); check-identity.py:1076's fixture row is a single digest). The read's
+    # IFS is tab-only and temporary — it reverts after `read`, so this loop keeps the
+    # column one token — thus an explicit word-split on both joins: `printf | tr` for
+    # tab-joined content and the default splitting for space-joined (2026-10-23).
+    # Digest lines: `sha256sum` (verified on the gate Mac: /sbin/sha256sum, GNU
+    # two-space format; Rocky 9 natively; a Mac without an un-prefixed sha256sum in
+    # PATH would flag every digest, which the launcher reports).
     for d in $(printf '%s' "$files" | tr '\t' ' '); do
       if ! find "$OUT/agent-from-guest" -type f -exec sha256sum {} + 2>/dev/null | grep -q "^${d}[0-9a-f]*  "; then
         echo "run-vm-gate: manifest row $row/$rid (request ${rsha:-?}) names a file whose digest ($d) is not in the harvested evidence" >&2

@@ -110,7 +110,8 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
                    --browser agent only: the rendezvous nonce the Mac launcher generated
                    (scripts/gate/mac/run-vm-gate.sh); every hello and response must carry it; never printed
   --wipe           remove an existing .env/auth/certs in that directory first (required when present)
-  --keep           leave the fixture running at the end (no teardown)
+  --keep           leave the fixture running at the end (no teardown; also
+                   keeps the receipt's .state for the kept fixture's readers)
   --no-screenshots skip the end-user screenshot story (X1/X3/X4 leave the required inventory)
   --no-static      skip gmake check / git diff --check (S1-S4 leave the required inventory)
 EOF
@@ -680,7 +681,20 @@ fixture_reset() {
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
-  rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
+  local p
+  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"; do
+    if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]]; then
+      # Root-owned leftovers of an earlier run survive rm -rf (fixture epc 2026-10-23:
+      # the docker daemon creates an absent bind-mount source root-owned at container
+      # create). The paths are this fixture's own; take them back as root, or refuse
+      # the run — an unclean fixture would fail every identity command after this.
+      if ! sudo -n rm -rf "$p"; then
+        log "fixture_reset: cannot remove $p even with sudo -n; refusing to run on an unclean fixture"
+        exit 1
+      fi
+      log "fixture_reset: removed as root what rm -rf alone could not: $p"
+    fi
+  done
 }
 cleanup_monitor_auth() {
   # Preflight proved these paths absent before the gate; only this fixture can have created them.
@@ -760,8 +774,17 @@ run_static() {
   else
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
-  local st_identity st_py=0 py_failed="" py_count=0 helper
-  cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
+  local st_identity st_py=0 py_failed="" py_count=0 helper s4_render_kv="${s1_render_kv:-}"
+  if [[ -n "$s4_render_kv" ]]; then
+    # the same loaded-image override S1's gmake chain runs its checkers with: the checker's
+    # own nginx -t renders cannot resolve the pinned ref on an offline-only store either
+    # (attempt 8, 2026-10-23: 'nginx -t must pass; exit 125: … registry-1.docker.io …
+    # operation not permitted'), and S4's direct invocation has no Makefile layer to
+    # inherit one from.
+    KRATE_CHECK_NGINX_IMAGE="${s4_render_kv#KRATE_CHECK_NGINX_IMAGE=}" cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
+  else
+    cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
+  fi
   # Every gate helper must compile under this host's python3 (the guests run 3.9), not one named file.
   for helper in "$GATE_DIR"/*.py; do
     [[ -f "$helper" ]] || continue  # an unmatched glob leaves the literal pattern
@@ -2891,7 +2914,12 @@ teardown() {
   for n in $(docker ps -aq --filter "label=krate.gate=phase4" \
       --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
-  rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
+  local p
+  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"; do
+    if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]] && ! sudo -n rm -rf "$p"; then
+      log "WARNING: teardown left $p in place (root-owned leftovers; remove it by hand)"
+    fi
+  done
   cleanup_monitor_auth
   local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
   log "fixture resources left: $left"
@@ -2958,10 +2986,11 @@ PYEOF
   fi
   if $KEEP; then
     # --keep is the operator's kept-fixture contract: the enrolled users' state and the stand-in's
-    # material must survive this cleanup for the post-run consumers that read them (the session's
-    # Mac story stage reads .state/p4; the stubx verbs read .state/stub). The directory is mode
-    # 0700, owned by the fixture user, and the operator's release of the fixture removes it — the
-    # operator's contract, not the runner's.
+    # material must survive this cleanup for the repo's own post-run readers — the stand-in verbs
+    # read .state/stub (stub_idp.sh:61 and its secret-rotate), the enrolled users' flow states
+    # under .state/p4 are read during the run by phase4_common and then ride to the Mac in the
+    # launcher's receipt harvest (run-vm-gate.sh's whole-receipt copy). The directory is mode
+    # 0700, owned by the fixture user; releasing the fixture removes it.
     :
   else
     rm -rf "$STATE"
@@ -3000,6 +3029,18 @@ PYEOF
 FINISHED=false
 on_signal() { log "interrupted"; trap - EXIT HUP INT TERM; FINISHED=true; teardown; finish; exit 130; }
 on_exit() { $FINISHED || { log "unexpected exit"; FINISHED=true; teardown; finish; }; }
+runner_guard() { # the CLI's own identity lock: a live holder means another run owns this fixture. An
+  # interleaved second runner killed a live run's fixture mid-row (2026-10-23: the 04:43 attempt
+  # launched while the 04:39 run still had rows running; its compose down removed the other run's
+  # keycloak between two B rows). A stale lock (its holder pid is gone) is cleared by fixture_reset.
+  local h=""
+  if [[ -f "$ED/auth/.identity.lock/pid" ]]; then h="$(cat "$ED/auth/.identity.lock/pid" 2>/dev/null || true)"; fi
+  if [[ -n "$h" ]] && kill -0 "$h" 2>/dev/null; then
+    log "REFUSING: the fixture's identity lock is held by a live run (pid $h); wait for its receipt or stop that run"
+    exit 2
+  fi
+}
+runner_guard
 host_conflicts
 open_receipt
 trap on_signal HUP INT TERM
