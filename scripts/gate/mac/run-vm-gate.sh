@@ -139,6 +139,13 @@ check_playwright() { # PW_MODULES must carry the gate's pin 1.60.0
   fi
 }
 check_playwright || PREFLIGHT_FAIL=1
+# The harvest tail verifies the agent-manifest digests with a sha256 digest tool (SHA_TOOL
+# there selects sha256sum or shasum -a 256); a host with NEITHER in PATH would fail every
+# digest check after the run — refuse it before the run starts instead.
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+  echo "run-vm-gate: refuse: no sha256 digest tool in PATH (sha256sum or shasum; the harvested agent-manifest is verified with it after the run)" >&2
+  PREFLIGHT_FAIL=1
+fi
 if scutil --proxy 2>/dev/null | grep -E '^[[:space:]]*(HTTPEnable|HTTPSEnable|SOCKSEnable|ProxyAutoConfigEnable|ProxyAutoDiscoveryEnable)[[:space:]]*:[[:space:]]*1[[:space:]]*$' | grep -q .; then
   echo "run-vm-gate: refuse: the Mac runs a system proxy; --host-resolver-rules would not apply to proxy-resolved names (TOPOFIX F3)" >&2
   PREFLIGHT_FAIL=1
@@ -177,9 +184,16 @@ echo "run-vm-gate: vm_ip=$VM_IP via $IFACE; preflight ok"
 # attempt was launched while the 04:39 run still had rows running; its reset's compose down
 # removed the other run's keycloak between two rows and the 04:39 ledger's B-block failed with
 # 'Keycloak is not running'). Refuse while any gate runner is still live on the guest.
-live_runners="$(limactl shell "$VM" -- sh -c "pgrep -af 'scripts/gate-identity' | grep -v pgrep || true" 2>/dev/null || true)"
+# The scan lists PIDs only, never command lines: the live runner's argv (the detached
+# setsid wrapper and the runner itself, the GUEST_CMD/nohup setsid pair below) carries this launcher's
+# --rendezvous-nonce, and the nonce is never printed (gate-identity.sh:65, agent.mjs:427).
+# pgrep -f matches /proc/<pid>/cmdline; the bracketed pattern '[s]cripts/gate-identity'
+# matches the literal runner argv but not the scan's own sh -c wrapper (its argv carries the
+# bracketed text verbatim), and pgrep never reports itself — so the old `grep -v pgrep`
+# line-filter is unneeded and its -a full-command-line output is never built.
+live_runners="$(limactl shell "$VM" -- sh -c "pgrep -f '[s]cripts/gate-identity' || true" 2>/dev/null || true)"
 if [[ -n "$live_runners" ]]; then
-  echo "run-vm-gate: refuse: a gate runner is already live on $VM (wait for its receipt or stop it first):" >&2
+  echo "run-vm-gate: refuse: a gate runner is already live on $VM (pids below; command lines are not printed so the live run's rendezvous nonce is not disclosed; wait for its receipt or stop it first):" >&2
   echo "$live_runners" >&2
   exit 2
 fi
@@ -275,6 +289,16 @@ if [[ "$PHASE" == 4c && ( ! -f "$OUT/agent-manifest.tsv" || ! -s "$OUT/agent-man
 fi
 if [[ -f "$OUT/agent-manifest.tsv" && -d "$OUT/agent-from-guest" ]]; then
   BAD=0
+  # Digest lines: select the digest tool once (the Makefile's own idiom, Makefile:260-263):
+  # sha256sum where present in PATH (Rocky natively; Macs that carry it), macOS shasum -a 256
+  # otherwise; both print the GNU two-space `HEX  path` form the grep below anchors on. A host
+  # with neither tool still fails closed: find cannot exec it, every digest is reported missing
+  # and RC takes 4. The preflight above already refuses such a host before the run starts.
+  if command -v sha256sum >/dev/null 2>&1; then
+    SHA_TOOL=(sha256sum)
+  else
+    SHA_TOOL=(shasum -a 256)
+  fi
   while IFS=$'\t' read -r rid row rsha files _; do # the TSV: id, row, request sha, file digests, chrome version
     [[ "$rid" == request_id || -z "$files" ]] && continue
     # The files column holds space-separated 12-hex digests (agent.mjs builds it with
@@ -282,11 +306,12 @@ if [[ -f "$OUT/agent-manifest.tsv" && -d "$OUT/agent-from-guest" ]]; then
     # IFS is tab-only and temporary — it reverts after `read`, so this loop keeps the
     # column one token — thus an explicit word-split on both joins: `printf | tr` for
     # tab-joined content and the default splitting for space-joined (2026-10-23).
-    # Digest lines: `sha256sum` (verified on the gate Mac: /sbin/sha256sum, GNU
-    # two-space format; Rocky 9 natively; a Mac without an un-prefixed sha256sum in
-    # PATH would flag every digest, which the launcher reports).
+    # Digest lines: the selected "${SHA_TOOL[@]}" prints the GNU two-space `HEX  path` form
+    # the grep anchors on; without the selection a Mac without sha256sum in PATH would flag
+    # every digest (find's exec error is swallowed by the 2>/dev/null), which the review
+    # thread r4356432012 proved with the shipped selftest on a stripped PATH.
     for d in $(printf '%s' "$files" | tr '\t' ' '); do
-      if ! find "$OUT/agent-from-guest" -type f -exec sha256sum {} + 2>/dev/null | grep -q "^${d}[0-9a-f]*  "; then
+      if ! find "$OUT/agent-from-guest" -type f -exec "${SHA_TOOL[@]}" {} + 2>/dev/null | grep -q "^${d}[0-9a-f]*  "; then
         echo "run-vm-gate: manifest row $row/$rid (request ${rsha:-?}) names a file whose digest ($d) is not in the harvested evidence" >&2
         BAD=1
       fi

@@ -127,6 +127,18 @@ Compose files mount the `auth/` and `certs` sources with
 daemon-created directories appear. One run at a time: a second runner refuses
 while the fixture's identity lock is still held for a live run, and the Mac
 launcher checks for a still-live runner on the guest before spawning another.
+The runner itself also takes a per-fixture run lock (the edition dir's
+`.gate-run.lock` plus a `${TMPDIR:-/tmp}/krate-gate-run/<project>.lock`),
+covering the gap between those two layers: the identity lock exists only while
+an identity command runs, and the guest-side live-runner scan needs `/proc`
+(a Mac local run has none), so without the run lock a second runner on the same
+fixture or Compose project could interleave and tear down the first run's
+fixture mid-row. A stale lock (its holder pid gone) is taken over — but not for
+its first 60 seconds: a lock younger than that reads as live even with a dead
+pid, so an operator who kills a run and restarts at once is refused with the
+dead pid for that minute (the write window between the pid write and the atomic
+rename) instead of the restart silently stealing the lock. A live one makes the
+second runner refuse with the holder's pid and exit 2.
 
 ## What a receipt binds the results to
 

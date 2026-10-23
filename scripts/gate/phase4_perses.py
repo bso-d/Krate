@@ -2178,8 +2178,12 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             ('cluster_ledger_unchanged', 'PASS' if unchanged else 'FAIL'),
         ]
         status, tokens = aggregate(probes)
-        return status, '%s; brokers %s, kafka-ui and keycloak-db unchanged; keycloak/proxy recorded:%s; walk: live4b v20-baseline.json' \
-               % (tokens, brokers, (' %s' % ' | '.join(recorded)) if recorded else ' none')
+        # the summary must say what the probe found: unchanged carries no diffs suffix (PASS rows
+        # stay byte-identical to the receipts already harvested); a failure names every diff the
+        # compare() walk collected — the sibling row U23's own shape (phase4_grafana.py:3128-3132).
+        return status, '%s; brokers %s, kafka-ui and keycloak-db %s; keycloak/proxy recorded:%s; walk: live4b v20-baseline.json' \
+               % (tokens, brokers, 'unchanged' if unchanged else 'CHANGED (diffs: %s)' % diffs,
+                  (' %s' % ' | '.join(recorded)) if recorded else ' none')
 
     def v21(self):
         # walk log 071: monitor up loopback refusals for localhost, 127.0.0.1, [::1] (rc 1, 0 containers changed).

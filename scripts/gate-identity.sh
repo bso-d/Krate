@@ -2888,6 +2888,10 @@ restore_prometheus_config() {
 }
 teardown() {
   section "teardown"
+  # release the per-fixture run lock before anything else: the --keep and not-owned early
+  # returns below must not strand it, and every exit path (on_exit, on_signal, the
+  # pre-trap refusal EXIT trap) comes through here or releases on its own
+  run_lock_release || true
   [[ -z "$CHILD" ]] || { kill "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; CHILD=""; }
   local phase4_child
   for phase4_child in "${PHASE4_CHILDREN[@]}"; do
@@ -3029,6 +3033,136 @@ PYEOF
 FINISHED=false
 on_signal() { log "interrupted"; trap - EXIT HUP INT TERM; FINISHED=true; teardown; finish; exit 130; }
 on_exit() { $FINISHED || { log "unexpected exit"; FINISHED=true; teardown; finish; }; }
+
+# ── per-fixture run lock (thread r4357234893, 2026-10-23) ──
+# The CLI's per-command identity lock covers only the moments an identity command runs
+# (it is taken and released per invocation, kraft/krate:954-1021), and runner_guard's
+# /proc scan is Linux-only (the Mac local mode has no /proc), so a second gate runner on
+# the same fixture interleaves freely between commands: its fixture_reset tears down the
+# first run's Compose project mid-row (observed 2026-10-23: the 04:43 attempt removed the
+# 04:39 run's keycloak between two B rows). Two scopes, both the CLI's own atomic shape:
+# the edition dir (one runner per fixture tree) and TMPDIR (one runner per Compose project
+# for cross-edition fixtures that share a project name). A stale lock — its holder pid is
+# gone — is taken over (the same liveness rule the CLI's identity lock uses).
+run_lock_pid_start() { # ps lstart: the only stable birth stamp on both macOS and Linux (macOS has no etimes)
+  ps -p "$1" -o lstart= 2>/dev/null | tr -d ' \n'
+}
+run_lock_live() { # a lock is live while its pid is alive with the same start stamp (guards pid reuse)
+  local dir="$1" pid start stamp now mtime
+  pid="$(cat "$dir/pid" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  if ps -p "$pid" >/dev/null 2>&1; then
+    start="$(cat "$dir/start" 2>/dev/null || true)"
+    stamp="$(run_lock_pid_start "$pid")"
+    [[ -n "$start" && -n "$stamp" ]] || return 0   # stamps unreadable: treat as live (fail closed)
+    [[ "$stamp" == "$start" ]]
+    return
+  fi
+  # pid gone: a directory younger than 60 s still reads as live — a freshly published
+  # lock whose holder died mid-run is indistinguishable from one mid-write (the pid is
+  # written before the rename), and an operator who kills a run and restarts at once is
+  # refused with the dead pid for that minute instead of silently stealing the lock.
+  # The CLI's identity lock keeps a comparable fail-closed grace, for an unreadable pid
+  # file rather than a dead one (a different trigger, the same closed-by-default shape).
+  now="$(date +%s)"
+  mtime="$(stat -c %Y "$dir" 2>/dev/null || stat -f %m "$dir" 2>/dev/null || echo 0)"
+  (( now - mtime < 60 ))
+}
+run_lock_release() { # removes only the locks this run owns (pid match); a refusal or a takeover never frees another run's lock
+  local d
+  for d in ${RUN_LOCK_DIRS+"${RUN_LOCK_DIRS[@]}"}; do
+    if [[ -d "$d" && "$(cat "$d/pid" 2>/dev/null || true)" == "$$" ]]; then rm -rf "$d"; fi
+  done
+  return 0
+}
+run_lock_rename() { # atomic publish: the rename lands only in a name that does not exist (the CLI lock's own shape)
+  local tmp="$1" dir="$2" inside="$2/${1##*/}"
+  if mv "$tmp" "$dir" 2>/dev/null && [[ ! -d "$inside" ]]; then return 0; fi
+  rm -rf "$tmp" "$inside"   # a lock that already existed swallowed the attempt (mv moved tmp inside it)
+  return 1
+}
+run_lock_write() {
+  local tmp="$1"
+  rm -rf "$tmp"
+  { mkdir "$tmp" && printf '%s\n' "$$" > "$tmp/pid" && run_lock_pid_start "$$" > "$tmp/start"; } \
+    || { rm -rf "$tmp"; log "cannot create the run lock $tmp"; return 1; }
+  return 0
+}
+run_lock_take() { # 0 taken, 2 held by a live run (RUN_LOCK_HELD_PID names the holder), 1 error
+  local dir="$1" tmp="$1.$$.tmp" holder stale_pid
+  mkdir -p "$(dirname "$dir")"
+  # check liveness BEFORE touching the directory: the failed rename below moves the tmp
+  # INSIDE an existing lock (mv semantics) and that would refresh its mtime, making a
+  # stale lock read as live (the probe's RED case for the takeover path)
+  if [[ -d "$dir" ]]; then
+    stale_pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    if run_lock_live "$dir"; then
+      RUN_LOCK_HELD_PID="${stale_pid:-unknown}"
+      return 2
+    fi
+    # run_lock_live judged $stale_pid dead. Re-read the pid before removing: a second
+    # taker whose takeover completed in between replaced the dead pid with its own, and
+    # rm -rf would destroy that live lock, leaving both runs believing they own it. A
+    # changed or vanished pid skips the removal and falls through to the rename below,
+    # whose own liveness re-check refuses against the fresh lock. The microsecond
+    # window between this read and the rm is recorded in
+    # harness/fix-52-fixture-run-lock/receipt.md (bash has no compare-and-delete; the
+    # CLI's own identity_lock has the same check-then-remove shape, kraft/krate:954).
+    if [[ "$(cat "$dir/pid" 2>/dev/null || true)" == "$stale_pid" ]]; then
+      log "removing the stale run lock left by pid ${stale_pid:-?} (its holder is gone)"
+      rm -rf "$dir"
+    fi
+  fi
+  run_lock_write "$tmp" || return 1
+  run_lock_rename "$tmp" "$dir" || {
+    # raced: another taker won between the check above and the rename — its fresh lock
+    # is young and its pid live, so the check below refuses rather than stealing it
+    if run_lock_live "$dir"; then
+      holder="$(cat "$dir/pid" 2>/dev/null || true)"
+      RUN_LOCK_HELD_PID="${holder:-unknown}"
+      return 2
+    fi
+    log "cannot take the run lock $dir (it reappeared and reads as not live)"
+    return 1
+  }
+  return 0
+}
+gate_run_lock() { # take both scopes; refuse (exit 2) while another run holds either
+  local rc ed_lock project_lock
+  RUN_LOCK_DIRS=()
+  ed_lock="${ED%/}/.gate-run.lock"
+  project_lock="${TMPDIR:-/tmp}/krate-gate-run/${PROJECT}.lock"
+  rc=0; run_lock_take "$ed_lock" || rc=$?
+  if (( rc == 2 )); then
+    log "REFUSING: a gate run is live on this fixture (pid ${RUN_LOCK_HELD_PID:-unknown}); one gate run on a fixture at a time — wait for its receipt or stop it"
+    exit 2
+  elif (( rc != 0 )); then
+    log "REFUSING: cannot take the fixture run lock $ed_lock"
+    exit 2
+  fi
+  RUN_LOCK_DIRS+=("$ed_lock")
+  rc=0; run_lock_take "$project_lock" || rc=$?
+  if (( rc == 2 )); then
+    run_lock_release
+    log "REFUSING: a gate run for Compose project $PROJECT is live (pid ${RUN_LOCK_HELD_PID:-unknown}); one gate run per project at a time — wait for its receipt or stop it"
+    exit 2
+  elif (( rc != 0 )); then
+    run_lock_release
+    log "REFUSING: cannot take the project run lock $project_lock"
+    exit 2
+  fi
+  RUN_LOCK_DIRS+=("$project_lock")
+  # provisional EXIT trap: covers the refusals between here (inside runner_guard) and
+  # the main trap on_exit below; on_exit/on_signal both call teardown, which releases first
+  trap run_lock_release EXIT
+  # A default-disposition signal death between the take and the main on_signal traps
+  # below runs no trap at all, stranding both locks until the 60 s grace and the stale
+  # takeover self-heal: cover that window with a release-and-exit shape (130, the gate's
+  # own interrupted exit code), which the main on_signal traps then override (a later
+  # trap on the same signal replaces this one).
+  trap 'run_lock_release; exit 130' HUP INT TERM
+}
+
 runner_guard() { # the CLI's own identity lock: a live holder means another run owns this fixture. An
   # interleaved second runner killed a live run's fixture mid-row (2026-10-23: the 04:43 attempt
   # launched while the 04:39 run still had rows running; its compose down removed the other run's
@@ -3060,6 +3194,7 @@ runner_guard() { # the CLI's own identity lock: a live holder means another run 
     log "REFUSING: another gate runner is already live on this guest (pids:$other); wait for its receipt or stop it"
     exit 2
   }
+  gate_run_lock   # the third layer: a per-fixture run lock the /proc scan cannot give the Mac local mode
 }
 runner_guard
 host_conflicts
