@@ -3053,7 +3053,7 @@ runner_guard() { # the CLI's own identity lock: a live holder means another run 
   for pid in /proc/[0-9]*; do
     pid="${pid#/proc/}"
     [[ "$pid" == "$$" || " $anc " == *" $pid "* ]] && continue
-    cmd="$(tr '\0' ' ' < "$pid/cmdline" 2>/dev/null)" || continue
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
     [[ "$cmd" == *scripts/gate-identity.sh* ]] && other="$other $pid"
   done
   [[ -z "$other" ]] || {
