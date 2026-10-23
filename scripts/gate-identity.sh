@@ -3078,7 +3078,8 @@ PYEOF
     echo "| id | phase | criterion | result | evidence |"; echo "|---|---|---|---|---|"
     tail -n +2 "$RECEIPT" | awk -F'\t' '{gsub(/\|/, "\\|", $5); printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5}'
   } > "$OUT/receipt.md"
-  chmod 644 "$OUT/receipt.md" "$OUT/receipt.tsv" "$OUT/run.log" 2>/dev/null || true; chmod 755 "$OUT" 2>/dev/null || true; [[ -d "$OUT/screenshots" ]] && chmod 755 "$OUT/screenshots" && chmod 644 "$OUT"/screenshots/* 2>/dev/null || true
+  chmod 644 "$OUT/receipt.md" "$OUT/receipt.tsv" "$OUT/run.log" 2>/dev/null || true; chmod 755 "$OUT" 2>/dev/null || true
+  if [[ -d "$OUT/screenshots" ]]; then chmod 755 "$OUT/screenshots" 2>/dev/null || true; chmod 644 "$OUT"/screenshots/* 2>/dev/null || true; fi
   log ""; log "VERDICT: $verdict  (PASS $PASSES, FAIL $FAILS, NOT_RUN $NOTRUN, required missing: ${missing[*]:-none}, bound: $BOUND)"
   log "receipt: $OUT/receipt.md"
   # the last lock release, after receipt finalization and at the very end of finish:
