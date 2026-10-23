@@ -1456,7 +1456,7 @@ def check_start_cluster_monitor_realm(checks):
     body = text[start:end]
     with tempfile.TemporaryDirectory(prefix='w1-realm-', dir=ROOT / 'harness/check-identity') as d:
         krate = Path(d) / 'krate'
-        krate.write_text('#!/bin/sh\nprintf \'KRATE %s\\n\' "$*" >> "$CALLS_FILE"\ncase "$*" in *"monitor realm"*) exit "$REALM_RC";; *"monitor up"*) exit "$MON_UP_RC";; esac\nexit 0\n')
+        krate.write_text('#!/bin/sh\nprintf \'KRATE %s\\n\' "$*" >> "$CALLS_FILE"\ncase "$*" in *"monitor realm"*) exit "$REALM_RC";; *"monitor up"*) exit "$MON_UP_RC";; *"GRAFANA_AUTH_CONFIG"*) exit "$GRAF_SET_RC";; esac\nexit 0\n')
         krate.chmod(0o755)
         calls_file = Path(d) / 'calls.txt'
         script = Path(d) / 'w1-bringup.sh'
@@ -1467,10 +1467,10 @@ def check_start_cluster_monitor_realm(checks):
     collect_secrets() { :; }
     SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
     ''' + body + '\nstart_cluster --local --monitor-realm\nprintf \'RC %s\\n\' "$?"\n')
-        def run_bringup(realm_rc, mon_up_rc=0):
+        def run_bringup(realm_rc, mon_up_rc=0, graf_set_rc=0):
             calls_file.write_text('')
             r = subprocess.run([bash, str(script)], env=dict(os.environ, KRATE=str(krate), REALM_RC=str(realm_rc),
-                                                             MON_UP_RC=str(mon_up_rc),
+                                                             MON_UP_RC=str(mon_up_rc), GRAF_SET_RC=str(graf_set_rc),
                                                              CALLS_FILE=str(calls_file)), text=True, capture_output=True, timeout=10)
             seq = [line[len('KRATE '):].rstrip() for line in calls_file.read_text().splitlines()]
             return r, seq
@@ -1494,6 +1494,16 @@ def check_start_cluster_monitor_realm(checks):
           f'a failed first monitor up fails the bring-up; out={r.stdout!r}')
         e('monitor realm' not in seq and 'GRAFANA_AUTH_CONFIG' not in seq and seq.count('monitor up') == 1,
           'a failed first monitor up skips the realm steps (monitor realm needs the up Grafana; no second failure stacked on the first verdict)')
+        # the finding on cd82eee (medium): a failed config switch must not restart local mode —
+        # a monitor up here would succeed against the unchanged config and the receipt would
+        # attribute exit 0 to the realm restart over a failed switch (SC_MONITOR2 stays 127)
+        e('if [[ $SC_GRAF_SET -eq 0 ]]; then\n          cap "$KRATE" monitor up' in text,
+          'the realm monitor up runs only after a successful GRAFANA_AUTH_CONFIG switch (SC_GRAF_SET guard)')
+        r, seq = run_bringup(0, 0, 1)
+        e(any(line.rstrip() == 'RC 1' for line in r.stdout.splitlines()),
+          f'a failed config set fails the bring-up; out={r.stdout!r}')
+        e('config set GRAFANA_AUTH_CONFIG=realm.ini' in seq and seq.count('monitor up') == 1,
+          f'a failed config set stops the sequence before the second monitor up (SC_MONITOR2 keeps its 127 sentinel; no local-mode restart attributed to the realm step); got {seq}')
 
 
 def check_browser_certificate_proceed(checks):
