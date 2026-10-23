@@ -517,11 +517,15 @@ class Gate(Phase4Gate):
                 return 'prepared V23 precondition failed: %s: %s' % (type(error).__name__, str(error)[:200])
             return None
         try:
-            self.cluster_initial = self.cluster_id_map()
             self.setup_realm_users()
             self.setup_grafana_realm()
             self.setup_perses_seed()
             self.setup_perses_realm()
+            # V20's baseline AFTER the setup's own fixture changes (they include the runtime.yml
+            # auth apply that recreates the proxy): the row asserts "unchanged across the V-block",
+            # and both live runs (a3b, a3c on 2026-10-23) failed only on the proxy pair captured
+            # from BEFORE its intended recreation.
+            self.cluster_initial = self.cluster_id_map()
         except Exception as error:
             return 'setup step failed: %s: %s' % (type(error).__name__, str(error)[:300])
         return None
@@ -2115,9 +2119,11 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             elif svc not in curr_cluster:
                 unchanged = False
                 diffs.append('%s: missing from current map' % svc)
-            elif initial[svc] != curr_cluster[svc]:
-                unchanged = False
-                diffs.append('%s: %s -> %s' % (svc, initial[svc][0][:12], curr_cluster[svc][0][:12]))
+            else:
+                moved, note = ledger_change(svc, initial[svc], curr_cluster[svc])
+                if moved:
+                    unchanged = False
+                    diffs.append(note)
 
         for service in ('keycloak', 'keycloak-db', 'kafka-ui', 'proxy'):
             compare(service)
