@@ -12,11 +12,11 @@ POLICIES = {
     "zk": {"kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"}},
     "kraft": {
         "kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"},
-        "keycloak": {"LIQUIBASE_ANALYTICS_ENABLED": "false"},
+        "keycloak": {"JAVA_OPTS_APPEND": "-Dliquibase.analytics.enabled=false"},
     },
     "epc": {
         "kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"},
-        "keycloak": {"LIQUIBASE_ANALYTICS_ENABLED": "false"},
+        "keycloak": {"JAVA_OPTS_APPEND": "-Dliquibase.analytics.enabled=false"},
     },
     "monitoring": {
         "grafana": {

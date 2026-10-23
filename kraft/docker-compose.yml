@@ -368,7 +368,9 @@ services:
       # Offline runtime: Keycloak migrates its database with Liquibase, whose
       # anonymous analytics (Liquibase 4.30.0+, on by default) look up
       # config.liquibase.com when `kc.sh bootstrap-admin` and the first start run.
-      LIQUIBASE_ANALYTICS_ENABLED: "false"
+      # Liquibase requires the JVM system property via JAVA_OPTS_APPEND; the
+      # container env var form (LIQUIBASE_ANALYTICS_ENABLED) is not read by Quarkus.
+      JAVA_OPTS_APPEND: "-Dliquibase.analytics.enabled=false"
       KC_TRUSTSTORE_PATHS: /opt/keycloak/conf/truststores
       # Digest of the PEM set in auth/keycloak/truststores, written by krate: a
       # changed set changes the environment, so `up` recreates Keycloak, which
