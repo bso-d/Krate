@@ -11,7 +11,7 @@
   "timepicker": {},
   "refresh": "30s",
   "schemaVersion": 39,
-  "title": "Krate \u2014 Cluster Overview",
+  "title": "Krate - Cluster Overview",
   "uid": "krate-overview",
   "version": 1,
   "templating": {

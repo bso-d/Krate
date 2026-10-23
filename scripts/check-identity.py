@@ -1970,6 +1970,17 @@ def check_browser_probe_lifecycle(checks):
     if not node:
         print('check_browser_probe_lifecycle: NOT RUN (optional host Node is absent)', file=sys.stderr)
         return
+    # U15 cosmetic pins: the three Grafana titles are ASCII (a title em dash broke the
+    # U15 row's slug; X3 navigates by uid, screenshots-grafana.mjs:55), while the Perses
+    # display names keep theirs — X4 matches /^Krate — / (screenshots-perses.mjs:256,295).
+    for name in ('kafka-overview.json', 'consumer-groups.json', 'host-capacity.json'):
+        dashboard = json.loads((ROOT / 'monitoring/grafana/dashboards' / name).read_text())
+        checks.expect(dashboard['title'].isascii(),
+                      f'grafana dashboards/{name}: the title stays ASCII (U15: an em dash in the title broke the slug)')
+    for name in ('kafka-overview.json', 'consumer-groups.json', 'host-capacity.json', 'logs.json'):
+        perses = json.loads((ROOT / 'monitoring/perses/dashboards' / name).read_text())
+        checks.expect(perses['spec']['display']['name'].startswith('Krate \u2014'),
+                      f'perses dashboards/{name}: the display name keeps the em dash (X4 matches /^Krate — /)')
     program = r"""// Standalone payload for the canonical Python checker. Pass only the shipped file
 // path as argv[2]; no ignored harness file is imported or needed at runtime.
 import { readFileSync } from 'node:fs';
@@ -1978,14 +1989,32 @@ import { Buffer } from 'node:buffer';
 import vm from 'node:vm';
 
 const source = readFileSync(process.argv[1], 'utf8');
-const cases = ['positive', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write', 'guard', 'terminal'];
+// 'viewer-redirect': the stock-RBAC redirect shape (the browser lands on Home after the
+//   explore navigation — the Viewer p4v run, walk log 147): the story must record the
+//   redirect and stay green instead of timing out on a Live click Home never offers.
+// 'live-positive': the browser stayed on /grafana/explore (the Admin shape) and the Live
+//   tail step runs. 'live-button': the Live click itself fails — a real story failure.
+const cases = ['positive', 'viewer-redirect', 'live-positive', 'live-button', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write', 'guard', 'terminal'];
+const cleanStory = ['positive', 'viewer-redirect', 'live-positive'];
 let failed = 0;
 for (const condition of cases) {
   const events = [], files = new Map(), logs = [];
   const reject = (stage) => { if (condition === stage) throw new Error(`injected ${stage}`); };
   const page = {
-    url: () => 'https://gate.test/grafana/', on() {}, async goto() {},
-    getByRole() { return { first() { return this; }, async click() {} }; },
+    // the goto stub does not navigate, so page.url() models where the browser ended up
+    // after the explore navigation: Home (redirect) or still on the explore page
+    url: () => ((condition === 'live-button' || condition === 'live-positive')
+      ? 'https://gate.test/grafana/explore?schemaVersion=1' : 'https://gate.test/grafana/'),
+    on() {}, async goto() {},
+    getByRole(role, sel) {
+      const target = {
+        first() { return target; },
+        async click() {
+          if (condition === 'live-button' && role === 'button' && String(sel?.name).includes('Live')) throw new Error('injected live-button');
+        },
+      };
+      return target;
+    },
     locator() { return { async count() { return 0; } }; },
     async waitForSelector() {}, async fill() {}, async click() {}, async waitForURL() {},
     async waitForLoadState() {}, async waitForTimeout() {}, async screenshot() {},
@@ -2033,16 +2062,29 @@ for (const condition of cases) {
   const parsed = stdout ? JSON.parse(stdout.slice('SUMMARY '.length)) : null;
   const errors = [], expect = (ok, message) => { if (!ok) errors.push(message); };
   expect(uncaught === null, 'failure escaped lifecycle');
-  expect(condition === 'positive' ? child.exitCode === 0 : child.exitCode !== 0, 'incorrect exit status');
+  expect(cleanStory.includes(condition) ? child.exitCode === 0 : child.exitCode !== 0, 'incorrect exit status');
   expect((!!summary || condition === 'summary-write') && (!!browser || condition === 'browser-write') && !!parsed, 'available summary/browser/stdout evidence missing');
   expect(events.filter((event) => event === 'close').length === 1, 'close not attempted exactly once');
   expect(events.includes('evidence') && events.indexOf('evidence') < events.indexOf('close'), 'live evidence not before close');
   expect(events.indexOf('close') < events.indexOf('write:ui15-summary.json'), 'summary finalized before cleanup');
-  if (condition !== 'positive') {
+  if (!cleanStory.includes(condition)) {
     if (condition !== 'summary-write') expect(summary?.failures?.some((failure) => failure.error.includes(`injected ${condition}`)), 'failure not retained in file');
     expect(parsed?.storyFailed && parsed?.failures?.length > 0, 'failure not retained in stdout');
     if (!['browser-write', 'summary-write'].includes(condition)) expect(events.includes('profile:true'), 'known failed profile not retained');
   } else expect(!summary?.storyFailed && !(summary?.failures || []).length, 'positive control fabricated failure');
+  if (condition === 'viewer-redirect') {
+    expect(summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'), 'redirect step not recorded for the redirected Viewer');
+    expect(!summary?.steps?.some((s) => s.name === 'explore live tail 20 s'), 'live tail ran for the redirected Viewer');
+  }
+  if (condition === 'live-positive') {
+    expect(summary?.steps?.some((s) => s.name === 'explore live tail 20 s'), 'live tail step not recorded for the explore run');
+    expect(!summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'), 'redirect step recorded although the browser stayed on explore');
+  }
+  if (condition === 'live-button') {
+    expect(!summary?.steps?.some((s) => s.name === 'explore live tail 20 s'), 'live tail step recorded despite the failed Live click');
+    expect(!summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'), 'redirect step recorded although the browser stayed on explore');
+    expect(summary?.failures?.some((failure) => failure.error.includes('injected live-button')), 'live-button failure not retained');
+  }
   if (condition === 'evidence') expect(!!browser?.evidenceFailed && !browser?.observedBy, 'missing evidence replaced by proof');
   if (condition === 'external') expect(summary?.externalAttempts?.[0]?.host === 'outside.invalid', 'external evidence lost');
   if (condition === 'close') expect(browser?.failures?.some((failure) => failure.stage === 'browser cleanup failed'), 'cleanup failure absent from browser receipt');
