@@ -69,6 +69,24 @@ import phase2_kafbat as p2  # noqa: E402
 from phase4_common import (Phase4Gate, helper_main, fail, aggregate, log,  # noqa: E402
                            Outcome, not_run, broker_services)
 
+
+def core_ledger_change(svc, old, new):
+    """U23's ledger decision for one service of a 2-tuple id map (this gate's
+    cluster_id_map comes from phase4_common: (container id, StartedAt); the
+    3-tuple original with RestartCount is phase4_grafana.core_ledger_change).
+    old/new are one service's entries in the two maps. Returns (changed, note):
+    a new id always counts; a bare StartedAt move counts for every service
+    EXCEPT keycloak — the one service U12/U13 intentionally stop and start
+    (SAME_ID proven at 115b300)."""
+    if old[0] != new[0]:
+        return True, '%s: NEW_ID %s->%s started %s->%s' % (
+            svc, old[0][:12], new[0][:12], old[1][:19], new[1][:19])
+    if old[1] != new[1]:
+        note = '%s started %s->%s' % (svc, old[1][:19], new[1][:19])
+        return svc != 'keycloak', note
+    return False, ''
+
+
 CASES = ['V%d' % i for i in range(1, 25)]
 RUNNER_OWNED = ('X4', 'Z4b')
 
@@ -2120,8 +2138,8 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                 unchanged = False
                 diffs.append('%s: missing from current map' % svc)
             else:
-                moved, note = ledger_change(svc, initial[svc], curr_cluster[svc])
-                if moved:
+                changed, note = core_ledger_change(svc, initial[svc], curr_cluster[svc])
+                if changed:
                     unchanged = False
                     diffs.append(note)
 
