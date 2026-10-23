@@ -165,7 +165,16 @@ services:
       KAFKA_UI_READONLY: "${KAFKA_UI_READONLY:-false}"
     volumes:
       - ./kafbat.yml:/etc/kafbat/kafbat.yml:ro,z
-      - ./auth/ui:/etc/krate/auth:ro,z
+      # A source absent at container create would be made by the docker daemon
+      # root-owned (fixture epc 2026-10-23); create_host_path: false refuses such a
+      # start instead: only `identity up`'s own prep may create these.
+      - type: bind
+        source: ./auth/ui
+        target: /etc/krate/auth
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
     networks:
       - kafka-network
       - identity
@@ -194,9 +203,16 @@ services:
       KRATE_PROXY_PUBLIC_HOST: ${KRATE_PROXY_PUBLIC_HOST:-}
       KRATE_PROXY_CONF_SHA: ${KRATE_PROXY_CONF_SHA:-}
     volumes:
-      # ':z' = shared SELinux label; both files are read-only config.
+      # ':z' = shared SELinux label; both files are read-only config. The certs dir
+      # is a bind with create_host_path: false (only gen-cert creates it).
       - ./nginx.conf:/etc/nginx/templates/default.conf.template:ro,z
-      - ./certs:/etc/nginx/certs:ro,z
+      - type: bind
+        source: ./certs
+        target: /etc/nginx/certs
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
     networks:
       kafka-network: {}
       # Fixed address: the one Keycloak trusts forwarded headers from
@@ -244,7 +260,16 @@ services:
       POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
     volumes:
       - keycloak_db_data:/var/lib/postgresql/data
-      - ./auth/keycloak/db-tls:/run/krate-db-tls:ro,z
+      # A db-tls absent at container create was made by the docker daemon root-owned
+      # (fixture epc 2026-10-23; the next identity up then failed on its leftovers);
+      # create_host_path: false refuses such a start instead.
+      - type: bind
+        source: ./auth/keycloak/db-tls
+        target: /run/krate-db-tls
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
     # Reachable only from the identity network (Keycloak, proxy, Kafbat).
     networks: [identity]
     healthcheck:
@@ -311,9 +336,31 @@ services:
       retries: 30
       start_period: 30s
     volumes:
-      - ./auth/keycloak/krate-realm.json:/opt/keycloak/data/import/krate-realm.json:ro,z
-      - ./auth/keycloak/truststores:/opt/keycloak/conf/truststores:ro,z
-      - ./auth/keycloak/db-tls/ca.crt:/opt/keycloak/conf/db-tls/ca.crt:ro,z
+      # The realm file and the CA are FILE sources: a daemon-created missing file
+      # source appears as a root-owned DIRECTORY (fixture epc 2026-10-23, the ca.crt
+      # that identity.py then refuses to write over with 'Errno 21 Is a directory');
+      # create_host_path: false refuses such a start instead.
+      - type: bind
+        source: ./auth/keycloak/krate-realm.json
+        target: /opt/keycloak/data/import/krate-realm.json
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ./auth/keycloak/truststores
+        target: /opt/keycloak/conf/truststores
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ./auth/keycloak/db-tls/ca.crt
+        target: /opt/keycloak/conf/db-tls/ca.crt
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
     # identity: the database, the proxy and Kafbat. identity-egress: Keycloak's
     # own route out of the host for the Phase 3 identity provider (an internal
     # network has no such route); nothing else joins it. Not on kafka-network.
