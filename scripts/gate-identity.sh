@@ -718,6 +718,21 @@ host_conflicts() { # other krate installations on this Docker host block a run (
 
 # ═══════════════════════════ static ═══════════════════════════
 gmake_check_in() { ( cd "$1" && gmake check ); }  # env -C is GNU-only
+# The identity checker's nginx render step runs its image by a docker reference; on an offline-only
+# store the image exists only under the runtime retag (krate-offline/image:sha256-<CONTENT digest> —
+# the retag's own RepoDigest, NOT the upstream digest a digest-qualified upstream reference resolves
+# to: stage B's own S1/S4, 2026-10-23; docker run BY TAG proven live on the guest).  Export the
+# checker's own KRATE_CHECK_NGINX_IMAGE override with the running nginx image's tag form when the
+# store has it, so the render never tries to pull.
+s1_render_env() {
+  local tpl_name
+  tpl_name="$(awk '/^NGINX_IMAGE=/{v=$0; sub(/^NGINX_IMAGE=/, "", v); print v; exit}' "$ED/.env.template" 2>/dev/null)"
+  [[ -n "$tpl_name" ]] || return 0
+  # The bundled template names the retag tag itself on a bundle (krate-offline/image:sha256-…);
+  # print it when it is actually loaded: the render step must not resolve anything by name.
+  docker image inspect "$tpl_name" >/dev/null 2>&1 && { printf 'KRATE_CHECK_NGINX_IMAGE=%s\n' "$tpl_name"; return 0; }
+  return 0
+}
 run_static() {
   section "S: static checks on the candidate"
   local id
@@ -726,7 +741,15 @@ run_static() {
     return
   fi
   if [[ -f "$TOPLEVEL/Makefile" ]]; then
-    cap gmake_check_in "$TOPLEVEL"; st=$?; ok_if S1 static S "$st" "gmake check (syntax, lint, compose-check, offline-check, identity-check): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
+    local s1_render_kv
+    s1_render_kv="$(s1_render_env)"
+    if [[ -n "$s1_render_kv" ]]; then
+      # shellcheck disable=SC2086  # the single KEY=value word, deliberate
+      env $s1_render_kv gmake_check_in "$TOPLEVEL"
+    else
+      gmake_check_in "$TOPLEVEL"
+    fi
+    st=$?; ok_if S1 static S "$st" "gmake check (syntax, lint, compose-check, offline-check, identity-check): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
   else
     record S1 static S NOT_RUN "no Makefile beside the edition (bundle host); run on the repository"
   fi
