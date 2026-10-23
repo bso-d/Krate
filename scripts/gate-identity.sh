@@ -3034,11 +3034,11 @@ runner_guard() { # the CLI's own identity lock: a live holder means another run 
   # launched while the 04:39 run still had rows running; its compose down removed the other run's
   # keycloak between two B rows). A stale lock (its holder pid is gone) is cleared by fixture_reset.
   # The lock exists only while an identity CLI command runs, so a second layer also refuses a
-  # second gate-identity process on this guest (the review's D2 window). The launcher's detached
-  # chain (its sh -c wrappers) carries the script name in argv by design, so the whole ancestor
-  # chain of THIS runner is exempt — not only the immediate parent (its own launch refused itself
-  # once that way, receipt 2026-10-23T062651Z naming pid 921453).
-  local h="" other anc="" walk line
+  # live second gate runner. The scan reads /proc/*/cmdline in this shell — no pgrep: pgrep's
+  # own forked subshell copies this runner's argv (pattern included) and once refused this very
+  # launch within its own line (receipt 20261023T062651Z, pid 921453). Ancestors are exempt:
+  # the launcher's detached wrappers carry the script name by design.
+  local h="" anc="" walk pid cmd other=""
   if [[ -f "$ED/auth/.identity.lock/pid" ]]; then h="$(cat "$ED/auth/.identity.lock/pid" 2>/dev/null || true)"; fi
   if [[ -n "$h" ]] && kill -0 "$h" 2>/dev/null; then
     log "REFUSING: the fixture's identity lock is held by a live run (pid $h); wait for its receipt or stop that run"
@@ -3050,14 +3050,16 @@ runner_guard() { # the CLI's own identity lock: a live holder means another run 
     [[ -n "$walk" && "$walk" != 1 ]] || break
     anc="$anc $walk"
   done
-  other="$(pgrep -f 'scripts/gate-identity.sh' 2>/dev/null | grep -vw "$$" || true)"
-  for line in $anc; do
-    other="$(printf '%s\n' "$other" | grep -vw "$line" || true)"
+  for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    [[ "$pid" == "$$" || " $anc " == *" $pid "* ]] && continue
+    cmd="$(tr '\0' ' ' < "$pid/cmdline" 2>/dev/null)" || continue
+    [[ "$cmd" == *scripts/gate-identity.sh* ]] && other="$other $pid"
   done
-  if [[ -n "$other" ]]; then
-    log "REFUSING: another gate runner is already live on this guest: $(echo "$other" | tr '\n' ' ')"
+  [[ -z "$other" ]] || {
+    log "REFUSING: another gate runner is already live on this guest (pids:$other); wait for its receipt or stop it"
     exit 2
-  fi
+  }
 }
 runner_guard
 host_conflicts
