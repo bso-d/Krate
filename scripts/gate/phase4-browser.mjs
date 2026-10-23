@@ -173,11 +173,30 @@ try {
     url: page.url().replace(BASE, '').split(/[?#]/)[0],
     logRows: await page.locator('[class*="logs-row"], [data-testid*="logRows"] tr, table tr').count(),
     shot: await shot(page, 'explore') });
-  await page.getByRole('button', { name: /^Live$/ }).first().click();
-  await page.waitForTimeout(20000);
-  step('explore live tail 20 s', {
-    liveRows: await page.locator('[class*="logs-row"], [data-testid="logRows"] tr').count(),
-    websockets: result.websockets, shot: await shot(page, 'explore-live') });
+  // Walk log 147 (Viewer p4v): stock Grafana RBAC has no datasources:explore for the
+  // Viewer, so Grafana 302s Explore to Home — the `ui` row (phase4_grafana.py)
+  // documents that redirect as stock behavior, not a story failure. Only the Admin
+  // run (U7) reaches a Live tail. Clicking Live on the redirected Home page would
+  // time out and fail the whole story (the strict T20 propagation), so the Live step
+  // is conditional on where the browser actually is after the explore navigation.
+  const exploreUrl = page.url().replace(BASE, '').split(/[?#]/)[0];
+  if (exploreUrl.startsWith('/grafana/explore')) {
+    await page.getByRole('button', { name: /^Live$/ }).first().click();
+    await page.waitForTimeout(20000);
+    step('explore live tail 20 s', {
+      liveRows: await page.locator('[class*="logs-row"], [data-testid="logRows"] tr').count(),
+      websockets: result.websockets, shot: await shot(page, 'explore-live') });
+  } else if (exploreUrl === '/grafana/' || exploreUrl === '/grafana') {
+    await page.waitForTimeout(20000);   // the same 20 s dwell so WebSocket activity still accumulates
+    step('explore redirected (stock viewer RBAC)', {
+      url: exploreUrl, websockets: result.websockets, shot: await shot(page, 'explore-redirected') });
+  } else {
+    // The stock RBAC redirect lands on Home exactly (walk log 147: "/grafana/"). Any other
+    // destination — a Grafana login page, the IdP login, an error page — is an
+    // authentication regression wearing the redirect's clothes; it must fail the story,
+    // not pass it as the Viewer shape.
+    throw new Error(`explore redirected to "${exploreUrl}", not the Viewer's stock Home (an authentication regression, not stock RBAC)`);
+  }
   // Both vantage assertions and the external-attempt assertion share the failure path.
   if (MAC) {
     const mr = serve.last();

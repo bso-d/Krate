@@ -1197,8 +1197,22 @@ Otherwise restore the .env of this installation, or a backup: krate identity res
 # because array is null"); Kafbat (user kafkaui) mounts auth/ui the same way. The files
 # inside keep their own modes (db-tls keys 600).
 ensure_identity_dirs() {
-  install -d -m 755 "$SCRIPT_DIR/auth" "$SCRIPT_DIR/auth/ui" "$SCRIPT_DIR/auth/keycloak" "$SCRIPT_DIR/auth/keycloak/truststores" \
-    || die "Could not create the auth directories under $SCRIPT_DIR"
+  # db-tls is a compose mount source (keycloak-db and the keycloak CA trust): a
+  # source absent at container create is made by the docker daemon root-owned
+  # (fixture epc 2026-10-23), and then no later install -d or rm by this user
+  # can touch it — every subsequent identity command would fail there.
+  local auth_dirs=("$SCRIPT_DIR/auth" "$SCRIPT_DIR/auth/ui" "$SCRIPT_DIR/auth/keycloak"
+                   "$SCRIPT_DIR/auth/keycloak/truststores" "$SCRIPT_DIR/auth/keycloak/db-tls")
+  if ! install -d -m 755 "${auth_dirs[@]}"; then
+    # Take the krate-owned tree back with the same sudo path the install flow
+    # itself uses; without sudo, name the exact recovery command.
+    local sudo_cmd=()
+    if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then sudo_cmd=(sudo); fi
+    if ! "${sudo_cmd[@]}" chown -R "$(id -u):$(id -g)" "$SCRIPT_DIR/auth"; then
+      die "Could not create the auth directories under $SCRIPT_DIR. $SCRIPT_DIR/auth holds containers' root-owned leftovers; as root run: chown -R $(id -u):$(id -g) '$SCRIPT_DIR/auth'"
+    fi
+    install -d -m 755 "${auth_dirs[@]}" || die "Could not create the auth directories under $SCRIPT_DIR"
+  fi
 }
 
 # The database TLS material (generated when absent, never over an incomplete
@@ -1207,6 +1221,26 @@ prepare_identity_files() {
   local sso plan command="${1:-up}"
   sso="$(sso_dir)"
   ensure_identity_dirs
+  # A start that ran without identity up made the docker daemon create absent FILE
+  # mount sources as root-owned DIRECTORIES (fixture epc 2026-10-23: a directory
+  # named ca.crt in db-tls that identity.py's own write-then-rename then refused
+  # with 'Errno 21 Is a directory'). A directory was never db-tls material: clear
+  # it only while nothing real beside it can be lost; with real material present,
+  # name it and refuse.
+  local artifact f
+  artifact=""
+  for f in ca.key ca.crt server.key server.crt pg_hba.conf; do
+    if [[ -d "$SCRIPT_DIR/auth/keycloak/db-tls/$f" ]]; then artifact="$artifact $f"; fi
+  done
+  if [[ -n "$artifact" ]]; then
+    for f in ca.key ca.crt server.key server.crt pg_hba.conf; do
+      if [[ -f "$SCRIPT_DIR/auth/keycloak/db-tls/$f" ]]; then
+        die "auth/keycloak/db-tls holds directory leftovers (${artifact# }) beside real material ($f); remove the directories by hand (root may own them), keep the material, and run again"
+      fi
+    done
+    for f in $artifact; do rm -rf "$SCRIPT_DIR/auth/keycloak/db-tls/$f"; done
+    info "Removed directory leftovers from auth/keycloak/db-tls:$artifact (left by a start that ran without 'identity up')"
+  fi
   if [[ ! -f "$SCRIPT_DIR/auth/keycloak/db-tls/ca.crt" ]]; then IDENTITY_CHANGED=true; fi
   python3 "$sso/identity.py" db-tls --output-dir "$SCRIPT_DIR/auth/keycloak/db-tls" \
     || { identity_journal "$command" refused "database TLS material incomplete or unwritable"; exit 1; }

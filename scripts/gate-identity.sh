@@ -110,7 +110,8 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
                    --browser agent only: the rendezvous nonce the Mac launcher generated
                    (scripts/gate/mac/run-vm-gate.sh); every hello and response must carry it; never printed
   --wipe           remove an existing .env/auth/certs in that directory first (required when present)
-  --keep           leave the fixture running at the end (no teardown)
+  --keep           leave the fixture running at the end (no teardown; also
+                   keeps the receipt's .state for the kept fixture's readers)
   --no-screenshots skip the end-user screenshot story (X1/X3/X4 leave the required inventory)
   --no-static      skip gmake check / git diff --check (S1-S4 leave the required inventory)
 EOF
@@ -680,7 +681,20 @@ fixture_reset() {
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
-  rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
+  local p
+  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"; do
+    if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]]; then
+      # Root-owned leftovers of an earlier run survive rm -rf (fixture epc 2026-10-23:
+      # the docker daemon creates an absent bind-mount source root-owned at container
+      # create). The paths are this fixture's own; take them back as root, or refuse
+      # the run — an unclean fixture would fail every identity command after this.
+      if ! sudo -n rm -rf "$p"; then
+        log "fixture_reset: cannot remove $p even with sudo -n; refusing to run on an unclean fixture"
+        exit 1
+      fi
+      log "fixture_reset: removed as root what rm -rf alone could not: $p"
+    fi
+  done
 }
 cleanup_monitor_auth() {
   # Preflight proved these paths absent before the gate; only this fixture can have created them.
@@ -718,6 +732,21 @@ host_conflicts() { # other krate installations on this Docker host block a run (
 
 # ═══════════════════════════ static ═══════════════════════════
 gmake_check_in() { ( cd "$1" && gmake check ); }  # env -C is GNU-only
+# The identity checker's nginx render step runs its image by a docker reference; on an offline-only
+# store the image exists only under the runtime retag (krate-offline/image:sha256-<CONTENT digest> —
+# the retag's own RepoDigest, NOT the upstream digest a digest-qualified upstream reference resolves
+# to: stage B's own S1/S4, 2026-10-23; docker run BY TAG proven live on the guest).  Export the
+# checker's own KRATE_CHECK_NGINX_IMAGE override with the running nginx image's tag form when the
+# store has it, so the render never tries to pull.
+s1_render_env() {
+  local tpl_name
+  tpl_name="$(awk '/^NGINX_IMAGE=/{v=$0; sub(/^NGINX_IMAGE=/, "", v); print v; exit}' "$ED/.env.template" 2>/dev/null)"
+  [[ -n "$tpl_name" ]] || return 0
+  # The bundled template names the retag tag itself on a bundle (krate-offline/image:sha256-…);
+  # print it when it is actually loaded: the render step must not resolve anything by name.
+  docker image inspect "$tpl_name" >/dev/null 2>&1 && { printf 'KRATE_CHECK_NGINX_IMAGE=%s\n' "$tpl_name"; return 0; }
+  return 0
+}
 run_static() {
   section "S: static checks on the candidate"
   local id
@@ -725,8 +754,18 @@ run_static() {
     for id in S1 S2 S3 S4; do record "$id" static S NOT_RUN "--no-static (outside the inventory)"; done
     return
   fi
+  local s1_render_kv
+  s1_render_kv="$(s1_render_env)"  # computed once here, for BOTH checker rows: S1's gmake
+                                   # chain above and S4's direct invocation below; a bundle
+                                   # host has no Makefile for S1 but still runs the checker
   if [[ -f "$TOPLEVEL/Makefile" ]]; then
-    cap gmake_check_in "$TOPLEVEL"; st=$?; ok_if S1 static S "$st" "gmake check (syntax, lint, compose-check, offline-check, identity-check): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
+    if [[ -n "$s1_render_kv" ]]; then
+      # a function cannot run under env(1); the shell's own VAR=value prefix sets it for this call
+      KRATE_CHECK_NGINX_IMAGE="${s1_render_kv#KRATE_CHECK_NGINX_IMAGE=}" cap gmake_check_in "$TOPLEVEL"
+    else
+      cap gmake_check_in "$TOPLEVEL"
+    fi
+    st=$?; ok_if S1 static S "$st" "gmake check (syntax, lint, compose-check, offline-check, identity-check): $(printf '%s' "$CAP" | tail -1 | cut -c1-120)"
   else
     record S1 static S NOT_RUN "no Makefile beside the edition (bundle host); run on the repository"
   fi
@@ -738,7 +777,14 @@ run_static() {
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
   local st_identity st_py=0 py_failed="" py_count=0 helper
-  cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
+  # S4's own render: the checker cannot resolve the pinned ref on an offline-only store
+  # (attempt 8, 2026-10-23: 'nginx -t must pass; exit 125: … registry-1.docker.io …
+  # operation not permitted'); s1_render_kv carries the loaded retag for bundle hosts too.
+  if [[ -n "$s1_render_kv" ]]; then
+    KRATE_CHECK_NGINX_IMAGE="${s1_render_kv#KRATE_CHECK_NGINX_IMAGE=}" cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
+  else
+    cap python3 -I "$TOPLEVEL/scripts/check-identity.py"; st_identity=$?
+  fi
   # Every gate helper must compile under this host's python3 (the guests run 3.9), not one named file.
   for helper in "$GATE_DIR"/*.py; do
     [[ -f "$helper" ]] || continue  # an unmatched glob leaves the literal pattern
@@ -1049,6 +1095,13 @@ run_screenshots() {
 # apply); returns non-zero when any step failed. The monitoring secrets are
 # collected for the leak scans.
 #
+# --monitor-realm (slice 4c): after the local `monitor up`, finish the
+# product's Grafana realm switch (monitor realm, config set
+# GRAFANA_AUTH_CONFIG=realm.ini, monitor up again) so the fixture sits in the
+# realm-mode monitoring shape the W rows assert (W1: grafana loopback-only per
+# U21a); sets SC_MONITOR_REALM/SC_GRAF_SET/SC_MONITOR2, named in
+# bringup_failed's evidence only when they ran.
+#
 # --broker (slice 4b only): the runner owns the stand-in IdP — stub_idp.sh up
 # (the Phase 3 project/port convention) BEFORE a plain auth configure, so the
 # stand-in is ready but NO broker plan is written or applied: with the broker
@@ -1062,7 +1115,7 @@ run_screenshots() {
 # stand-in's PEM at 644 in the truststore dir, and
 # PING_KEYCLOAK_CLIENT_SECRET through the environment (set_env_raw), never on
 # a command line.
-SC_CONFIGURE=0; SC_SET=0; SC_START=0; SC_APPLY=0; SC_MONITOR=0; SC_STUB=0; SC_CONFIGURE_EV=""; SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
+SC_CONFIGURE=0; SC_SET=0; SC_START=0; SC_APPLY=0; SC_MONITOR=0; SC_MONITOR_REALM=0; SC_GRAF_SET=0; SC_MONITOR2=0; SC_STUB=0; SC_CONFIGURE_EV=""; SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
 stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR/site.json
   local cluster rc f
   cap "$KRATE" auth configure; rc=$?  # the plain plan: its runtime.yml names the edition's cluster list
@@ -1078,16 +1131,18 @@ stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR
   set_env_raw PING_KEYCLOAK_CLIENT_SECRET "$(tr -d '\n' < "$STUB_DIR/.client-secret")"; collect_secrets
   log "broker prelude: stand-in up on 127.0.0.1:$STUB_PORT (cluster $cluster); site file $STUB_DIR/site.json"
 }
-start_cluster() { # [--local] [--broker]
-  local arg broker=false
+start_cluster() { # [--local] [--broker] [--monitor-realm]
+  local arg broker=false monitor_realm=false
   local -a cfg_args=()
   for arg in "$@"; do
     case "$arg" in
       --broker) broker=true ;;
+      --monitor-realm) monitor_realm=true ;;
       *) cfg_args+=("$arg") ;;
     esac
   done
   SC_CONFIGURE=127; SC_SET=127; SC_START=127; SC_APPLY=127; SC_MONITOR=127
+  SC_MONITOR_REALM=0; SC_GRAF_SET=0; SC_MONITOR2=0
   SC_CONFIGURE_EV=""; SC_STUB=0
   if $broker; then
     # Slice 4b only: the runner owns the stand-in IdP (up, truststore, secret,
@@ -1108,8 +1163,43 @@ start_cluster() { # [--local] [--broker]
   cap "$KRATE" auth apply; SC_APPLY=$?
   SC_BROKER_AFTER="$(cid kafka-92)"
   cap "$KRATE" monitor up; SC_MONITOR=$?
+  if $monitor_realm; then
+    # Slice 4c's rows assert the realm-mode monitoring shape (W1: grafana
+    # loopback-only per U21a), so the bring-up finishes the product's own realm
+    # switch rather than leaving the fixture local and failing its own row: the
+    # first `monitor up` left Grafana on the local login with the Basic admin
+    # (seed-alerting has waited for it to answer), `monitor realm` then creates
+    # the seed service account/token and monitoring/auth/realm.ini against that
+    # admin, the config switch names realm.ini, and the second `monitor up`
+    # recreates Grafana loopback-only and ends the sessions the local login made
+    # (monitoring/README.md table 1; seed-alerting re-seeds through the seed
+    # token in realm mode). The stage drivers used to do this by hand after the
+    # bring-up; a gate run that starts on a fresh fixture without them failed W1.
+    # A failed first `monitor up` skips the realm steps too: `monitor realm`
+    # needs the up Grafana to answer with its admin login, and running it against
+    # a down Grafana would stack a second, unrelated failure on the first one's
+    # a down Grafana would stack a second, unrelated failure on the first one's
+    # verdict. The three realm exits keep their 127 "never ran" sentinels (so
+    # realm_ev names that the realm steps did not run), the aggregate still fails
+    # on SC_MONITOR itself, and bringup_failed's base message names the refused
+    # monitor up.
+    SC_MONITOR_REALM=127; SC_GRAF_SET=127; SC_MONITOR2=127
+    if [[ $SC_MONITOR -eq 0 ]]; then
+      cap "$KRATE" monitor realm; SC_MONITOR_REALM=$?
+      # Stop at the first realm-step failure: a refused `monitor realm` leaves the
+      # switch unprepared (no seed token, no realm.ini), and running the config switch
+      # and the realm `monitor up` anyway would fail later with the seed-alerting
+      # missing-token error instead of the refusal that caused it. The fixture then
+      # stays on the local login and the failure message names the refused step.
+      if [[ $SC_MONITOR_REALM -eq 0 ]]; then
+        "$KRATE" config set GRAFANA_AUTH_CONFIG=realm.ini >/dev/null; SC_GRAF_SET=$?
+        cap "$KRATE" monitor up; SC_MONITOR2=$?
+      fi
+    fi
+  fi
   collect_secrets
-  [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 && $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]]
+  [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 && $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]] \
+    && { ! $monitor_realm || { [[ $SC_MONITOR_REALM -eq 0 && $SC_GRAF_SET -eq 0 && $SC_MONITOR2 -eq 0 ]]; }; }
 }
 
 # ═══════════════════════════ phase 2 ═══════════════════════════
@@ -2273,11 +2363,11 @@ if 111 in expected:
 else:
     o111 = spot_by_port.get(111, {}).get("outcome", "not-swept")
     if fw_running and o111 not in ("refused", "rejected"):
-        bad.append("control port 111 is %s with firewalld running (its zone is not applied to lima0; expected refused/rejected)" % o111)
+        bad.append("control port 111 is %s at the idle re-probe with firewalld running (expected refused/rejected: the sweep's 64-concurrent load can suppress firewalld's ICMP replies, which is why the spot outcome is the idle re-probe's, not the sweep's)" % o111)
     elif not fw_running:
         note.append("111=%s; no firewall control available (firewalld state: %s)" % (o111, fw_state))
     else:
-        note.append("control port 111 refused/rejected as the zone requires (%s)" % o111)
+        note.append("control port 111 refused/rejected at the idle re-probe as the zone requires (%s; sweep label %s)" % (o111, spot_by_port.get(111, {}).get("outcomeSweep", "n/a")))
 for port in sorted(spot_by_port):
     if port in expected or port == 111:
         continue
@@ -2516,8 +2606,12 @@ phase4_row_w4() {
 }
 bringup_failed() { # slice id...: every row FAILs when the fixture never came up
   local slice="$1"; shift
-  local id crit ev
-  ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR (output in run.log)"
+  local id crit ev realm_ev=""
+  # The realm-switch exits are named only when the failed bring-up ran them (4c).
+  if (( SC_MONITOR_REALM || SC_GRAF_SET || SC_MONITOR2 )); then
+    realm_ev=", monitor realm exit $SC_MONITOR_REALM, grafana config set exit $SC_GRAF_SET, monitor up (realm) exit $SC_MONITOR2"
+  fi
+  ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR$realm_ev (output in run.log)"
   log "$ev"
   for id in "$@"; do
     crit="${id%%[0-9]*}"
@@ -2560,9 +2654,12 @@ run_phase4() { # slice: 4a|4b|4c
   fi
   # Slice 4b brings up the stand-in IdP and configures with its site.json (the
   # broker plan of commit 0, lead decision 2026-10-13); 4a and 4c configure plain
-  # (--local, accepted and ignored by the CLI).
+  # (--local, accepted and ignored by the CLI). 4c's W rows assert the
+  # realm-mode monitoring shape (W1: grafana loopback-only per U21a), so its
+  # bring-up finishes the Grafana realm switch (see start_cluster).
   local -a bringup=(--local)
   [[ "$slice" == 4b ]] && bringup=(--broker)
+  [[ "$slice" == 4c ]] && bringup+=(--monitor-realm)
   if ! start_cluster "${bringup[@]}"; then
     bringup_failed "$slice" "${run_inv[@]}"
     return
@@ -2842,6 +2939,13 @@ restore_prometheus_config() {
 }
 teardown() {
   section "teardown"
+  # both run locks stay HELD through this whole function (children, prometheus restore,
+  # compose down -v, volume/auth/cert removal) and past receipt finalization: a second
+  # runner must not start its fixture while this one is still deleting those resources
+  # (thread r4359042087: releasing first left an unlocked destructive window, and the
+  # Mac local mode has no /proc scan to see the tearing runner). The release runs in
+  # finish(), after the receipt is written — so the --keep and not-owned early returns
+  # below still release (they return to finish, not exit).
   [[ -z "$CHILD" ]] || { kill "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; CHILD=""; }
   local phase4_child
   for phase4_child in "${PHASE4_CHILDREN[@]}"; do
@@ -2868,7 +2972,12 @@ teardown() {
   for n in $(docker ps -aq --filter "label=krate.gate=phase4" \
       --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
-  rm -rf "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"
+  local p
+  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"; do
+    if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]] && ! sudo -n rm -rf "$p"; then
+      log "WARNING: teardown left $p in place (root-owned leftovers; remove it by hand)"
+    fi
+  done
   cleanup_monitor_auth
   local left; left="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | wc -l | tr -d ' ') containers, $(docker volume ls -q | grep -c -E "^${PROJECT}_|^${MON_PROJECT}_" || true) volumes, $(docker network ls --format '{{.Name}}' | grep -c -E "^${PROJECT}_|^${PROJECT}-|^${MON_PROJECT}_|^${CLASH_NET}$" || true) networks"
   log "fixture resources left: $left"
@@ -2933,7 +3042,17 @@ PYEOF
   else
     log "WARNING: redaction failed; the raw log is kept at $RAW (mode 600) and must be redacted by hand"
   fi
-  rm -rf "$STATE"
+  if $KEEP; then
+    # --keep is the operator's kept-fixture contract: the enrolled users' state and the stand-in's
+    # material must survive this cleanup for the repo's own post-run readers — the stand-in verbs
+    # read .state/stub (stub_idp.sh:61 and its secret-rotate), the enrolled users' flow states
+    # under .state/p4 are read during the run by phase4_common and then ride to the Mac in the
+    # launcher's receipt harvest (run-vm-gate.sh's whole-receipt copy). The directory is mode
+    # 0700, owned by the fixture user; releasing the fixture removes it.
+    :
+  else
+    rm -rf "$STATE"
+  fi
   local gate_digest
   gate_digest="$(find "$GATE_DIR" -type f \( -name '*.py' -o -name '*.mjs' -o -name '*.sh' \) | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)"
   {
@@ -2959,15 +3078,198 @@ PYEOF
     echo "| id | phase | criterion | result | evidence |"; echo "|---|---|---|---|---|"
     tail -n +2 "$RECEIPT" | awk -F'\t' '{gsub(/\|/, "\\|", $5); printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5}'
   } > "$OUT/receipt.md"
-  chmod 644 "$OUT/receipt.md" "$OUT/receipt.tsv" "$OUT/run.log" 2>/dev/null; chmod 755 "$OUT"; [[ -d "$OUT/screenshots" ]] && chmod 755 "$OUT/screenshots" && chmod 644 "$OUT"/screenshots/* 2>/dev/null
+  chmod 644 "$OUT/receipt.md" "$OUT/receipt.tsv" "$OUT/run.log" 2>/dev/null || true; chmod 755 "$OUT" 2>/dev/null || true
+  if [[ -d "$OUT/screenshots" ]]; then chmod 755 "$OUT/screenshots" 2>/dev/null || true; chmod 644 "$OUT"/screenshots/* 2>/dev/null || true; fi
   log ""; log "VERDICT: $verdict  (PASS $PASSES, FAIL $FAILS, NOT_RUN $NOTRUN, required missing: ${missing[*]:-none}, bound: $BOUND)"
   log "receipt: $OUT/receipt.md"
+  # the last lock release, after receipt finalization and at the very end of finish:
+  # finish is the script's last command, so its final line (`[[ "$verdict" == PASS ]]`)
+  # is what sets the exit status — a release placed AFTER the finish() call would either
+  # clobber that status (run_lock_release || true returns 0, masking a FAIL verdict) or
+  # be skipped by the signal path's `exit 130` right after finish. Every path that
+  # reached finish (the main flow, on_signal, on_exit) releases here (thread r4359042087);
+  # the traps are already cleared on all of them, so nothing after this can strand the
+  # locks. Refusal paths that never reach finish keep their own EXIT-trap release in
+  # gate_run_lock. (The script is `set -uo pipefail`, not errexit — no mid-finish abort
+  # exists; the release must simply precede the verdict line.)
+  run_lock_release || true
   [[ "$verdict" == PASS ]]
 }
 
 FINISHED=false
 on_signal() { log "interrupted"; trap - EXIT HUP INT TERM; FINISHED=true; teardown; finish; exit 130; }
 on_exit() { $FINISHED || { log "unexpected exit"; FINISHED=true; teardown; finish; }; }
+
+# ── per-fixture run lock (thread r4357234893, 2026-10-23) ──
+# The CLI's per-command identity lock covers only the moments an identity command runs
+# (it is taken and released per invocation, kraft/krate:954-1021), and runner_guard's
+# /proc scan is Linux-only (the Mac local mode has no /proc), so a second gate runner on
+# the same fixture interleaves freely between commands: its fixture_reset tears down the
+# first run's Compose project mid-row (observed 2026-10-23: the 04:43 attempt removed the
+# 04:39 run's keycloak between two B rows). Two scopes, both the CLI's own atomic shape:
+# the edition dir (one runner per fixture tree) and TMPDIR (one runner per Compose project
+# for cross-edition fixtures that share a project name). A stale lock — its holder pid is
+# gone — is taken over (the same liveness rule the CLI's identity lock uses).
+run_lock_pid_start() { # ps lstart: the only stable birth stamp on both macOS and Linux (macOS has no etimes).
+  # The raw stamp is environment-dependent: ps renders it in the caller's timezone and
+  # locale, so the same live pid reads differently under different TZ (thread r4360101520:
+  # the mismatch reads as pid reuse and lets a contender take over a live holder's lock —
+  # on the Mac local mode there is no /proc guard behind it). Pin both so the stamp the
+  # writer publishes and the stamp a reader re-reads are the same bytes for the same pid.
+  TZ=UTC0 LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | tr -d ' \n'
+}
+run_lock_live() { # a lock is live while its pid is alive with the same start stamp (guards pid reuse)
+  local dir="$1" pid start stamp now mtime
+  pid="$(cat "$dir/pid" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  if ps -p "$pid" >/dev/null 2>&1; then
+    start="$(cat "$dir/start" 2>/dev/null || true)"
+    stamp="$(run_lock_pid_start "$pid")"
+    [[ -n "$start" && -n "$stamp" ]] || return 0   # stamps unreadable: treat as live (fail closed)
+    [[ "$stamp" == "$start" ]]
+    return
+  fi
+  # pid gone: a directory younger than 60 s still reads as live — a freshly published
+  # lock whose holder died mid-run is indistinguishable from one mid-write (the pid is
+  # written before the rename), and an operator who kills a run and restarts at once is
+  # refused with the dead pid for that minute instead of silently stealing the lock.
+  # The CLI's identity lock keeps a comparable fail-closed grace, for an unreadable pid
+  # file rather than a dead one (a different trigger, the same closed-by-default shape).
+  now="$(date +%s)"
+  mtime="$(stat -c %Y "$dir" 2>/dev/null || stat -f %m "$dir" 2>/dev/null || echo 0)"
+  (( now - mtime < 60 ))
+}
+run_lock_release() { # removes only the locks this run owns (pid match); a refusal or a takeover never frees another run's lock
+  local d
+  for d in ${RUN_LOCK_DIRS+"${RUN_LOCK_DIRS[@]}"}; do
+    if [[ -d "$d" && "$(cat "$d/pid" 2>/dev/null || true)" == "$$" ]]; then rm -rf "$d"; fi
+  done
+  return 0
+}
+run_lock_rename() { # atomic publish: the rename lands only in a name that does not exist (the CLI lock's own shape)
+  local tmp="$1" dir="$2" inside="$2/${1##*/}"
+  if mv "$tmp" "$dir" 2>/dev/null && [[ ! -d "$inside" ]]; then return 0; fi
+  rm -rf "$tmp" "$inside"   # a lock that already existed swallowed the attempt (mv moved tmp inside it)
+  return 1
+}
+run_lock_write() {
+  local tmp="$1"
+  rm -rf "$tmp"
+  { mkdir "$tmp" && printf '%s\n' "$$" > "$tmp/pid" && run_lock_pid_start "$$" > "$tmp/start"; } \
+    || { rm -rf "$tmp"; log "cannot create the run lock $tmp"; return 1; }
+  return 0
+}
+run_lock_take() { # 0 taken, 2 held by a live run (RUN_LOCK_HELD_PID names the holder), 1 error
+  local dir="$1" tmp="$1.$$.tmp" holder stale_pid
+  mkdir -p "$(dirname "$dir")"
+  # check liveness BEFORE touching the directory: the failed rename below moves the tmp
+  # INSIDE an existing lock (mv semantics) and that would refresh its mtime, making a
+  # stale lock read as live (the probe's RED case for the takeover path)
+  if [[ -d "$dir" ]]; then
+    stale_pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    if run_lock_live "$dir"; then
+      RUN_LOCK_HELD_PID="${stale_pid:-unknown}"
+      return 2
+    fi
+    # run_lock_live judged $stale_pid dead. Re-read the pid before removing: a second
+    # taker whose takeover completed in between replaced the dead pid with its own, and
+    # rm -rf would destroy that live lock, leaving both runs believing they own it. A
+    # changed or vanished pid skips the removal and falls through to the rename below,
+    # whose own liveness re-check refuses against the fresh lock. The microsecond
+    # window between this read and the rm is recorded in
+    # harness/fix-52-fixture-run-lock/receipt.md (bash has no compare-and-delete; the
+    # CLI's own identity_lock has the same check-then-remove shape, kraft/krate:954).
+    if [[ "$(cat "$dir/pid" 2>/dev/null || true)" == "$stale_pid" ]]; then
+      log "removing the stale run lock left by pid ${stale_pid:-?} (its holder is gone)"
+      rm -rf "$dir"
+    fi
+  fi
+  run_lock_write "$tmp" || return 1
+  run_lock_rename "$tmp" "$dir" || {
+    # raced: another taker won between the check above and the rename — its fresh lock
+    # is young and its pid live, so the check below refuses rather than stealing it
+    if run_lock_live "$dir"; then
+      holder="$(cat "$dir/pid" 2>/dev/null || true)"
+      RUN_LOCK_HELD_PID="${holder:-unknown}"
+      return 2
+    fi
+    log "cannot take the run lock $dir (it reappeared and reads as not live)"
+    return 1
+  }
+  return 0
+}
+gate_run_lock() { # take both scopes; refuse (exit 2) while another run holds either
+  local rc ed_lock project_lock
+  RUN_LOCK_DIRS=()
+  ed_lock="${ED%/}/.gate-run.lock"
+  project_lock="${TMPDIR:-/tmp}/krate-gate-run/${PROJECT}.lock"
+  rc=0; run_lock_take "$ed_lock" || rc=$?
+  if (( rc == 2 )); then
+    log "REFUSING: a gate run is live on this fixture (pid ${RUN_LOCK_HELD_PID:-unknown}); one gate run on a fixture at a time — wait for its receipt or stop it"
+    exit 2
+  elif (( rc != 0 )); then
+    log "REFUSING: cannot take the fixture run lock $ed_lock"
+    exit 2
+  fi
+  RUN_LOCK_DIRS+=("$ed_lock")
+  rc=0; run_lock_take "$project_lock" || rc=$?
+  if (( rc == 2 )); then
+    run_lock_release
+    log "REFUSING: a gate run for Compose project $PROJECT is live (pid ${RUN_LOCK_HELD_PID:-unknown}); one gate run per project at a time — wait for its receipt or stop it"
+    exit 2
+  elif (( rc != 0 )); then
+    run_lock_release
+    log "REFUSING: cannot take the project run lock $project_lock"
+    exit 2
+  fi
+  RUN_LOCK_DIRS+=("$project_lock")
+  # provisional EXIT trap: covers the refusals between here (inside runner_guard) and
+  # the main trap on_exit below — no fixture work has started yet, so releasing on EXIT
+  # directly is safe (on_exit/on_signal hold the locks through teardown and finish, and
+  # release only after receipt finalization)
+  trap run_lock_release EXIT
+  # A default-disposition signal death between the take and the main on_signal traps
+  # below runs no trap at all, stranding both locks until the 60 s grace and the stale
+  # takeover self-heal: cover that window with a release-and-exit shape (130, the gate's
+  # own interrupted exit code), which the main on_signal traps then override (a later
+  # trap on the same signal replaces this one).
+  trap 'run_lock_release; exit 130' HUP INT TERM
+}
+
+runner_guard() { # the CLI's own identity lock: a live holder means another run owns this fixture. An
+  # interleaved second runner killed a live run's fixture mid-row (2026-10-23: the 04:43 attempt
+  # launched while the 04:39 run still had rows running; its compose down removed the other run's
+  # keycloak between two B rows). A stale lock (its holder pid is gone) is cleared by fixture_reset.
+  # The lock exists only while an identity CLI command runs, so a second layer also refuses a
+  # live second gate runner. The scan reads /proc/*/cmdline in this shell — no pgrep: pgrep's
+  # own forked subshell copies this runner's argv (pattern included) and once refused this very
+  # launch within its own line (receipt 20261023T062651Z, pid 921453). Ancestors are exempt:
+  # the launcher's detached wrappers carry the script name by design.
+  local h="" anc="" walk pid cmd other=""
+  if [[ -f "$ED/auth/.identity.lock/pid" ]]; then h="$(cat "$ED/auth/.identity.lock/pid" 2>/dev/null || true)"; fi
+  if [[ -n "$h" ]] && kill -0 "$h" 2>/dev/null; then
+    log "REFUSING: the fixture's identity lock is held by a live run (pid $h); wait for its receipt or stop that run"
+    exit 2
+  fi
+  walk="$$"
+  for _ in 1 2 3 4 5 6; do
+    walk="$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')" || break
+    [[ -n "$walk" && "$walk" != 1 ]] || break
+    anc="$anc $walk"
+  done
+  for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    [[ "$pid" == "$$" || " $anc " == *" $pid "* ]] && continue
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+    [[ "$cmd" == *scripts/gate-identity.sh* ]] && other="$other $pid"
+  done
+  [[ -z "$other" ]] || {
+    log "REFUSING: another gate runner is already live on this guest (pids:$other); wait for its receipt or stop it"
+    exit 2
+  }
+  gate_run_lock   # the third layer: a per-fixture run lock the /proc scan cannot give the Mac local mode
+}
+runner_guard
 host_conflicts
 open_receipt
 trap on_signal HUP INT TERM

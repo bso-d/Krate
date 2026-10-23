@@ -11,7 +11,7 @@
   "timepicker": {},
   "refresh": "30s",
   "schemaVersion": 39,
-  "title": "Krate \u2014 Consumer Groups",
+  "title": "Krate - Consumer Groups",
   "uid": "krate-consumers",
   "version": 1,
   "templating": {

@@ -64,7 +64,10 @@ addition, a `git` executable and that separate checkout (a `git clone -b
 check: the pinned `nginx:1.27-alpine@sha256:…` reference does not resolve after
 `docker load` (the registry digest is not preserved), so set
 `KRATE_CHECK_NGINX_IMAGE` to the image the bundle loaded (the `NGINX_IMAGE`
-value of the installed `.env.template`); the check names the image it rendered with in the
+value of the installed `.env.template`); the runner derives that reference itself
+from the loaded template for the rows that need it (the S1 `gmake check` chain
+and the S4 checker row), and
+the check names the image it rendered with in the
 run log, and the S4 evidence reads `check-identity rc=…; py_compile of N gate helpers rc=…`. X1 needs the
 `krate-harness/playwright:1.60.0` image loaded from a saved archive (3.8 GB on
 disk, 0.94 GB gzipped, arm64), and J7 needs root. On a `--phase 4c --browser agent` run
@@ -95,7 +98,10 @@ IdP, `scripts/gate/stub_idp.sh`: a second Keycloak started from the edition's ow
 realm `pingstub`, published on `127.0.0.1:18443` only (`--stub-port N` when that
 port is taken) and joined to the fixture's `identity-egress` network under the alias
 `pingstub`; its certificate and secrets are generated per run under the receipt's
-state directory (0600) and removed with it. A missing image, a taken port or a
+state directory (0600) and removed with it when the run does not keep the fixture;
+a run with `--keep` preserves that directory (mode 0700) for the kept fixture's
+post-run consumers, and the operator's release of the fixture removes it. A missing
+image, a taken port or a
 missing network fails every Phase 3 row with that reason (the rows stay in the
 inventory; they are never silently NOT_RUN).
 
@@ -104,7 +110,40 @@ about 15 minutes for Phase 2 and about 10 minutes for Phase 3 (the stand-in's
 start and three Keycloak recreations). Output: `harness/gate-receipts/<edition>-<sha>-<time>/`
 with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 (every command output, secret values replaced by `<redacted>`) and
-`screenshots/*.png` with `manifest.json` captions.
+`screenshots/*.png` with `manifest.json` captions. A run with `--keep` leaves its
+state directory (`.state`, mode 0700: the stand-in's material and the enrolled
+users' state including `secrets.txt`, mode 600) inside the receipt folder for the
+kept fixture's post-run consumers.
+
+The runner's fixture reset removes the run's own state (`.env`,
+`auth/keycloak`, `auth/ui/runtime.yml`, the journal, the identity lock,
+`certs/`, the monitoring `.env`); a path left root-owned by an earlier run is
+then removed with `sudo -n rm -rf` too, and when even that fails the run
+refuses with the path in its log instead of continuing on an unclean fixture.
+The reason such leftovers can exist at all is the docker daemon creating an
+absent bind-mount source root-owned at container create, so the editions'
+Compose files mount the `auth/` and `certs` sources with
+`create_host_path: false` — a start without the CLI's own prep refuses, and no
+daemon-created directories appear. One run at a time: a second runner refuses
+while the fixture's identity lock is still held for a live run, and the Mac
+launcher checks for a still-live runner on the guest before spawning another.
+The runner itself also takes a per-fixture run lock (the edition dir's
+`.gate-run.lock` plus a `${TMPDIR:-/tmp}/krate-gate-run/<project>.lock`),
+covering the gap between those two layers: the identity lock exists only while
+an identity command runs, and the guest-side live-runner scan needs `/proc`
+(a Mac local run has none), so without the run lock a second runner on the same
+fixture or Compose project could interleave and tear down the first run's
+fixture mid-row. A stale lock (its holder pid gone) is taken over — but not for
+its first 60 seconds: a lock younger than that reads as live even with a dead
+pid, so an operator who kills a run and restarts at once is refused with the
+dead pid for that minute (the write window between the pid write and the atomic
+rename) instead of the restart silently stealing the lock. A live one makes the
+second runner refuse with the holder's pid and exit 2. The locks are held through
+teardown and receipt finalization — a runner keeps them while it stops children,
+runs `compose down -v`, removes the volumes, auth state and certificates, and
+writes its receipt — and releases them in `finish()` after the receipt is on disk,
+so a second runner cannot start its fixture while the first is still deleting those
+resources (the Mac local mode has no `/proc` scan to see a tearing runner).
 
 ## What a receipt binds the results to
 

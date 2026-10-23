@@ -787,8 +787,10 @@ def check_gate_scripts(checks):
     e('mac_src_ip' in agent and 'mac_iface' in agent and 'vm_g6' in agent and 'clock_skew_ms' in agent,
       'the agent hello carries the guest address, the Mac source address, the guest\'s lima0 GLOBAL address (vm_g6, review S6: the field is named for the class it carries) and the clock facts the runner preflights')
     probe = (ROOT / 'scripts/gate/mac/probe.mjs').read_text()
-    e("case 'ECONNREFUSED': return 'refused';" in probe and "return 'rejected';" in probe and "return 'timeout';" in probe,
-      'probe.mjs classifies every connect outcome, not only open/closed (TOPOFIX F6: three outcomes; the mapping must be the shipped one)')
+    e("case 'ECONNREFUSED': case 'ECONNRESET': return 'refused';" in probe
+      and "case 'ETIMEDOUT': return 'timeout';" in probe and "case 'ECONNABORTED': return 'other-ECONNABORTED';" in probe,
+      "probe.mjs classifies every connect outcome, not only open/closed (TOPOFIX F6: three outcomes; the mapping must be the"
+      " shipped one — W5 round 4: an RST counts as refused, ECONNABORTED fails closed as other- instead of a fake timeout)")
     guide_fingerprint = (ROOT / 'sso/guides/identity-gate.md').read_text()
     e('net::ERR_NAME_NOT_RESOLVED' in guide_fingerprint,
       'the guide names the external-attempt fingerprint of the MAP * ~NOTFOUND rule (M5)')
@@ -1302,6 +1304,196 @@ def check_firewall_round4(checks):
             run('W7 query status', query + ' returns23 with valid-looking stdout', w7_script,
                 {'FAIL_QUERY': query}, 'FAIL')
 
+
+def check_phase4_w3_controls(checks):
+    """W3 fix round (PR #52 threads/attempt-10 stage-B): the container-IP inspect template
+    must not read .GlobalIPv6Address — Docker 27+ renders the literal junk "invalid IP"
+    for every network without IPv6 (observed live: 64 TARGET_INVALID probe targets, two
+    junk tokens after every real address) — and the IPv6 link-local control must be
+    firewall-aware: with firewalld running the mirrored zone filters the [::] docker-proxy
+    path (lab8 N11a), so the published port is BLOCKED over IPv6; without firewalld the
+    docker-proxy listener answers and the control proves reachability of the probe path."""
+    e = lambda cond, msg: checks.expect(cond, 'phase4_w3: ' + msg)  # noqa: E731
+    bash = shutil.which('bash')
+    text = (ROOT / 'scripts/gate/phase4_w3.sh').read_text()
+    e('{{.IPAddress}} {{.GlobalIPv6Address}}' not in text,
+      "the container-IP inspect template must not read .GlobalIPv6Address (Docker 27+ renders the literal junk 'invalid IP' for IPv6-less networks; observed live as 64 TARGET_INVALID probe targets)")
+    e("ips=$(as_root docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' \"$c\" 2>/dev/null)" in text,
+      'the container-IP inspect template stays the space-separated IPv4 form the for-loop word-splits')
+    if bash is None:
+        return
+    start = text.index('if [[ -n "$LL" ]]; then')
+    end = text.index('echo "## c. backend container IPs')
+    block = text[start:end]
+    stub = r'''
+    set -uo pipefail
+    systemctl() { [[ "${1:-}" == is-active ]] || return 1; [[ -n "$FW_ACTIVE" ]]; }
+    tcp_probe() { return "${TCP_RC:-0}"; }
+    must_reach_tcp() { return "${TCP_RC:-0}"; }
+    must_not_tcp() { :; }
+    ok() { printf 'OK_MSG %s\n' "$1"; }
+    bad() { printf 'BAD_MSG %s\n' "$1"; }
+    LL=fe80::42 VN=veth0 VH=veth-host POS_PORT=13443 LOOP_PORTS="9092 13100"
+    '''
+    with tempfile.TemporaryDirectory(prefix='w3-ll-', dir=ROOT / 'harness/check-identity') as d:
+        script_path = Path(d) / 'block.sh'
+        def run_ll(case, fw, tcp_rc, ll='fe80::42'):
+            script_path.write_text(stub.replace('LL=fe80::42', 'LL=' + (ll or '')) + block + '\n')
+            r = subprocess.run([bash, str(script_path)], env=dict(os.environ, FW_ACTIVE=fw, TCP_RC=str(tcp_rc)),
+                               text=True, capture_output=True, timeout=5)
+            checks.expect(r.returncode == 0,
+                          f'phase4_w3/{case}: rc={r.returncode} stderr={r.stderr[-300:]!r}')
+            return r.stdout
+        # firewalld running, the N11a block (tcp_probe rc 1) -> ok naming the zone
+        out = run_ll('firewalld-active blocked', 'yes', 1)
+        e('blocked by the mirrored zone' in out and 'N11a' in out,
+          f'firewalld-active blocked: ok names the mirrored-zone block; out={out!r}')
+        e('BAD_MSG' not in out, f'firewalld-active blocked: no bad; out={out!r}')
+        # firewalld running, the port is OPEN (rc 0) -> bad (contradicts W5's v6 expectation)
+        out = run_ll('firewalld-active open', 'yes', 0)
+        e('BAD_MSG' in out and 'OPEN' in out and 'W5' in out,
+          f'firewalld-active open: an open IPv6 path fails the row naming OPEN directly (W5 asserts docker-published ports are not open over IPv6); out={out!r}')
+        # firewalld running, probe unknown (class 2) -> bad (inconclusive fails closed)
+        out = run_ll('firewalld-active unknown', 'yes', 2)
+        e('BAD_MSG' in out and 'class 2' in out,
+          f'firewalld-active unknown: an unknown probe class fails closed; out={out!r}')
+        # firewalld off -> the reachable control proves the probe path itself
+        out = run_ll('firewalld-inactive reachable', '', 0)
+        e('BAD_MSG' not in out, f'firewalld-inactive: the reachable control passes; out={out!r}')
+        # no link-local address at all -> inconclusive bad
+        out = run_ll('no-link-local', '', 0, ll='')
+        e('BAD_MSG' in out and 'no IPv6 link-local address' in out,
+          f'no-LL: inconclusive bad recorded; out={out!r}')
+
+
+def check_run_lock_order(checks):
+    """Run-lock release ordering (PR #52 thread r4359042087): the locks are held through
+    teardown's destructive work (children, prometheus restore, compose down -v, volume/auth/
+    cert removal) and past receipt finalization, and release inside finish() at its very
+    end. finish is the script's last command and its final line (`[[ "$verdict" == PASS ]]`)
+    sets the exit status (the script is `set -uo pipefail`, not errexit), so a release
+    placed after the finish() call would either clobber that status (run_lock_release ||
+    true returns 0, masking a FAIL verdict) or be skipped by on_signal's `exit 130` —
+    the release belongs inside finish, before the verdict line. Releasing at teardown's
+    start instead left an unlocked destructive window: on the Mac local mode (no /proc
+    scan) a second runner could start its fixture while the first was still deleting
+    those resources."""
+    text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e = lambda cond, msg: checks.expect(cond, 'run-lock order: ' + msg)  # noqa: E731
+    teardown_body = text[text.index('\nteardown() {'):]
+    teardown_body = teardown_body[:teardown_body.index('\nfinish() {')]
+    e('run_lock_release' not in teardown_body,
+      'teardown holds the run locks through its destructive work (no release inside it)')
+    finish_body = text[text.index('\nfinish() {'):]
+    finish_body = finish_body[:finish_body.index('\nFINISHED=false')]
+    e('run_lock_release || true' in finish_body,
+      'finish() releases the run locks (the only release on the normal/signal/unexpected paths)')
+    receipt_line = finish_body.find('log "receipt: $OUT/receipt.md"')
+    release_line = finish_body.find('run_lock_release || true')
+    verdict_line = finish_body.rfind('[[ "$verdict" == PASS ]]')  # rfind: the earlier hits are the verdict computation
+    e(-1 < receipt_line < release_line < verdict_line,
+      'the release sits after the receipt write and before the verdict exit')
+    on_signal = text[text.index('on_signal() {'):]
+    on_signal = on_signal[:on_signal.index('\n')]
+    e(on_signal == 'on_signal() { log "interrupted"; trap - EXIT HUP INT TERM; FINISHED=true; teardown; finish; exit 130; }',
+      f'the signal path runs teardown then finish (which releases); got {on_signal!r}')
+    on_exit = text[text.index('on_exit() {'):]
+    on_exit = on_exit[:on_exit.index('\n')]
+    e(on_exit == 'on_exit() { $FINISHED || { log "unexpected exit"; FINISHED=true; teardown; finish; }; }',
+      f'the unexpected-exit path runs teardown then finish (which releases); got {on_exit!r}')
+    tail = text[text.rindex('\nairgap_after_rows'):]
+    e(tail.endswith('\nFINISHED=true\ntrap - EXIT HUP INT TERM\nteardown\nfinish\n'),
+      f'the main flow ends in teardown then finish (dropping finish here would strand the '
+      f'locks on every normal run — finish is also the last command, so its verdict line '
+      f'sets the exit status); got {tail[-80:]!r}')
+    # the refusal paths that never reach finish keep their own EXIT-trap release
+    e('trap run_lock_release EXIT' in text,
+      'the provisional EXIT trap still releases on pre-fixture refusals')
+
+
+def check_run_lock_stamp_tz(checks):
+    """Run-lock stamp normalization (PR #52 thread r4360101520): ps lstart renders in the
+    caller's timezone and locale, so the same live pid published and re-read under
+    different environments produced different stamps — the mismatch read as pid reuse and
+    let a contender take over a live holder's lock (no /proc guard backs this on the Mac
+    local mode). run_lock_pid_start pins TZ and LC_ALL so publication and liveness checks
+    use the same bytes for the same pid under any caller environment."""
+    text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e = lambda cond, msg: checks.expect(cond, 'run-lock stamp tz: ' + msg)  # noqa: E731
+    helper = text[text.index('run_lock_pid_start() {'):]
+    helper = helper[:helper.index('\n}\n') + 3]
+    e('TZ=UTC0 LC_ALL=C ps -p "$1" -o lstart=' in helper,
+      'run_lock_pid_start pins TZ and LC_ALL for the stamp (the raw ps output is env-dependent)')
+    e(helper.count('ps -p') == 1,
+      'no second, unpinned ps invocation remains in the helper')
+    # the write path and the read path both go through the helper: exactly one comment
+    # mention + exactly one invocation may carry the word (no second, header-form renderer)
+    e(text.count('lstart') == 2,
+      f'run_lock_pid_start is the only lstart renderer in the gate script (found {text.count("lstart")}: one comment, one invocation)')
+
+
+def check_start_cluster_monitor_realm(checks):
+    """W1 fix round (PR #52): the 4c fixture bring-up finishes the product's Grafana realm
+    switch (monitor realm, config set GRAFANA_AUTH_CONFIG=realm.ini, monitor up again), so
+    the fixture sits in the realm-mode monitoring shape the W1 row asserts (grafana
+    loopback-only per U21a) instead of failing its own row on a local-mode 0.0.0.0 publish
+    (attempt-10 stage-B: W1 FAIL with grafana [0.0.0.0:13000])."""
+    e = lambda cond, msg: checks.expect(cond, 'monitor-realm bringup: ' + msg)  # noqa: E731
+    bash = shutil.which('bash')
+    text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e('--monitor-realm) monitor_realm=true ;;' in text, 'start_cluster parses a --monitor-realm flag')
+    e('[[ "$slice" == 4c ]] && bringup+=(--monitor-realm)' in text, 'the 4c bring-up passes --monitor-realm')
+    e(text.count('[[ "$slice" == 4b ]] && bringup=(--broker)') == 1 and 'bringup=(--broker --monitor-realm)' not in text,
+      'the 4b broker bring-up keeps its own shape (no realm flag)')
+    e('SC_MONITOR_REALM=127; SC_GRAF_SET=127; SC_MONITOR2=127' in text,
+      'the realm-switch steps get the 127 sentinel before they run')
+    e('if (( SC_MONITOR_REALM || SC_GRAF_SET || SC_MONITOR2 )); then' in text,
+      'bringup_failed names the realm-switch exits whenever realm mode was requested (127 = the steps never ran)')
+    if bash is None:
+        return
+    start = text.index('start_cluster() {')
+    end = text.index('\n}\n', start) + 3
+    body = text[start:end]
+    with tempfile.TemporaryDirectory(prefix='w1-realm-', dir=ROOT / 'harness/check-identity') as d:
+        krate = Path(d) / 'krate'
+        krate.write_text('#!/bin/sh\nprintf \'KRATE %s\\n\' "$*" >> "$CALLS_FILE"\ncase "$*" in *"monitor realm"*) exit "$REALM_RC";; *"monitor up"*) exit "$MON_UP_RC";; esac\nexit 0\n')
+        krate.chmod(0o755)
+        calls_file = Path(d) / 'calls.txt'
+        script = Path(d) / 'w1-bringup.sh'
+        script.write_text(r'''
+    set -uo pipefail
+    cap() { "$@"; }
+    cid() { :; }
+    collect_secrets() { :; }
+    SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
+    ''' + body + '\nstart_cluster --local --monitor-realm\nprintf \'RC %s\\n\' "$?"\n')
+        def run_bringup(realm_rc, mon_up_rc=0):
+            calls_file.write_text('')
+            r = subprocess.run([bash, str(script)], env=dict(os.environ, KRATE=str(krate), REALM_RC=str(realm_rc),
+                                                             MON_UP_RC=str(mon_up_rc),
+                                                             CALLS_FILE=str(calls_file)), text=True, capture_output=True, timeout=10)
+            seq = [line[len('KRATE '):].rstrip() for line in calls_file.read_text().splitlines()]
+            return r, seq
+        r, seq = run_bringup(0)
+        e(seq == ['auth configure --local',
+                  'config set KAFKA_UI_AUTH_CONFIG=runtime.yml',
+                  'start',
+                  'auth apply',
+                  'monitor up',
+                  'monitor realm',
+                  'config set GRAFANA_AUTH_CONFIG=realm.ini',
+                  'monitor up'],
+          f'the realm bring-up order (auth configure, runtime.yml, start, apply, monitor up, monitor realm, GRAFANA_AUTH_CONFIG, monitor up); got {seq}')
+        e(any(line.rstrip() == 'RC 0' for line in r.stdout.splitlines()), f'a clean realm switch brings the fixture up (rc 0); out={r.stdout!r}')
+        r, seq = run_bringup(1)
+        e(any(line.rstrip() == 'RC 1' for line in r.stdout.splitlines()), f'a failed monitor realm step fails the bring-up; out={r.stdout!r}')
+        e(seq[-1] != 'monitor up' or 'config set GRAFANA_AUTH_CONFIG=realm.ini' not in seq,
+          'a failed monitor realm stops the sequence before the config switch (the fixture stays local)')
+        r, seq = run_bringup(0, 1)
+        e(any(line.rstrip() == 'RC 1' for line in r.stdout.splitlines()),
+          f'a failed first monitor up fails the bring-up; out={r.stdout!r}')
+        e('monitor realm' not in seq and 'GRAFANA_AUTH_CONFIG' not in seq and seq.count('monitor up') == 1,
+          'a failed first monitor up skips the realm steps (monitor realm needs the up Grafana; no second failure stacked on the first verdict)')
 
 
 def check_browser_certificate_proceed(checks):
@@ -1970,6 +2162,17 @@ def check_browser_probe_lifecycle(checks):
     if not node:
         print('check_browser_probe_lifecycle: NOT RUN (optional host Node is absent)', file=sys.stderr)
         return
+    # U15 cosmetic pins: the three Grafana titles are ASCII (a title em dash broke the
+    # U15 row's slug; X3 navigates by uid, screenshots-grafana.mjs:55), while the Perses
+    # display names keep theirs — X4 matches /^Krate — / (screenshots-perses.mjs:256,295).
+    for name in ('kafka-overview.json', 'consumer-groups.json', 'host-capacity.json'):
+        dashboard = json.loads((ROOT / 'monitoring/grafana/dashboards' / name).read_text())
+        checks.expect(dashboard['title'].isascii(),
+                      f'grafana dashboards/{name}: the title stays ASCII (U15: an em dash in the title broke the slug)')
+    for name in ('kafka-overview.json', 'consumer-groups.json', 'host-capacity.json', 'logs.json'):
+        perses = json.loads((ROOT / 'monitoring/perses/dashboards' / name).read_text())
+        checks.expect(perses['spec']['display']['name'].startswith('Krate \u2014'),
+                      f'perses dashboards/{name}: the display name keeps the em dash (X4 matches /^Krate — /)')
     program = r"""// Standalone payload for the canonical Python checker. Pass only the shipped file
 // path as argv[2]; no ignored harness file is imported or needed at runtime.
 import { readFileSync } from 'node:fs';
@@ -1978,14 +2181,37 @@ import { Buffer } from 'node:buffer';
 import vm from 'node:vm';
 
 const source = readFileSync(process.argv[1], 'utf8');
-const cases = ['positive', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write', 'guard', 'terminal'];
+// 'viewer-redirect': the stock-RBAC redirect shape (the browser lands on Home after the
+//   explore navigation — the Viewer p4v run, walk log 147): the story must record the
+//   redirect and stay green instead of timing out on a Live click Home never offers.
+// 'login-redirect': the explore navigation lands on a Grafana login page (session loss
+//   or an auth regression) — the redirect exception must not accept it: the story fails
+//   naming the destination, instead of passing as the Viewer's stock shape.
+// 'live-positive': the browser stayed on /grafana/explore (the Admin shape) and the Live
+//   tail step runs. 'live-button': the Live click itself fails — a real story failure.
+const cases = ['positive', 'viewer-redirect', 'login-redirect', 'live-positive', 'live-button', 'address', 'certificate', 'external', 'evidence', 'close', 'browser-write', 'summary-write', 'guard', 'terminal'];
+const cleanStory = ['positive', 'viewer-redirect', 'live-positive'];
 let failed = 0;
 for (const condition of cases) {
   const events = [], files = new Map(), logs = [];
   const reject = (stage) => { if (condition === stage) throw new Error(`injected ${stage}`); };
   const page = {
-    url: () => 'https://gate.test/grafana/', on() {}, async goto() {},
-    getByRole() { return { first() { return this; }, async click() {} }; },
+    // the goto stub does not navigate, so page.url() models where the browser ended up
+    // after the explore navigation: Home (redirect), the login page (auth regression),
+    // or still on the explore page
+    url: () => (condition === 'login-redirect' ? 'https://gate.test/grafana/login'
+      : (condition === 'live-button' || condition === 'live-positive')
+      ? 'https://gate.test/grafana/explore?schemaVersion=1' : 'https://gate.test/grafana/'),
+    on() {}, async goto() {},
+    getByRole(role, sel) {
+      const target = {
+        first() { return target; },
+        async click() {
+          if (condition === 'live-button' && role === 'button' && String(sel?.name).includes('Live')) throw new Error('injected live-button');
+        },
+      };
+      return target;
+    },
     locator() { return { async count() { return 0; } }; },
     async waitForSelector() {}, async fill() {}, async click() {}, async waitForURL() {},
     async waitForLoadState() {}, async waitForTimeout() {}, async screenshot() {},
@@ -2033,16 +2259,36 @@ for (const condition of cases) {
   const parsed = stdout ? JSON.parse(stdout.slice('SUMMARY '.length)) : null;
   const errors = [], expect = (ok, message) => { if (!ok) errors.push(message); };
   expect(uncaught === null, 'failure escaped lifecycle');
-  expect(condition === 'positive' ? child.exitCode === 0 : child.exitCode !== 0, 'incorrect exit status');
+  expect(cleanStory.includes(condition) ? child.exitCode === 0 : child.exitCode !== 0, 'incorrect exit status');
   expect((!!summary || condition === 'summary-write') && (!!browser || condition === 'browser-write') && !!parsed, 'available summary/browser/stdout evidence missing');
   expect(events.filter((event) => event === 'close').length === 1, 'close not attempted exactly once');
   expect(events.includes('evidence') && events.indexOf('evidence') < events.indexOf('close'), 'live evidence not before close');
   expect(events.indexOf('close') < events.indexOf('write:ui15-summary.json'), 'summary finalized before cleanup');
-  if (condition !== 'positive') {
-    if (condition !== 'summary-write') expect(summary?.failures?.some((failure) => failure.error.includes(`injected ${condition}`)), 'failure not retained in file');
+  if (!cleanStory.includes(condition)) {
+    if (!['summary-write', 'login-redirect'].includes(condition)) expect(summary?.failures?.some((failure) => failure.error.includes(`injected ${condition}`)), 'failure not retained in file');
     expect(parsed?.storyFailed && parsed?.failures?.length > 0, 'failure not retained in stdout');
     if (!['browser-write', 'summary-write'].includes(condition)) expect(events.includes('profile:true'), 'known failed profile not retained');
   } else expect(!summary?.storyFailed && !(summary?.failures || []).length, 'positive control fabricated failure');
+  if (condition === 'viewer-redirect') {
+    expect(summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'), 'redirect step not recorded for the redirected Viewer');
+    expect(!summary?.steps?.some((s) => s.name === 'explore live tail 20 s'), 'live tail ran for the redirected Viewer');
+  }
+  if (condition === 'login-redirect') {
+    expect(!summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'),
+      'a login-page destination was recorded as the stock Viewer redirect');
+    expect(summary?.failures?.some((failure) => failure.error.includes('/grafana/login')
+      && failure.error.includes("not the Viewer's stock Home")),
+      'the login-redirect failure does not name the destination and the stock-Home rule');
+  }
+  if (condition === 'live-positive') {
+    expect(summary?.steps?.some((s) => s.name === 'explore live tail 20 s'), 'live tail step not recorded for the explore run');
+    expect(!summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'), 'redirect step recorded although the browser stayed on explore');
+  }
+  if (condition === 'live-button') {
+    expect(!summary?.steps?.some((s) => s.name === 'explore live tail 20 s'), 'live tail step recorded despite the failed Live click');
+    expect(!summary?.steps?.some((s) => s.name === 'explore redirected (stock viewer RBAC)'), 'redirect step recorded although the browser stayed on explore');
+    expect(summary?.failures?.some((failure) => failure.error.includes('injected live-button')), 'live-button failure not retained');
+  }
   if (condition === 'evidence') expect(!!browser?.evidenceFailed && !browser?.observedBy, 'missing evidence replaced by proof');
   if (condition === 'external') expect(summary?.externalAttempts?.[0]?.host === 'outside.invalid', 'external evidence lost');
   if (condition === 'close') expect(browser?.failures?.some((failure) => failure.stage === 'browser cleanup failed'), 'cleanup failure absent from browser receipt');
@@ -2145,18 +2391,31 @@ const source = readFileSync(sourcePath, 'utf8');
 const manual = process.argv.includes('--manual');
 const savePath = process.argv.find(a => a.startsWith('--save='))?.slice(7);
 const cases = manual ? [{ name: 'manual non-spot EMFILE', code: 'EMFILE', port: 32000, fail: true }] : [
-  ...['EMFILE', 'ENFILE', undefined, 'EADDRNOTAVAIL', 'ENOTSUP', 'EINVAL', 'ENXIO'].map(code =>
+  ...['EMFILE', 'ENFILE', undefined, 'EADDRNOTAVAIL', 'ENOTSUP', 'EINVAL', 'ENXIO', 'ECONNABORTED'].map(code =>
     ({ name: `non-spot ${code || 'missing errno'}`, code, port: 32000, fail: true })),
   { name: 'spot EMFILE', code: 'EMFILE', port: 111, fail: true },
   { name: 'all inconclusive bounded sample', code: 'EMFILE', all: true, fail: true },
-  ...['ECONNREFUSED', 'EHOSTUNREACH', 'ETIMEDOUT', 'open'].map(code =>
+  ...['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ETIMEDOUT', 'open'].map(code =>
     ({ name: `conclusive ${code}`, code, port: 32000, fail: false })),
+  // The live-observed rate-limiter artifact (W5 round 4): the sweep's concurrent connect to
+  // the spot port stays silent (firewalld's ICMP REJECT suppressed by icmp_ratelimit) so the
+  // socket timer labels it 'timeout', while the idle re-probe answers ECONNREFUSED — the spot
+  // entry must carry the idle outcome as 'outcome' with the sweep's label as 'outcomeSweep'.
+  { name: 'spot sweep-silent idle-refused (rate-limiter artifact)', code: 'ECONNREFUSED', phase: 'rate-limit', port: 111, fail: false },
+  // The drop shape: the spot port stays silent at idle too — three re-probe strikes, the
+  // honest label is 'timeout' with the attempts recorded and errno null (a timer timeout
+  // carries no raw errno).
+  { name: 'spot idle-strikes timeout (drop shape)', code: 'ECONNREFUSED', phase: 'idle-timeout', port: 111, fail: false },
+  // The repair shape: a genuinely-open spot port whose sweep connect was load-shaped into
+  // 'timeout' answers OPEN at idle — the observed open set must gain the port (the row's
+  // fact statement) while counts keep the sweep's census.
+  { name: 'spot idle-open repairs the open set', code: 'open', phase: 'idle-open', port: 111, fail: false },
 ];
 let failures = 0;
 for (const test of cases) {
-  const files = new Map(); const stdout = []; const stderr = []; const connected = [];
+  const files = new Map(); const stdout = []; const stderr = []; const connected = []; const attempts = new Map();
   let rc = 0; let caught;
-  const context = vm.createContext({ process: {
+  const context = vm.createContext({ setTimeout: (cb, _ms) => { if (typeof cb === 'function') queueMicrotask(cb); }, process: {
     argv: ['node', sourcePath, 'sweep', '--ip', '127.0.0.1', '--host', 'fixture.test', '--out', '/owned-output'],
     stdout: { write(s) { stdout.push(s); } }, exit(n) { rc = n; const e = new Error('process exit'); e.exit = true; throw e; },
   }, console: { log(s) { stdout.push(s); }, error(s) { stderr.push(s); } } });
@@ -2172,9 +2431,21 @@ for (const test of cases) {
     }
     if (specifier === 'node:net') namespace.default = { ...namespace.default, connect(options) {
       connected.push(options.port);
+      const seen = (attempts.set(options.port, (attempts.get(options.port) || 0) + 1), attempts.get(options.port));
+      // phase modes model the live rate-limiter behavior on the spot port: 'rate-limit'
+      // silences only the sweep's first connect to it (ICMP suppressed under load; the
+      // other ports answer refused), 'idle-timeout' silences every connect to it (a
+      // dropped port never answers), 'idle-open' silences only the sweep's first connect
+      // and then answers a successful connect at idle (a genuinely-open port the sweep
+      // mislabeled).
+      const silent = test.phase === 'idle-timeout'
+        || ((test.phase === 'rate-limit' || test.phase === 'idle-open') && options.port === 111 && seen === 1);
       const socket = new EventEmitter(); socket.destroy = () => socket;
-      socket.setTimeout = () => socket;
+      socket.setTimeout = (_ms, cb) => { if (silent) queueMicrotask(cb); return socket; };
       queueMicrotask(() => {
+        if (silent) return;   // the socket timer callback finishes it as 'timeout'
+        if (test.phase === 'idle-open' && options.port === 111) { socket.emit('connect'); return; }
+        if (test.phase) { socket.emit('error', { code: 'ECONNREFUSED' }); return; }
         const selected = test.all || options.port === test.port;
         if (selected && test.code === 'open') socket.emit('connect');
         else socket.emit('error', { code: selected ? test.code : 'ECONNREFUSED' });
@@ -2196,7 +2467,8 @@ for (const test of cases) {
   if (!manual) {
     check(!caught, 'unexpected module error: ' + caught);
     check(rc === (test.fail ? 1 : 0), `exit ${rc}, expected ${test.fail ? 1 : 0}`);
-    check(connected.length === 65535 && new Set(connected).size === 65535, 'complete IPv4 sweep');
+    check(new Set(connected).size === 65535, 'complete IPv4 sweep (every port probed at least once)');
+    check(connected.filter((p) => p === 111).length >= 2, 'the spot control port is re-probed at idle after the sweep');
     check(report && Object.values(report.counts).reduce((a,b) => a+b,0) === 65535, 'complete count report');
     check(report && files.get('/owned-output/w5-result.sha256') === `${createHash('sha256').update(raw).digest('hex')}  w5-result.json\n`, 'report hash');
     if (test.fail) {
@@ -2206,7 +2478,35 @@ for (const test of cases) {
       check(report?.inconclusive?.sample?.length === (test.all ? 8 : 1), 'bounded sample');
       check(report?.inconclusive?.sample?.[0]?.port === (test.all ? 1 : test.port), 'diagnostic names failing port');
       check(errors.includes(String(test.all ? 65535 : 1)) && errors.length < 1500, 'bounded diagnostic total');
+      if (test.code === 'ECONNABORTED') check(report?.inconclusive?.sample?.[0]?.outcome === 'other-ECONNABORTED',
+        'ECONNABORTED fails closed as other-ECONNABORTED instead of being labeled a timeout');
     } else check(output.includes('RESULT W5 rc=0'), 'conclusive sweep success');
+    if (test.code === 'ECONNRESET') check(report?.counts?.refused === 65535 && report?.counts?.timeout === 0,
+      'ECONNRESET (an RST) must count as refused, never as a timeout');
+    if (test.phase === 'rate-limit') {
+      const spot111 = report?.spot?.find((s) => s.port === 111);
+      check(spot111?.outcome === 'refused' && spot111?.outcomeSweep === 'timeout',
+        'the idle re-probe relabels the rate-limiter artifact (sweep timeout -> idle refused)');
+      check(spot111?.errno === 'ECONNREFUSED', 'the spot entry records the raw errno of the idle probe');
+      check(spot111?.idleAttempts === 1, 'a conclusive idle re-probe stops after one attempt');
+      check(report?.counts?.timeout === 1 && report?.counts?.refused === 65534,
+        "counts keep the sweep's honest record while the spot decision uses the idle outcome");
+    }
+    if (test.phase === 'idle-timeout') {
+      const spot111 = report?.spot?.find((s) => s.port === 111);
+      check(spot111?.outcome === 'timeout' && spot111?.outcomeSweep === 'timeout', 'three idle strikes keep the honest timeout label');
+      check(spot111?.idleAttempts === 3, 'the idle re-probe strikes three times before accepting timeout');
+      check(spot111?.errno === null, 'a timer timeout carries no raw errno — recorded as null, never synthesized');
+    }
+    if (test.phase === 'idle-open') {
+      const spot111 = report?.spot?.find((s) => s.port === 111);
+      check(spot111?.outcome === 'open' && spot111?.outcomeSweep === 'timeout',
+        'the idle re-probe relabels a load-shaped sweep miss of a genuinely-open spot port as open');
+      check(report?.open?.includes(111), 'the observed open set gains the idle-open port (the row\'s fact statement)');
+      check(report?.counts?.timeout === 1 && report?.counts?.open === 0 && report?.counts?.refused === 65534,
+        "counts keep the sweep's honest census while the open set carries the idle-repaired fact");
+      check(connected.filter((p) => p === 111).length === 2, 'an open idle re-probe stops after the first conclusive attempt');
+    }
   }
   failures += problems.length;
   console.log(JSON.stringify({ case: test.name, rc, counts: report?.counts, inconclusive: report?.inconclusive,
@@ -11263,7 +11563,7 @@ def main():
                   check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_collision_classification, check_grafana_collision_warning_rendering, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_phase4_w3_controls, check_run_lock_order, check_run_lock_stamp_tz, check_start_cluster_monitor_realm, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight, check_probe_causes, check_probe_diagnostic_privacy,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,

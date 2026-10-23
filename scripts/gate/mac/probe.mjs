@@ -3,7 +3,9 @@
 // `sweep`  — from the Mac, a full TCP connect sweep of ports 1-65535 against the VM's vzNAT
 //            address, every probe classified (open / refused / rejected / timeout), a
 //            per-port spot outcome table for the ports the row needs decided (the control
-//            port 111 first among them), a targeted IPv6 pass on the guest's lima0 address (the
+//            port 111 first among them — each spot port re-probed sequentially at idle
+//            after the sweep, because the sweep's own label is shaped by the guest's
+//            ICMP rate limiting), a targeted IPv6 pass on the guest's lima0 address (the
 //            GLOBAL one without a zone; a link-local only with the Mac's owning interface as its
 //            zone), and — when --cert is
 //            given — the Node TLS pin on --port. TCP only: none of the product's published
@@ -46,13 +48,21 @@ if (!net.isIPv4(ip)) die(`--ip must be an IPv4 address, got ${ip}`);
 const host = args.host || die('--host is required');
 
 // Node connect error -> the row's outcome name (F6: record refused (RST) and rejected
-// (ICMP admin-prohibited; EHOSTUNREACH by platform — M3 observed an icmp-port-unreachable
-// REJECT landing as a socket error on this same mechanism) separately.
+// (ICMP admin-prohibited) separately). Platform truth: Linux maps an ICMP
+// admin-prohibited to EHOSTUNREACH (a 'rejected' it can tell from an RST), while
+// the Mac's XNU maps every ICMP destination-unreachable — including firewalld's
+// REJECT answer — to ECONNREFUSED, the same errno an RST gives, so on Darwin
+// 'refused' covers both shapes and the two cannot be told apart by errno (M3
+// observed an icmp-port-unreachable REJECT landing as a socket error on this same
+// mechanism). ECONNRESET is a definitive peer answer (an RST), never a timeout;
+// ECONNABORTED is a local abort whose cause the errno does not name, so it fails
+// closed into the inconclusive family rather than being mislabeled.
 function outcomeOf(code) {
   switch (code) {
-    case 'ECONNREFUSED': return 'refused';
+    case 'ECONNREFUSED': case 'ECONNRESET': return 'refused';
     case 'EHOSTUNREACH': case 'ENETUNREACH': case 'EHOSTDOWN': case 'EPERM': return 'rejected';
-    case 'ETIMEDOUT': case 'ECONNRESET': case 'ECONNABORTED': return 'timeout';
+    case 'ETIMEDOUT': return 'timeout';
+    case 'ECONNABORTED': return 'other-ECONNABORTED';
     case 'EADDRNOTAVAIL': case 'ENOTSUP': case 'EINVAL': case 'ENXIO': return 'no-route-or-scope';
     default: return `other-${code || 'unknown'}`;
   }
@@ -61,10 +71,10 @@ function connectOnce(targetAddress, port, family, timeoutMs) {
   return new Promise((res) => {
     const sock = net.connect({ host: targetAddress, port, family });
     let done = false;
-    const finish = (outcome) => { if (!done) { done = true; sock.destroy(); res({ port, outcome }); } };
+    const finish = (outcome, errno) => { if (!done) { done = true; sock.destroy(); res({ port, outcome, errno: errno || null }); } };
     sock.setTimeout(timeoutMs, () => finish('timeout'));
     sock.on('connect', () => finish('open'));
-    sock.on('error', (e) => finish(outcomeOf(e.code)));
+    sock.on('error', (e) => finish(outcomeOf(e.code), e.code || null));
   });
 }
 
@@ -102,9 +112,41 @@ async function subSweep() {
     else { counts.other += 1; }
   }
   for (const [p, outcome] of all) if (outcome === 'open') open.push(p);
+  // The spot table: each listed port is re-probed SEQUENTIALLY AT IDLE after the sweep —
+  // the v6 pass's own shape — because the sweep's label for a port is load-shaped: the
+  // because under the 64-concurrent sweep firewalld's REJECT answers are suppressed and a
+  // refused port mislabels as 'timeout' (measured live on
+  // the fixture VM: the full sweep recorded refused=702 / timeout=64832 while a single
+  // idle connect to 111 answered ECONNREFUSED in ~2 ms). The row's decision therefore
+  // uses the idle outcome ('outcome'); the sweep's label is kept as 'outcomeSweep' and
+  // the raw errno as 'errno' (null when the socket carried none — a timer timeout has
+  // no errno), with the number of idle attempts. counts stay the
+  // sweep's honest record.
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
   const spotOut = new Map();
-  for (const p of spot) spotOut.set(p, { port: p, outcome: all.get(p) || 'not-swept', inSpot: true });
-  for (const p of open) if (!spotOut.has(p)) spotOut.set(p, { port: p, outcome: 'open', inSpot: false });
+  for (const p of spot) {
+    let r = { port: p, outcome: 'not-swept' };
+    let attempts = 0;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (spotOut.size) await sleep(1200);   // let the guest's ICMP limiter budget replenish between ports
+      attempts = attempt;
+      r = await connectOnce(ip, p, 4, Math.max(timeoutMs, 2500));
+      if (r.outcome !== 'timeout') break;   // conclusive at idle
+      if (attempt < 3) await sleep(1200);
+    }
+    spotOut.set(p, { port: p, outcome: r.outcome, outcomeSweep: all.get(p) || 'not-swept',
+      errno: r.errno || null, idleAttempts: attempts, inSpot: true });
+  }
+  // A spot port the sweep mislabeled as timeout but that answers OPEN at idle is an
+  // observed-open port: the open set is the row's fact statement about the fixture, so
+  // the idle result repairs it — counts keep the sweep's honest record, and the spot
+  // entry still carries outcomeSweep so the mislabel stays visible in the receipt. The
+  // repair is one-directional on purpose: an idle 'refused' never removes a sweep-open
+  // port, so a false positive stays fail-closed rather than hidden.
+  for (const [p, r] of spotOut) {
+    if (r.inSpot && r.outcome === 'open' && !open.includes(p)) open.push(p);
+  }
+  for (const p of open) if (!spotOut.has(p)) spotOut.set(p, { port: p, outcome: 'open', outcomeSweep: 'open', inSpot: false });
   const report = {
     row: 'W5', ip, host,
     swept: { from: 1, to: 65535, concurrency, timeoutMs, tcpOnly: true, seconds: Math.round((Date.now() - t0) / 100.0) / 10 },
@@ -167,7 +209,7 @@ async function subSweep() {
     const v6 = [];
     for (const p of v6Ports) {
       const r = await connectOnce(target, p, 6, Math.max(timeoutMs, 3000));
-      v6.push({ port: p, outcome: r.outcome });
+      v6.push({ port: p, outcome: r.outcome, errno: r.errno || null });
     }
     report.v6 = { addressClass: args['v6-class'] || (linkLocal ? 'link-local' : 'global'), address: target, ports: v6 };   // S6: the class is recorded, not assumed
     report.positives.push(`v6 ${report.v6.addressClass} ${target} open=[${v6.filter((x) => x.outcome === 'open').map((x) => x.port).join(',') || 'none'}]`);
