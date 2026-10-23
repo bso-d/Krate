@@ -1095,6 +1095,13 @@ run_screenshots() {
 # apply); returns non-zero when any step failed. The monitoring secrets are
 # collected for the leak scans.
 #
+# --monitor-realm (slice 4c): after the local `monitor up`, finish the
+# product's Grafana realm switch (monitor realm, config set
+# GRAFANA_AUTH_CONFIG=realm.ini, monitor up again) so the fixture sits in the
+# realm-mode monitoring shape the W rows assert (W1: grafana loopback-only per
+# U21a); sets SC_MONITOR_REALM/SC_GRAF_SET/SC_MONITOR2, named in
+# bringup_failed's evidence only when they ran.
+#
 # --broker (slice 4b only): the runner owns the stand-in IdP — stub_idp.sh up
 # (the Phase 3 project/port convention) BEFORE a plain auth configure, so the
 # stand-in is ready but NO broker plan is written or applied: with the broker
@@ -1108,7 +1115,7 @@ run_screenshots() {
 # stand-in's PEM at 644 in the truststore dir, and
 # PING_KEYCLOAK_CLIENT_SECRET through the environment (set_env_raw), never on
 # a command line.
-SC_CONFIGURE=0; SC_SET=0; SC_START=0; SC_APPLY=0; SC_MONITOR=0; SC_STUB=0; SC_CONFIGURE_EV=""; SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
+SC_CONFIGURE=0; SC_SET=0; SC_START=0; SC_APPLY=0; SC_MONITOR=0; SC_MONITOR_REALM=0; SC_GRAF_SET=0; SC_MONITOR2=0; SC_STUB=0; SC_CONFIGURE_EV=""; SC_BROKER_BEFORE=""; SC_BROKER_AFTER=""
 stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR/site.json
   local cluster rc f
   cap "$KRATE" auth configure; rc=$?  # the plain plan: its runtime.yml names the edition's cluster list
@@ -1124,16 +1131,18 @@ stub_up_for_broker() { # the 4b stand-in prelude; sets SC_STUB, writes $STUB_DIR
   set_env_raw PING_KEYCLOAK_CLIENT_SECRET "$(tr -d '\n' < "$STUB_DIR/.client-secret")"; collect_secrets
   log "broker prelude: stand-in up on 127.0.0.1:$STUB_PORT (cluster $cluster); site file $STUB_DIR/site.json"
 }
-start_cluster() { # [--local] [--broker]
-  local arg broker=false
+start_cluster() { # [--local] [--broker] [--monitor-realm]
+  local arg broker=false monitor_realm=false
   local -a cfg_args=()
   for arg in "$@"; do
     case "$arg" in
       --broker) broker=true ;;
+      --monitor-realm) monitor_realm=true ;;
       *) cfg_args+=("$arg") ;;
     esac
   done
   SC_CONFIGURE=127; SC_SET=127; SC_START=127; SC_APPLY=127; SC_MONITOR=127
+  SC_MONITOR_REALM=0; SC_GRAF_SET=0; SC_MONITOR2=0
   SC_CONFIGURE_EV=""; SC_STUB=0
   if $broker; then
     # Slice 4b only: the runner owns the stand-in IdP (up, truststore, secret,
@@ -1154,8 +1163,43 @@ start_cluster() { # [--local] [--broker]
   cap "$KRATE" auth apply; SC_APPLY=$?
   SC_BROKER_AFTER="$(cid kafka-92)"
   cap "$KRATE" monitor up; SC_MONITOR=$?
+  if $monitor_realm; then
+    # Slice 4c's rows assert the realm-mode monitoring shape (W1: grafana
+    # loopback-only per U21a), so the bring-up finishes the product's own realm
+    # switch rather than leaving the fixture local and failing its own row: the
+    # first `monitor up` left Grafana on the local login with the Basic admin
+    # (seed-alerting has waited for it to answer), `monitor realm` then creates
+    # the seed service account/token and monitoring/auth/realm.ini against that
+    # admin, the config switch names realm.ini, and the second `monitor up`
+    # recreates Grafana loopback-only and ends the sessions the local login made
+    # (monitoring/README.md table 1; seed-alerting re-seeds through the seed
+    # token in realm mode). The stage drivers used to do this by hand after the
+    # bring-up; a gate run that starts on a fresh fixture without them failed W1.
+    # A failed first `monitor up` skips the realm steps too: `monitor realm`
+    # needs the up Grafana to answer with its admin login, and running it against
+    # a down Grafana would stack a second, unrelated failure on the first one's
+    # a down Grafana would stack a second, unrelated failure on the first one's
+    # verdict. The three realm exits keep their 127 "never ran" sentinels (so
+    # realm_ev names that the realm steps did not run), the aggregate still fails
+    # on SC_MONITOR itself, and bringup_failed's base message names the refused
+    # monitor up.
+    SC_MONITOR_REALM=127; SC_GRAF_SET=127; SC_MONITOR2=127
+    if [[ $SC_MONITOR -eq 0 ]]; then
+      cap "$KRATE" monitor realm; SC_MONITOR_REALM=$?
+      # Stop at the first realm-step failure: a refused `monitor realm` leaves the
+      # switch unprepared (no seed token, no realm.ini), and running the config switch
+      # and the realm `monitor up` anyway would fail later with the seed-alerting
+      # missing-token error instead of the refusal that caused it. The fixture then
+      # stays on the local login and the failure message names the refused step.
+      if [[ $SC_MONITOR_REALM -eq 0 ]]; then
+        "$KRATE" config set GRAFANA_AUTH_CONFIG=realm.ini >/dev/null; SC_GRAF_SET=$?
+        cap "$KRATE" monitor up; SC_MONITOR2=$?
+      fi
+    fi
+  fi
   collect_secrets
-  [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 && $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]]
+  [[ $SC_CONFIGURE -eq 0 && $SC_SET -eq 0 && $SC_START -eq 0 && $SC_APPLY -eq 0 && $SC_MONITOR -eq 0 ]] \
+    && { ! $monitor_realm || { [[ $SC_MONITOR_REALM -eq 0 && $SC_GRAF_SET -eq 0 && $SC_MONITOR2 -eq 0 ]]; }; }
 }
 
 # ═══════════════════════════ phase 2 ═══════════════════════════
@@ -2319,11 +2363,11 @@ if 111 in expected:
 else:
     o111 = spot_by_port.get(111, {}).get("outcome", "not-swept")
     if fw_running and o111 not in ("refused", "rejected"):
-        bad.append("control port 111 is %s with firewalld running (its zone is not applied to lima0; expected refused/rejected)" % o111)
+        bad.append("control port 111 is %s at the idle re-probe with firewalld running (expected refused/rejected: the sweep's 64-concurrent load can suppress firewalld's ICMP replies, which is why the spot outcome is the idle re-probe's, not the sweep's)" % o111)
     elif not fw_running:
         note.append("111=%s; no firewall control available (firewalld state: %s)" % (o111, fw_state))
     else:
-        note.append("control port 111 refused/rejected as the zone requires (%s)" % o111)
+        note.append("control port 111 refused/rejected at the idle re-probe as the zone requires (%s; sweep label %s)" % (o111, spot_by_port.get(111, {}).get("outcomeSweep", "n/a")))
 for port in sorted(spot_by_port):
     if port in expected or port == 111:
         continue
@@ -2562,8 +2606,12 @@ phase4_row_w4() {
 }
 bringup_failed() { # slice id...: every row FAILs when the fixture never came up
   local slice="$1"; shift
-  local id crit ev
-  ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR (output in run.log)"
+  local id crit ev realm_ev=""
+  # The realm-switch exits are named only when the failed bring-up ran them (4c).
+  if (( SC_MONITOR_REALM || SC_GRAF_SET || SC_MONITOR2 )); then
+    realm_ev=", monitor realm exit $SC_MONITOR_REALM, grafana config set exit $SC_GRAF_SET, monitor up (realm) exit $SC_MONITOR2"
+  fi
+  ev="fixture bring-up failed: stand-in exit $SC_STUB, auth configure exit $SC_CONFIGURE, config set exit $SC_SET, start exit $SC_START, auth apply exit $SC_APPLY, monitor up exit $SC_MONITOR$realm_ev (output in run.log)"
   log "$ev"
   for id in "$@"; do
     crit="${id%%[0-9]*}"
@@ -2606,9 +2654,12 @@ run_phase4() { # slice: 4a|4b|4c
   fi
   # Slice 4b brings up the stand-in IdP and configures with its site.json (the
   # broker plan of commit 0, lead decision 2026-10-13); 4a and 4c configure plain
-  # (--local, accepted and ignored by the CLI).
+  # (--local, accepted and ignored by the CLI). 4c's W rows assert the
+  # realm-mode monitoring shape (W1: grafana loopback-only per U21a), so its
+  # bring-up finishes the Grafana realm switch (see start_cluster).
   local -a bringup=(--local)
   [[ "$slice" == 4b ]] && bringup=(--broker)
+  [[ "$slice" == 4c ]] && bringup+=(--monitor-realm)
   if ! start_cluster "${bringup[@]}"; then
     bringup_failed "$slice" "${run_inv[@]}"
     return

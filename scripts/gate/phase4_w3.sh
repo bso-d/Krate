@@ -163,7 +163,24 @@ for p in $LOOP_PORTS; do
   must_not_tcp "$PADDR" "$p" "primary $PADDR:$p"
 done
 if [[ -n "$LL" ]]; then
-  must_reach_tcp "$LL%$VN" "$POS_PORT" "IPv6 link-local $LL:$POS_PORT"
+  # Lab8 N11a and the W5 row's v6 check: with firewalld running and the zone mirrored
+  # on the probe veth, the [::] docker-proxy path is filtered, so the published port is
+  # BLOCKED over IPv6 link-local — the control then asserts that block (matching W5's
+  # "docker-published ports are not open over IPv6"). Without firewalld the docker-proxy
+  # listener answers and the control asserts reachability, proving the probe path itself.
+  if systemctl is-active -q firewalld 2>/dev/null; then
+    tcp_probe "$LL%$VN" "$POS_PORT"
+    ll_r=$?
+    if [[ $ll_r -eq 1 ]]; then
+      ok "IPv6 link-local $LL:$POS_PORT blocked by the mirrored zone (lab8 N11a: the [::] docker-proxy path is filtered)"
+    elif [[ $ll_r -eq 0 ]]; then
+      bad "IPv6 link-local $LL:$POS_PORT answered a successful connect (OPEN) with firewalld running (expected the N11a block; W5 also asserts docker-published ports are not open over IPv6)"
+    else
+      bad "IPv6 link-local $LL:$POS_PORT is class $ll_r (tcp_probe rc) with firewalld running (expected the N11a block; W5 also asserts docker-published ports are not open over IPv6)"
+    fi
+  else
+    must_reach_tcp "$LL%$VN" "$POS_PORT" "IPv6 link-local $LL:$POS_PORT"
+  fi
   for p in $LOOP_PORTS; do must_not_tcp "$LL%$VN" "$p" "IPv6 link-local :$p"; done
 else
   bad "no IPv6 link-local address on $VH; IPv6 negative checks are inconclusive"
@@ -171,7 +188,12 @@ fi
 echo "## c. backend container IPs (direct routing)"
 for t in "${TARGETS[@]}"; do
   c="${t%%:*}"; cp="${t##*:}"
-  ips=$(as_root docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}' "$c" 2>/dev/null) || { bad "$c: no such container"; continue; }
+  ips=$(as_root docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$c" 2>/dev/null) || { bad "$c: no such container"; continue; }
+  # (IPv4 only: on Docker 27+ a ranged `{{.GlobalIPv6Address}}` renders the literal junk
+  # "invalid IP" for every network without IPv6 — observed live as 64 TARGET_INVALID
+  # probe targets in the attempt-10 stage-B receipt, two junk tokens after every real
+  # address. The IPv6 exposure of published ports is asserted by the link-local
+  # controls above and the W5 row's v6 pass, not by container addresses.)
   if [[ -z "${ips// /}" ]]; then bad "$c:$cp has no inspectable container IP"; continue; fi
   for ip in $ips; do
     policy_out=$(python3 -I "$PY_HELPER" target-policy "$ip" 2>&1); policy_rc=$?
