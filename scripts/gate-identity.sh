@@ -1178,7 +1178,6 @@ start_cluster() { # [--local] [--broker] [--monitor-realm]
     # A failed first `monitor up` skips the realm steps too: `monitor realm`
     # needs the up Grafana to answer with its admin login, and running it against
     # a down Grafana would stack a second, unrelated failure on the first one's
-    # a down Grafana would stack a second, unrelated failure on the first one's
     # verdict. The three realm exits keep their 127 "never ran" sentinels (so
     # realm_ev names that the realm steps did not run), the aggregate still fails
     # on SC_MONITOR itself, and bringup_failed's base message names the refused
@@ -1193,7 +1192,14 @@ start_cluster() { # [--local] [--broker] [--monitor-realm]
       # stays on the local login and the failure message names the refused step.
       if [[ $SC_MONITOR_REALM -eq 0 ]]; then
         "$KRATE" config set GRAFANA_AUTH_CONFIG=realm.ini >/dev/null; SC_GRAF_SET=$?
-        cap "$KRATE" monitor up; SC_MONITOR2=$?
+        # Stop at the config switch too: a failed `config set` leaves GRAFANA_AUTH_CONFIG
+        # on the local login, so a `monitor up` here would restart local mode and the
+        # receipt would read monitor up (realm) exit 0 against a failed switch — a
+        # misleading attribution and an extra startup the stop-at-first-failure sequence
+        # forbids. SC_MONITOR2 keeps its 127 sentinel (the realm restart never ran).
+        if [[ $SC_GRAF_SET -eq 0 ]]; then
+          cap "$KRATE" monitor up; SC_MONITOR2=$?
+        fi
       fi
     fi
   fi
