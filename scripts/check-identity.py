@@ -1411,6 +1411,27 @@ def check_run_lock_order(checks):
       'the provisional EXIT trap still releases on pre-fixture refusals')
 
 
+def check_run_lock_stamp_tz(checks):
+    """Run-lock stamp normalization (PR #52 thread r4360101520): ps lstart renders in the
+    caller's timezone and locale, so the same live pid published and re-read under
+    different environments produced different stamps — the mismatch read as pid reuse and
+    let a contender take over a live holder's lock (no /proc guard backs this on the Mac
+    local mode). run_lock_pid_start pins TZ and LC_ALL so publication and liveness checks
+    use the same bytes for the same pid under any caller environment."""
+    text = (ROOT / 'scripts/gate-identity.sh').read_text()
+    e = lambda cond, msg: checks.expect(cond, 'run-lock stamp tz: ' + msg)  # noqa: E731
+    helper = text[text.index('run_lock_pid_start() {'):]
+    helper = helper[:helper.index('\n}\n') + 3]
+    e('TZ=UTC0 LC_ALL=C ps -p "$1" -o lstart=' in helper,
+      'run_lock_pid_start pins TZ and LC_ALL for the stamp (the raw ps output is env-dependent)')
+    e(helper.count('ps -p') == 1,
+      'no second, unpinned ps invocation remains in the helper')
+    # the write path and the read path both go through the helper: exactly one comment
+    # mention + exactly one invocation may carry the word (no second, header-form renderer)
+    e(text.count('lstart') == 2,
+      f'run_lock_pid_start is the only lstart renderer in the gate script (found {text.count("lstart")}: one comment, one invocation)')
+
+
 def check_start_cluster_monitor_realm(checks):
     """W1 fix round (PR #52): the 4c fixture bring-up finishes the product's Grafana realm
     switch (monitor realm, config set GRAFANA_AUTH_CONFIG=realm.ini, monitor up again), so
@@ -11542,7 +11563,7 @@ def main():
                   check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_collision_classification, check_grafana_collision_warning_rendering, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_phase4_w3_controls, check_run_lock_order, check_start_cluster_monitor_realm, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_phase4_w3_controls, check_run_lock_order, check_run_lock_stamp_tz, check_start_cluster_monitor_realm, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight, check_probe_causes, check_probe_diagnostic_privacy,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,

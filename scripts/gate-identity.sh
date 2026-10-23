@@ -3110,8 +3110,13 @@ on_exit() { $FINISHED || { log "unexpected exit"; FINISHED=true; teardown; finis
 # the edition dir (one runner per fixture tree) and TMPDIR (one runner per Compose project
 # for cross-edition fixtures that share a project name). A stale lock — its holder pid is
 # gone — is taken over (the same liveness rule the CLI's identity lock uses).
-run_lock_pid_start() { # ps lstart: the only stable birth stamp on both macOS and Linux (macOS has no etimes)
-  ps -p "$1" -o lstart= 2>/dev/null | tr -d ' \n'
+run_lock_pid_start() { # ps lstart: the only stable birth stamp on both macOS and Linux (macOS has no etimes).
+  # The raw stamp is environment-dependent: ps renders it in the caller's timezone and
+  # locale, so the same live pid reads differently under different TZ (thread r4360101520:
+  # the mismatch reads as pid reuse and lets a contender take over a live holder's lock —
+  # on the Mac local mode there is no /proc guard behind it). Pin both so the stamp the
+  # writer publishes and the stamp a reader re-reads are the same bytes for the same pid.
+  TZ=UTC0 LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | tr -d ' \n'
 }
 run_lock_live() { # a lock is live while its pid is alive with the same start stamp (guards pid reuse)
   local dir="$1" pid start stamp now mtime
