@@ -2933,7 +2933,16 @@ PYEOF
   else
     log "WARNING: redaction failed; the raw log is kept at $RAW (mode 600) and must be redacted by hand"
   fi
-  rm -rf "$STATE"
+  if $KEEP; then
+    # --keep is the operator's kept-fixture contract: the enrolled users' state and the stand-in's
+    # material must survive this cleanup for the post-run consumers that read them (the session's
+    # Mac story stage reads .state/p4; the stubx verbs read .state/stub). The directory is mode
+    # 0700, owned by the fixture user, and the operator's release of the fixture removes it — the
+    # operator's contract, not the runner's.
+    :
+  else
+    rm -rf "$STATE"
+  fi
   local gate_digest
   gate_digest="$(find "$GATE_DIR" -type f \( -name '*.py' -o -name '*.mjs' -o -name '*.sh' \) | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-16)"
   {

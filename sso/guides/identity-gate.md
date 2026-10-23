@@ -95,7 +95,10 @@ IdP, `scripts/gate/stub_idp.sh`: a second Keycloak started from the edition's ow
 realm `pingstub`, published on `127.0.0.1:18443` only (`--stub-port N` when that
 port is taken) and joined to the fixture's `identity-egress` network under the alias
 `pingstub`; its certificate and secrets are generated per run under the receipt's
-state directory (0600) and removed with it. A missing image, a taken port or a
+state directory (0600) and removed with it when the run does not keep the fixture;
+a run with `--keep` preserves that directory (mode 0700) for the kept fixture's
+post-run consumers, and the operator's release of the fixture removes it. A missing
+image, a taken port or a
 missing network fails every Phase 3 row with that reason (the rows stay in the
 inventory; they are never silently NOT_RUN).
 
@@ -104,7 +107,10 @@ about 15 minutes for Phase 2 and about 10 minutes for Phase 3 (the stand-in's
 start and three Keycloak recreations). Output: `harness/gate-receipts/<edition>-<sha>-<time>/`
 with `receipt.md` (the table below, generated), `receipt.tsv`, `run.log`
 (every command output, secret values replaced by `<redacted>`) and
-`screenshots/*.png` with `manifest.json` captions.
+`screenshots/*.png` with `manifest.json` captions. A run with `--keep` leaves its
+state directory (`.state`, mode 0700: the stand-in's material and the enrolled
+users' state including `secrets.txt`, mode 600) inside the receipt folder for the
+kept fixture's post-run consumers.
 
 ## What a receipt binds the results to
 
