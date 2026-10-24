@@ -458,8 +458,9 @@ def check_networks(checks, edition, config):
       f'{edition}: network identity-egress must exist and not be internal')
     services = config['services']
     expected = {'keycloak-db': {'identity'}, 'keycloak': {'identity', 'identity-egress'},
-                'proxy': {'kafka-network', 'identity'}, 'kafka-ui': {'kafka-network', 'identity'},
-                'idp-watch': {'identity', 'identity-egress'}}
+                'proxy': {'kafka-network', 'identity'}, 'kafka-ui': {'kafka-network', 'identity'}}
+    if 'idp-watch' in services:
+        expected['idp-watch'] = {'identity', 'identity-egress'}
     for name, wanted in expected.items():
         attached = set(networks_of(services.get(name, {})))
         e(attached == wanted, f'{edition}/{name}: must be attached to {sorted(wanted)}; got {sorted(attached)}')

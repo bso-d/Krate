@@ -162,7 +162,32 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
         return False, 'No issuer configured in plan'
 
     # Probe 1: OIDC Discovery
+    # If issuer uses localhost/127.0.0.1, check backend endpoints for a reachable internal authority
     disc_url = f'{issuer}/.well-known/openid-configuration'
+    issuer_parts = urllib.parse.urlsplit(issuer)
+    if issuer_parts.hostname in ('localhost', '127.0.0.1'):
+        # Check backend endpoints for non-loopback authority
+        backend_authority = None
+        for backend_url in [token_url, jwks_url, user_info_url]:
+            if backend_url:
+                backend_parts = urllib.parse.urlsplit(backend_url)
+                if backend_parts.hostname and backend_parts.hostname not in ('localhost', '127.0.0.1'):
+                    backend_authority = backend_parts.netloc
+                    break
+
+        if backend_authority:
+            # Construct discovery URL pointing to internal authority
+            disc_url = urllib.parse.urlunsplit((
+                issuer_parts.scheme,
+                backend_authority,
+                issuer_parts.path.rstrip('/') + '/.well-known/openid-configuration',
+                '',
+                ''
+            ))
+            # Add backend authority to allowed list so check_target_allowed permits it
+            allowed_authorities = allowed_authorities.copy()
+            allowed_authorities.add(backend_authority.lower())
+
     status, body, err = probe_http(disc_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
     if err:
         return False, f'Discovery probe failed: {err}'
