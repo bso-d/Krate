@@ -70,14 +70,24 @@ installation ever runs without SSO.
 | User browser | Application FQDN, HTTPS | Kafbat and Keycloak login |
 | User browser | PingFederate authorization URL | Enterprise sign-in and MFA |
 | Keycloak container | PingFederate token, UserInfo and JWKS URLs | Code exchange and identity checks |
+| `idp-watch` container | PingFederate discovery, JWKS, token and UserInfo URLs | Reachability probes (allowlist restricted) |
 | Kafbat container | Keycloak service on the internal Compose network, TCP 8080 | OIDC code exchange and token checks |
 | Kafbat container | Configured Kafka broker listeners | Cluster data and permitted actions |
 
 Use the ports in the IAM endpoint URLs, usually 443. Allow the approved DNS
-names and keep VM time correct. Place the enterprise CA PEM chain in
-`auth/keycloak/truststores/`. The user's browser must trust the application
-HTTPS certificate. No public Internet is needed at runtime. The build machine
-downloads images before offline delivery.
+names and keep VM time correct. Place the enterprise CA chain in
+`auth/keycloak/truststores/`. **PEM format (`.pem` or `.crt`) is mandatory**:
+both Keycloak and the `idp-watch` reachability daemon load CA certificates from
+this directory to validate TLS connections.
+
+### Probe allowlist and reachability checks
+The `idp-watch` daemon continuously validates reachability of PingFederate endpoints.
+It operates under a strict allowlist: only the host:port authorities declared in the
+broker plan's `issuer`, `authorizationUrl`, `tokenUrl`, `userInfoUrl`, and `jwksUrl`
+may ever be contacted. Any other destination is refused. Probes verify:
+1. OpenID Discovery (`/.well-known/openid-configuration`) returns HTTP 200 with matching issuer.
+2. JWKS keys endpoint returns HTTP 200 with non-empty signing keys.
+3. Token and UserInfo endpoints respond (any HTTP status < 500 confirms application reachability).
 
 ## 4. Give the operator these values
 

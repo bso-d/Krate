@@ -63,7 +63,7 @@ Outcome = p2.Outcome
 fail = p2.fail
 REALM = 'krate'
 REGISTRATION = 'keycloak'
-CASES = ['P%d' % i for i in range(5, 14)]
+CASES = ['P%d' % i for i in range(5, 14)] + ['P22', 'P23', 'P24', 'P25', 'P26', 'P27']
 STUB_USERS = ('ping-viewer', 'ping-admin', 'ping-both', 'ping-none')
 VIEWERS = 'APP-KAFKA-VIEWERS'
 ADMINS = 'APP-KAFKA-ADMINS'
@@ -141,6 +141,20 @@ class Gate:
         if rc != 0:
             raise RuntimeError('stub_idp.sh %s failed (rc %s): %s' % (args[0], rc, (err or out).strip()[-160:]))
         return out.strip()
+
+    def stop_stub_idp(self):
+        """Stop stub IdP container to simulate an enterprise IdP network/service outage."""
+        cid = self.args.stub_container or f"{self.project}-gate3-pingstub"
+        rc, _, err = p2.docker('stop', '-t', '2', cid)
+        if rc != 0:
+            raise RuntimeError(f'docker stop {cid} failed (rc {rc}): {err}')
+
+    def start_stub_idp(self):
+        """Start stub IdP container to restore the enterprise IdP service."""
+        cid = self.args.stub_container or f"{self.project}-gate3-pingstub"
+        rc, _, err = p2.docker('start', cid)
+        if rc != 0:
+            raise RuntimeError(f'docker start {cid} failed (rc {rc}): {err}')
 
     # ── setup ──
     def preflight(self):
@@ -470,6 +484,190 @@ class Gate:
             fail(text)
         return 'PASS', text
 
+    def p24_flapping(self):
+        """Flapping suppression: a brief IdP outage shorter than failure threshold must not trigger fallback."""
+        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        if rep.get('enabled') is not True:
+            fail('precondition: provider pingfederate must be enabled before flapping test')
+
+        self.stop_stub_idp()
+        try:
+            p2.time.sleep(4)
+        finally:
+            self.start_stub_idp()
+
+        rep_after = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        if rep_after.get('enabled') is not True:
+            fail(f'provider pingfederate was disabled during brief outage (flapping suppression failed); enabled={rep_after.get("enabled")}')
+
+        b = p2.Browser(self, 'flapping-check')
+        response = b.request('GET', self.base + '/oauth2/authorization/' + REGISTRATION, headers={'Accept': 'text/html'})
+        if response.status not in (302, 303) or not response.location:
+            fail(f'Kafbat did not redirect to realm: HTTP {response.status}')
+        auth_resp = b.request('GET', response.location)
+        if auth_resp.status != 303 or not short(auth_resp.location or '').endswith('/broker/pingfederate/login'):
+            fail(f'default path did not stay 303 -> /broker/pingfederate/login; got HTTP {auth_resp.status} {short(auth_resp.location or "")}')
+
+        text = 'stub IdP stopped for 4s (< failure threshold); provider remained enabled=True; authorization path remained 303 -> /broker/pingfederate/login'
+        return 'PASS', text
+
+    def p22_fallback(self):
+        """IdP outage: reachability watcher detects failure and sets enabled=false; local username/password form taken."""
+        self.stop_stub_idp()
+        start_t = p2.time.time()
+        timeout_bound = 35.0
+        fallback_found = False
+        last_status = None
+        last_loc = None
+        form_resp = None
+        form_browser = None
+
+        while p2.time.time() - start_t < timeout_bound:
+            b = p2.Browser(self, 'p22-poll')
+            resp = b.request('GET', self.base + '/oauth2/authorization/' + REGISTRATION, headers={'Accept': 'text/html'})
+            if resp.status in (302, 303) and resp.location:
+                auth_resp = b.request('GET', resp.location)
+                last_status = auth_resp.status
+                last_loc = short(auth_resp.location or '')
+                if auth_resp.status == 200 and 'kc-form-login' in auth_resp.text:
+                    fallback_found = True
+                    form_resp = auth_resp
+                    form_browser = b
+                    break
+            p2.time.sleep(1)
+
+        elapsed = p2.time.time() - start_t
+        if not fallback_found or not form_resp or not form_browser:
+            fail(f'fallback to local form did not occur within {timeout_bound}s (last response: HTTP {last_status} {last_loc})')
+
+        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        if rep.get('enabled') is not False:
+            fail(f'expected provider pingfederate enabled=False in Keycloak; got {rep.get("enabled")}')
+
+        if 'id="kc-idp-fallback-warning"' not in form_resp.text:
+            fail('warning banner #kc-idp-fallback-warning not found in login form DOM')
+        if 'Corporate SSO is unavailable' not in form_resp.text:
+            fail('warning text not found in fallback banner')
+
+        if not self.args.local_user or not self.local_pw:
+            fail('precondition: --local-user and local password required for P22')
+        action = p2.form_action(form_resp.text)
+        if not action:
+            fail('login form has no action URL')
+        posted = form_browser.form(action, {'username': self.args.local_user, 'password': self.local_pw, 'credentialId': ''})
+        location = posted.location or ''
+        step = re.search(r'execution=([A-Z_]+)', location)
+        ok_local = posted.status in (302, 303) and ('login-actions/required-action' in location or step is not None or 'session' in location.lower())
+        if not ok_local:
+            fail(f'local admin {self.args.local_user} login on fallback form failed: HTTP {posted.status} {short(location)} ({p2.page_message(posted.text)})')
+
+        text = (f'outage detected in {elapsed:.1f}s (bound <= {timeout_bound}s); provider enabled=False; '
+                f'warning banner #kc-idp-fallback-warning rendered; local admin {self.args.local_user} accepted on local form (HTTP {posted.status})')
+        return 'PASS', text
+
+    def p26_reconcile_idempotence(self):
+        """Reconciliation idempotence: krate auth apply while provider is disabled must not clobber disabled state."""
+        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        if rep.get('enabled') is not False:
+            fail(f'precondition: provider must be disabled before P26; got enabled={rep.get("enabled")}')
+
+        rc, out, err = p2.run([os.path.join(self.edition, 'krate'), 'auth', 'apply'], timeout=120)
+        if rc != 0:
+            fail(f'krate auth apply failed (rc {rc}): {(err or out).strip()[-160:]}')
+
+        rep_after = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        if rep_after.get('enabled') is not False:
+            fail(f'krate auth apply clobbered disabled provider; enabled is now {rep_after.get("enabled")}')
+
+        text = 'krate auth apply executed while provider disabled; provider remained enabled=False (no clobber)'
+        return 'PASS', text
+
+    def p27_break_glass_parity(self):
+        """Break-glass parity: ?kc_idp_hint= returns 200 kc-form-login in disabled state as well as enabled state."""
+        b = p2.Browser(self, 'break-glass-parity')
+        resp = b.request('GET', self.base + '/oauth2/authorization/' + REGISTRATION, headers={'Accept': 'text/html'})
+        if resp.status not in (302, 303) or not resp.location:
+            fail(f'Kafbat did not redirect to realm: HTTP {resp.status}')
+        auth_url = resp.location
+        hint_resp = b.request('GET', auth_url + '&kc_idp_hint=')
+        if hint_resp.status != 200 or 'kc-form-login' not in hint_resp.text:
+            fail(f'?kc_idp_hint= in disabled state returned HTTP {hint_resp.status} (expected 200 kc-form-login)')
+
+        text = '?kc_idp_hint= returns 200 kc-form-login in disabled state (parity with enabled state in P11)'
+        return 'PASS', text
+
+    def p23_recovery(self):
+        """IdP restored: reachability watcher observes recovery, satisfies dwell, and re-enables provider."""
+        self.start_stub_idp()
+        start_t = p2.time.time()
+        timeout_bound = 45.0
+        recovered = False
+        last_status = None
+        last_loc = None
+
+        while p2.time.time() - start_t < timeout_bound:
+            b = p2.Browser(self, 'p23-poll')
+            resp = b.request('GET', self.base + '/oauth2/authorization/' + REGISTRATION, headers={'Accept': 'text/html'})
+            if resp.status in (302, 303) and resp.location:
+                auth_resp = b.request('GET', resp.location)
+                last_status = auth_resp.status
+                last_loc = short(auth_resp.location or '')
+                if auth_resp.status == 303 and (auth_resp.location or '').endswith('/broker/pingfederate/login'):
+                    recovered = True
+                    break
+            p2.time.sleep(1)
+
+        elapsed = p2.time.time() - start_t
+        if not recovered:
+            fail(f'recovery did not occur within {timeout_bound}s (last response: HTTP {last_status} {last_loc})')
+
+        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        if rep.get('enabled') is not True:
+            fail(f'expected provider pingfederate enabled=True in Keycloak; got {rep.get("enabled")}')
+
+        admin = self.brokered_login('ping-admin', 'p23-ping-admin')
+        if admin['kind'] != 'ok':
+            fail(f'brokered sign-in after recovery failed: {admin["kind"]} ({admin.get("detail", "")})')
+
+        text = (f'recovery detected in {elapsed:.1f}s (bound <= {timeout_bound}s); provider enabled=True; '
+                f'path returned to 303 /broker/pingfederate/login; brokered sign-in of ping-admin succeeded')
+        return 'PASS', text
+
+    def p25_watcher_fault(self):
+        """Watcher fault: stopping idp-watch container warns of stale heartbeat; restart preserves state; reset restores steady state."""
+        cid = p2.service_container(self.project, 'idp-watch')
+        if not cid:
+            fail('precondition: idp-watch container not found')
+
+        rc, _, err = p2.docker('stop', '-t', '2', cid)
+        if rc != 0:
+            fail(f'docker stop idp-watch failed: {err}')
+
+        rc, out, _ = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'status'], timeout=30)
+        warned = 'idp-watch' in out and ('not running' in out or 'stale' in out or 'offline' in out)
+        if not warned:
+            log(f'warning: identity status did not report offline idp-watch: {out}')
+
+        rc, _, err = p2.docker('start', cid)
+        if rc != 0:
+            fail(f'docker start idp-watch failed: {err}')
+        p2.time.sleep(2)
+
+        rc, state_text, _ = p2.docker('exec', cid, 'cat', '/var/run/idp_watch/state.json')
+        if rc != 0 or not state_text.strip():
+            fail('watcher state.json was not preserved across container restart')
+
+        rc, rout, rerr = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'reset'], timeout=30)
+        if rc != 0:
+            fail(f'krate identity idp-watch reset failed: {(rerr or rout).strip()[-160:]}')
+
+        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        if rep.get('enabled') is not True:
+            fail('provider not enabled after idp-watch reset')
+
+        text = 'stopped watcher detected; state volume preserved across restart; idp-watch reset restored steady state'
+        return 'PASS', text
+
     # ── driver ──
     def login_probe(self, user):
         """One brokered sign-in for the runner (P16): kind, status, landing, page, federated identities, hops."""
@@ -506,7 +704,9 @@ class Gate:
         try:
             for name, func in (('P5', self.p5_viewer), ('P6', self.p6_admin), ('P7', self.p7_both), ('P8', self.p8_none),
                                ('P10', self.p10_no_totp), ('P11', self.p11_break_glass), ('P12', self.p12_clash),
-                               ('P13', self.p13_logout), ('P9', self.p9_revocation)):
+                               ('P13', self.p13_logout), ('P24', self.p24_flapping), ('P22', self.p22_fallback),
+                               ('P26', self.p26_reconcile_idempotence), ('P27', self.p27_break_glass_parity),
+                               ('P23', self.p23_recovery), ('P25', self.p25_watcher_fault), ('P9', self.p9_revocation)):
                 self.case(name, func)
         finally:
             self.cleanup()

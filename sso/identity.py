@@ -29,10 +29,14 @@ UI_CLIENT = 'krate-ui'
 CLI_CLIENT = 'krate-cli'
 SERVICE_ACCOUNT = 'service-account-' + CLI_CLIENT
 CLI_ROLES = ['manage-users', 'view-users', 'query-users', 'query-groups']
+IDP_WATCH_CLIENT = 'krate-idp-watch'
+IDP_WATCH_SERVICE_ACCOUNT = 'service-account-' + IDP_WATCH_CLIENT
+IDP_WATCH_ROLES = ['view-identity-providers', 'manage-identity-providers']
 UI_SECRET = '${KEYCLOAK_KAFBAT_CLIENT_SECRET}'
 CLI_SECRET = '${KEYCLOAK_CLI_CLIENT_SECRET}'
+IDP_WATCH_SECRET = '${KEYCLOAK_IDP_WATCH_CLIENT_SECRET}'
 # The .env keys the plan refers to by placeholder; named here for the summary only.
-PLAN_PLACEHOLDER_KEYS = ('KEYCLOAK_CLI_CLIENT_SECRET', 'KEYCLOAK_KAFBAT_CLIENT_SECRET')
+PLAN_PLACEHOLDER_KEYS = ('KEYCLOAK_CLI_CLIENT_SECRET', 'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'KEYCLOAK_IDP_WATCH_CLIENT_SECRET')
 GROUPS_CLAIM = 'groups'
 # Default client scopes without offline_access: no client may mint offline tokens.
 DEFAULT_SCOPES = ['profile', 'email', 'roles', 'web-origins', 'basic']
@@ -447,6 +451,16 @@ def realm(values):
         'defaultClientScopes': list(DEFAULT_SCOPES),
         'optionalClientScopes': [],
     }
+    idp_watch_client = {
+        'clientId': IDP_WATCH_CLIENT, 'name': 'Krate IdP reachability watcher', 'enabled': True,
+        'protocol': 'openid-connect', 'publicClient': False,
+        'clientAuthenticatorType': 'client-secret', 'secret': IDP_WATCH_SECRET,
+        'standardFlowEnabled': False, 'implicitFlowEnabled': False,
+        'directAccessGrantsEnabled': False, 'serviceAccountsEnabled': True,
+        'redirectUris': [], 'webOrigins': [],
+        'defaultClientScopes': list(DEFAULT_SCOPES) + [SERVICE_ACCOUNT_SCOPE],
+        'optionalClientScopes': [],
+    }
     return {
         'realm': REALM, 'enabled': True,
         'registrationAllowed': False, 'resetPasswordAllowed': False,
@@ -475,10 +489,14 @@ def realm(values):
              'enabled': True, 'defaultAction': False, 'priority': 30},
         ],
         'groups': [{'name': values['viewer_group']}, {'name': values['admin_group']}],
-        'clients': [cli_client, ui_client],
+        'clients': [cli_client, ui_client, idp_watch_client],
         'users': [{'username': SERVICE_ACCOUNT, 'enabled': True,
                    'serviceAccountClientId': CLI_CLIENT,
-                   'clientRoles': {'realm-management': list(CLI_ROLES)}}],
+                   'clientRoles': {'realm-management': list(CLI_ROLES)}},
+                  {'username': IDP_WATCH_SERVICE_ACCOUNT, 'enabled': True,
+                   'serviceAccountClientId': IDP_WATCH_CLIENT,
+                   'clientRoles': {'realm-management': list(IDP_WATCH_ROLES)}}],
+        'loginTheme': 'krate',
         'browserFlow': 'browser',
     }
 
@@ -1042,9 +1060,14 @@ def env_secret(key):
     return value
 
 
-def broker_provider(plan, with_secret=False):
+def broker_provider(plan, with_secret=False, enabled=None):
     """The provider representation; with `with_secret` the placeholder becomes the environment's value."""
     provider = json.loads(json.dumps(plan['identityProviders'][0]))
+    if enabled is not None:
+        if isinstance(enabled, str):
+            provider['enabled'] = enabled.lower() == 'true'
+        else:
+            provider['enabled'] = bool(enabled)
     if with_secret:
         provider['config']['clientSecret'] = env_secret(BROKER_SECRET_KEY)
     else:
@@ -1059,7 +1082,7 @@ def differs(wanted, current):
     return wanted != current
 
 
-def provider_differs(plan, current):
+def provider_differs(plan, current, ignore_enabled=False):
     """True when the live provider `current` differs from the plan.
 
     Beyond differs() (a planned key lacks or differs), the claim-filter keys are managed: a live provider
@@ -1068,6 +1091,8 @@ def provider_differs(plan, current):
     `filteredByClaim` of "false" is a filter that is off and is left alone.
     """
     wanted = broker_provider(plan)
+    if ignore_enabled and isinstance(current, dict) and isinstance(current.get('enabled'), bool):
+        wanted = dict(wanted, enabled=current['enabled'])
     if differs(wanted, current):
         return True
     live = current.get('config') if isinstance(current, dict) else None
@@ -1113,9 +1138,9 @@ def cmd_broker(args):
     out = sys.stdout
     if args.item == 'provider':
         # The secret travels stdin -> kcadm only; this output is piped, never logged or captured.
-        out.write(json.dumps(broker_provider(plan, args.with_secret)) + '\n')
+        out.write(json.dumps(broker_provider(plan, args.with_secret, enabled=getattr(args, 'enabled', None))) + '\n')
     elif args.item == 'provider-differs':
-        out.write(('differs' if provider_differs(plan, json.load(sys.stdin)) else 'same') + '\n')
+        out.write(('differs' if provider_differs(plan, json.load(sys.stdin), ignore_enabled=getattr(args, 'ignore_enabled', False)) else 'same') + '\n')
     elif args.item == 'mappers':
         for mapper in plan['identityProviderMappers']:
             out.write(json.dumps(mapper) + '\n')
@@ -1756,6 +1781,10 @@ def main():
     broker.add_argument('name', nargs='?', default='', help='flow alias, mapper name or config alias the item refers to')
     broker.add_argument('--with-secret', action='store_true',
                         help=f'substitute {BROKER_SECRET_KEY} from the environment into the provider (output is piped to kcadm)')
+    broker.add_argument('--ignore-enabled', action='store_true',
+                        help='do not treat difference in enabled as a diff between plan and current provider')
+    broker.add_argument('--enabled', choices=['true', 'false'], default=None,
+                        help='override enabled flag in provider representation')
     broker.set_defaults(func=cmd_broker)
     gclient = commands.add_parser('grafana-client', help='the krate-grafana client representation for krate monitor realm')
     gclient.add_argument('--origin', required=True, help='public origin: KEYCLOAK_PUBLIC_URL without /identity')

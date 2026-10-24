@@ -51,7 +51,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 EDITIONS = ('epc', 'kraft')
 # Makefile build_one: cp sso/configure.py ... sso/identity.py "$bundle_dir/sso/"
 SSO_FILES = ('configure.py', 'example.json', 'configure-dual.py', 'dual-example.json',
-             'activate.sh', 'preflight.py', 'probe.py', 'identity.py')
+             'activate.sh', 'preflight.py', 'probe.py', 'identity.py', 'idp_watch.py')
 # Makefile build_one: cp sso/guides/... "$bundle_dir/docs/"
 GUIDES = ('identity-foundation.md', 'dual-login.md', 'pingfederate-sso.md',
           'pingfederate-iam-guide.md', 'sso-flows.md', 'perses-sso.md', 'grafana-sso.md')
@@ -158,7 +158,7 @@ def inventory(repo: str, candidate: str, edition: str) -> Dict[str, str]:
     items['krate'] = edition + '/krate'
     for name in MON_TOP:
         items['monitoring/' + name] = 'monitoring/' + name
-    trees = ['monitoring/' + tree for tree in MON_TREES]
+    trees = ['monitoring/' + tree for tree in MON_TREES] + ['sso/theme']
     listed = _git(repo, ['ls-tree', '-r', '--name-only', '-z', candidate, '--'] + trees)
     for path in listed.decode('utf-8').split('\0'):
         # The bundle prunes __pycache__ directories from the copied trees.

@@ -34,7 +34,7 @@ class Preflight(ValueError):
     """A refusal whose message is safe to print: it never carries a configured value."""
 
 
-IDENTITY_MEMBERS = {'keycloak-db', 'keycloak', 'proxy', 'kafka-ui'}
+IDENTITY_MEMBERS = {'keycloak-db', 'keycloak', 'proxy', 'kafka-ui', 'idp-watch'}
 EGRESS_NETWORK = 'identity-egress'
 
 
@@ -292,8 +292,8 @@ def validate_networks(config):
     if members != IDENTITY_MEMBERS:
         raise Preflight(f'the {IDENTITY_NETWORK} network must carry exactly {sorted(IDENTITY_MEMBERS)}; rendered: {sorted(members)}')
     egress = {name for name, service in services.items() if EGRESS_NETWORK in service_networks(service)}
-    if egress != {'keycloak'}:
-        raise Preflight(f'only keycloak may be on the {EGRESS_NETWORK} network; rendered: {sorted(egress)}')
+    if egress != {'keycloak', 'idp-watch'}:
+        raise Preflight(f'only keycloak and idp-watch may be on the {EGRESS_NETWORK} network; rendered: {sorted(egress)}')
     if set(service_networks(services['keycloak-db'])) != {IDENTITY_NETWORK}:
         raise Preflight(f'keycloak-db must be attached to the {IDENTITY_NETWORK} network only')
     keycloak_networks = service_networks(services['keycloak'])

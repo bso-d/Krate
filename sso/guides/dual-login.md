@@ -792,6 +792,44 @@ A local user whose username or email equals an identity PingFederate
 presents is not merged (D2): the first-broker-login flow has no "handle
 existing account" step, so that login ends on a Keycloak error page.
 
+### Automatic Fallback and Recovery
+
+When the enterprise IdP experiences an outage, the reachability watcher daemon (`idp-watch`)
+automatically switches the login flow to internal Keycloak authentication, and automatically
+restores IdP authentication when the enterprise service recovers — with zero manual intervention.
+
+#### State Transitions and Thresholds
+1. **Fallback bound:**
+   The watcher probes the IdP endpoints (discovery, JWKS, token, UserInfo) every `IDP_WATCH_INTERVAL_SECONDS` (default 10s).
+   When `IDP_WATCH_FAILURES_TO_FALLBACK` consecutive cycles fail (default 2) and minimum dwell time
+   (`IDP_WATCH_DWELL_SECONDS`, default 30s) has elapsed, the watcher sets `enabled: false` on provider
+   `pingfederate` via Keycloak's Admin REST API.
+   Keycloak's `IdentityProviderAuthenticator` detects the provider is disabled, invokes `context.attempted()`,
+   and falls through to the next alternative execution (`krate forms`) — the local username/password + OTP form.
+   Fallback begins within $\le (\text{failures} \times \text{interval}) + \text{timeout} = 25\text{ s}$.
+
+2. **Recovery bound:**
+   When the enterprise IdP is restored, the watcher observes `IDP_WATCH_SUCCESSES_TO_RECOVER` consecutive
+   successful probe cycles (default 2), satisfies dwell, and sets `enabled: true`.
+   The default authorization flow returns immediately to `303 -> /broker/pingfederate/login`.
+   Recovery completes within $\le \max((\text{successes} \times \text{interval}) + \text{timeout},\; \text{dwell})$.
+
+3. **Flapping suppression:**
+   Transient network glitches shorter than the failure threshold do not trigger fallback: the failure counter
+   is reset to zero on the first successful probe.
+
+4. **UX & Lockout Protection:**
+   The custom login theme (`sso/theme/krate`) renders an explicit warning banner (`#kc-idp-fallback-warning`)
+   on the local login form whenever an enterprise IdP is configured. This informs corporate users that enterprise
+   SSO is offline and prevents account lockouts caused by typing corporate credentials into the local break-glass form.
+   Only pre-provisioned local operator accounts (`./krate identity users add <user> --admin`) hold Keycloak credentials.
+
+#### Watcher CLI Commands (`krate identity idp-watch`)
+- `./krate identity idp-watch status`: inspect daemon health, probe state (`HEALTHY` vs `FALLBACK`), consecutive counts, last error, heartbeat age, and Keycloak provider status.
+- `./krate identity idp-watch reset`: re-enables provider in Keycloak (`enabled=true`), clears persisted state, and restarts the watcher.
+- `./krate identity idp-watch pause`: sets pause flag in state volume; watcher halts state transitions during planned maintenance.
+- `./krate identity idp-watch resume`: clears pause flag and resumes automated transitions.
+
 ### Trust material and the Keycloak restart
 
 Keycloak loads `auth/keycloak/truststores/` at start only. `./krate identity

@@ -13,10 +13,12 @@ POLICIES = {
     "kraft": {
         "kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"},
         "keycloak": {"JAVA_OPTS_APPEND": "-Dliquibase.analytics.enabled=false"},
+        "idp-watch": {"IDP_WATCH_OFFLINE_ONLY": "true"},
     },
     "epc": {
         "kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"},
         "keycloak": {"JAVA_OPTS_APPEND": "-Dliquibase.analytics.enabled=false"},
+        "idp-watch": {"IDP_WATCH_OFFLINE_ONLY": "true"},
     },
     "monitoring": {
         "grafana": {

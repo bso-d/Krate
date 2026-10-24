@@ -782,7 +782,7 @@ cmd_auth() {
 # credentials Keycloak and its database were initialised with, so the identity
 # secrets are generated only before that database exists and changed later
 # through `krate identity rotate`, which updates both sides.
-IDENTITY_KEYS=(KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_CLI_CLIENT_SECRET)
+IDENTITY_KEYS=(KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_IDP_WATCH_CLIENT_SECRET)
 IDENTITY_REALM=krate
 # Required actions a local user gets from `identity users add` and `reset-password`
 # (identity.USER_REQUIRED_ACTIONS): the authenticator is enrolled and the temporary
@@ -1518,8 +1518,12 @@ identity_apply_idp_plan() {
     identity_put_idp_provider "$plan" "$sso" create
     IDENTITY_IDP_CHANGES+=("provider created")
   else
+    local -a diff_opts=()
+    if [[ "$(env_value IDP_WATCH_ENABLED)" == true ]]; then
+      diff_opts+=(--ignore-enabled)
+    fi
     # A helper failure must never read as "same" (that would print No changes over a stale provider).
-    verdict="$(printf '%s' "$provider" | python3 "$sso/identity.py" broker --plan "$plan" provider-differs)" \
+    verdict="$(printf '%s' "$provider" | python3 "$sso/identity.py" broker --plan "$plan" provider-differs "${diff_opts[@]}")" \
       || die "Cannot compare identity provider $IDENTITY_IDP_ALIAS with $IDENTITY_IDP_PLAN"
     case "$verdict" in
       differs) identity_put_idp_provider "$plan" "$sso" update; IDENTITY_IDP_CHANGES+=("provider updated") ;;
@@ -1663,12 +1667,24 @@ for e in json.load(sys.stdin):
 # --with-secret` through that process's environment and kcadm through its stdin.
 identity_put_idp_provider() {
   local plan="$1" sso="$2" action="$3"
+  local enabled_arg=""
   if [[ "$action" == create ]]; then
-    PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3 "$sso/identity.py" broker --plan "$plan" provider --with-secret \
+    enabled_arg="--enabled true"
+  else
+    local live_enabled
+    live_enabled="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" --fields enabled --format csv --noquotes 2>/dev/null || echo "")"
+    if [[ "$live_enabled" == "true" || "$live_enabled" == "false" ]]; then
+      enabled_arg="--enabled $live_enabled"
+    fi
+  fi
+  if [[ "$action" == create ]]; then
+    # shellcheck disable=SC2086
+    PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3 "$sso/identity.py" broker --plan "$plan" $enabled_arg provider --with-secret \
       | KCADM_STDIN=1 kcadm -- create identity-provider/instances -r "$IDENTITY_REALM" -f - >/dev/null \
       || die "Keycloak refused to create identity provider $IDENTITY_IDP_ALIAS"
   else
-    PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3 "$sso/identity.py" broker --plan "$plan" provider --with-secret \
+    # shellcheck disable=SC2086
+    PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3 "$sso/identity.py" broker --plan "$plan" $enabled_arg provider --with-secret \
       | KCADM_STDIN=1 kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" -f - >/dev/null \
       || die "Keycloak refused to update identity provider $IDENTITY_IDP_ALIAS"
   fi
@@ -1688,6 +1704,9 @@ identity_rotate_ping_secret() {
     rm -f "$idp_err"
     [[ -f "$plan" ]] || die "Identity provider $IDENTITY_IDP_ALIAS exists but $IDENTITY_IDP_PLAN is missing; restore the plan (krate auth configure <site.json>) before rotating"
     identity_put_idp_provider "$plan" "$sso" update
+    if [[ "$(env_value IDP_WATCH_ENABLED)" == true ]]; then
+      identity_up_service idp-watch
+    fi
     identity_journal rotate PING_KEYCLOAK_CLIENT_SECRET "applied to identity provider $IDENTITY_IDP_ALIAS"
     ok "Identity provider $IDENTITY_IDP_ALIAS: secret updated"
   elif grep -q "not found" "$idp_err" || [[ "$provider" == *"not found"* ]]; then
@@ -1947,6 +1966,24 @@ cmd_identity_status() {
   printf "  %-22s %s\n" "realm $IDENTITY_REALM" "$realm"
   [[ "$realm" == present ]] || ready=false
   printf "  %-22s %s\n" "KEYCLOAK_ENABLED" "$(env_value KEYCLOAK_ENABLED)"
+  if [[ "$(env_value IDP_WATCH_ENABLED)" == true ]]; then
+    local watch_cid watch_status watch_health
+    watch_cid="$(identity_container idp-watch)"
+    watch_status="$(container_status "$watch_cid")"
+    watch_health="$(container_health "$watch_cid")"
+    printf "  %-22s %s (%s)\n" "idp-watch" "$watch_status" "$watch_health"
+    if [[ "$watch_status" == running ]]; then
+      local watch_state hb_age
+      watch_state="$(docker exec "$watch_cid" python3 -c 'import json, os; s=json.load(open("/var/run/idp_watch/state.json")) if os.path.isfile("/var/run/idp_watch/state.json") else {}; print(s.get("state", "UNKNOWN") + " (enabled=" + str(s.get("enabled", "unknown")) + ")")' 2>/dev/null || echo "unknown")"
+      printf "  %-22s %s\n" "idp fallback state" "$watch_state"
+      hb_age="$(docker exec "$watch_cid" python3 -c 'import os, time; p="/var/run/idp_watch/heartbeat"; print(int(time.time() - os.path.getmtime(p)) if os.path.isfile(p) else -1)' 2>/dev/null || echo -1)"
+      if [[ "$hb_age" -ge 0 && "$hb_age" -gt 30 ]]; then
+        warn "idp-watch heartbeat is stale (${hb_age}s old)"
+      fi
+    else
+      warn "idp-watch is not running (IdP fallback watcher offline)"
+    fi
+  fi
   if [[ -f "$SCRIPT_DIR/auth/identity-journal.log" ]]; then
     echo "  journal (last 5):"
     tail -n 5 "$SCRIPT_DIR/auth/identity-journal.log" | sed 's/^/    /'
@@ -2536,6 +2573,93 @@ cmd_identity_logrotate() {
   esac
 }
 
+cmd_identity_idp_watch_status() {
+  require_compose; require_compose_file; require_env
+  local cid status health state_json hb_age live_enabled
+  cid="$(identity_container idp-watch)"
+  status="$(container_status "$cid")"
+  health="$(container_health "$cid")"
+  echo "IdP Reachability Watcher (idp-watch):"
+  printf "  %-24s %s (%s)\n" "container" "$status" "$health"
+  if [[ "$status" == running ]]; then
+    state_json="$(docker exec "$cid" cat /var/run/idp_watch/state.json 2>/dev/null || echo "")"
+    hb_age="$(docker exec "$cid" python3 -c 'import os, time; p="/var/run/idp_watch/heartbeat"; print(int(time.time() - os.path.getmtime(p)) if os.path.isfile(p) else -1)' 2>/dev/null || echo -1)"
+    if [[ -n "$state_json" ]]; then
+      local p_state p_en c_fail c_succ last_err paused
+      p_state="$(printf '%s' "$state_json" | json_field state)"
+      p_en="$(printf '%s' "$state_json" | json_field enabled)"
+      c_fail="$(printf '%s' "$state_json" | json_field consecutive_failures)"
+      c_succ="$(printf '%s' "$state_json" | json_field consecutive_successes)"
+      last_err="$(printf '%s' "$state_json" | json_field last_error)"
+      paused="$(printf '%s' "$state_json" | json_field paused)"
+      printf "  %-24s %s (provider enabled: %s)\n" "probe state" "$p_state" "$p_en"
+      printf "  %-24s %s\n" "consecutive failures" "${c_fail:-0}"
+      printf "  %-24s %s\n" "consecutive successes" "${c_succ:-0}"
+      if [[ -n "$last_err" && "$last_err" != null ]]; then
+        printf "  %-24s %s\n" "last error" "$last_err"
+      fi
+      printf "  %-24s %s\n" "paused" "${paused:-false}"
+    fi
+    if [[ "$hb_age" -ge 0 ]]; then
+      printf "  %-24s %ss ago\n" "heartbeat age" "$hb_age"
+    fi
+  fi
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || true
+  live_enabled="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" --fields enabled --format csv --noquotes 2>/dev/null || echo "unknown")"
+  kcadm_logout
+  printf "  %-24s %s\n" "Keycloak IdP enabled" "$live_enabled"
+}
+
+cmd_identity_idp_watch_reset() {
+  require_compose; require_compose_file; require_env
+  identity_lock
+  local cid
+  info "Re-enabling identity provider $IDENTITY_IDP_ALIAS in Keycloak..."
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+  kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" -s enabled=true || die "Keycloak update failed"
+  kcadm_logout
+  cid="$(identity_container idp-watch)"
+  if [[ -n "$cid" && "$(container_status "$cid")" == running ]]; then
+    info "Clearing watcher state and restarting..."
+    docker exec "$cid" rm -f /var/run/idp_watch/state.json /var/run/idp_watch/paused >/dev/null 2>&1 || true
+    identity_up_service idp-watch
+  fi
+  identity_journal "idp-watch reset" ok "provider enabled in Keycloak; state cleared; watcher restarted"
+  ok "IdP reachability watcher reset (provider enabled=true, state cleared, watcher restarted)"
+}
+
+cmd_identity_idp_watch_pause() {
+  require_compose; require_compose_file; require_env
+  local cid
+  cid="$(identity_container idp-watch)"
+  [[ -n "$cid" && "$(container_status "$cid")" == running ]] || die "idp-watch is not running"
+  docker exec "$cid" touch /var/run/idp_watch/paused || die "Could not touch pause flag"
+  identity_journal "idp-watch pause" ok "watcher paused"
+  ok "IdP reachability watcher paused (transitions halted)"
+}
+
+cmd_identity_idp_watch_resume() {
+  require_compose; require_compose_file; require_env
+  local cid
+  cid="$(identity_container idp-watch)"
+  [[ -n "$cid" && "$(container_status "$cid")" == running ]] || die "idp-watch is not running"
+  docker exec "$cid" rm -f /var/run/idp_watch/paused || die "Could not clear pause flag"
+  identity_journal "idp-watch resume" ok "watcher resumed"
+  ok "IdP reachability watcher resumed"
+}
+
+cmd_identity_idp_watch() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    status) cmd_identity_idp_watch_status ;;
+    reset)  cmd_identity_idp_watch_reset ;;
+    pause)  cmd_identity_idp_watch_pause ;;
+    resume) cmd_identity_idp_watch_resume ;;
+    *) die "Usage: krate identity idp-watch {status|reset|pause|resume}" ;;
+  esac
+}
+
 cmd_identity() {
   local sub="${1:-}"
   shift || true
@@ -2550,8 +2674,9 @@ cmd_identity() {
     rotate)        cmd_identity_rotate "$@" ;;
     backup)        cmd_identity_backup "$@" ;;
     restore)       cmd_identity_restore "$@" ;;
+    idp-watch)     cmd_identity_idp_watch "$@" ;;
     *)
-      echo "Usage: krate identity {up|status|down|recover-admin|users ...|rotate KEY [--value]|backup FILE|restore FILE|renew-db-tls|logrotate [--install]}"
+      echo "Usage: krate identity {up|status|down|recover-admin|users ...|rotate KEY [--value]|backup FILE|restore FILE|renew-db-tls|logrotate [--install]|idp-watch {status|reset|pause|resume}}"
       return 1 ;;
   esac
 }

@@ -27,6 +27,11 @@ apply_auth() {
     identity_lock
     local kc_before kc_after trust_changed=false
     kc_before="$(compose_cmd ps -q keycloak)"
+    local theme_dir="$sso_dir/theme/krate" theme_sha=""
+    if [[ -d "$theme_dir" ]]; then
+      theme_sha="$(python3 -c 'import hashlib, sys; from pathlib import Path; p=Path(sys.argv[1]); h=hashlib.sha256(); [h.update(f.read_bytes()) for f in sorted(p.rglob("*")) if f.is_file()]; print(h.hexdigest()[:32])' "$theme_dir" 2>/dev/null || echo "")"
+      [[ "$(env_value KRATE_KEYCLOAK_THEME_SHA)" == "$theme_sha" ]] || set_env_file_value "$ENV_FILE" KRATE_KEYCLOAK_THEME_SHA "$theme_sha"
+    fi
     if sync_truststore_env; then
       trust_changed=true
       info "Trust material in auth/keycloak/truststores changed; recreating Keycloak..."
@@ -43,6 +48,35 @@ apply_auth() {
       identity_journal apply recreated "keycloak: service definition changed"
     fi
     identity_apply_idp apply
+    if [[ "$(env_value IDP_WATCH_ENABLED)" == true && -f "$SCRIPT_DIR/$IDENTITY_IDP_PLAN" ]]; then
+      local admin_group gid enabled_admins
+      admin_group="$(env_value KEYCLOAK_ADMIN_GROUP)"
+      admin_group="${admin_group:-KRATE_ADMINS}"
+      gid="$(kcadm_group_id "$IDENTITY_REALM" "$admin_group" 2>/dev/null || echo "")"
+      if [[ -n "$gid" ]]; then
+        enabled_admins="$(kcadm -- get "groups/$gid/members" -r "$IDENTITY_REALM" --fields username,enabled --format csv --noquotes 2>/dev/null | awk -F, '$2=="true" {print $1}' || echo "")"
+        if [[ -z "$enabled_admins" ]]; then
+          warn "No enabled local users found in group '$admin_group'; fallback sign-in requires at least one local operator account (krate identity users add <user> --admin)"
+        fi
+      fi
+      local watch_sha
+      watch_sha="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()[:32])' "$sso_dir/idp_watch.py" 2>/dev/null || echo "")"
+      [[ "$(env_value KRATE_IDP_WATCH_SHA)" == "$watch_sha" ]] || set_env_file_value "$ENV_FILE" KRATE_IDP_WATCH_SHA "$watch_sha"
+      compose_cmd up -d --pull never --no-build --no-deps --wait --wait-timeout "$timeout" idp-watch
+      ok "IdP reachability watcher reconciled (idp-watch)"
+    else
+      local watch_cid
+      watch_cid="$(compose_cmd ps -q idp-watch 2>/dev/null || echo "")"
+      if [[ -n "$watch_cid" ]]; then
+        compose_cmd stop idp-watch >/dev/null 2>&1 || true
+      fi
+    fi
+  else
+    local watch_cid
+    watch_cid="$(compose_cmd ps -q idp-watch 2>/dev/null || echo "")"
+    if [[ -n "$watch_cid" ]]; then
+      compose_cmd stop idp-watch >/dev/null 2>&1 || true
+    fi
   fi
   # Only kafka-ui is recreated below, and it depends on healthy brokers.
   while IFS= read -r service; do

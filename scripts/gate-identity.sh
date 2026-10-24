@@ -461,7 +461,7 @@ REQUIRED_P1=(S1 S2 S3 S4 H1 H2 H3 F1 F2 F3 F4 F5 F6 G1 G2 G3 G4 G5 G6 G7 G8 A1 A
 as_root() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 if { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; } && command -v logrotate >/dev/null 2>&1; then J7_REQUIRED=true; fi
 REQUIRED_P2=(K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K11 K12 K13 K14 K15 K16 K18 K19 K20 K21 K22 K23 K24 K25 K26 K27 K28 K30 K31 K32 K33 K34 M1 M2 Z2)
-REQUIRED_P3=(P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P18 Z3)
+REQUIRED_P3=(P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 P11 P12 P13 P14 P15 P16 P18 P22 P23 P24 P25 P26 P27 Z3)
 REQUIRED_X=(X1)
 # Phase 4 inventories (PHASE4-INSTRUCTIONS-v3.md section 5): a slice is REQUIRED_P1
 # plus its own rows, and it holds no Phase 2/3 ids (on an EPC edition directory the
