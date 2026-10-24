@@ -36,7 +36,7 @@ POLICIES = {
 
 
 # Services under a Compose profile render only with that profile enabled.
-PROFILES = {"kraft": ("sso",), "epc": ("sso",)}
+PROFILES = {"kraft": ("sso", "idp-watch"), "epc": ("sso", "idp-watch")}
 
 
 def violations(variant, config):

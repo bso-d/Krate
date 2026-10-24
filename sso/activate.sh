@@ -52,6 +52,7 @@ apply_auth() {
       local admin_group gid enabled_admins
       admin_group="$(env_value KEYCLOAK_ADMIN_GROUP)"
       admin_group="${admin_group:-KRATE_ADMINS}"
+      kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || true
       gid="$(kcadm_group_id "$IDENTITY_REALM" "$admin_group" 2>/dev/null || echo "")"
       if [[ -n "$gid" ]]; then
         enabled_admins="$(kcadm -- get "groups/$gid/members" -r "$IDENTITY_REALM" --fields username,enabled --format csv --noquotes 2>/dev/null | awk -F, '$2=="true" {print $1}' || echo "")"
@@ -59,10 +60,17 @@ apply_auth() {
           warn "No enabled local users found in group '$admin_group'; fallback sign-in requires at least one local operator account (krate identity users add <user> --admin)"
         fi
       fi
+      kcadm_logout
       local watch_sha
-      watch_sha="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()[:32])' "$sso_dir/idp_watch.py" 2>/dev/null || echo "")"
+      watch_sha="$(python3 -c '
+import hashlib, sys, os
+h = hashlib.sha256()
+for path in sys.argv[1:]:
+    if os.path.isfile(path):
+        h.update(open(path, "rb").read())
+print(h.hexdigest()[:32])' "$sso_dir/idp_watch.py" "$SCRIPT_DIR/$IDENTITY_IDP_PLAN" 2>/dev/null || echo "")$(env_value KRATE_TRUSTSTORE_SHA)"
       [[ "$(env_value KRATE_IDP_WATCH_SHA)" == "$watch_sha" ]] || set_env_file_value "$ENV_FILE" KRATE_IDP_WATCH_SHA "$watch_sha"
-      compose_cmd up -d --pull never --no-build --no-deps --wait --wait-timeout "$timeout" idp-watch
+      identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --wait --wait-timeout "$timeout" idp-watch
       ok "IdP reachability watcher reconciled (idp-watch)"
     else
       local watch_cid

@@ -620,9 +620,14 @@ compose_cmd() {
         set -- up --pull never --no-build "$@"
       fi
     fi
-    if $with_sso; then set -- --profile sso "$@"; fi
+    if $with_sso; then
+      set -- --profile sso "$@"
+      if [[ "$(env_value IDP_WATCH_ENABLED)" == true && -f "$SCRIPT_DIR/$IDENTITY_IDP_PLAN" ]]; then
+        set -- --profile idp-watch "$@"
+      fi
+    fi
   fi
-  "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  KRATE_SSO_DIR="$(sso_dir)" "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
 # The shape of the client secret PingFederate issues: taken as issued, except
@@ -840,7 +845,11 @@ identity_volume_present() {
 identity_compose() {
   sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
   resolve_local_ui_image
-  "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile sso "$@"
+  local -a prof=(--profile sso)
+  if [[ "$(env_value IDP_WATCH_ENABLED)" == true && -f "$SCRIPT_DIR/$IDENTITY_IDP_PLAN" ]]; then
+    prof+=(--profile idp-watch)
+  fi
+  KRATE_SSO_DIR="$(sso_dir)" "${COMPOSE_BIN[@]}" -p "$(cluster_project)" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${prof[@]}" "$@"
 }
 
 # Container ID of an identity service (running or not); empty when none.
@@ -1180,6 +1189,14 @@ prepare_identity() {
       IDENTITY_CHANGED=true
     fi
   else
+    if [[ -z "$(env_value KEYCLOAK_IDP_WATCH_CLIENT_SECRET)" || "$(env_value KEYCLOAK_IDP_WATCH_CLIENT_SECRET)" == REPLACE_ME ]]; then
+      local gen_watch
+      gen_watch="$(fill_secrets "$ENV_FILE" 24 KEYCLOAK_IDP_WATCH_CLIENT_SECRET | xargs)"
+      if [[ -n "$gen_watch" ]]; then
+        ok "Generated $gen_watch in .env for IdP watcher"
+        IDENTITY_CHANGED=true
+      fi
+    fi
     for key in "${IDENTITY_KEYS[@]}"; do
       case "$(env_value "$key")" in ""|REPLACE_ME) missing+=" $key" ;; esac
     done
@@ -1406,6 +1423,54 @@ json.dump(action, sys.stdout)' "$line" | KCADM_STDIN=1 kcadm -- update "authenti
       ok "Realm $IDENTITY_REALM: required action $alias set to enabled/default ${line// //} from the realm plan"
     fi
   done <<< "$actions"
+  kcadm_logout
+}
+
+identity_reconcile_idp_watch_client() {
+  local plan="$SCRIPT_DIR/auth/keycloak/krate-realm.json" id
+  [[ -f "$plan" ]] || return 0
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
+  id="$(kcadm_client_id "$IDENTITY_REALM" krate-idp-watch 2>/dev/null || echo "")"
+  if [[ -z "$id" ]]; then
+    info "Reconciling krate-idp-watch client in realm $IDENTITY_REALM..."
+    local client_rep sa_user_id mgmt_id r_view r_manage
+    client_rep="$(python3 -c '
+import json, sys
+c = next(c for c in json.load(open(sys.argv[1]))["clients"] if c["clientId"] == "krate-idp-watch")
+c["secret"] = sys.argv[2]
+print(json.dumps(c))' "$plan" "$(env_value KEYCLOAK_IDP_WATCH_CLIENT_SECRET)")" || die "Cannot render krate-idp-watch client"
+    printf '%s\n' "$client_rep" | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null \
+      || die "Keycloak refused to create krate-idp-watch client"
+    id="$(kcadm_client_id "$IDENTITY_REALM" krate-idp-watch)" || die "Keycloak query failed"
+    sa_user_id="$(kcadm -- get "clients/$id/service-account-user" -r "$IDENTITY_REALM" --fields id --format csv --noquotes 2>/dev/null || echo "")"
+    if [[ -n "$sa_user_id" ]]; then
+      mgmt_id="$(kcadm_client_id "$IDENTITY_REALM" realm-management 2>/dev/null || echo "")"
+      if [[ -n "$mgmt_id" ]]; then
+        r_view="$(kcadm -- get "clients/$mgmt_id/roles/view-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
+        r_manage="$(kcadm -- get "clients/$mgmt_id/roles/manage-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
+        if [[ -n "$r_view" ]]; then
+          printf '[%s]\n' "$r_view" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null || true
+        fi
+        if [[ -n "$r_manage" ]]; then
+          printf '[%s]\n' "$r_manage" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null || true
+        fi
+      fi
+    fi
+    identity_journal "${1:-up}" reconciled "krate-idp-watch client and service account"
+    IDENTITY_CHANGED=true
+    ok "krate-idp-watch client and service account reconciled in realm $IDENTITY_REALM"
+  fi
+  local wanted_theme current_theme
+  wanted_theme="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("loginTheme", ""))' "$plan" 2>/dev/null || echo "")"
+  if [[ -n "$wanted_theme" ]]; then
+    current_theme="$(kcadm -- get "realms/$IDENTITY_REALM" --fields loginTheme --format csv --noquotes 2>/dev/null || echo "")"
+    if [[ "$current_theme" != "$wanted_theme" ]]; then
+      kcadm -- update "realms/$IDENTITY_REALM" -s "loginTheme=$wanted_theme" >/dev/null 2>&1 || true
+      identity_journal "${1:-up}" reconciled "realm loginTheme ($wanted_theme)"
+      IDENTITY_CHANGED=true
+      ok "Realm $IDENTITY_REALM: loginTheme set to $wanted_theme from the realm plan"
+    fi
+  fi
   kcadm_logout
 }
 
@@ -1672,9 +1737,12 @@ identity_put_idp_provider() {
     enabled_arg="--enabled true"
   else
     local live_enabled
-    live_enabled="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" --fields enabled --format csv --noquotes 2>/dev/null || echo "")"
-    if [[ "$live_enabled" == "true" || "$live_enabled" == "false" ]]; then
+    if [[ "$(env_value IDP_WATCH_ENABLED)" == true ]]; then
+      live_enabled="$(kcadm -- get "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" --fields enabled --format csv --noquotes)" || die "Keycloak query failed for provider $IDENTITY_IDP_ALIAS enabled state"
+      [[ "$live_enabled" == "true" || "$live_enabled" == "false" ]] || die "Invalid enabled state for provider $IDENTITY_IDP_ALIAS: '$live_enabled'"
       enabled_arg="--enabled $live_enabled"
+    else
+      enabled_arg="--enabled true"
     fi
   fi
   if [[ "$action" == create ]]; then
@@ -1873,6 +1941,7 @@ cmd_identity_up() {
     identity_verify_admin up
     identity_reconcile_ui_urls
     identity_reconcile_realm_policy up
+    identity_reconcile_idp_watch_client up
   fi
   identity_verify_cli up
   # The PingFederate plan, when it exists, is applied to the realm here as well
@@ -2193,11 +2262,11 @@ identity_rotate_plan_check() {
 cmd_identity_rotate() {
   local key="${1:-}" value state client cid id json q
   case "$key" in
-    KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET) ;;
+    KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET|KEYCLOAK_IDP_WATCH_CLIENT_SECRET) ;;
     PING_KEYCLOAK_CLIENT_SECRET)
       # Issued by PingFederate, never generated here: the value comes from stdin (or a terminal prompt).
       [[ "${2:-}" == --value ]] || die "PING_KEYCLOAK_CLIENT_SECRET is issued by PingFederate: krate identity rotate PING_KEYCLOAK_CLIENT_SECRET --value (reads it from stdin, or asks on a terminal)" ;;
-    *) die "Usage: krate identity rotate {KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET} [--value] | PING_KEYCLOAK_CLIENT_SECRET --value" ;;
+    *) die "Usage: krate identity rotate {KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET|KEYCLOAK_IDP_WATCH_CLIENT_SECRET} [--value] | PING_KEYCLOAK_CLIENT_SECRET --value" ;;
   esac
   [[ $# -eq 1 || "${2:-}" == --value ]] || die "Usage: krate identity rotate <KEY> [--value]   (--value reads the new value from stdin)"
   identity_rotate_plan_check "$key"
@@ -2222,7 +2291,7 @@ cmd_identity_rotate() {
     fi
     # The identity preflight requires distinct credentials; refuse reuse before any store changes.
     local other
-    for other in KEYCLOAK_DB_PASSWORD KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET KAFKA_UI_PASSWORD PING_KEYCLOAK_CLIENT_SECRET; do
+    for other in KEYCLOAK_DB_PASSWORD KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_IDP_WATCH_CLIENT_SECRET KAFKA_UI_PASSWORD PING_KEYCLOAK_CLIENT_SECRET; do
       [[ "$other" == "$key" || "$(env_value "$other")" != "$value" ]] || die "$key must not reuse the value of $other (every identity and UI credential must be distinct)"
     done
   else
@@ -2251,9 +2320,13 @@ cmd_identity_rotate() {
       set_env_file_value "$ENV_FILE" "$key" "$value"
       identity_verify_admin rotate
       ;;
-    KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET)
+    KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET|KEYCLOAK_IDP_WATCH_CLIENT_SECRET)
       client=krate-cli
-      [[ "$key" == KEYCLOAK_CLI_CLIENT_SECRET ]] || client=krate-ui
+      if [[ "$key" == KEYCLOAK_KAFBAT_CLIENT_SECRET ]]; then
+        client=krate-ui
+      elif [[ "$key" == KEYCLOAK_IDP_WATCH_CLIENT_SECRET ]]; then
+        client=krate-idp-watch
+      fi
       identity_verify_admin rotate >/dev/null
       kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
       id="$(kcadm_client_id "$IDENTITY_REALM" "$client")" || die "Keycloak query failed"
@@ -2265,6 +2338,11 @@ cmd_identity_rotate() {
       set_env_file_value "$ENV_FILE" "$key" "$value"
       if [[ "$client" == krate-cli ]]; then
         identity_verify_cli rotate
+      elif [[ "$client" == krate-idp-watch ]]; then
+        if [[ "$(env_value IDP_WATCH_ENABLED)" == true && -f "$SCRIPT_DIR/$IDENTITY_IDP_PLAN" ]]; then
+          info "Recreating idp-watch with the new client secret..."
+          identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" idp-watch 2>/dev/null || true
+        fi
       elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml ]]; then
         info "Recreating Kafbat UI with the new client secret..."
         compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" kafka-ui
@@ -2305,7 +2383,7 @@ identity_passphrase() {
 # The .env keys a backup carries beside the database dump: what Keycloak was
 # initialised with and the dump expects. The database password is a role of
 # the database, not part of the dump, so it stays with the volume.
-IDENTITY_BACKUP_KEYS=(KEYCLOAK_ADMIN_USER KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET)
+IDENTITY_BACKUP_KEYS=(KEYCLOAK_ADMIN_USER KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_IDP_WATCH_CLIENT_SECRET)
 IDENTITY_ENC=(-aes-256-cbc -pbkdf2 -iter 600000 -salt -pass env:KRATE_BACKUP_PASSPHRASE)
 
 # An encrypted tar of db.dump (pg_dump -Fc) and identity.env (the keys above).
@@ -2421,6 +2499,7 @@ If that keeps failing, follow the volume-lost procedure in docs/identity-foundat
   prepare_identity_files restore
   identity_reconcile_ui_urls restore
   identity_reconcile_realm_policy restore
+  identity_reconcile_idp_watch_client restore
   identity_journal restore ok "$file"
   ok "Identity database restored from $file"
 }
@@ -2619,10 +2698,11 @@ cmd_identity_idp_watch_reset() {
   kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" -s enabled=true || die "Keycloak update failed"
   kcadm_logout
   cid="$(identity_container idp-watch)"
-  if [[ -n "$cid" && "$(container_status "$cid")" == running ]]; then
-    info "Clearing watcher state and restarting..."
-    docker exec "$cid" rm -f /var/run/idp_watch/state.json /var/run/idp_watch/paused >/dev/null 2>&1 || true
-    identity_up_service idp-watch
+  if [[ -n "$cid" ]]; then
+    info "Stopping idp-watch, clearing state, and restarting..."
+    compose_cmd stop idp-watch >/dev/null 2>&1 || true
+    docker run --rm -v "$(cluster_project)_idp_watch_state:/var/run/idp_watch" "${IDP_WATCH_IMAGE}" rm -f /var/run/idp_watch/state.json /var/run/idp_watch/paused >/dev/null 2>&1 || true
+    identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --wait --wait-timeout "$IDENTITY_TIMEOUT" idp-watch
   fi
   identity_journal "idp-watch reset" ok "provider enabled in Keycloak; state cleared; watcher restarted"
   ok "IdP reachability watcher reset (provider enabled=true, state cleared, watcher restarted)"

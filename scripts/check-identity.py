@@ -387,7 +387,9 @@ def compose_config(env_file, edition, project_dir=None):
     command = ['docker', 'compose', '--env-file', str(env_file), '-f', str(ROOT / edition / 'docker-compose.yml')]
     if project_dir is not None:
         command += ['--project-directory', str(project_dir)]
-    result = subprocess.run(command + ['--profile', 'sso', 'config', '--format', 'json'], cwd=ROOT, text=True, capture_output=True)
+    env = dict(os.environ, KRATE_SSO_DIR=str(ROOT / 'sso'))
+    result = subprocess.run(command + ['--profile', 'sso', '--profile', 'idp-watch', 'config', '--format', 'json'],
+                            cwd=ROOT, text=True, capture_output=True, env=env)
     return result.returncode, result.stdout
 
 

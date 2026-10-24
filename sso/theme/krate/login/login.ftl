@@ -9,7 +9,7 @@
     <#if section = "header">
         ${msg("loginAccountTitle")}
     <#elseif section = "form">
-        <#if realm.identityProviders?? && realm.identityProviders?has_content>
+        <#if realm.identityFederationEnabled>
             <div id="kc-idp-fallback-warning" class="alert alert-warning" style="margin-bottom: 15px;">
                 <strong>Notice:</strong> Corporate SSO is unavailable or you used the break-glass link. Only local emergency accounts can sign in here.
             </div>

@@ -86,6 +86,17 @@ def build_ssl_context(truststore_dir):
     return ctx, certs_loaded
 
 
+class AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Enforce destination allowlist on every redirect hop."""
+    def __init__(self, allowed_authorities):
+        super().__init__()
+        self.allowed_authorities = allowed_authorities
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_target_allowed(newurl, self.allowed_authorities)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def probe_http(url, ssl_context, timeout, method='GET', allowed_authorities=None, post_data=None):
     """Execute single HTTP probe with timeout and SSL context.
     
@@ -103,8 +114,13 @@ def probe_http(url, ssl_context, timeout, method='GET', allowed_authorities=None
         req.add_header('Content-Type', 'application/x-www-form-urlencoded')
         req.data = post_data
 
+    handlers = [urllib.request.HTTPSHandler(context=ssl_context)]
+    if allowed_authorities:
+        handlers.append(AllowlistRedirectHandler(allowed_authorities))
+    opener = urllib.request.build_opener(*handlers)
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             body = resp.read()
             return resp.status, body, None
     except urllib.error.HTTPError as exc:
@@ -129,6 +145,12 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
     
     Returns (ok: bool, error_reason: str or None).
     """
+    start_time = time.time()
+
+    def remaining_timeout():
+        elapsed = time.time() - start_time
+        return max(1.0, timeout - elapsed)
+
     provider = plan['identityProviders'][0]
     config = provider.get('config', {})
     issuer = (config.get('issuer') or '').rstrip('/')
@@ -141,7 +163,7 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
 
     # Probe 1: OIDC Discovery
     disc_url = f'{issuer}/.well-known/openid-configuration'
-    status, body, err = probe_http(disc_url, ssl_context, timeout, allowed_authorities=allowed_authorities)
+    status, body, err = probe_http(disc_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
     if err:
         return False, f'Discovery probe failed: {err}'
     if status != 200:
@@ -156,7 +178,7 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
 
     # Probe 2: JWKS Keys
     if jwks_url:
-        status, body, err = probe_http(jwks_url, ssl_context, timeout, allowed_authorities=allowed_authorities)
+        status, body, err = probe_http(jwks_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
         if err:
             return False, f'JWKS probe failed: {err}'
         if status != 200:
@@ -171,7 +193,7 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
 
     # Probe 3: Token / UserInfo reachability (any HTTP status < 500 confirms application reachability)
     if token_url:
-        status, _, err = probe_http(token_url, ssl_context, timeout, method='POST',
+        status, _, err = probe_http(token_url, ssl_context, remaining_timeout(), method='POST',
                                     allowed_authorities=allowed_authorities, post_data='grant_type=invalid_probe')
         if err:
             return False, f'Token endpoint reachability probe failed: {err}'
@@ -179,7 +201,7 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
             return False, f'Token endpoint returned server error HTTP {status}'
 
     if user_info_url:
-        status, _, err = probe_http(user_info_url, ssl_context, timeout, method='GET',
+        status, _, err = probe_http(user_info_url, ssl_context, remaining_timeout(), method='GET',
                                     allowed_authorities=allowed_authorities)
         if err:
             return False, f'UserInfo reachability probe failed: {err}'
@@ -343,27 +365,41 @@ class IdpWatcher:
         pause_file = self.state_dir / 'paused'
         return pause_file.is_file()
 
+    def reconcile_with_keycloak(self):
+        """Query Keycloak Admin API to align local state with live provider reality."""
+        if not self.watch_secret:
+            return
+        try:
+            token = acquire_keycloak_token(self.keycloak_url, self.realm, self.watch_secret, timeout=self.timeout)
+            live_enabled = get_live_provider_state(self.keycloak_url, self.realm, token, alias=DEFAULT_IDP_ALIAS, timeout=self.timeout)
+            if live_enabled is not None:
+                self.provider_enabled = bool(live_enabled)
+                self.current_state = 'HEALTHY' if self.provider_enabled else 'FALLBACK'
+        except Exception as exc:
+            sys.stderr.write(f"[idp-watch] Note: Keycloak state reconciliation skipped ({exc})\n")
+
     def load_or_init_state(self):
-        """Restore state from disk or initialize fresh."""
+        """Restore state from disk or initialize fresh, reconciling with Keycloak ground truth."""
         existing = read_state_file(self.state_dir)
-        now = time.time()
         if existing and isinstance(existing, dict):
             self.current_state = existing.get('state', 'HEALTHY')
             self.provider_enabled = existing.get('enabled', True)
             self.consecutive_failures = existing.get('consecutive_failures', 0)
             self.consecutive_successes = existing.get('consecutive_successes', 0)
-            self.last_transition_ts = existing.get('last_transition_ts', now)
-            self.last_probe_ts = existing.get('last_probe_ts', 0)
+            self.last_transition_ts = existing.get('last_transition_ts', 0.0)
+            self.last_probe_ts = existing.get('last_probe_ts', 0.0)
             self.last_error = existing.get('last_error')
         else:
             self.current_state = 'HEALTHY'
             self.provider_enabled = True
             self.consecutive_failures = 0
             self.consecutive_successes = 0
-            self.last_transition_ts = now
-            self.last_probe_ts = 0
+            self.last_transition_ts = 0.0
+            self.last_probe_ts = 0.0
             self.last_error = None
-            self.persist_state()
+
+        self.reconcile_with_keycloak()
+        self.persist_state()
 
     def persist_state(self):
         """Save current state to atomic JSON file."""
@@ -394,16 +430,19 @@ class IdpWatcher:
             rep = construct_provider_representation(self.plan, target_enabled, self.ping_secret)
             set_live_provider_state(self.keycloak_url, self.realm, token, rep, alias=DEFAULT_IDP_ALIAS, timeout=self.timeout)
 
-            # Verification readback
-            live_enabled = get_live_provider_state(self.keycloak_url, self.realm, token, alias=DEFAULT_IDP_ALIAS, timeout=self.timeout)
-            if live_enabled != target_enabled:
-                raise RuntimeError(f'Verification readback failed: expected enabled={target_enabled}, got {live_enabled}')
-
             old_state = self.current_state
             self.current_state = target_state
             self.provider_enabled = target_enabled
             self.last_transition_ts = time.time()
             self.persist_state()
+
+            # Verification readback (warn on error, do not leave internal state contrary to applied write)
+            try:
+                live_enabled = get_live_provider_state(self.keycloak_url, self.realm, token, alias=DEFAULT_IDP_ALIAS, timeout=self.timeout)
+                if live_enabled != target_enabled:
+                    sys.stderr.write(f"[idp-watch] Warning: verification readback expected enabled={target_enabled}, got {live_enabled}\n")
+            except Exception as e:
+                sys.stderr.write(f"[idp-watch] Warning: verification readback query error: {e}\n")
 
             action_name = 'fallback' if target_enabled is False else 'recovery'
             log_journal_entry(self.state_dir, f'idp-watch {action_name}', 'ok',
@@ -411,6 +450,8 @@ class IdpWatcher:
             return True
         except Exception as exc:
             sys.stderr.write(f"[idp-watch] Transition failed: {exc}\n")
+            self.reconcile_with_keycloak()
+            self.persist_state()
             if self.fail_open and target_enabled is False:
                 sys.stderr.write("[idp-watch] FAIL_OPEN active: keeping provider enabled after Keycloak API failure\n")
             return False
@@ -460,16 +501,19 @@ class IdpWatcher:
         sys.stdout.flush()
 
         while self.running:
+            cycle_start = time.time()
             try:
                 self.step()
             except Exception as exc:
                 sys.stderr.write(f"[idp-watch] Unexpected error in step: {exc}\n")
             
-            # Sleep in 1-second intervals for responsive termination
-            sleep_remaining = self.interval
+            # Sleep remainder of interval for deterministic cadence
+            cycle_elapsed = time.time() - cycle_start
+            sleep_remaining = max(0.0, self.interval - cycle_elapsed)
             while sleep_remaining > 0 and self.running:
-                time.sleep(min(1.0, sleep_remaining))
-                sleep_remaining -= 1.0
+                chunk = min(1.0, sleep_remaining)
+                time.sleep(chunk)
+                sleep_remaining -= chunk
 
 
 def parse_env_config():

@@ -416,7 +416,7 @@ services:
           create_host_path: false
           selinux: z
       - type: bind
-        source: ./sso/theme/krate
+        source: ${KRATE_SSO_DIR:-../sso}/theme/krate
         target: /opt/keycloak/themes/krate
         read_only: true
         bind:
@@ -428,14 +428,32 @@ services:
     networks: [identity, identity-egress]
 
   idp-watch:
-    profiles: [sso]
+    profiles: [idp-watch]
     image: ${IDP_WATCH_IMAGE}
     command: ["python3", "/opt/krate/idp_watch.py"]
     networks: [identity, identity-egress]
     volumes:
-      - ./sso/idp_watch.py:/opt/krate/idp_watch.py:ro,z
-      - ./auth/keycloak/pingfederate-idp.json:/etc/krate/idp.json:ro,z
-      - ./auth/keycloak/truststores:/etc/krate/truststores:ro,z
+      - type: bind
+        source: ${KRATE_SSO_DIR:-../sso}/idp_watch.py
+        target: /opt/krate/idp_watch.py
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ./auth/keycloak/pingfederate-idp.json
+        target: /etc/krate/idp.json
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ./auth/keycloak/truststores
+        target: /etc/krate/truststores
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
       - idp_watch_state:/var/run/idp_watch
     restart: unless-stopped
     read_only: true

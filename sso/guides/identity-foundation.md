@@ -506,14 +506,16 @@ temporary password and enrols TOTP at first login.
 ### `./krate identity rotate KEY`
 
 `KEY` is one of `KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`,
-`KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`. Order:
+`KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`,
+`KEYCLOAK_IDP_WATCH_CLIENT_SECRET`. Order:
 
 1. Change the authoritative store first: `ALTER ROLE` through `psql` in
    `keycloak-db`; `kcadm set-password` in `master`; or
    `kcadm update clients/<id> -s secret=...` in `krate`.
 2. Write `.env` atomically (temporary file, mode 600, rename).
 3. Recreate the consumer: `keycloak` for the database password; `kafka-ui`
-   for the Kafbat client secret only when `KAFKA_UI_AUTH_CONFIG=runtime.yml`.
+   for the Kafbat client secret only when `KAFKA_UI_AUTH_CONFIG=runtime.yml`;
+   `idp-watch` for `KEYCLOAK_IDP_WATCH_CLIENT_SECRET` when the watcher is active.
 4. Verify (ready, login) and write the journal line.
 
 Before step 1, for `KEYCLOAK_KAFBAT_CLIENT_SECRET` in `runtime.yml` mode and for

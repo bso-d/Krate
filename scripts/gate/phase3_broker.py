@@ -55,6 +55,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)  # python3 -I does not add the script directory
 import phase2_kafbat as p2  # noqa: E402
+import phase3_realm as pr  # noqa: E402
 
 REDACT = p2.REDACT
 log = p2.log
@@ -101,6 +102,7 @@ class Gate:
         self.hops = {}  # user label → list of (status, path) through the realm and back
         self.permissions = {}
         self.cleanup_topics = set()
+        self._idp_kc = None
 
     # ── plumbing shared with the Phase 2 helper's Browser ──
     def check_url(self, url):
@@ -130,6 +132,16 @@ class Gate:
         if self.kc is None:
             fail('precondition: the krate-cli kcadm session is not open')
         return self.kc
+
+    def idp_keycloak(self):
+        """Kcadm session logged in as master admin to inspect or manage identity providers."""
+        if self._idp_kc is None:
+            admin_user = self.env.get('KEYCLOAK_ADMIN_USER', 'admin')
+            admin_pw = self.env.get('KEYCLOAK_ADMIN_PASSWORD', '')
+            if not admin_pw:
+                admin_pw = os.environ.get('KC_CLI_PASSWORD', '')
+            self._idp_kc = pr.Kcadm(self.project, admin_user, admin_pw)
+        return self._idp_kc
 
     def stub(self, *args):
         """stub_idp.sh <action> for the stand-in; its secrets stay in the stub directory."""
@@ -486,7 +498,7 @@ class Gate:
 
     def p24_flapping(self):
         """Flapping suppression: a brief IdP outage shorter than failure threshold must not trigger fallback."""
-        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        rep = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep.get('enabled') is not True:
             fail('precondition: provider pingfederate must be enabled before flapping test')
 
@@ -496,7 +508,7 @@ class Gate:
         finally:
             self.start_stub_idp()
 
-        rep_after = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        rep_after = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep_after.get('enabled') is not True:
             fail(f'provider pingfederate was disabled during brief outage (flapping suppression failed); enabled={rep_after.get("enabled")}')
 
@@ -540,7 +552,7 @@ class Gate:
         if not fallback_found or not form_resp or not form_browser:
             fail(f'fallback to local form did not occur within {timeout_bound}s (last response: HTTP {last_status} {last_loc})')
 
-        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        rep = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep.get('enabled') is not False:
             fail(f'expected provider pingfederate enabled=False in Keycloak; got {rep.get("enabled")}')
 
@@ -567,7 +579,7 @@ class Gate:
 
     def p26_reconcile_idempotence(self):
         """Reconciliation idempotence: krate auth apply while provider is disabled must not clobber disabled state."""
-        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        rep = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep.get('enabled') is not False:
             fail(f'precondition: provider must be disabled before P26; got enabled={rep.get("enabled")}')
 
@@ -575,7 +587,7 @@ class Gate:
         if rc != 0:
             fail(f'krate auth apply failed (rc {rc}): {(err or out).strip()[-160:]}')
 
-        rep_after = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        rep_after = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep_after.get('enabled') is not False:
             fail(f'krate auth apply clobbered disabled provider; enabled is now {rep_after.get("enabled")}')
 
@@ -612,7 +624,7 @@ class Gate:
                 auth_resp = b.request('GET', resp.location)
                 last_status = auth_resp.status
                 last_loc = short(auth_resp.location or '')
-                if auth_resp.status == 303 and (auth_resp.location or '').endswith('/broker/pingfederate/login'):
+                if auth_resp.status == 303 and short(auth_resp.location or '').endswith('/broker/pingfederate/login'):
                     recovered = True
                     break
             p2.time.sleep(1)
@@ -621,7 +633,7 @@ class Gate:
         if not recovered:
             fail(f'recovery did not occur within {timeout_bound}s (last response: HTTP {last_status} {last_loc})')
 
-        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        rep = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep.get('enabled') is not True:
             fail(f'expected provider pingfederate enabled=True in Keycloak; got {rep.get("enabled")}')
 
@@ -639,29 +651,33 @@ class Gate:
         if not cid:
             fail('precondition: idp-watch container not found')
 
+        p2.docker('exec', cid, 'touch', '/var/run/idp_watch/p25-marker')
+
         rc, _, err = p2.docker('stop', '-t', '2', cid)
         if rc != 0:
             fail(f'docker stop idp-watch failed: {err}')
 
-        rc, out, _ = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'status'], timeout=30)
-        warned = 'idp-watch' in out and ('not running' in out or 'stale' in out or 'offline' in out)
+        rc, out, err_out = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'status'], timeout=30)
+        combined = (out or '') + '\n' + (err_out or '')
+        warned = 'idp-watch' in combined and ('not running' in combined or 'stale' in combined or 'offline' in combined)
         if not warned:
-            log(f'warning: identity status did not report offline idp-watch: {out}')
+            fail(f'identity status did not warn of stopped idp-watch; got: {combined.strip()[-300:]}')
 
         rc, _, err = p2.docker('start', cid)
         if rc != 0:
             fail(f'docker start idp-watch failed: {err}')
         p2.time.sleep(2)
 
-        rc, state_text, _ = p2.docker('exec', cid, 'cat', '/var/run/idp_watch/state.json')
-        if rc != 0 or not state_text.strip():
-            fail('watcher state.json was not preserved across container restart')
+        rc, _, _ = p2.docker('exec', cid, 'test', '-f', '/var/run/idp_watch/p25-marker')
+        if rc != 0:
+            fail('marker file in /var/run/idp_watch was not preserved across container restart (state volume lost)')
+        p2.docker('exec', cid, 'rm', '-f', '/var/run/idp_watch/p25-marker')
 
         rc, rout, rerr = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'reset'], timeout=30)
         if rc != 0:
             fail(f'krate identity idp-watch reset failed: {(rerr or rout).strip()[-160:]}')
 
-        rep = self.keycloak().get('identity-provider/instances/pingfederate') or {}
+        rep = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep.get('enabled') is not True:
             fail('provider not enabled after idp-watch reset')
 
@@ -734,6 +750,9 @@ class Gate:
         removed = sorted(self.cleanup_topics - set(failed))
         log('cleanup: topics %s removed (--if-exists)%s' % (','.join(removed) or 'none',
                                                              ('; NOT removed: ' + ','.join(failed)) if failed else ''))
+        if getattr(self, '_idp_kc', None):
+            self._idp_kc.close()
+            self._idp_kc = None
 
     def finish(self):
         for case in CASES:
