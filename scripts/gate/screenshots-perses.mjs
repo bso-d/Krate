@@ -109,6 +109,23 @@ function totp(secretB32, t = Date.now() / 1000) {
   return String((d.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0');
 }
 
+const TOTP_PERIOD = 30;
+const TOTP_STEP_GUARD = 3.0; // Margin before step boundary (same as phase4_common.py)
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function guardedTotp(secretB32) {
+  let now = Date.now() / 1000;
+  const rem = TOTP_PERIOD - (now % TOTP_PERIOD);
+  if (rem <= TOTP_STEP_GUARD) {
+    await sleep((rem + 0.5) * 1000);
+    now = Date.now() / 1000;
+  }
+  return totp(secretB32, now);
+}
+
 // Manifests and step records are published evidence: keep only origin+path,
 // never the query or fragment (authorization codes, state and nonce are
 // transient credentials, not evidence).
@@ -196,7 +213,7 @@ async function keycloakLogin(page, user, password, totpB32) {
   await page.fill('#password', password);
   await page.click('#kc-login');
   await page.waitForSelector('#otp', { timeout: 30000 });
-  await page.fill('#otp', totp(totpB32));
+  await page.fill('#otp', await guardedTotp(totpB32));
   await page.click('#kc-login');
 }
 

@@ -138,7 +138,8 @@ case "$ACTION" in
       -e KC_BOOTSTRAP_ADMIN_USERNAME="$ADMIN_USER" -e KC_BOOTSTRAP_ADMIN_PASSWORD \
       -e KC_HOSTNAME="https://localhost:$PORT" -e KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true \
       -e KC_HTTPS_CERTIFICATE_FILE=/opt/keycloak/conf/stub.crt -e KC_HTTPS_CERTIFICATE_KEY_FILE=/opt/keycloak/conf/stub.key \
-      -e KC_HEALTH_ENABLED=true "$IMAGE" start-dev >/dev/null || fail "docker run of the stand-in IdP failed"
+      -e KC_HEALTH_ENABLED=true -e JAVA_OPTS_APPEND="-Dliquibase.analytics.enabled=false" \
+      "$IMAGE" start-dev >/dev/null || fail "docker run of the stand-in IdP failed"
     say "container $CONTAINER started from $IMAGE on 127.0.0.1:$PORT, alias $ALIAS on $NETWORK"
     waited=0
     until [[ "$(http_code "https://127.0.0.1:$PORT/realms/master")" == 200 ]]; do

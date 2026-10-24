@@ -1786,6 +1786,13 @@ phase4_screenshots_x4() {
   export GATE_DISABLED_PASSWORD="$pw_d"
   export GATE_NOGROUP_PASSWORD="$pw_n" GATE_NOGROUP_TOTP="$totp_n"
 
+  # Ensure X4 begins on a fresh 30-second TOTP step, preventing anti-replay collisions
+  # with V24's sign-in of p4v immediately before phase4_screenshots_x4.
+  local now rem
+  now=$(date +%s)
+  rem=$(( 30 - (now % 30) ))
+  sleep $(( rem + 1 ))
+
   cap docker run --rm --add-host host.docker.internal:host-gateway -v "$outdir:/out" -v "$GATE_DIR:/gate:ro" \
     -e GATE_VIEWER_PASSWORD -e GATE_VIEWER_TOTP -e GATE_ADMIN_PASSWORD -e GATE_ADMIN_TOTP \
     -e GATE_DISABLED_PASSWORD -e GATE_NOGROUP_PASSWORD -e GATE_NOGROUP_TOTP -e PW_MODULES=/usr/lib/node_modules \
