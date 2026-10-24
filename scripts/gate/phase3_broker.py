@@ -527,7 +527,7 @@ class Gate:
         """IdP outage: reachability watcher detects failure and sets enabled=false; local username/password form taken."""
         self.stop_stub_idp()
         start_t = p2.time.time()
-        timeout_bound = 35.0
+        timeout_bound = 25.0
         fallback_found = False
         last_status = None
         last_loc = None
@@ -647,31 +647,59 @@ class Gate:
 
     def p25_watcher_fault(self):
         """Watcher fault: stopping idp-watch container warns of stale heartbeat; restart preserves state; reset restores steady state."""
+        import json
         cid = p2.service_container(self.project, 'idp-watch')
         if not cid:
             fail('precondition: idp-watch container not found')
 
-        p2.docker('exec', cid, 'touch', '/var/run/idp_watch/p25-marker')
-
-        rc, _, err = p2.docker('stop', '-t', '2', cid)
+        # Thread 6: capture actual persisted watcher state before stopping
+        rc, state_pre, _ = p2.docker('exec', cid, 'cat', '/var/run/idp_watch/state.json')
         if rc != 0:
-            fail(f'docker stop idp-watch failed: {err}')
+            fail('failed to read state.json before stopping watcher')
+        pre_data = json.loads(state_pre)
+        saved_ts = pre_data.get('last_transition_ts')
+        saved_failures = pre_data.get('consecutive_failures')
 
-        rc, out, err_out = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'status'], timeout=30)
-        combined = (out or '') + '\n' + (err_out or '')
-        warned = 'idp-watch' in combined and ('not running' in combined or 'stale' in combined or 'offline' in combined)
-        if not warned:
-            fail(f'identity status did not warn of stopped idp-watch; got: {combined.strip()[-300:]}')
-
-        rc, _, err = p2.docker('start', cid)
+        # Thread 6: set a distinct state property (pause the watcher)
+        rc, _, err = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'pause'], timeout=30)
         if rc != 0:
-            fail(f'docker start idp-watch failed: {err}')
-        p2.time.sleep(2)
+            fail(f'failed to pause idp-watch: {(err or "").strip()[-160:]}')
+        p2.time.sleep(1)
 
-        rc, _, _ = p2.docker('exec', cid, 'test', '-f', '/var/run/idp_watch/p25-marker')
+        # Thread 5 + Thread 6: wrap stopped-watcher inspection in try...finally
+        try:
+            rc, _, err = p2.docker('stop', '-t', '2', cid)
+            if rc != 0:
+                fail(f'docker stop idp-watch failed: {err}')
+
+            rc, out, err_out = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'status'], timeout=30)
+            combined = (out or '') + '\n' + (err_out or '')
+            warned = 'idp-watch' in combined and ('not running' in combined or 'stale' in combined or 'offline' in combined)
+            if not warned:
+                fail(f'identity status did not warn of stopped idp-watch; got: {combined.strip()[-300:]}')
+        finally:
+            # Thread 5: guaranteed restart in finally block
+            rc, _, err = p2.docker('start', cid)
+            if rc != 0:
+                log(f'warning: failed to restart idp-watch: {err}')
+            p2.time.sleep(2)
+
+        # Thread 6: verify persisted state after restart
+        rc, state_post, _ = p2.docker('exec', cid, 'cat', '/var/run/idp_watch/state.json')
         if rc != 0:
-            fail('marker file in /var/run/idp_watch was not preserved across container restart (state volume lost)')
-        p2.docker('exec', cid, 'rm', '-f', '/var/run/idp_watch/p25-marker')
+            fail('failed to read state.json after restarting watcher')
+        post_data = json.loads(state_post)
+
+        # Assert persisted state is preserved
+        if post_data.get('last_transition_ts') != saved_ts:
+            fail(f'last_transition_ts changed: was {saved_ts}, now {post_data.get("last_transition_ts")}')
+        if post_data.get('paused') is not True:
+            fail('paused flag not preserved across restart')
+
+        # Thread 6: resume and reset
+        rc, _, err = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'resume'], timeout=30)
+        if rc != 0:
+            fail(f'failed to resume idp-watch: {(err or "").strip()[-160:]}')
 
         rc, rout, rerr = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'reset'], timeout=30)
         if rc != 0:
@@ -681,7 +709,7 @@ class Gate:
         if rep.get('enabled') is not True:
             fail('provider not enabled after idp-watch reset')
 
-        text = 'stopped watcher detected; state volume preserved across restart; idp-watch reset restored steady state'
+        text = 'stopped watcher detected; state volume preserved across restart; persisted state (last_transition_ts, paused flag) verified; idp-watch reset restored steady state'
         return 'PASS', text
 
     # ── driver ──

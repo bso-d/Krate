@@ -1449,23 +1449,56 @@ print(json.dumps(c))' "$plan" "$(env_value KEYCLOAK_IDP_WATCH_CLIENT_SECRET)")" 
         r_view="$(kcadm -- get "clients/$mgmt_id/roles/view-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
         r_manage="$(kcadm -- get "clients/$mgmt_id/roles/manage-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
         if [[ -n "$r_view" ]]; then
-          printf '[%s]\n' "$r_view" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null || true
+          printf '[%s]\n' "$r_view" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
+            || die "Keycloak refused to assign view-identity-providers role to krate-idp-watch service account"
         fi
         if [[ -n "$r_manage" ]]; then
-          printf '[%s]\n' "$r_manage" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null || true
+          printf '[%s]\n' "$r_manage" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
+            || die "Keycloak refused to assign manage-identity-providers role to krate-idp-watch service account"
         fi
       fi
     fi
     identity_journal "${1:-up}" reconciled "krate-idp-watch client and service account"
     IDENTITY_CHANGED=true
     ok "krate-idp-watch client and service account reconciled in realm $IDENTITY_REALM"
+  else
+    # Client already exists: verify and repair roles if needed
+    local sa_user_id mgmt_id current_roles r_view r_manage needs_view needs_manage
+    sa_user_id="$(kcadm -- get "clients/$id/service-account-user" -r "$IDENTITY_REALM" --fields id --format csv --noquotes 2>/dev/null || echo "")"
+    if [[ -n "$sa_user_id" ]]; then
+      mgmt_id="$(kcadm_client_id "$IDENTITY_REALM" realm-management 2>/dev/null || echo "")"
+      if [[ -n "$mgmt_id" ]]; then
+        current_roles="$(kcadm -- get "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" 2>/dev/null || echo "[]")"
+        r_view="$(kcadm -- get "clients/$mgmt_id/roles/view-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
+        r_manage="$(kcadm -- get "clients/$mgmt_id/roles/manage-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
+        needs_view=true; needs_manage=true
+        if echo "$current_roles" | grep -q '"name":"view-identity-providers"'; then
+          needs_view=false
+        fi
+        if echo "$current_roles" | grep -q '"name":"manage-identity-providers"'; then
+          needs_manage=false
+        fi
+        if $needs_view && [[ -n "$r_view" ]]; then
+          info "Assigning view-identity-providers role to krate-idp-watch service account..."
+          printf '[%s]\n' "$r_view" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
+            || die "Keycloak refused to assign view-identity-providers role to krate-idp-watch service account"
+          IDENTITY_CHANGED=true
+        fi
+        if $needs_manage && [[ -n "$r_manage" ]]; then
+          info "Assigning manage-identity-providers role to krate-idp-watch service account..."
+          printf '[%s]\n' "$r_manage" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
+            || die "Keycloak refused to assign manage-identity-providers role to krate-idp-watch service account"
+          IDENTITY_CHANGED=true
+        fi
+      fi
+    fi
   fi
   local wanted_theme current_theme
   wanted_theme="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("loginTheme", ""))' "$plan" 2>/dev/null || echo "")"
   if [[ -n "$wanted_theme" ]]; then
     current_theme="$(kcadm -- get "realms/$IDENTITY_REALM" --fields loginTheme --format csv --noquotes 2>/dev/null || echo "")"
     if [[ "$current_theme" != "$wanted_theme" ]]; then
-      kcadm -- update "realms/$IDENTITY_REALM" -s "loginTheme=$wanted_theme" >/dev/null 2>&1 || true
+      kcadm -- update "realms/$IDENTITY_REALM" -s "loginTheme=$wanted_theme" || die "Keycloak refused to update loginTheme"
       identity_journal "${1:-up}" reconciled "realm loginTheme ($wanted_theme)"
       IDENTITY_CHANGED=true
       ok "Realm $IDENTITY_REALM: loginTheme set to $wanted_theme from the realm plan"
@@ -1947,6 +1980,17 @@ cmd_identity_up() {
   # The PingFederate plan, when it exists, is applied to the realm here as well
   # (auth apply does it first); without the plan a leftover provider is removed.
   identity_apply_idp up
+  # Reconcile idp-watch after broker plan is applied
+  if [[ "$(env_value IDP_WATCH_ENABLED)" == true && -f "$SCRIPT_DIR/$IDENTITY_IDP_PLAN" ]]; then
+    local watch_sha sso
+    sso="$(sso_dir)"
+    watch_sha="$(python3 -c 'import hashlib, sys, os; h=hashlib.sha256(); [h.update(open(p, "rb").read()) for p in sys.argv[1:] if os.path.isfile(p)]; print(h.hexdigest()[:32])' "$sso/idp_watch.py" "$SCRIPT_DIR/$IDENTITY_IDP_PLAN")$(env_value KRATE_TRUSTSTORE_SHA)"
+    if [[ "$(env_value KRATE_IDP_WATCH_SHA)" != "$watch_sha" ]]; then
+      set_env_file_value "$ENV_FILE" KRATE_IDP_WATCH_SHA "$watch_sha"
+      IDENTITY_CHANGED=true
+    fi
+    identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --wait --wait-timeout "$IDENTITY_TIMEOUT" idp-watch
+  fi
   if [[ "$(env_value KEYCLOAK_ENABLED)" != true ]]; then
     set_env_file_value "$ENV_FILE" KEYCLOAK_ENABLED true
     ok "Set KEYCLOAK_ENABLED=true in .env (Keycloak now starts and stops with the cluster)"
@@ -2341,7 +2385,11 @@ cmd_identity_rotate() {
       elif [[ "$client" == krate-idp-watch ]]; then
         if [[ "$(env_value IDP_WATCH_ENABLED)" == true && -f "$SCRIPT_DIR/$IDENTITY_IDP_PLAN" ]]; then
           info "Recreating idp-watch with the new client secret..."
-          identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" idp-watch 2>/dev/null || true
+          identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" idp-watch \
+            || die "Failed to recreate idp-watch with new secret"
+          info "Verifying idp-watch can acquire a token with the new secret..."
+          sso="$(sso_dir)"
+          python3 "$sso/idp_watch.py" --test-token || die "Failed to verify token acquisition for idp-watch with new secret"
         fi
       elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml ]]; then
         info "Recreating Kafbat UI with the new client secret..."
@@ -2692,7 +2740,9 @@ cmd_identity_idp_watch_status() {
 cmd_identity_idp_watch_reset() {
   require_compose; require_compose_file; require_env
   identity_lock
-  local cid
+  local cid img
+  img="$(env_value IDP_WATCH_IMAGE)"
+  [[ -n "$img" ]] || die "IDP_WATCH_IMAGE is not set in .env"
   info "Re-enabling identity provider $IDENTITY_IDP_ALIAS in Keycloak..."
   kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
   kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS" -r "$IDENTITY_REALM" -s enabled=true || die "Keycloak update failed"
@@ -2701,7 +2751,8 @@ cmd_identity_idp_watch_reset() {
   if [[ -n "$cid" ]]; then
     info "Stopping idp-watch, clearing state, and restarting..."
     compose_cmd stop idp-watch >/dev/null 2>&1 || true
-    docker run --rm -v "$(cluster_project)_idp_watch_state:/var/run/idp_watch" "${IDP_WATCH_IMAGE}" rm -f /var/run/idp_watch/state.json /var/run/idp_watch/paused >/dev/null 2>&1 || true
+    docker run --rm -v "$(cluster_project)_idp_watch_state:/var/run/idp_watch" "$img" rm -f /var/run/idp_watch/state.json /var/run/idp_watch/paused \
+      || die "Could not clear watcher state volume"
     identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --wait --wait-timeout "$IDENTITY_TIMEOUT" idp-watch
   fi
   identity_journal "idp-watch reset" ok "provider enabled in Keycloak; state cleared; watcher restarted"

@@ -148,92 +148,97 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
     start_time = time.time()
 
     def remaining_timeout():
-        elapsed = time.time() - start_time
-        return max(1.0, timeout - elapsed)
+        rem = timeout - (time.time() - start_time)
+        if rem <= 0:
+            raise TimeoutError('Overall probe deadline exceeded')
+        return rem
 
-    provider = plan['identityProviders'][0]
-    config = provider.get('config', {})
-    issuer = (config.get('issuer') or '').rstrip('/')
-    jwks_url = config.get('jwksUrl')
-    token_url = config.get('tokenUrl')
-    user_info_url = config.get('userInfoUrl')
-
-    if not issuer:
-        return False, 'No issuer configured in plan'
-
-    # Probe 1: OIDC Discovery
-    # If issuer uses localhost/127.0.0.1, check backend endpoints for a reachable internal authority
-    disc_url = f'{issuer}/.well-known/openid-configuration'
-    issuer_parts = urllib.parse.urlsplit(issuer)
-    if issuer_parts.hostname in ('localhost', '127.0.0.1'):
-        # Check backend endpoints for non-loopback authority
-        backend_authority = None
-        for backend_url in [token_url, jwks_url, user_info_url]:
-            if backend_url:
-                backend_parts = urllib.parse.urlsplit(backend_url)
-                if backend_parts.hostname and backend_parts.hostname not in ('localhost', '127.0.0.1'):
-                    backend_authority = backend_parts.netloc
-                    break
-
-        if backend_authority:
-            # Construct discovery URL pointing to internal authority
-            disc_url = urllib.parse.urlunsplit((
-                issuer_parts.scheme,
-                backend_authority,
-                issuer_parts.path.rstrip('/') + '/.well-known/openid-configuration',
-                '',
-                ''
-            ))
-            # Add backend authority to allowed list so check_target_allowed permits it
-            allowed_authorities = allowed_authorities.copy()
-            allowed_authorities.add(backend_authority.lower())
-
-    status, body, err = probe_http(disc_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
-    if err:
-        return False, f'Discovery probe failed: {err}'
-    if status != 200:
-        return False, f'Discovery probe returned HTTP {status}'
     try:
-        disc_json = json.loads(body.decode('utf-8'))
-        reported_issuer = (disc_json.get('issuer') or '').rstrip('/')
-        if reported_issuer != issuer:
-            return False, f'Discovery issuer mismatch: expected {issuer}, got {reported_issuer}'
-    except Exception as exc:
-        return False, f'Discovery JSON parse error: {exc}'
+        provider = plan['identityProviders'][0]
+        config = provider.get('config', {})
+        issuer = (config.get('issuer') or '').rstrip('/')
+        jwks_url = config.get('jwksUrl')
+        token_url = config.get('tokenUrl')
+        user_info_url = config.get('userInfoUrl')
 
-    # Probe 2: JWKS Keys
-    if jwks_url:
-        status, body, err = probe_http(jwks_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
+        if not issuer:
+            return False, 'No issuer configured in plan'
+
+        # Probe 1: OIDC Discovery
+        # If issuer uses localhost/127.0.0.1, check backend endpoints for a reachable internal authority
+        disc_url = f'{issuer}/.well-known/openid-configuration'
+        issuer_parts = urllib.parse.urlsplit(issuer)
+        if issuer_parts.hostname in ('localhost', '127.0.0.1'):
+            # Check backend endpoints for non-loopback authority
+            backend_authority = None
+            for backend_url in [token_url, jwks_url, user_info_url]:
+                if backend_url:
+                    backend_parts = urllib.parse.urlsplit(backend_url)
+                    if backend_parts.hostname and backend_parts.hostname not in ('localhost', '127.0.0.1'):
+                        backend_authority = backend_parts.netloc
+                        break
+
+            if backend_authority:
+                # Construct discovery URL pointing to internal authority
+                disc_url = urllib.parse.urlunsplit((
+                    issuer_parts.scheme,
+                    backend_authority,
+                    issuer_parts.path.rstrip('/') + '/.well-known/openid-configuration',
+                    '',
+                    ''
+                ))
+                # Add backend authority to allowed list so check_target_allowed permits it
+                allowed_authorities = allowed_authorities.copy()
+                allowed_authorities.add(backend_authority.lower())
+
+        status, body, err = probe_http(disc_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
         if err:
-            return False, f'JWKS probe failed: {err}'
+            return False, f'Discovery probe failed: {err}'
         if status != 200:
-            return False, f'JWKS probe returned HTTP {status}'
+            return False, f'Discovery probe returned HTTP {status}'
         try:
-            jwks_json = json.loads(body.decode('utf-8'))
-            keys = jwks_json.get('keys')
-            if not isinstance(keys, list) or len(keys) == 0:
-                return False, 'JWKS keys array is missing or empty'
+            disc_json = json.loads(body.decode('utf-8'))
+            reported_issuer = (disc_json.get('issuer') or '').rstrip('/')
+            if reported_issuer != issuer:
+                return False, f'Discovery issuer mismatch: expected {issuer}, got {reported_issuer}'
         except Exception as exc:
-            return False, f'JWKS JSON parse error: {exc}'
+            return False, f'Discovery JSON parse error: {exc}'
 
-    # Probe 3: Token / UserInfo reachability (any HTTP status < 500 confirms application reachability)
-    if token_url:
-        status, _, err = probe_http(token_url, ssl_context, remaining_timeout(), method='POST',
-                                    allowed_authorities=allowed_authorities, post_data='grant_type=invalid_probe')
-        if err:
-            return False, f'Token endpoint reachability probe failed: {err}'
-        if status >= 500:
-            return False, f'Token endpoint returned server error HTTP {status}'
+        # Probe 2: JWKS Keys
+        if jwks_url:
+            status, body, err = probe_http(jwks_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
+            if err:
+                return False, f'JWKS probe failed: {err}'
+            if status != 200:
+                return False, f'JWKS probe returned HTTP {status}'
+            try:
+                jwks_json = json.loads(body.decode('utf-8'))
+                keys = jwks_json.get('keys')
+                if not isinstance(keys, list) or len(keys) == 0:
+                    return False, 'JWKS keys array is missing or empty'
+            except Exception as exc:
+                return False, f'JWKS JSON parse error: {exc}'
 
-    if user_info_url:
-        status, _, err = probe_http(user_info_url, ssl_context, remaining_timeout(), method='GET',
-                                    allowed_authorities=allowed_authorities)
-        if err:
-            return False, f'UserInfo reachability probe failed: {err}'
-        if status >= 500:
-            return False, f'UserInfo returned server error HTTP {status}'
+        # Probe 3: Token / UserInfo reachability (any HTTP status < 500 confirms application reachability)
+        if token_url:
+            status, _, err = probe_http(token_url, ssl_context, remaining_timeout(), method='POST',
+                                        allowed_authorities=allowed_authorities, post_data='grant_type=invalid_probe')
+            if err:
+                return False, f'Token endpoint reachability probe failed: {err}'
+            if status >= 500:
+                return False, f'Token endpoint returned server error HTTP {status}'
 
-    return True, None
+        if user_info_url:
+            status, _, err = probe_http(user_info_url, ssl_context, remaining_timeout(), method='GET',
+                                        allowed_authorities=allowed_authorities)
+            if err:
+                return False, f'UserInfo reachability probe failed: {err}'
+            if status >= 500:
+                return False, f'UserInfo returned server error HTTP {status}'
+
+        return True, None
+    except TimeoutError as exc:
+        return False, f'Probe deadline exceeded: {exc}'
 
 
 def acquire_keycloak_token(keycloak_url, realm, client_secret, timeout=5):
@@ -383,6 +388,7 @@ class IdpWatcher:
 
         # Internal state
         self.running = True
+        self.reconciliation_pending = False
         self.load_or_init_state()
 
     def is_paused(self):
@@ -391,17 +397,22 @@ class IdpWatcher:
         return pause_file.is_file()
 
     def reconcile_with_keycloak(self):
-        """Query Keycloak Admin API to align local state with live provider reality."""
+        """Query Keycloak Admin API to align local state with live provider reality.
+
+        Returns True on success, False on failure.
+        """
         if not self.watch_secret:
-            return
+            return False
         try:
             token = acquire_keycloak_token(self.keycloak_url, self.realm, self.watch_secret, timeout=self.timeout)
             live_enabled = get_live_provider_state(self.keycloak_url, self.realm, token, alias=DEFAULT_IDP_ALIAS, timeout=self.timeout)
             if live_enabled is not None:
                 self.provider_enabled = bool(live_enabled)
                 self.current_state = 'HEALTHY' if self.provider_enabled else 'FALLBACK'
+            return True
         except Exception as exc:
             sys.stderr.write(f"[idp-watch] Note: Keycloak state reconciliation skipped ({exc})\n")
+            return False
 
     def load_or_init_state(self):
         """Restore state from disk or initialize fresh, reconciling with Keycloak ground truth."""
@@ -466,8 +477,10 @@ class IdpWatcher:
                 live_enabled = get_live_provider_state(self.keycloak_url, self.realm, token, alias=DEFAULT_IDP_ALIAS, timeout=self.timeout)
                 if live_enabled != target_enabled:
                     sys.stderr.write(f"[idp-watch] Warning: verification readback expected enabled={target_enabled}, got {live_enabled}\n")
+                    self.reconciliation_pending = True
             except Exception as e:
                 sys.stderr.write(f"[idp-watch] Warning: verification readback query error: {e}\n")
+                self.reconciliation_pending = True
 
             action_name = 'fallback' if target_enabled is False else 'recovery'
             log_journal_entry(self.state_dir, f'idp-watch {action_name}', 'ok',
@@ -475,6 +488,7 @@ class IdpWatcher:
             return True
         except Exception as exc:
             sys.stderr.write(f"[idp-watch] Transition failed: {exc}\n")
+            self.reconciliation_pending = True
             self.reconcile_with_keycloak()
             self.persist_state()
             if self.fail_open and target_enabled is False:
@@ -495,6 +509,13 @@ class IdpWatcher:
             # Watcher paused via operator flag
             self.persist_state()
             return
+
+        # Attempt reconciliation if pending
+        if self.reconciliation_pending:
+            if self.reconcile_with_keycloak():
+                self.reconciliation_pending = False
+            else:
+                sys.stderr.write("[idp-watch] Reconciliation pending; will retry next cycle\n")
 
         probe_ok, error_reason = probe_idp(self.plan, self.ssl_context, self.timeout, self.authorities)
         self.last_error = error_reason
@@ -576,6 +597,22 @@ def parse_env_config():
 
 
 def main():
+    if '--test-token' in sys.argv:
+        config = parse_env_config()
+        if not config['watch_secret']:
+            sys.stderr.write("KEYCLOAK_IDP_WATCH_CLIENT_SECRET is not set\n")
+            return 1
+        try:
+            token = acquire_keycloak_token(config['keycloak_url'], config['realm'], config['watch_secret'], timeout=config['timeout'])
+            if not token:
+                sys.stderr.write("Acquired token is empty\n")
+                return 1
+            sys.stdout.write("Token acquisition verified successfully\n")
+            return 0
+        except Exception as exc:
+            sys.stderr.write(f"Token acquisition failed: {exc}\n")
+            return 1
+
     config = parse_env_config()
     plan_path = os.environ.get('IDP_PLAN_PATH', '/etc/krate/idp.json')
     truststores_dir = os.environ.get('IDP_TRUSTSTORES_DIR', '/etc/krate/truststores')
