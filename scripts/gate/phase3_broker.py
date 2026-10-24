@@ -682,6 +682,11 @@ class Gate:
             if not warned:
                 fail(f'identity status did not warn of stopped idp-watch; got: {combined.strip()[-300:]}')
 
+            rc, _, err = p2.docker('start', cid)
+            if rc != 0:
+                fail(f'docker start idp-watch failed: {err}')
+            p2.time.sleep(2)
+
             # Thread 6: verify persisted state after restart
             rc, state_post, _ = p2.docker('exec', cid, 'cat', '/var/run/idp_watch/state.json')
             if rc != 0:
@@ -694,10 +699,10 @@ class Gate:
             if post_data.get('paused') is not True:
                 fail('paused flag not preserved across restart')
         finally:
-            # Thread 5: guaranteed restart in finally block
-            rc, _, err = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'resume'], timeout=30)
-            if rc != 0:
-                fail(f'failed to resume idp-watch: {(err or "").strip()[-160:]}')
+            # Thread 5: guaranteed restart and unpause in finally block
+            p2.docker('start', cid)
+            p2.time.sleep(1)
+            p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'resume'], timeout=30)
 
         p2.time.sleep(2)
 

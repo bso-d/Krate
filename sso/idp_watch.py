@@ -127,7 +127,15 @@ def probe_http(url, ssl_context, timeout, method='GET', allowed_authorities=None
         if rem <= 0:
             raise TimeoutError('Probe deadline exceeded')
         with opener.open(req, timeout=rem) as resp:
-            body = resp.read()
+            chunks = []
+            while True:
+                if deadline and time.time() >= deadline:
+                    raise TimeoutError('Response body read deadline exceeded')
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            body = b''.join(chunks)
             return resp.status, body, None
     except urllib.error.HTTPError as exc:
         body = b''
@@ -437,6 +445,7 @@ class IdpWatcher:
             self.last_transition_ts = existing.get('last_transition_ts', 0.0)
             self.last_probe_ts = existing.get('last_probe_ts', 0.0)
             self.last_error = existing.get('last_error')
+            self.reconciliation_pending = existing.get('reconciliation_pending', False)
         else:
             self.current_state = 'HEALTHY'
             self.provider_enabled = True
@@ -445,9 +454,12 @@ class IdpWatcher:
             self.last_transition_ts = 0.0
             self.last_probe_ts = 0.0
             self.last_error = None
+            self.reconciliation_pending = False
 
         if not self.reconcile_with_keycloak():
             self.reconciliation_pending = True
+        else:
+            self.reconciliation_pending = False
         self.persist_state()
 
     def persist_state(self):
@@ -461,6 +473,7 @@ class IdpWatcher:
             'last_probe_ts': self.last_probe_ts,
             'last_error': self.last_error,
             'paused': self.is_paused(),
+            'reconciliation_pending': self.reconciliation_pending,
         }
         write_state_file(self.state_dir, state_data)
 
