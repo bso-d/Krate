@@ -1469,25 +1469,20 @@ print(json.dumps(c))' "$plan" "$(env_value KEYCLOAK_IDP_WATCH_CLIENT_SECRET)")" 
       mgmt_id="$(kcadm_client_id "$IDENTITY_REALM" realm-management 2>/dev/null || echo "")"
       if [[ -n "$mgmt_id" ]]; then
         current_roles="$(kcadm -- get "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" 2>/dev/null || echo "[]")"
-        r_view="$(kcadm -- get "clients/$mgmt_id/roles/view-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
-        r_manage="$(kcadm -- get "clients/$mgmt_id/roles/manage-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
-        needs_view=true; needs_manage=true
-        if echo "$current_roles" | grep -q '"name":"view-identity-providers"'; then
-          needs_view=false
-        fi
-        if echo "$current_roles" | grep -q '"name":"manage-identity-providers"'; then
-          needs_manage=false
-        fi
-        if $needs_view && [[ -n "$r_view" ]]; then
+        r_view="$(kcadm -- get "clients/$mgmt_id/roles/view-identity-providers" -r "$IDENTITY_REALM")" || die "Keycloak query failed for role view-identity-providers"
+        r_manage="$(kcadm -- get "clients/$mgmt_id/roles/manage-identity-providers" -r "$IDENTITY_REALM")" || die "Keycloak query failed for role manage-identity-providers"
+        needs_view="$(python3 -c 'import json, sys; roles={r.get("name") for r in json.load(sys.stdin)}; print("false" if "view-identity-providers" in roles else "true")' <<< "$current_roles")"
+        needs_manage="$(python3 -c 'import json, sys; roles={r.get("name") for r in json.load(sys.stdin)}; print("false" if "manage-identity-providers" in roles else "true")' <<< "$current_roles")"
+        if [[ "$needs_view" == true ]]; then
           info "Assigning view-identity-providers role to krate-idp-watch service account..."
           printf '[%s]\n' "$r_view" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
-            || die "Keycloak refused to assign view-identity-providers role to krate-idp-watch service account"
+            || die "Keycloak refused to assign view-identity-providers role"
           IDENTITY_CHANGED=true
         fi
-        if $needs_manage && [[ -n "$r_manage" ]]; then
+        if [[ "$needs_manage" == true ]]; then
           info "Assigning manage-identity-providers role to krate-idp-watch service account..."
           printf '[%s]\n' "$r_manage" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
-            || die "Keycloak refused to assign manage-identity-providers role to krate-idp-watch service account"
+            || die "Keycloak refused to assign manage-identity-providers role"
           IDENTITY_CHANGED=true
         fi
       fi
@@ -1990,6 +1985,12 @@ cmd_identity_up() {
       IDENTITY_CHANGED=true
     fi
     identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --wait --wait-timeout "$IDENTITY_TIMEOUT" idp-watch
+  else
+    local watch_cid
+    watch_cid="$(identity_container idp-watch 2>/dev/null || echo "")"
+    if [[ -n "$watch_cid" ]]; then
+      identity_compose --profile idp-watch stop idp-watch >/dev/null 2>&1 || true
+    fi
   fi
   if [[ "$(env_value KEYCLOAK_ENABLED)" != true ]]; then
     set_env_file_value "$ENV_FILE" KEYCLOAK_ENABLED true
@@ -2387,9 +2388,11 @@ cmd_identity_rotate() {
           info "Recreating idp-watch with the new client secret..."
           identity_compose --profile idp-watch up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" idp-watch \
             || die "Failed to recreate idp-watch with new secret"
-          info "Verifying idp-watch can acquire a token with the new secret..."
-          sso="$(sso_dir)"
-          python3 "$sso/idp_watch.py" --test-token || die "Failed to verify token acquisition for idp-watch with new secret"
+          local watch_cid
+          watch_cid="$(identity_container idp-watch)"
+          [[ -n "$watch_cid" ]] || die "idp-watch container not found after recreation"
+          docker exec "$watch_cid" python3 /opt/krate/idp_watch.py --test-token >/dev/null \
+            || die "Failed to verify token acquisition inside idp-watch with new secret"
         fi
       elif [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml ]]; then
         info "Recreating Kafbat UI with the new client secret..."

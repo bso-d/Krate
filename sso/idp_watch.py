@@ -88,16 +88,19 @@ def build_ssl_context(truststore_dir):
 
 class AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Enforce destination allowlist on every redirect hop."""
-    def __init__(self, allowed_authorities):
+    def __init__(self, allowed_authorities, deadline=None):
         super().__init__()
         self.allowed_authorities = allowed_authorities
+        self.deadline = deadline
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         check_target_allowed(newurl, self.allowed_authorities)
+        if self.deadline and time.time() >= self.deadline:
+            raise TimeoutError('Redirect probe deadline exceeded')
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def probe_http(url, ssl_context, timeout, method='GET', allowed_authorities=None, post_data=None):
+def probe_http(url, ssl_context, timeout, method='GET', allowed_authorities=None, post_data=None, deadline=None):
     """Execute single HTTP probe with timeout and SSL context.
     
     Returns (status_code, body_bytes, error_message).
@@ -116,11 +119,14 @@ def probe_http(url, ssl_context, timeout, method='GET', allowed_authorities=None
 
     handlers = [urllib.request.HTTPSHandler(context=ssl_context)]
     if allowed_authorities:
-        handlers.append(AllowlistRedirectHandler(allowed_authorities))
+        handlers.append(AllowlistRedirectHandler(allowed_authorities, deadline=deadline))
     opener = urllib.request.build_opener(*handlers)
 
     try:
-        with opener.open(req, timeout=timeout) as resp:
+        rem = deadline - time.time() if deadline else timeout
+        if rem <= 0:
+            raise TimeoutError('Probe deadline exceeded')
+        with opener.open(req, timeout=rem) as resp:
             body = resp.read()
             return resp.status, body, None
     except urllib.error.HTTPError as exc:
@@ -145,13 +151,7 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
     
     Returns (ok: bool, error_reason: str or None).
     """
-    start_time = time.time()
-
-    def remaining_timeout():
-        rem = timeout - (time.time() - start_time)
-        if rem <= 0:
-            raise TimeoutError('Overall probe deadline exceeded')
-        return rem
+    deadline = time.time() + timeout
 
     try:
         provider = plan['identityProviders'][0]
@@ -191,7 +191,10 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
                 allowed_authorities = allowed_authorities.copy()
                 allowed_authorities.add(backend_authority.lower())
 
-        status, body, err = probe_http(disc_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
+        rem = deadline - time.time()
+        if rem <= 0:
+            raise TimeoutError('Probe deadline exceeded')
+        status, body, err = probe_http(disc_url, ssl_context, rem, allowed_authorities=allowed_authorities, deadline=deadline)
         if err:
             return False, f'Discovery probe failed: {err}'
         if status != 200:
@@ -206,7 +209,10 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
 
         # Probe 2: JWKS Keys
         if jwks_url:
-            status, body, err = probe_http(jwks_url, ssl_context, remaining_timeout(), allowed_authorities=allowed_authorities)
+            rem = deadline - time.time()
+            if rem <= 0:
+                raise TimeoutError('Probe deadline exceeded')
+            status, body, err = probe_http(jwks_url, ssl_context, rem, allowed_authorities=allowed_authorities, deadline=deadline)
             if err:
                 return False, f'JWKS probe failed: {err}'
             if status != 200:
@@ -221,16 +227,22 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
 
         # Probe 3: Token / UserInfo reachability (any HTTP status < 500 confirms application reachability)
         if token_url:
-            status, _, err = probe_http(token_url, ssl_context, remaining_timeout(), method='POST',
-                                        allowed_authorities=allowed_authorities, post_data='grant_type=invalid_probe')
+            rem = deadline - time.time()
+            if rem <= 0:
+                raise TimeoutError('Probe deadline exceeded')
+            status, _, err = probe_http(token_url, ssl_context, rem, method='POST',
+                                        allowed_authorities=allowed_authorities, post_data='grant_type=invalid_probe', deadline=deadline)
             if err:
                 return False, f'Token endpoint reachability probe failed: {err}'
             if status >= 500:
                 return False, f'Token endpoint returned server error HTTP {status}'
 
         if user_info_url:
-            status, _, err = probe_http(user_info_url, ssl_context, remaining_timeout(), method='GET',
-                                        allowed_authorities=allowed_authorities)
+            rem = deadline - time.time()
+            if rem <= 0:
+                raise TimeoutError('Probe deadline exceeded')
+            status, _, err = probe_http(user_info_url, ssl_context, rem, method='GET',
+                                        allowed_authorities=allowed_authorities, deadline=deadline)
             if err:
                 return False, f'UserInfo reachability probe failed: {err}'
             if status >= 500:
@@ -434,7 +446,8 @@ class IdpWatcher:
             self.last_probe_ts = 0.0
             self.last_error = None
 
-        self.reconcile_with_keycloak()
+        if not self.reconcile_with_keycloak():
+            self.reconciliation_pending = True
         self.persist_state()
 
     def persist_state(self):

@@ -578,20 +578,24 @@ class Gate:
         return 'PASS', text
 
     def p26_reconcile_idempotence(self):
-        """Reconciliation idempotence: krate auth apply while provider is disabled must not clobber disabled state."""
+        """Reconciliation idempotence: krate auth apply and krate identity up while provider is disabled must not clobber disabled state."""
         rep = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep.get('enabled') is not False:
             fail(f'precondition: provider must be disabled before P26; got enabled={rep.get("enabled")}')
 
-        rc, out, err = p2.run([os.path.join(self.edition, 'krate'), 'auth', 'apply'], timeout=120)
-        if rc != 0:
-            fail(f'krate auth apply failed (rc {rc}): {(err or out).strip()[-160:]}')
+        rc1, out1, err1 = p2.run([os.path.join(self.edition, 'krate'), 'auth', 'apply'], timeout=120)
+        if rc1 != 0:
+            fail(f'krate auth apply failed (rc {rc1}): {(err1 or out1).strip()[-160:]}')
+
+        rc2, out2, err2 = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'up'], timeout=120)
+        if rc2 != 0:
+            fail(f'krate identity up failed (rc {rc2}): {(err2 or out2).strip()[-160:]}')
 
         rep_after = self.idp_keycloak().get('identity-provider/instances/pingfederate') or {}
         if rep_after.get('enabled') is not False:
-            fail(f'krate auth apply clobbered disabled provider; enabled is now {rep_after.get("enabled")}')
+            fail(f'krate auth apply / krate identity up clobbered disabled provider; enabled is now {rep_after.get("enabled")}')
 
-        text = 'krate auth apply executed while provider disabled; provider remained enabled=False (no clobber)'
+        text = 'both krate auth apply and krate identity up executed while provider disabled; provider remained enabled=False'
         return 'PASS', text
 
     def p27_break_glass_parity(self):
@@ -677,30 +681,27 @@ class Gate:
             warned = 'idp-watch' in combined and ('not running' in combined or 'stale' in combined or 'offline' in combined)
             if not warned:
                 fail(f'identity status did not warn of stopped idp-watch; got: {combined.strip()[-300:]}')
+
+            # Thread 6: verify persisted state after restart
+            rc, state_post, _ = p2.docker('exec', cid, 'cat', '/var/run/idp_watch/state.json')
+            if rc != 0:
+                fail('failed to read state.json after restarting watcher')
+            post_data = json.loads(state_post)
+
+            # Assert persisted state is preserved
+            if post_data.get('last_transition_ts') != saved_ts:
+                fail(f'last_transition_ts changed: was {saved_ts}, now {post_data.get("last_transition_ts")}')
+            if post_data.get('paused') is not True:
+                fail('paused flag not preserved across restart')
         finally:
             # Thread 5: guaranteed restart in finally block
-            rc, _, err = p2.docker('start', cid)
+            rc, _, err = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'resume'], timeout=30)
             if rc != 0:
-                log(f'warning: failed to restart idp-watch: {err}')
-            p2.time.sleep(2)
+                fail(f'failed to resume idp-watch: {(err or "").strip()[-160:]}')
 
-        # Thread 6: verify persisted state after restart
-        rc, state_post, _ = p2.docker('exec', cid, 'cat', '/var/run/idp_watch/state.json')
-        if rc != 0:
-            fail('failed to read state.json after restarting watcher')
-        post_data = json.loads(state_post)
+        p2.time.sleep(2)
 
-        # Assert persisted state is preserved
-        if post_data.get('last_transition_ts') != saved_ts:
-            fail(f'last_transition_ts changed: was {saved_ts}, now {post_data.get("last_transition_ts")}')
-        if post_data.get('paused') is not True:
-            fail('paused flag not preserved across restart')
-
-        # Thread 6: resume and reset
-        rc, _, err = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'resume'], timeout=30)
-        if rc != 0:
-            fail(f'failed to resume idp-watch: {(err or "").strip()[-160:]}')
-
+        # Thread 6: reset
         rc, rout, rerr = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'reset'], timeout=30)
         if rc != 0:
             fail(f'krate identity idp-watch reset failed: {(rerr or rout).strip()[-160:]}')
