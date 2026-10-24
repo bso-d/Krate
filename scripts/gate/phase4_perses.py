@@ -105,6 +105,20 @@ def managed_binding_stems(names, exclude=()):
     return out
 
 
+def ledger_change(svc, old, new):
+    """V20's per-service decision for a (id, StartedAt) pair. Same policy as phase4_grafana's
+    core_ledger_change (its 3-tuple adds RestartCount): a new container id always counts; a bare
+    StartedAt move with the SAME id does not count for keycloak, the one service V15/V16
+    intentionally stop and start (the StartedAt exemption is scoped to keycloak); every other
+    service counts a StartedAt move as a change."""
+    if old[0] != new[0]:
+        return True, '%s: NEW_ID id %s -> %s (started %s -> %s)' % (
+            svc, old[0][:12], new[0][:12], old[1][:19], new[1][:19])
+    if old[1] != new[1]:
+        note = '%s: SAME_ID started %s -> %s' % (svc, old[1][:19], new[1][:19])
+        return svc != 'keycloak', note
+    return False, ''
+
 class PersesDriver:
     """One user agent on the Perses TLS gateway (https://H:PERSES_PORT):
     cookie jar, NoRedirect, pinned TLS (gate.tls). Adds session cookies (_oauth2_proxy,
