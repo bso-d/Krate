@@ -392,6 +392,8 @@ def check_compose(checks):
         e(kc.get('KC_DB_TLS_MODE') == 'verify-server', f'{edition}/keycloak: KC_DB_TLS_MODE must be verify-server; got {kc.get("KC_DB_TLS_MODE")!r}')
         e(bool(kc.get('KC_DB_TLS_TRUST_STORE_FILE')), f'{edition}/keycloak: KC_DB_TLS_TRUST_STORE_FILE must be set')
         e(kc.get('KC_HTTP_MANAGEMENT_RELATIVE_PATH') == '/', f'{edition}/keycloak: KC_HTTP_MANAGEMENT_RELATIVE_PATH must stay /')
+        e(kc.get('JAVA_OPTS_APPEND') == '-Dliquibase.analytics.enabled=false',
+          f'{edition}/keycloak: JAVA_OPTS_APPEND must be -Dliquibase.analytics.enabled=false; got {kc.get("JAVA_OPTS_APPEND")!r}')
         e('KEYCLOAK_CLI_CLIENT_SECRET' in kc, f'{edition}/keycloak: KEYCLOAK_CLI_CLIENT_SECRET must be passed for the realm placeholder')
         e(bool(services.get('keycloak', {}).get('healthcheck', {}).get('test')), f'{edition}/keycloak: healthcheck must be present')
         targets = {mount.get('target') for mount in services.get('keycloak', {}).get('volumes', [])}
