@@ -115,16 +115,19 @@ class TotpSteps:
 
     def lock_for(self, user):
         with self._guard:
-            return self._locks.setdefault(user, threading.Lock())
+            user_lock = self._locks.setdefault(user, threading.Lock())
+        return user_lock
 
     def used_set(self, user):
         """The live set of used steps of one user (phase2_kafbat.User.used can share it)."""
         with self._guard:
-            return self._steps.setdefault(user, set())
+            steps = self._steps.setdefault(user, set())
+        return steps
 
     def used(self, user):
         with self._guard:
-            return frozenset(self._steps.get(user, ()))
+            frozen = frozenset(self._steps.get(user, ()))
+        return frozen
 
     def mark(self, user, *steps):
         with self.lock_for(user):
@@ -159,12 +162,17 @@ class TotpSteps:
                 now = self._clock()
                 current = int(now // TOTP_PERIOD)
                 remaining = TOTP_PERIOD - now % TOTP_PERIOD
+                selected = None
                 for step in range(current, current + lookahead + 1):
                     if step in used or (step == current and remaining <= TOTP_STEP_GUARD):
                         continue
                     used.add(step)
-                    return totp_code(secret_b32, step), step, now - started
+                    selected = (totp_code(secret_b32, step), step, now - started)
+                    break
+                if selected is not None:
+                    break
                 self._sleep(remaining + 0.5)
+        return selected
 
 
 # ─── background threads for the timing rows (section 5) ───────────────────────
@@ -209,7 +217,7 @@ class TimedRows:
         thread, box = self._rows[row_id]
         thread.join(timeout)
         if thread.is_alive():
-            return ('FAIL', 'row thread still running after %s s (timeout)' % timeout)
+            return 'FAIL', 'row thread still running after %s s (timeout)' % timeout
         return box.get('result') or ('FAIL', 'row thread produced no result')
 
     def alive(self):
@@ -383,51 +391,43 @@ class Phase4Gate(p2.Gate):
             time.sleep(2)
         return None
 
-    def mon_container(self, service, all_states=True):
+    @staticmethod
+    def _project_container(project, service, all_states=True):
         flags = ['-aq'] if all_states else ['-q']
-        rc, out, _ = p2.docker('ps', *flags, '--filter', 'label=com.docker.compose.project=' + self.monitor_project,
+        rc, out, _ = p2.docker('ps', *flags, '--filter', 'label=com.docker.compose.project=' + project,
                                '--filter', 'label=com.docker.compose.service=' + service)
         ids = out.split()
         return ids[0] if rc == 0 and ids else None
 
+    @staticmethod
+    def _project_id_map(project):
+        found = {}
+        rc, out, _ = p2.docker('ps', '-aq', '--filter',
+                               'label=com.docker.compose.project=' + project)
+        if rc != 0 or not out.split():
+            return found
+        for cid in out.split():
+            rc2, info, _ = p2.docker('inspect', '--format',
+                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
+            if rc2 == 0 and info.split():
+                parts = info.split()
+                if len(parts) >= 3 and parts[0] != '<no':  # label-less: docker prints '<no value>'
+                    found[parts[0]] = (parts[1], ' '.join(parts[2:]))
+        return found
+
+    def mon_container(self, service, all_states=True):
+        return self._project_container(self.monitor_project, service, all_states)
+
     def cluster_container(self, service, all_states=True):
-        flags = ['-aq'] if all_states else ['-q']
-        rc, out, _ = p2.docker('ps', *flags, '--filter', 'label=com.docker.compose.project=' + self.project,
-                               '--filter', 'label=com.docker.compose.service=' + service)
-        ids = out.split()
-        return ids[0] if rc == 0 and ids else None
+        return self._project_container(self.project, service, all_states)
 
     def mon_id_map(self):
         """{service: (container id, StartedAt)} of the monitoring project."""
-        found = {}
-        rc, out, _ = p2.docker('ps', '-aq', '--filter',
-                               'label=com.docker.compose.project=' + self.monitor_project)
-        if rc != 0 or not out.split():
-            return found
-        for cid in out.split():
-            rc2, info, _ = p2.docker('inspect', '--format',
-                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
-            if rc2 == 0 and info.split():
-                parts = info.split()
-                if len(parts) >= 3 and parts[0] != '<no':  # label-less: docker prints '<no value>'
-                    found[parts[0]] = (parts[1], ' '.join(parts[2:]))
-        return found
+        return self._project_id_map(self.monitor_project)
 
     def cluster_id_map(self):
         """{service: (container id, StartedAt)} of the cluster project."""
-        found = {}
-        rc, out, _ = p2.docker('ps', '-aq', '--filter',
-                               'label=com.docker.compose.project=' + self.project)
-        if rc != 0 or not out.split():
-            return found
-        for cid in out.split():
-            rc2, info, _ = p2.docker('inspect', '--format',
-                                     '{{index .Config.Labels "com.docker.compose.service"}} {{.Id}} {{.State.StartedAt}}', cid)
-            if rc2 == 0 and info.split():
-                parts = info.split()
-                if len(parts) >= 3 and parts[0] != '<no':  # label-less: docker prints '<no value>'
-                    found[parts[0]] = (parts[1], ' '.join(parts[2:]))
-        return found
+        return self._project_id_map(self.project)
 
     # ── realm users ──
     def master_kcadm(self):
@@ -510,7 +510,7 @@ class Phase4Gate(p2.Gate):
         return code, step, waited
 
     # ── rows ──
-    def stub(self, row_id, needs):
+    def stub(self, _row_id, needs):
         """Scaffold marker for a row body that awaits the live walk notes (rule 11).
 
         Every U*/V* row starts here; a row is replaced by its real body only
@@ -812,7 +812,7 @@ def helper_main(gate_cls, prog, argv=None, doc=None, extra=None):
     parser = build_parser(prog, doc, extra)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     check_run_args(parser, args, gate_cls.CASES)
-    signal.signal(signal.SIGTERM, p2._on_sigterm)
+    signal.signal(signal.SIGTERM, p2.on_sigterm)
     started = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     log('%s run %s slice %s base %s monitor project %s' % (prog, started, gate_cls.SLICE,
                                                            args.base_url, args.monitor_project))

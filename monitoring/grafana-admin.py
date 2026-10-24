@@ -179,7 +179,7 @@ def fail(operation, message):
     sys.exit(1)
 
 
-def resolve_config(operation):
+def resolve_config(_operation=None):
     """Read connection and credentials from the environment only."""
     url = os.environ.get('GRAFANA_URL', '').strip()
     if not url:

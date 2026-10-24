@@ -14,8 +14,8 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from common import (Component, Unresolved, VerificationError, classify_expression, http_get,
-                    log, quote_url, slug)
+from common import (Component, Unresolved, VerificationError, aggregate_expressions,
+                    http_get, log, quote_url, slug)
 
 GITLAB = 'https://gitlab.alpinelinux.org'
 PROJECT = 'alpine%2Faports'
@@ -46,7 +46,7 @@ def is_azul(row):
     return 'azul' in (row.get('m') or '').lower()
 
 
-def components(facts, image_ref, arch, cache, registry):
+def components(facts, image_ref, arch, _cache, registry):
     rows = parse_installed(facts.get('apk_installed'))
     if not rows:
         return 0
@@ -63,14 +63,10 @@ def components(facts, image_ref, arch, cache, registry):
         comp = registry.get(key)
         if comp is None:
             licences = sorted({p.get('L', '') for p in pkgs})
-            results = [classify_expression(l) for l in licences]
-            cat = ('copyleft' if any(r['category'] == 'copyleft' for r in results) else
-                   'unknown' if any(r['category'] == 'unknown' for r in results) else
-                   'elected-permissive' if any(r['category'] == 'elected-permissive' for r in results)
-                   else 'permissive')
+            cat, fams = aggregate_expressions(licences)
             comp = Component(key=key, ecosystem='alpine', name=origin, version=ver,
                              licence=' AND '.join(l for l in licences if l) or '(none declared)',
-                             category=cat, families=sorted({f for r in results for f in r['families']}))
+                             category=cat, families=fams)
             comp.fetch = {'commit': commit, 'branch': branch, 'arches': set(), 'apk_arch': set()}
             if not commit:
                 comp.notes.append('package has no aports commit (not built from Alpine aports); '
@@ -230,7 +226,7 @@ def prepare(comps, cache, workroot):
                 comp.fetch.setdefault('eval', {})[carch] = results.get(job_id)
 
 
-def fetch(comp, cache, out_dir, rel_root):
+def fetch(comp, cache, _out_dir, rel_root):
     if comp.fetch.get('error'):
         raise comp.fetch['error']
     commit = comp.fetch.get('commit')

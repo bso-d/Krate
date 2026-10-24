@@ -700,11 +700,11 @@ def check_gate_scripts(checks):
 
     def _create_topic_case(post_status, delete_status):
         fake_gate = types.SimpleNamespace(cluster='cluster-x', cleanup_topics=set())
-        browser = _FakeTopicBrowser(post_status, delete_status)
+        topic_browser = _FakeTopicBrowser(post_status, delete_status)
         try:
-            return 'return', p3_module.Gate.create_topic(fake_gate, browser, 'gate3-check'), browser.calls
+            return 'return', p3_module.Gate.create_topic(fake_gate, topic_browser, 'gate3-check'), topic_browser.calls
         except p3_module.Outcome as blocked:
-            return 'fail', (blocked.status, blocked.text), browser.calls
+            return 'fail', (blocked.status, blocked.text), topic_browser.calls
 
     kind, got, calls = _create_topic_case(200, 500)
     e(kind == 'fail' and got[0] == 'FAIL' and '500' in got[1],
@@ -750,7 +750,7 @@ def check_gate_scripts(checks):
     # strings and step records alike — must be stripped of query and fragment
     # before it can reach a manifest or summary file.
     # Same rule for the Mac agent's helpers under scripts/gate/mac.
-    for story_folder in ((ROOT / 'scripts/gate', ROOT / 'scripts/gate/mac')):
+    for story_folder in (ROOT / 'scripts/gate', ROOT / 'scripts/gate/mac'):
         for story_path in sorted(story_folder.glob('*.mjs')):
             story = story_path.read_text()
             for match in re.finditer(r'\.url\(\)', story):
@@ -868,9 +868,9 @@ def check_gate_scripts(checks):
     # ── review round (TOPOFIX-IMPL-REVIEW §4): the four defects the 48 mutants could not reach ──
     # B1: the preflight must skip the agent's own directory BEFORE the digest read; pin the choice
     # by text order (the `continue` sits above the hashlib read in agent_preflight's python).
-    preflight = runner_text[runner_text.index('agent_preflight() {'):runner_text.index('case "$BROWSER_MODE" in', runner_text.index('agent_preflight() {'))]
-    skip_at = preflight.find("startswith(\"mac/\")")
-    hash_at = preflight.find('hashlib.sha256(open(local')
+    preflight_block = runner_text[runner_text.index('agent_preflight() {'):runner_text.index('case "$BROWSER_MODE" in', runner_text.index('agent_preflight() {'))]
+    skip_at = preflight_block.find("startswith(\"mac/\")")
+    hash_at = preflight_block.find('hashlib.sha256(open(local')
     e(0 <= skip_at < hash_at,
       'the agent preflight skips scripts/gate/mac/* BEFORE computing the digest (review B1: the agent\'s own files are not in the guest, so reading before the skip - or no skip at all - refuses every agent run)')
     # S1: the external-attempt guard compares host NAMES (the stories build the tracker with the
@@ -998,7 +998,8 @@ def check_gate_scripts(checks):
     try:
         u9_probe = types.SimpleNamespace(
             one_request=lambda driver: (u9_hits.append(1), (200, ''))[1])
-        u9_keeps = u9_gate.Gate._u9_keep_active.__get__(u9_probe, u9_gate.Gate)(None, 6)
+        u9_keep_fn = getattr(u9_gate.Gate, '_u9_keep_active')
+        u9_keeps = u9_keep_fn.__get__(u9_probe, u9_gate.Gate)(None, 6)
     finally:
         _u9_time.monotonic, _u9_time.sleep = u9_real_mono, u9_real_sleep
     e(u9_keeps == 6 and len(u9_hits) == 6 and u9_now[0] - 1000.0 >= 360,
@@ -1258,14 +1259,14 @@ def check_firewall_round4(checks):
         RAW=/dev/stderr; KRATE=/usr/bin/true
         '''
 
-        def run(condition, case, script, env, expected):
-            result = subprocess.run([bash, '-c', script], env=dict(os.environ, **env),
+        def run(condition, case_name, script_body, env_vars, expected_verdict):
+            result = subprocess.run([bash, '-c', script_body], env=dict(os.environ, **env_vars),
                                     text=True, capture_output=True, timeout=5)
             verdict = next((line.split('|')[0].split()[-1] for line in result.stdout.splitlines()
                             if line.startswith('RECORD ')), 'MISSING')
-            checks.expect(verdict == expected, f'{condition}/{case}: expected {expected}, got {verdict}; rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}')
-            if condition == 'W5 listener precondition' and expected == 'FAIL':
-                checks.expect('AGENT_CALLED' not in result.stdout, f'W5/{case}: failed control precondition must stop before requesting the Mac sweep')
+            checks.expect(verdict == expected_verdict, f'{condition}/{case_name}: expected {expected_verdict}, got {verdict}; rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}')
+            if condition == 'W5 listener precondition' and expected_verdict == 'FAIL':
+                checks.expect('AGENT_CALLED' not in result.stdout, f'W5/{case_name}: failed control precondition must stop before requesting the Mac sweep')
 
         w5_stub = r'''
         firewall-cmd() { echo "$FW_STATE"; }
@@ -1505,11 +1506,11 @@ def check_start_cluster_monitor_realm(checks):
     ''' + body + '\nstart_cluster --local --monitor-realm\nprintf \'RC %s\\n\' "$?"\n')
         def run_bringup(realm_rc, mon_up_rc=0, graf_set_rc=0):
             calls_file.write_text('')
-            r = subprocess.run([bash, str(script)], env=dict(os.environ, KRATE=str(krate), REALM_RC=str(realm_rc),
-                                                             MON_UP_RC=str(mon_up_rc), GRAF_SET_RC=str(graf_set_rc),
-                                                             CALLS_FILE=str(calls_file)), text=True, capture_output=True, timeout=10)
-            seq = [line[len('KRATE '):].rstrip() for line in calls_file.read_text().splitlines()]
-            return r, seq
+            proc_res = subprocess.run([bash, str(script)], env=dict(os.environ, KRATE=str(krate), REALM_RC=str(realm_rc),
+                                                                    MON_UP_RC=str(mon_up_rc), GRAF_SET_RC=str(graf_set_rc),
+                                                                    CALLS_FILE=str(calls_file)), text=True, capture_output=True, timeout=10)
+            call_seq = [line[len('KRATE '):].rstrip() for line in calls_file.read_text().splitlines()]
+            return proc_res, call_seq
         r, seq = run_bringup(0)
         e(seq == ['auth configure --local',
                   'config set KAFKA_UI_AUTH_CONFIG=runtime.yml',
@@ -2366,22 +2367,24 @@ def check_browser_probe_consumer(checks):
                                                for target in item.targets))]
     # Compile the shipped method ASTs without constructing a cluster-backed Gate.
     selected = ast.ClassDef(name='ProbeConsumer', bases=[], keywords=[], body=members, decorator_list=[])
-    namespace = {'os': os, 'json': json, 'HERE': str(ROOT / 'scripts/gate'), 'log': lambda _message: None}
+    namespace = {'os': os, 'json': json, 'contextlib': contextlib, 'HERE': str(ROOT / 'scripts/gate'), 'log': lambda _message: None}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[selected], type_ignores=[])),
                  'shipped-phase4-browser-consumer', 'exec'), namespace)
     consumer = namespace['ProbeConsumer']()
     consumer._benign_404 = lambda _item: False
+    network_flake = getattr(consumer, '_network_flake')
+    browser_attempt = getattr(consumer, '_browser_attempt')
     clean = {'cspViolations': 0, 'pageErrors': 0, 'failedRequests': [], 'http4xx5xx': []}
     network = dict(clean, failedRequests=[{'err': 'net::ERR_CONNECTION_RESET'}])
     e = checks.expect
     e(consumer.browser_clean(clean), 'clean browser summary must pass')
-    e(consumer._network_flake(network), 'successful child with network-only dirt retains one retry')
+    e(network_flake(network), 'successful child with network-only dirt retains one retry')
     failure_fields = ({'storyFailed': 'certificate mismatch'},
                       {'failures': [{'stage': 'browser cleanup failed', 'error': 'closed failed'}]},
                       {'probeExitCode': 1}, {'probeExitCode': -9})
     for fields in failure_fields:
         e(not consumer.browser_clean(dict(clean, **fields)), f'browser_clean must reject {fields}')
-        e(not consumer._network_flake(dict(network, **fields)), f'retry must not erase {fields}')
+        e(not network_flake(dict(network, **fields)), f'retry must not erase {fields}')
 
     consumer.base = 'https://fixture.test'
     consumer.origin = types.SimpleNamespace(hostname='fixture.test')
@@ -2395,8 +2398,8 @@ def check_browser_probe_consumer(checks):
         for rc in (0, 1, -9):
             namespace['p2'] = types.SimpleNamespace(docker=lambda *args, **kwargs:
                 (rc, 'SUMMARY ' + json.dumps(dict(clean, probeExitCode=0)), ''))
-            summary, _steps = consumer._browser_attempt('viewer', 'dash', '192.0.2.10',
-                                                       consumer.load_state('viewer'), temporary)
+            summary, _steps = browser_attempt('viewer', 'dash', '192.0.2.10',
+                                              consumer.load_state('viewer'), temporary)
             e(summary.get('probeExitCode') == rc, f'actual child exit {rc} must overwrite summary claim')
             e(consumer.browser_clean(summary) == (rc == 0), f'child exit {rc} must reach verdict')
         for fields in failure_fields:
@@ -2693,7 +2696,7 @@ def check_topofix2(checks):
         w5_python = pyw5.group(1)
         w5_docker = '80,443,3443,9092,9093'
 
-        def w5_case(v6_ports, vm_g6, with_v6=True, envelope_leak='ok', result_leak=None, listing='match'):
+        def w5_case(v6_ports, vm_g6, with_v6=True, envelope_leak='ok', result_leak=None, listing_mode='match'):
             report = {'swept': {'tcpOnly': True}, 'counts': {'open': 6}, 'open': [22, 80, 443, 3443, 9092, 9093],
                       'spot': [{'port': 111, 'outcome': 'refused'}],
                       'cert': {'authorized': True, 'protocol': 'TLSv1.3', 'sha256': 'ab12'}}
@@ -2713,23 +2716,23 @@ def check_topofix2(checks):
                 # R1: the agent's response lists what it delivered (files[]: name, sha256, bytes); the runner binds the result file to that entry
                 entry = {'name': 'w5-result.json', 'sha256': hashlib.sha256(result_path.read_bytes()).hexdigest(), 'bytes': result_path.stat().st_size}
                 sibling = {'name': 'w5-result.sha256', 'sha256': hashlib.sha256(b'sibling').hexdigest(), 'bytes': 79}
-                if listing == 'match':
+                if listing_mode == 'match':
                     envelope['files'] = [sibling, entry]
-                elif listing == 'stale':   # the file under the delivery folder is not the one the agent delivered (scp -r nested the fresh folder)
+                elif listing_mode == 'stale':   # the file under the delivery folder is not the one the agent delivered (scp -r nested the fresh folder)
                     envelope['files'] = [sibling, dict(entry, sha256=hashlib.sha256(b'an earlier run').hexdigest())]
-                elif listing == 'unlisted':
+                elif listing_mode == 'unlisted':
                     envelope['files'] = [sibling]
-                elif listing == 'last-char':   # all but the last hex character of the real digest: only a prefix compare accepts it
+                elif listing_mode == 'last-char':   # all but the last hex character of the real digest: only a prefix compare accepts it
                     envelope['files'] = [sibling, dict(entry, sha256=entry['sha256'][:-1] + ('0' if entry['sha256'][-1] != '0' else '1'))]
-                elif listing == 'twice':
+                elif listing_mode == 'twice':
                     envelope['files'] = [entry, entry]
-                elif listing == 'no-files-key':
+                elif listing_mode == 'no-files-key':
                     envelope.pop('files', None)
-                response_path = Path(w5_tmp) / 'w5-agent-response.json'
-                response_path.write_text(json.dumps(envelope))
+                w5_resp_path = Path(w5_tmp) / 'w5-agent-response.json'
+                w5_resp_path.write_text(json.dumps(envelope))
                 env = dict(os.environ, W5_EXPECTED='22,' + w5_docker, W5_DOCKER=w5_docker, W5_VM_G6=vm_g6)
-                run = subprocess.run([sys.executable, '-I', '-', str(result_path), 'running', str(response_path)], input=w5_python, env=env, text=True, capture_output=True)
-            return run.returncode, run.stdout + run.stderr
+                w5_proc = subprocess.run([sys.executable, '-I', '-', str(result_path), 'running', str(w5_resp_path)], input=w5_python, env=env, text=True, capture_output=True)
+            return w5_proc.returncode, w5_proc.stdout + w5_proc.stderr
 
         m4_shape = [(22, 'open'), (80, 'refused'), (443, 'refused'), (111, 'refused'), (3443, 'refused'), (9092, 'refused'), (9093, 'refused')]
         rc_m4, out_m4 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96')
@@ -2761,15 +2764,15 @@ def check_topofix2(checks):
         # R1: the result file the runner reads must be the one the agent's response lists in files[] (sha256), whatever else sits in the folder
         for listing, reason in (('stale', 'is not the file this agent response lists'), ('unlisted', 'lists 0 w5-result.json entries'),
                                 ('twice', 'lists 2 w5-result.json entries'), ('no-files-key', 'lists 0 w5-result.json entries')):
-            rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing=listing)
+            rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing_mode=listing)
             e(rc_r1 == 1 and 'breaches=1' in out_r1 and 'BREACH the ' in out_r1 and reason in out_r1
               and 'observed open set' not in out_r1 and 'open=[' not in out_r1,
               f'W5 fails closed, evaluating nothing, when the delivered result file is not tied to the agent response ({listing}); got rc {rc_r1}: {out_r1[-240:]!r} (R1)')
-        rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing='match')
+        rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing_mode='match')
         e(rc_r1 == 0 and 'breaches=0' in out_r1, f'W5 passes when the result file is the one the response lists; got rc {rc_r1}: {out_r1[-200:]!r} (R1)')
         # N2 (delta review of 2d4c9df, mutant D-R1p): the comparison is on the whole sha256. A listing that agrees with the result file on
         # every hex character but the last (a prefix compare would accept it) is refused, and the two lines that decide it are pinned whole.
-        rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing='last-char')
+        rc_r1, out_r1 = w5_case(m4_shape, 'fd61:4f24:7843:765b:5055:55ff:fe33:4b96', listing_mode='last-char')
         e(rc_r1 == 1 and 'breaches=1' in out_r1 and 'is not the file this agent response lists' in out_r1 and 'open=[' not in out_r1,
           f'W5 refuses a listed sha256 that differs from the result file only in its last hex character; got rc {rc_r1}: {out_r1[-200:]!r} (N2)')
         w5_python_lines = [ln.strip() for ln in w5_python.splitlines()]
@@ -2792,12 +2795,12 @@ def check_topofix2(checks):
                 for name, body in (('sudo', sudo_body), ('ufw', ufw_body)):
                     (fake_bin / name).write_text('#!/bin/sh\n' + body + '\n')
                     (fake_bin / name).chmod(0o755)
-                script = 'st=0; ufw_reason=""\n' + (first_line or ufw_first_line) + '\n' + case_match.group(0) + '\nprintf "%s|%s|%s\\n" "$st" "$ufw_first" "$ufw_reason"\n'
+                ub_script = 'st=0; ufw_reason=""\n' + (first_line or ufw_first_line) + '\n' + case_match.group(0) + '\nprintf "%s|%s|%s\\n" "$st" "$ufw_first" "$ufw_reason"\n'
                 env = dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}')
                 if caller_locale:
                     env['LC_ALL'] = caller_locale
-                run = subprocess.run(['bash', '-c', script], env=env, text=True, capture_output=True)
-            return run.stdout.strip()
+                ub_proc = subprocess.run(['bash', '-c', ub_script], env=env, text=True, capture_output=True)
+            return ub_proc.stdout.strip()
         # a sudo that takes `-n` the way the runner calls it (a fake `exec "$@"` would try to run a command named -n, fail, and send every
         # test down the plain fallback arm, leaving the sudo arm of the runner's lines unexercised)
         pass_sudo = '[ "$1" = -n ] && shift\nexec "$@"'
@@ -2836,9 +2839,9 @@ def check_topofix2(checks):
     bash_for_f2 = bash_binary()
     browser_case = next((ln for ln in topo_runner_lines if ln.startswith('case "$BROWSER_MODE" in ') and ' exit 2 ;; esac' in ln), '')
     if bash_for_f2 is not None and browser_case:
-        def browser_refusal(mode):
-            run = subprocess.run([bash_for_f2, '-c', 'BROWSER_MODE="$1"\n' + browser_case + '\necho reached', 'bash', mode], text=True, capture_output=True)
-            return run.returncode, run.stdout.strip(), run.stderr.strip()
+        def browser_refusal(browser_mode):
+            ref_proc = subprocess.run([bash_for_f2, '-c', 'BROWSER_MODE="$1"\n' + browser_case + '\necho reached', 'bash', browser_mode], text=True, capture_output=True)
+            return ref_proc.returncode, ref_proc.stdout.strip(), ref_proc.stderr.strip()
         e(browser_refusal('local') == (2, '', '--browser must be container or agent: local'),
           f'`--browser local` is refused with exit 2 and the message (the runner\'s own refusal line); got {browser_refusal("local")!r} (F2)')
         e(browser_refusal('container') == (0, 'reached', '') and browser_refusal('agent') == (0, 'reached', ''),
@@ -2863,8 +2866,8 @@ def check_topofix2(checks):
                 hello_path = Path(pf_tmp) / 'agent-hello.json'
                 hello_path.write_text(json.dumps({'schema': 1, 'nonce': 'n0nce', 'clock_skew_ms': 5, 'mac_src_ip': src, 'vm_ip': '192.168.64.2',
                                                   'gate_files': {}, 'plan': ['W5', 'W6'], 'vm_g6': '', 'mac_iface': 'bridge100'}))
-                run = subprocess.run([sys.executable, '-I', '-', str(hello_path), 'n0nce', pf_tmp], input=preflight_py.group(1), text=True, capture_output=True)
-            return run.returncode, run.stdout, run.stderr
+                pf_proc = subprocess.run([sys.executable, '-I', '-', str(hello_path), 'n0nce', pf_tmp], input=preflight_py.group(1), text=True, capture_output=True)
+            return pf_proc.returncode, pf_proc.stdout, pf_proc.stderr
         for ok_src in ('192.168.64.1', '10.0.0.1', '10.255.255.254', '172.16.0.1', '172.31.255.254', '192.168.255.254'):
             rc_f7, out_f7, err_f7 = preflight_case(ok_src)
             e(rc_f7 == 0 and f'MAC_SRC_IP={ok_src}' in out_f7, f'the preflight accepts mac_src_ip {ok_src} (inside 10/8, 172.16/12 or 192.168/16); got rc {rc_f7}: {err_f7.strip()[:120]!r} (F7)')
@@ -2974,10 +2977,10 @@ def check_topofix2(checks):
 
         def agent_request_case():
             with tempfile.TemporaryDirectory() as t01_tmp:
-                base = Path(t01_tmp)
-                rdv = base / 'rdv'
+                t01_base = Path(t01_tmp)
+                rdv = t01_base / 'rdv'
                 rdv.mkdir()
-                (base / 'state').mkdir()
+                (t01_base / 'state').mkdir()
                 nonce = 'topofix2-t01-nonce'
 
                 def responder():
@@ -2997,15 +3000,15 @@ def check_topofix2(checks):
 
                 worker = threading.Thread(target=responder, daemon=True)
                 worker.start()
-                script = ('RAW="$1"; STATE="$2"; RENDEZVOUS="$3"; REND_NONCE="$4"; GATE_DIR="$5"\n'
-                          + bash_function_source(runner_path, 'agent_request')
-                          + 'agent_request W6 30; echo "rc=$?" > "$STATE/rc.txt"; printf "%s" "$CAP" > "$STATE/cap.json"\n')
-                subprocess.run([bash_t, '-c', script, 'bash', str(base / 'raw.log'), str(base / 'state'), str(rdv), nonce, str(ROOT / 'scripts/gate')],
+                t01_script = ('RAW="$1"; STATE="$2"; RENDEZVOUS="$3"; REND_NONCE="$4"; GATE_DIR="$5"\n'
+                              + bash_function_source(runner_path, 'agent_request')
+                              + 'agent_request W6 30; echo "rc=$?" > "$STATE/rc.txt"; printf "%s" "$CAP" > "$STATE/cap.json"\n')
+                subprocess.run([bash_t, '-c', t01_script, 'bash', str(t01_base / 'raw.log'), str(t01_base / 'state'), str(rdv), nonce, str(ROOT / 'scripts/gate')],
                                text=True, capture_output=True, timeout=90)
                 worker.join(timeout=5)
-                cap_text = (base / 'state/cap.json').read_text() if (base / 'state/cap.json').exists() else ''
-                raw_text = (base / 'raw.log').read_text() if (base / 'raw.log').exists() else ''
-                rc_text = (base / 'state/rc.txt').read_text().strip() if (base / 'state/rc.txt').exists() else ''
+                cap_text = (t01_base / 'state/cap.json').read_text() if (t01_base / 'state/cap.json').exists() else ''
+                raw_text = (t01_base / 'raw.log').read_text() if (t01_base / 'raw.log').exists() else ''
+                rc_text = (t01_base / 'state/rc.txt').read_text().strip() if (t01_base / 'state/rc.txt').exists() else ''
                 try:
                     parsed_cap = json.loads(cap_text)
                 except ValueError:
@@ -3014,17 +3017,17 @@ def check_topofix2(checks):
 
         def agent_request_nonce_leak_case():
             with tempfile.TemporaryDirectory() as t01b_tmp:
-                base = Path(t01b_tmp)
-                (base / 'gate').mkdir()
-                (base / 'state').mkdir()
-                (base / 'gate/browser_remote.py').write_text(
+                t01b_base = Path(t01b_tmp)
+                (t01b_base / 'gate').mkdir()
+                (t01b_base / 'state').mkdir()
+                (t01b_base / 'gate/browser_remote.py').write_text(
                     'import sys\nnonce = sys.argv[sys.argv.index("--nonce") + 1]\nsys.stderr.write("diagnostic naming " + nonce + "\\n")\nprint(\'{"exit": 0}\')\n')
-                script = ('RAW="$1"; STATE="$2"; RENDEZVOUS="$3"; REND_NONCE="$4"; GATE_DIR="$5"\n'
-                          + bash_function_source(runner_path, 'agent_request')
-                          + 'agent_request W6 5; printf "%s" "$CAP_ERR" > "$STATE/cap.err"\n')
-                subprocess.run([bash_t, '-c', script, 'bash', str(base / 'raw.log'), str(base / 'state'), str(base), 'topofix2-t01b-nonce', str(base / 'gate')], text=True, capture_output=True, timeout=30)
-                raw_text_b = (base / 'raw.log').read_text() if (base / 'raw.log').exists() else ''
-                err_text_b = (base / 'state/cap.err').read_text() if (base / 'state/cap.err').exists() else ''
+                t01b_script = ('RAW="$1"; STATE="$2"; RENDEZVOUS="$3"; REND_NONCE="$4"; GATE_DIR="$5"\n'
+                               + bash_function_source(runner_path, 'agent_request')
+                               + 'agent_request W6 5; printf "%s" "$CAP_ERR" > "$STATE/cap.err"\n')
+                subprocess.run([bash_t, '-c', t01b_script, 'bash', str(t01b_base / 'raw.log'), str(t01b_base / 'state'), str(t01b_base), 'topofix2-t01b-nonce', str(t01b_base / 'gate')], text=True, capture_output=True, timeout=30)
+                raw_text_b = (t01b_base / 'raw.log').read_text() if (t01b_base / 'raw.log').exists() else ''
+                err_text_b = (t01b_base / 'state/cap.err').read_text() if (t01b_base / 'state/cap.err').exists() else ''
             return raw_text_b, err_text_b
 
         t01b_raw, t01b_err = agent_request_nonce_leak_case()
@@ -3053,10 +3056,10 @@ def check_topofix2(checks):
                     '    esac ;;\n'
                     'esac\n')
                 (fake_bin / 'docker').chmod(0o755)
-                script = ('RAW=/dev/null; PROJECT=krate-gate1; MON_PROJECT=krate-epc-monitoring\n' + bash_function_source(runner_path, 'w5_published_any_ports')
-                          + 'out="$(w5_published_any_ports)"; rc=$?; printf "rc=%s\\n%s\\n" "$rc" "$out"\n')
-                run = subprocess.run([bash_t, '-c', script], env=dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}'), text=True, capture_output=True)
-            return run.stdout.strip().splitlines()
+                t02_script = ('RAW=/dev/null; PROJECT=krate-gate1; MON_PROJECT=krate-epc-monitoring\n' + bash_function_source(runner_path, 'w5_published_any_ports')
+                              + 'out="$(w5_published_any_ports)"; rc=$?; printf "rc=%s\\n%s\\n" "$rc" "$out"\n')
+                t02_proc = subprocess.run([bash_t, '-c', t02_script], env=dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}'), text=True, capture_output=True)
+            return t02_proc.stdout.strip().splitlines()
 
         good_ports = w5_ports_case({'gate': ['c1', 'c2'], 'mon': ['c3']})
         e(good_ports[:1] == ['rc=0'] and sorted(good_ports[1:]) == ['kafka=9092', 'kafka=9093', 'proxy=443', 'proxy=80'],
@@ -3090,10 +3093,10 @@ def check_topofix2(checks):
 
         def w7_case(os_name, firewalld='active', with_firewall_cmd=True, docker_target='ACCEPT', ufw_status='Status: inactive', caller_locale='', sudo_works=True):
             with tempfile.TemporaryDirectory() as t05_tmp:
-                base = Path(t05_tmp)
-                fake_bin = base / 'bin'
+                t05_base = Path(t05_tmp)
+                fake_bin = t05_base / 'bin'
                 fake_bin.mkdir()
-                (base / 'os-release').write_text(os_releases[os_name])
+                (t05_base / 'os-release').write_text(os_releases[os_name])
                 scripts_text = {
                     'sudo': '[ "$1" = -n ] && shift\nexec "$@"' if sudo_works else 'exit 1',
                     'systemctl': 'case "$*" in "is-active firewalld") echo "${FAKE_FIREWALLD:-inactive}" ;; "is-active ufw") echo active ;; esac',
@@ -3114,18 +3117,18 @@ def check_topofix2(checks):
                 for name, body in scripts_text.items():
                     (fake_bin / name).write_text('#!/bin/sh\n' + body + '\n')
                     (fake_bin / name).chmod(0o755)
-                (base / 'krate').write_text('#!/bin/sh\necho "[ok] firewalld active, docker zone present (target ACCEPT)"\n')
-                (base / 'krate').chmod(0o755)
-                script = ('section() { :; }\nrecord() { printf "RECORD %s|%s\\n" "$4" "$5"; }\nRAW=/dev/null; KRATE="$1"\n'
-                          'command() { if [[ "$1" == -v && "$2" == firewall-cmd ]]; then [[ -n "${FAKE_FWCMD_PATH:-}" ]] || return 1; echo "$FAKE_FWCMD_PATH"; return 0; fi; builtin command "$@"; }\n'
-                          + bash_function_source(runner_path, 'w7_os_family') + bash_function_source(runner_path, 'phase4_row_w7')
-                          + 'phase4_row_w7 4c "$2"\n')
+                (t05_base / 'krate').write_text('#!/bin/sh\necho "[ok] firewalld active, docker zone present (target ACCEPT)"\n')
+                (t05_base / 'krate').chmod(0o755)
+                t05_script = ('section() { :; }\nrecord() { printf "RECORD %s|%s\\n" "$4" "$5"; }\nRAW=/dev/null; KRATE="$1"\n'
+                              'command() { if [[ "$1" == -v && "$2" == firewall-cmd ]]; then [[ -n "${FAKE_FWCMD_PATH:-}" ]] || return 1; echo "$FAKE_FWCMD_PATH"; return 0; fi; builtin command "$@"; }\n'
+                              + bash_function_source(runner_path, 'w7_os_family') + bash_function_source(runner_path, 'phase4_row_w7')
+                              + 'phase4_row_w7 4c "$2"\n')
                 env = dict(os.environ, PATH=f'{fake_bin}:{os.environ["PATH"]}', FAKE_FIREWALLD=firewalld, FAKE_DOCKER_TARGET=docker_target, FAKE_UFW_STATUS=ufw_status,
                            FAKE_FWCMD_PATH=str(fake_bin / 'firewall-cmd') if with_firewall_cmd else '', FAKE_LOCALIZED='1' if caller_locale else '')
                 if caller_locale:
                     env['LC_ALL'] = caller_locale
-                run = subprocess.run([bash_t, '-c', script, 'bash', str(base / 'krate'), str(base / 'os-release')], env=env, text=True, capture_output=True)
-            return (run.stdout + run.stderr).strip()
+                t05_proc = subprocess.run([bash_t, '-c', t05_script, 'bash', str(t05_base / 'krate'), str(t05_base / 'os-release')], env=env, text=True, capture_output=True)
+            return (t05_proc.stdout + t05_proc.stderr).strip()
 
         family_script = bash_function_source(runner_path, 'w7_os_family') + 'w7_os_family "$1"\n'
         for id_only, wanted in (('ID=rhel', 'rhel'), ('ID="rocky"', 'rhel'), ('ID=almalinux', 'rhel'), ('ID=centos', 'rhel'), ('ID=fedora', 'rhel'), ('ID=ol\nID_LIKE="fedora"', 'rhel'),
@@ -3380,14 +3383,14 @@ console.log(JSON.stringify({ length: out.length, newline: out.includes('\n'), pa
     if bash_t is not None:
         launcher_funcs = ''.join(bash_function_source(launcher_path, name) for name in ('receipt_verdict', 'receipt_candidate_ok', 'run_outcome'))
 
-        def outcome_case(runner_rc, receipt_text, candidate=candidate_sha):
+        def outcome_case(runner_rc, rcpt_body, candidate=candidate_sha):
             with tempfile.TemporaryDirectory() as t14_tmp:
                 receipt = Path(t14_tmp) / 'receipt.md'
-                if receipt_text is not None:
-                    receipt.write_text(receipt_text)
-                script = launcher_funcs + 'reason="$(run_outcome "$1" "$2" "$3")"; rc=$?; printf "%s|%s\\n" "$rc" "$reason"\n'
-                run = subprocess.run([bash_t, '-c', script, 'bash', runner_rc, str(receipt), candidate], text=True, capture_output=True)
-            return run.stdout.strip()
+                if rcpt_body is not None:
+                    receipt.write_text(rcpt_body)
+                t14_script = launcher_funcs + 'reason="$(run_outcome "$1" "$2" "$3")"; rc=$?; printf "%s|%s\\n" "$rc" "$reason"\n'
+                t14_proc = subprocess.run([bash_t, '-c', t14_script, 'bash', runner_rc, str(receipt), candidate], text=True, capture_output=True)
+            return t14_proc.stdout.strip()
 
         def receipt_text(verdict='PASS', commit=candidate_sha):
             return (f'| field | value |\n|---|---|\n| verdict | **{verdict}** (PASS 70, FAIL 0, NOT_RUN 0, required missing 0: none; bound: true) |\n'
@@ -3458,31 +3461,32 @@ console.log(JSON.stringify({ length: out.length, newline: out.includes('\n'), pa
         if rm_line and mkdir_line:
             def delivery_after(prelude_lines):
                 with tempfile.TemporaryDirectory() as r1_tmp:
-                    base = Path(r1_tmp)
-                    guest = base / 'guest'
+                    r1_base = Path(r1_tmp)
+                    guest = r1_base / 'guest'
                     (guest / 'agent-out/w5').mkdir(parents=True)
                     (guest / 'agent-out/w5/w5-result.json').write_text('STALE')
                     (guest / 'rdv').mkdir()
                     (guest / 'rdv/agent-hello.json').write_text('hello')
                     (guest / 'keep.txt').write_text('keep')
-                    (base / 'bin').mkdir()
-                    (base / 'bin/limactl').write_text(
+                    (r1_base / 'bin').mkdir()
+                    (r1_base / 'bin/limactl').write_text(
                         '#!/bin/sh\n[ "$1" = shell ] || exit 9\nshift; shift; [ "$1" = -- ] && shift\n'
                         'cmd="$1"; shift\n'
                         'case "$cmd" in rm|mkdir) ;; *) echo "fake limactl: refused $cmd" >&2; exit 9 ;; esac\n'
                         'for a in "$@"; do case "$a" in -*) ;; "$FAKE_GUEST"/*) ;; *) echo "fake limactl: refused path $a" >&2; exit 9 ;; esac; done\n'
                         'exec "$cmd" "$@"\n')
-                    (base / 'bin/limactl').chmod(0o755)
-                    script = 'set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"\n' + '\n'.join(prelude_lines) + '\n'
-                    run = subprocess.run([bash_t, '-c', script, 'bash', str(guest)], env=dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}', FAKE_GUEST=str(guest)),
-                                         text=True, capture_output=True, timeout=30)
-                    fresh = base / 'fresh/1-sweep'
+                    (r1_base / 'bin/limactl').chmod(0o755)
+                    r1_script = 'set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"\n' + '\n'.join(prelude_lines) + '\n'
+                    r1_proc = subprocess.run([bash_t, '-c', r1_script, 'bash', str(guest)], env=dict(os.environ, PATH=f'{r1_base / "bin"}:{os.environ["PATH"]}', FAKE_GUEST=str(guest)),
+                                             text=True, capture_output=True, timeout=30)
+                    fresh = r1_base / 'fresh/1-sweep'
                     fresh.mkdir(parents=True)
                     (fresh / 'w5-result.json').write_text('FRESH')
                     subprocess.run(['cp', '-R', str(fresh), str(guest / 'agent-out/w5')], check=True)
                     top = guest / 'agent-out/w5/w5-result.json'
-                    return {'rc': run.returncode, 'stderr': run.stderr.strip(), 'top': top.read_text() if top.exists() else None,
-                            'nested': (guest / 'agent-out/w5/1-sweep').exists(), 'keep': (guest / 'keep.txt').exists(), 'hello': (guest / 'rdv/agent-hello.json').exists()}
+                    outcome_dict = {'rc': r1_proc.returncode, 'stderr': r1_proc.stderr.strip(), 'top': top.read_text() if top.exists() else None,
+                                    'nested': (guest / 'agent-out/w5/1-sweep').exists(), 'keep': (guest / 'keep.txt').exists(), 'hello': (guest / 'rdv/agent-hello.json').exists()}
+                return outcome_dict
             control = delivery_after([mkdir_line])
             e(control['rc'] == 0 and control['top'] == 'STALE' and control['nested'], f'R1 harness control: with only the mkdir line the stale w5-result.json survives and the fresh folder nests; got {control!r}')
             fixed = delivery_after([rm_line, mkdir_line])
@@ -3561,13 +3565,13 @@ esac
 
         def r2_run(prelude, block, epilogue='', runner_rc=None, receipt=False, **fake_env):
             with tempfile.TemporaryDirectory() as r2_tmp:
-                base = Path(r2_tmp)
-                (base / 'bin').mkdir()
-                (base / 'bin/limactl').write_text(fake_lima_r2)
-                (base / 'bin/route').write_text(fake_route_r2)
+                r2_base = Path(r2_tmp)
+                (r2_base / 'bin').mkdir()
+                (r2_base / 'bin/limactl').write_text(fake_lima_r2)
+                (r2_base / 'bin/route').write_text(fake_route_r2)
                 for tool in ('limactl', 'route'):
-                    (base / 'bin' / tool).chmod(0o755)
-                guest, out = base / 'guest', base / 'out'
+                    (r2_base / 'bin' / tool).chmod(0o755)
+                guest, out = r2_base / 'guest', r2_base / 'out'
                 (guest / 'rdv').mkdir(parents=True)
                 (guest / 'agent-out').mkdir()
                 out.mkdir()
@@ -3576,12 +3580,12 @@ esac
                 if receipt:
                     (guest / 'receipt-x').mkdir()
                     (guest / 'receipt-x/receipt.md').write_text(receipt_text())
-                script = ('set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"; OUT="$2"; GUEST_RECEIPT="$1/receipt-x"; CANDIDATE="$3"; RC=0; PHASE=4a\n'
-                          + prelude + '\n' + block + '\n' + epilogue + '\n')
-                env = dict(os.environ, PATH=f'{base / "bin"}:{os.environ["PATH"]}', FAKE_FAIL='', FAKE_HEAD='', FAKE_IFACE='')
+                r2_script = ('set -euo pipefail\nVM=fake; GUEST_ROOT="$1"; RDV="$1/rdv"; OUT="$2"; GUEST_RECEIPT="$1/receipt-x"; CANDIDATE="$3"; RC=0; PHASE=4a\n'
+                             + prelude + '\n' + block + '\n' + epilogue + '\n')
+                env = dict(os.environ, PATH=f'{r2_base / "bin"}:{os.environ["PATH"]}', FAKE_FAIL='', FAKE_HEAD='', FAKE_IFACE='')
                 env.update({k.upper(): v for k, v in fake_env.items()})
-                run = subprocess.run([bash_t, '-c', script, 'bash', str(guest), str(out), candidate_sha], env=env, text=True, capture_output=True, timeout=30)
-            return run.returncode, run.stdout, run.stderr
+                r2_proc = subprocess.run([bash_t, '-c', r2_script, 'bash', str(guest), str(out), candidate_sha], env=env, text=True, capture_output=True, timeout=30)
+            return r2_proc.returncode, r2_proc.stdout, r2_proc.stderr
 
         if all(r2_blocks.values()):
             rc_a, out_a, err_a = r2_run('', r2_blocks['addr'], fake_fail='1')
@@ -3620,13 +3624,13 @@ esac
             e(bool(hello_wait), 'the launcher keeps the hello wait block the R9 test runs')
 
             def hello_wait_case(seen_on_call):
-                script = ('set -euo pipefail\nVM=fake; RDV=/g/rdv; NONCE=n; OUT=/o; AGENT_PID=$$; calls=0; SEEN="$1"\n'
-                          'limactl() { calls=$((calls + 1)); SECONDS=$((SECONDS + 5)); [[ -n "$SEEN" && $calls -ge $SEEN ]]; }\n'
-                          'sleep() { SECONDS=$((SECONDS + $1)); }\n'
-                          'trap \'echo "calls=$calls" >&2\' EXIT\n' + hello_wait + '\necho passed\n')
-                run = subprocess.run([bash_t, '-c', script, 'bash', str(seen_on_call or '')], text=True, capture_output=True, timeout=30)
-                found = re.search(r'calls=(\d+)', run.stderr)
-                return run.returncode, run.stdout.strip(), run.stderr, int(found.group(1)) if found else -1
+                hw_script = ('set -euo pipefail\nVM=fake; RDV=/g/rdv; NONCE=n; OUT=/o; AGENT_PID=$$; calls=0; SEEN="$1"\n'
+                             'limactl() { calls=$((calls + 1)); SECONDS=$((SECONDS + 5)); [[ -n "$SEEN" && $calls -ge $SEEN ]]; }\n'
+                             'sleep() { SECONDS=$((SECONDS + $1)); }\n'
+                             'trap \'echo "calls=$calls" >&2\' EXIT\n' + hello_wait + '\necho passed\n')
+                hw_proc = subprocess.run([bash_t, '-c', hw_script, 'bash', str(seen_on_call or '')], text=True, capture_output=True, timeout=30)
+                found = re.search(r'calls=(\d+)', hw_proc.stderr)
+                return hw_proc.returncode, hw_proc.stdout.strip(), hw_proc.stderr, int(found.group(1)) if found else -1
 
             if hello_wait:
                 rc_h, out_h, err_h, calls_h = hello_wait_case(None)
@@ -3706,17 +3710,17 @@ def check_phase4_monitor_paths(checks):
     stop = runner.index('MON_PROJECT=', start)
     select_shell = runner[start:stop]
 
-    def check_case(edition, expected):
-        for module in (grafana, perses, kafbat):
-            gate = object.__new__(module.Gate)
-            gate.edition = str(edition)
-            e(gate.mon_dir() == str(expected),
-              f'{module.__name__} selected {gate.mon_dir()} for {edition}; expected {expected}')
+    def check_case(ed_path, exp_path):
+        for gate_mod in (grafana, perses, kafbat):
+            gate_inst = object.__new__(gate_mod.Gate)
+            gate_inst.edition = str(ed_path)
+            e(gate_inst.mon_dir() == str(exp_path),
+              f'{gate_mod.__name__} selected {gate_inst.mon_dir()} for {ed_path}; expected {exp_path}')
         script = 'ED="$1"\n' + select_shell + '\nprintf "%s" "$MON_DIR"\n'
-        selected = subprocess.run(['bash', '-euc', script, 'bash', str(edition)],
+        selected = subprocess.run(['bash', '-euc', script, 'bash', str(ed_path)],
                                   text=True, capture_output=True)
-        e(selected.returncode == 0 and selected.stdout == str(expected),
-          f'gate-identity selected {selected.stdout!r} for {edition}; expected {expected}; {selected.stderr}')
+        e(selected.returncode == 0 and selected.stdout == str(exp_path),
+          f'gate-identity selected {selected.stdout!r} for {ed_path}; expected {exp_path}; {selected.stderr}')
 
     for edition in EDITIONS:
         check_case(ROOT / edition, ROOT / 'monitoring')
@@ -4445,11 +4449,11 @@ def check_check_flows_priority(checks):
     flows = json.loads(json.dumps(identity.planned_flows()))
     next(f for f in flows if f['alias'] == 'krate otp')['authenticationExecutions'][1]['priority'] = '20'
     try:
-        identity._check_flows('plan.json', flows)
-        e(False, 'identity._check_flows must refuse a non-integer priority')
+        identity.check_flows('plan.json', flows)
+        e(False, 'identity.check_flows must refuse a non-integer priority')
     except ValueError as exc:
         e('krate otp' in str(exc) and 'auth-otp-form' in str(exc) and 'integer' in str(exc),
-          f'identity._check_flows must name the flow and execution of a non-integer priority; got {exc}')
+          f'identity.check_flows must name the flow and execution of a non-integer priority; got {exc}')
 
 
 def _execution_of(plan, flow_alias, index):
@@ -4621,7 +4625,7 @@ def check_broker_plan_shape(checks, idp):
       'differs(): a provider that does not trust the asserted e-mail is a difference, so auth apply converges a console-only change back')
 
 
-def truststore_pem(site, name='enterprise-ca.pem', mode=0o644):
+def truststore_pem(site, name='enterprise-ca.pem', file_mode=0o644):
     """A placeholder PEM in auth/keycloak/truststores (755), as the operator places the enterprise CA."""
     trust = site / 'auth/keycloak/truststores'
     trust.mkdir(parents=True, exist_ok=True)
@@ -4631,7 +4635,7 @@ def truststore_pem(site, name='enterprise-ca.pem', mode=0o644):
         if str(parent) != '.':
             (trust / parent).mkdir(exist_ok=True)
             (trust / parent).chmod(0o755)
-    identity.write_file(trust / name, '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n', mode)
+    identity.write_file(trust / name, '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n', file_mode)
     return trust / name
 
 
@@ -4716,11 +4720,11 @@ def check_probe_diagnostic_privacy(checks):
     add('valid userinfo issuer', f'https://{user}:{password}@{PUBLIC_HOST}/identity/realms/krate',
         error=HTTPError(issuer, 502, external_text, email.message.Message(), None),
         required=invalid_hints, request_expected=False)
-    for label, configured in (
+    for label, cfg_url in (
             ('query', issuer + '?token=' + query), ('fragment', issuer + '#' + fragment),
             ('path', origin + '/' + path_token)):
-        add('configured issuer ' + label, configured,
-            error=HTTPError(configured, 502, external_text, email.message.Message(), None),
+        add('configured issuer ' + label, cfg_url,
+            error=HTTPError(cfg_url, 502, external_text, email.message.Message(), None),
             required=invalid_hints if label != 'path' else ('HTTP 502', PUBLIC_HOST, 'Keycloak'),
             request_expected=label == 'path')
     for field in ('issuer',) + probe.ENDPOINT_KEYS:
@@ -4731,9 +4735,9 @@ def check_probe_diagnostic_privacy(checks):
         error=HTTPError(issuer, 503, external_text + ' ' + unsafe_url, email.message.Message(), None),
         required=('HTTP 503', PUBLIC_HOST, 'Keycloak'))
     invalid_url_text = 'nonnumeric port: ' + unsafe_url + ' ' + external_text
-    for label, error in (('raw', http.client.InvalidURL(invalid_url_text)),
-                         ('wrapped', URLError(http.client.InvalidURL(invalid_url_text)))):
-        add(label + ' InvalidURL contains secret', error=error,
+    for label, err_item in (('raw', http.client.InvalidURL(invalid_url_text)),
+                            ('wrapped', URLError(http.client.InvalidURL(invalid_url_text)))):
+        add(label + ' InvalidURL contains secret', error=err_item,
             required=('is invalid', runtime_file, 'KEYCLOAK_PUBLIC_URL', 'redirect or proxy target'),
             forbidden=('nothing was contacted', 'the issuer URL'))
     add('OSError text contains secret', error=URLError(OSError(113, external_text + unsafe_url)),
@@ -4803,10 +4807,10 @@ def check_probe_diagnostic_privacy(checks):
         def read(self, size):
             return self.body[:size]
 
-    for title, configured, error, reply, lookups, required, forbidden, request_expected in rows:
+    for row_title, row_configured, row_error, row_reply, row_lookups, row_required, row_forbidden, row_req_expected in rows:
         reads, alarms, requests = [], [], []
         runtime = json.dumps({'auth': {'oauth2': {'client': {'keycloak': {
-            'issuer-uri': configured, 'client-secret': password}}}}})
+            'issuer-uri': row_configured, 'client-secret': password}}}}})
 
         def read_runtime(file, *_args, **_kwargs):
             reads.append(str(file))
@@ -4815,11 +4819,11 @@ def check_probe_diagnostic_privacy(checks):
 
         def request(*args, **kwargs):
             requests.append((args, kwargs))
-            for host, port in lookups if lookups is not None else ((PUBLIC_HOST, 443),):
+            for host, port in row_lookups if row_lookups is not None else ((PUBLIC_HOST, 443),):
                 socket.getaddrinfo(host, port)
-            if error is not None:
-                raise error
-            return Reply(reply if reply is not None else document)
+            if row_error is not None:
+                raise row_error
+            return Reply(row_reply if row_reply is not None else document)
 
         def resolver(*_args, **_kwargs):
             return []
@@ -4836,8 +4840,8 @@ def check_probe_diagnostic_privacy(checks):
             status = probe.main()
             restored = socket.getaddrinfo is resolver
         output = out.getvalue() + err.getvalue()
-        label = 'probe diagnostic privacy (' + title + ')'
-        success = title == 'ordinary valid discovery'
+        label = 'probe diagnostic privacy (' + row_title + ')'
+        success = row_title == 'ordinary valid discovery'
         checks.expect(status == (0 if success else 1), f'{label}: failure stays exit1; only valid discovery exits0; got {status}')
         checks.expect(all(marker not in output for marker in markers), f'{label}: no credentials, URL tokens or external text may be printed; got {output!r}')
         displayed_urls = re.findall(r'https?://[^\s)>,;]+', output)
@@ -4852,14 +4856,14 @@ def check_probe_diagnostic_privacy(checks):
         checks.expect(success or (out.getvalue() == '' and err.getvalue().startswith('Public SSO readiness failed: ')
                                   and err.getvalue().count('\n') == 1 and err.getvalue()[:-1].isprintable()),
                       f'{label}: failure remains one printable stderr line and no stdout; got {output!r}')
-        for needle in required:
+        for needle in row_required:
             checks.expect(needle in output, f'{label}: cause/file/repair detail {needle!r} must remain; got {output!r}')
-        for needle in forbidden:
+        for needle in row_forbidden:
             checks.expect(needle not in output, f'{label}: must not misattribute {needle!r}; got {output!r}')
         checks.expect(reads == ['/privacy-fixture/' + runtime_file] and restored and alarms == [15, 0],
                       f'{label}: read only runtime.yml, cancel the deadline and restore the resolver')
-        if request_expected:
-            checks.expect(len(requests) == 1 and requests[0][0] == (configured + '/.well-known/openid-configuration',),
+        if row_req_expected:
+            checks.expect(len(requests) == 1 and requests[0][0] == (row_configured + '/.well-known/openid-configuration',),
                           f'{label}: sanitizing the displayed address must not rewrite the actual discovery request target; got {requests!r}')
         else:
             checks.expect(not requests, f'{label}: malformed/private issuer is refused before any request')
@@ -5243,7 +5247,7 @@ def check_local_mode_unchanged(checks, edition, site, env, rendered):
     write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET='REPLACE_ME'))
     result = preflight(site, 'runtime.yml', rendered)
     e(result.returncode == 0, f'{edition}: local mode must pass with PING_KEYCLOAK_CLIENT_SECRET at REPLACE_ME and no truststore; got {result.stderr.strip()}')
-    pem = truststore_pem(site, mode=0o600)
+    pem = truststore_pem(site, file_mode=0o600)
     result = preflight(site, 'runtime.yml', rendered)
     e(result.returncode == 0, f'{edition}: local mode must not inspect truststore PEM modes; got {result.stderr.strip()}')
     pem.unlink()
@@ -5271,18 +5275,18 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     trust = site / 'auth/keycloak/truststores'
 
     def expect_refusal(case, wanted):
-        outcome = preflight(site, 'runtime.yml', rendered)
-        checks.expect(outcome.returncode == 1 and wanted in outcome.stderr,
-                      f'{edition}: ping-mode preflight must refuse: {case} (naming {wanted!r}); got exit {outcome.returncode}: {outcome.stderr.strip()}')
-        checks.expect(not any(secret in outcome.stdout + outcome.stderr for secret in ALL_SECRETS), f'{edition}: ping-mode refusal leaked a secret ({case})')
+        pf_outcome = preflight(site, 'runtime.yml', rendered)
+        checks.expect(pf_outcome.returncode == 1 and wanted in pf_outcome.stderr,
+                      f'{edition}: ping-mode preflight must refuse: {case} (naming {wanted!r}); got exit {pf_outcome.returncode}: {pf_outcome.stderr.strip()}')
+        checks.expect(not any(secret in pf_outcome.stdout + pf_outcome.stderr for secret in ALL_SECRETS), f'{edition}: ping-mode refusal leaked a secret ({case})')
 
     def expect_pass(case):
-        outcome = preflight(site, 'runtime.yml', rendered)
-        checks.expect(outcome.returncode == 0, f'{edition}: ping-mode preflight must accept: {case}; got exit {outcome.returncode}: {outcome.stderr.strip()}')
+        pf_outcome = preflight(site, 'runtime.yml', rendered)
+        checks.expect(pf_outcome.returncode == 0, f'{edition}: ping-mode preflight must accept: {case}; got exit {pf_outcome.returncode}: {pf_outcome.stderr.strip()}')
 
-    def mutated_plan(mutation):
+    def mutated_plan(mut_fn):
         data = json.loads(plan_original)
-        mutation(data)
+        mut_fn(data)
         identity.write_file(plan_file, json.dumps(data, indent=2) + '\n', 0o644)
 
     write_env(site, dict(env, PING_KEYCLOAK_CLIENT_SECRET='REPLACE_ME'))
@@ -5370,15 +5374,14 @@ def check_broker_refusals(checks, edition, site, env, rendered):
     mutated_plan(endpoints_on(public + ':8443'))
     expect_refusal('the identity provider on the public host but another port, without a PEM', 'holds no truststore file')
     mutated_plan(endpoints_on(public))
-    truststore_pem(site, mode=0o600)
+    truststore_pem(site, file_mode=0o600)
     expect_refusal('a 600 PEM even when the provider is on the public host', 'chmod 644')
     (trust / 'enterprise-ca.pem').unlink()
-    # truststore system (site key idp_truststore): no CA file required, the note names the JVM truststore; the mode rules stay.
     mutated_plan(lambda p: p.__setitem__('truststore', 'system'))
     outcome = preflight(site, 'runtime.yml', rendered)
     checks.expect(outcome.returncode == 0 and 'JVM default truststore' in outcome.stderr,
                   f'{edition}: truststore system without a PEM must pass with a note naming the JVM default truststore; got exit {outcome.returncode}: {outcome.stderr.strip()}')
-    truststore_pem(site, mode=0o600)
+    truststore_pem(site, file_mode=0o600)
     expect_refusal('a 600 PEM under truststore system', 'chmod 644')
     (trust / 'enterprise-ca.pem').unlink()
     trust.chmod(0o700)
@@ -6806,17 +6809,17 @@ echo "changed=$IDENTITY_CHANGED"
                  'configs': {}, 'browserFlow': 'browser'}
         state_file.write_text(json.dumps(realm))
 
-        def run(command='apply', env_secret=secret, **extra):
+        def run(command='apply', env_secret=secret, **extra_env):
             calls_file.write_text('')
             write_env(site, dict(SYNTHETIC, PING_KEYCLOAK_CLIENT_SECRET=env_secret))
-            environment = dict(os.environ, KC_STATE=str(state_file), KC_CALLS=str(calls_file), JOURNAL=str(journal), FAKE=str(fake), SSO_DIR=str(ROOT / 'sso'), **extra)
+            environment = dict(os.environ, KC_STATE=str(state_file), KC_CALLS=str(calls_file), JOURNAL=str(journal), FAKE=str(fake), SSO_DIR=str(ROOT / 'sso'), **extra_env)
             environment.pop('PING_KEYCLOAK_CLIENT_SECRET', None)
             outcome = run_bash(script, site, command, env=environment)
-            calls = [json.loads(line) for line in calls_file.read_text().splitlines() if line.startswith('[')]
-            return outcome, calls, json.loads(state_file.read_text())
+            kc_calls = [json.loads(raw_line) for raw_line in calls_file.read_text().splitlines() if raw_line.startswith('[')]
+            return outcome, kc_calls, json.loads(state_file.read_text())
 
-        def mutating(calls):
-            return [c for c in calls if c[0] in ('create', 'update', 'delete')]
+        def mutating(call_list):
+            return [c for c in call_list if c[0] in ('create', 'update', 'delete')]
 
         result, calls, state = run()
         label = 'apply on an empty realm'
@@ -7117,8 +7120,8 @@ identity_rotate_ping_secret
             environment = dict(os.environ, KC_STATE=str(state_file), KC_CALLS=str(calls_file), JOURNAL=str(journal), FAKE=str(fake), SSO_DIR=str(ROOT / 'sso'))
             environment.pop('PING_KEYCLOAK_CLIENT_SECRET', None)
             outcome = run_bash(rotate_script, site, env=environment)
-            calls = [json.loads(line) for line in calls_file.read_text().splitlines() if line.startswith('[')]
-            return outcome, calls, json.loads(state_file.read_text())
+            rot_calls = [json.loads(raw_line) for raw_line in calls_file.read_text().splitlines() if raw_line.startswith('[')]
+            return outcome, rot_calls, json.loads(state_file.read_text())
 
         result, calls, state_norotate = rotate()
         e(result.returncode == 0 and 'Identity provider pingfederate: not applied yet (krate auth apply)' in result.stdout and mutating(calls) == []
@@ -7310,12 +7313,12 @@ def check_mfa_choice(checks):
     e = checks.expect
     refuse_value = identity.MFA_VALUE_RULE
 
-    def refuses(name, value, needle):
+    def refuses(claim_name, claim_val, exp_needle):
         try:
-            identity.validate_mfa_filter(name, value)
-            e(False, f'identity.validate_mfa_filter must refuse {name!r}/{value!r} naming {needle!r}')
-        except ValueError as exc:
-            e(needle in str(exc), f'identity.validate_mfa_filter must refuse {name!r}/{value!r} naming {needle!r}; got {exc}')
+            identity.validate_mfa_filter(claim_name, claim_val)
+            e(False, f'identity.validate_mfa_filter must refuse {claim_name!r}/{claim_val!r} naming {exp_needle!r}')
+        except ValueError as val_exc:
+            e(exp_needle in str(val_exc), f'identity.validate_mfa_filter must refuse {claim_name!r}/{claim_val!r} naming {exp_needle!r}; got {val_exc}')
 
     for name in ('acr', 'amr', 'OTP', 'my_claim1'):
         try:
@@ -7412,16 +7415,16 @@ def check_mfa_choice(checks):
             except ValueError as exc:
                 e(False, f'identity.broker_plan must accept the {label} planned file; got {exc}')
 
-        def plan_refusal(label, base, mutation: 'Callable[[dict], object]', *needles):
-            mutated = json.loads(json.dumps(base))
+        def plan_refusal(ref_label, base_plan, mutation: 'Callable[[dict], object]', *needles):
+            mutated = json.loads(json.dumps(base_plan))
             mutation(mutated)
             path.write_text(json.dumps(mutated))
             try:
                 identity.broker_plan(path)
-                e(False, f'identity.broker_plan must refuse {label}')
-            except ValueError as exc:
-                e(all(needle in str(exc) for needle in needles),
-                  f'identity.broker_plan refusing {label} must name {needles[0]!r}; got {exc}')
+                e(False, f'identity.broker_plan must refuse {ref_label}')
+            except ValueError as ref_exc:
+                e(all(req_needle in str(ref_exc) for req_needle in needles),
+                  f'identity.broker_plan refusing {ref_label} must name {needles[0]!r}; got {ref_exc}')
 
         def provider_config(p):
             return p['identityProviders'][0]['config']
@@ -7518,8 +7521,8 @@ def check_mfa_reconcile(checks):
             files[name].write_text(json.dumps(module.configs(site, SYNTHETIC)['keycloak/pingfederate-idp.json']))
         plans = {name: identity.broker_plan(path) for name, path in files.items()}
 
-        def live_of(name, extra=None, drop=()):
-            rep = json.loads(json.dumps(plans[name]['identityProviders'][0]))
+        def live_of(plan_name, extra=None, drop=()):
+            rep = json.loads(json.dumps(plans[plan_name]['identityProviders'][0]))
             rep['config']['clientSecret'] = '**********'
             rep.update({'internalId': 'x', 'types': ['USER_AUTHENTICATION']})
             for key in drop:
@@ -7756,14 +7759,14 @@ def check_p18_logic(checks):
     optout_site[identity.MFA_NOT_ASSERTED_KEY] = True
     optout_plan = load_configure_dual().configs(optout_site, SYNTHETIC)['keycloak/pingfederate-idp.json']
 
-    def run(inject):
+    def run(inject_val):
         with tempfile.TemporaryDirectory() as tmp:
             scratch = Path(tmp)
             (scratch / 'model.py').write_text(P18_MODEL)
             (scratch / 'plan.optout.json').write_text(json.dumps(optout_plan, indent=2) + '\n')
             (scratch / 'driver.sh').write_text(driver)
             (scratch / 'events').write_text('0')
-            environment = dict(os.environ, ROOT=str(ROOT), INJECT=inject)
+            environment = dict(os.environ, ROOT=str(ROOT), INJECT=inject_val)
             outcome = subprocess.run([bash_binary() or 'bash', str(scratch / 'driver.sh'), str(scratch)], text=True, capture_output=True, env=environment, timeout=120)
         return outcome.stdout, outcome.stderr, outcome.returncode
     out, err, rc = run('')
@@ -7838,24 +7841,24 @@ def check_rotate_stance(checks):
                                    'identity_put_idp_provider', 'identity_rotate_ping_secret', *(['identity_rotate_plan_check'] if has_check else []), 'cmd_identity_rotate')
         script = BASH_STUBS + functions + ROTATE_DRIVER
 
-        def rotate(plan, key, mode='runtime.yml', stdin=None):
+        def rotate(plan_doc, rot_key, ui_mode='runtime.yml', stdin_data=None):
             with tempfile.TemporaryDirectory() as tmp:
                 site = Path(tmp)
                 (site / 'auth/keycloak').mkdir(parents=True)
-                if plan is not None:
-                    (site / 'auth/keycloak/pingfederate-idp.json').write_text(json.dumps(plan, indent=2) + '\n')
-                write_env(site, dict(SYNTHETIC, KAFKA_UI_AUTH_CONFIG=mode, PING_KEYCLOAK_CLIENT_SECRET=RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']))
+                if plan_doc is not None:
+                    (site / 'auth/keycloak/pingfederate-idp.json').write_text(json.dumps(plan_doc, indent=2) + '\n')
+                write_env(site, dict(SYNTHETIC, KAFKA_UI_AUTH_CONFIG=ui_mode, PING_KEYCLOAK_CLIENT_SECRET=RUNTIME_SITE['PING_KEYCLOAK_CLIENT_SECRET']))
                 before = (site / '.env').read_bytes()
-                effects = site / 'effects.log'
-                effects.write_text('')
-                environment = dict(os.environ, EFFECTS=str(effects), SSO_DIR=str(ROOT / 'sso'))
-                outcome = run_bash(script, site, key, *(['--value'] if stdin else []), env=environment, stdin=stdin)
-                result = (outcome, before, (site / '.env').read_bytes(), effects.read_text().splitlines())
+                effects_path = site / 'effects.log'
+                effects_path.write_text('')
+                environment = dict(os.environ, EFFECTS=str(effects_path), SSO_DIR=str(ROOT / 'sso'))
+                rot_outcome = run_bash(script, site, rot_key, *(['--value'] if stdin_data else []), env=environment, stdin=stdin_data)
+                result = (rot_outcome, before, (site / '.env').read_bytes(), effects_path.read_text().splitlines())
             return result
 
-        for key, mode, stdin in (('PING_KEYCLOAK_CLIENT_SECRET', 'runtime.yml', rotated + '\n'), ('KEYCLOAK_KAFBAT_CLIENT_SECRET', 'runtime.yml', None)):
-            label = f'{edition}: identity rotate {key} ({mode}) on a plan that states no MFA stance'
-            outcome, env_before, env_after, effects = rotate(stanceless, key, mode, stdin)
+        for key, auth_mode, stdin in (('PING_KEYCLOAK_CLIENT_SECRET', 'runtime.yml', rotated + '\n'), ('KEYCLOAK_KAFBAT_CLIENT_SECRET', 'runtime.yml', None)):
+            label = f'{edition}: identity rotate {key} ({auth_mode}) on a plan that states no MFA stance'
+            outcome, env_before, env_after, effects = rotate(stanceless, key, auth_mode, stdin)
             e(outcome.returncode != 0 and 'no MFA stance' in outcome.stderr and 'Nothing was rotated' in outcome.stderr,
               f'{label} must refuse naming the stance and that nothing was rotated; got exit {outcome.returncode} {outcome.stderr.strip()[-200:]!r}')
             e(env_after == env_before, f'{label}: .env must be byte-identical after the refusal')
@@ -7864,7 +7867,7 @@ def check_rotate_stance(checks):
             e(rotated not in outcome.stdout + outcome.stderr, f'{label}: the secret is never printed')
             # The same harness reaches every write with a valid plan (and with the opt-out, the other valid stance).
             for stance, good in (('the claim pair', pair_plan), ('the opt-out', optout_plan)):
-                outcome, env_before, env_after, effects = rotate(good, key, mode, stdin)
+                outcome, env_before, env_after, effects = rotate(good, key, auth_mode, stdin)
                 wanted = (['kcadm update identity-provider/instances/pingfederate', 'identity_up_service keycloak'] if key.startswith('PING')
                           else ['kcadm update clients/client-id-1', 'compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout 5 kafka-ui'])
                 e(outcome.returncode == 0 and env_after != env_before and 'prepare_identity_env' in effects and all(item in effects for item in wanted),
@@ -7898,13 +7901,13 @@ def check_mfa_docs(checks):
     dual = (ROOT / 'sso/guides/dual-login.md').read_text()
     flat = ' '.join(dual.split())
 
-    def between(text, start, stop):
+    def between(src_text, start, stop):
         """The text from `start` up to `stop`; empty when `start` is missing, so the assertions below fail with their own message."""
-        begin = text.find(start)
+        begin = src_text.find(start)
         if begin < 0:
             return ''
-        end = text.find(stop, begin)
-        return text[begin:end if end >= 0 else len(text)]
+        end = src_text.find(stop, begin)
+        return src_text[begin:end if end >= 0 else len(src_text)]
     # F3: the upgrade paragraph lists every command that refuses a plan without a stance; each is tied to the code below.
     upgrade = between(flat, 'A PingFederate site whose plan file was written before the MFA stance existed', '## Company SSO through PingFederate')
     for command in ('./krate start', './krate install', './krate auth apply', './krate identity up',
@@ -8008,8 +8011,8 @@ def check_mfa_docs(checks):
       'identity-gate.md must state the enforce-if-asserted decision and the opt-out wording')
     e(re.search(r'`REQUIRED_P3` is P1–P16, P18, P22–P27 and Z3 \(24 ids\)', gate) is not None, 'identity-gate.md must count P18, P22-P27 in REQUIRED_P3 (24 ids)')
 
-    def required(name):
-        found = re.search(r'^REQUIRED_%s=\((.*)\)$' % name, runner, re.M)
+    def required(phase_name):
+        found = re.search(r'^REQUIRED_%s=\((.*)\)$' % phase_name, runner, re.M)
         return found.group(1).split() if found else []
     sizes = {name: required(name) for name in ('P1', 'P2', 'P3', 'X')}
     total = sum(len(ids) for ids in sizes.values())
@@ -9225,10 +9228,10 @@ def check_perses_sync_scopes(checks):
             identity.client_verdict(identity.perses_rep(name, origin, port), current)
         return buffer.getvalue().split()
 
-    def readback(plan, default, optional=()):
+    def readback(client_plan, default, optional=()):
         """The shape Keycloak's GET clients/<id> returns: the plan, Keycloak's own additions, the
         secret masked, the scope lists in an order of Keycloak's choosing (not the plan's)."""
-        return dict(plan, id='3f1c7a52-0b6d-4c1e-9d2a-5e8b4a7c6d10', surrogateAuthRequired=False, bearerOnly=False,
+        return dict(client_plan, id='3f1c7a52-0b6d-4c1e-9d2a-5e8b4a7c6d10', surrogateAuthRequired=False, bearerOnly=False,
                     consentRequired=False, alwaysDisplayInConsole=False, fullScopeAllowed=True,
                     nodeReRegistrationTimeout=-1, access={'view': True, 'configure': True, 'manage': True},
                     secret=identity.KEYCLOAK_SECRET_MASK, defaultClientScopes=list(default),
@@ -9355,9 +9358,9 @@ def check_grafana_admin_contract(checks):
       f'got {api.calls[1][2]}')
 
     # User search must not omit a collision or retirement target on the next page.
-    users = [{'id': i, 'login': f'user{i}'} for i in range(1, 1001)]
-    users.append({'id': 1001, 'login': 'target', 'name': 'Target'})
-    api = RecordingApi(users=users)
+    user_list = [{'id': i, 'login': f'user{i}'} for i in range(1, 1001)]
+    user_list.append({'id': 1001, 'login': 'target', 'name': 'Target'})
+    api = RecordingApi(users=user_list)
     payload = run(lambda: admin.cmd_retire_user(api, 'target', admin.DEFAULT_EMAIL_SUFFIX))
     e(payload['disabled'] is True and payload['login'] == 'target',
       f'retire-user must find the account on page two; got {payload}')
@@ -9366,7 +9369,7 @@ def check_grafana_admin_contract(checks):
           ('GET', '/api/users?perpage=1000&page=2')],
       f'user pagination must cross the 1000-user boundary; got {api.calls[:2]}')
     for label, bad_page in (('malformed', {'users': []}), ('duplicate', [{'id': 1}])):
-        api = RecordingApi(users=users, user_pages=[users[:1000], bad_page])
+        api = RecordingApi(users=user_list, user_pages=[user_list[:1000], bad_page])
         try:
             admin.list_users(api)
             e(False, f'{label} second user page must fail closed')
@@ -9472,11 +9475,11 @@ def check_render_writes(checks):
     chmods, chowns, opens = [], [], []
     real_chmod, real_chown, real_open = os.chmod, os.chown, os.open
 
-    def chmod_stub(path, mode, *args, **kwargs):
-        chmods.append((str(path), mode))
-        real_chmod(path, mode, *args, **kwargs)
+    def chmod_stub(path, file_mode, *args, **kwargs):
+        chmods.append((str(path), file_mode))
+        real_chmod(path, file_mode, *args, **kwargs)
 
-    def chown_stub(path, uid, gid, *args, **kwargs):
+    def chown_stub(path, uid, gid, *_args, **_kwargs):
         chowns.append((str(path), uid, gid))
 
     def open_stub(path, flags, *args, **kwargs):

@@ -30,7 +30,7 @@ def worst(statuses):
     for status in statuses:
         if status not in RANK:
             raise ValueError('unknown probe token %r (want PASS, FAIL or NOT_RUN)' % (status,))
-    return max(statuses, key=lambda status: RANK[status])
+    return max(statuses, key=lambda item: RANK[item])
 
 
 def token(name, status):

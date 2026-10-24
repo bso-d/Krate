@@ -231,7 +231,7 @@ def components(facts, image_ref, arch, cache, registry):
     return len(by_source)
 
 
-def fetch(comp, cache, out_dir, rel_root):
+def fetch(comp, cache, _out_dir, rel_root):
     files = []
     for path, name, url, how in fetch_source(cache, comp.name, comp.version):
         rel = f'{rel_root}/debian/{slug(comp.name)}/{slug(comp.version)}/{name}'

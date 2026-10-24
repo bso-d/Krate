@@ -14,11 +14,11 @@ import sqlite3
 import struct
 import subprocess
 import uuid
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as element_tree
 from pathlib import Path
 
-from common import (Component, Unresolved, VerificationError, classify_expression, sha256_bytes,
-                    sha256_file, slug)
+from common import (Component, Unresolved, VerificationError, aggregate_expressions,
+                    sha256_bytes, sha256_file, slug)
 
 UBI = 'https://cdn-ubi.redhat.com/content/public/ubi/dist'
 TAGS = {1000: 'name', 1001: 'version', 1002: 'release', 1003: 'epoch', 1011: 'vendor',
@@ -105,7 +105,7 @@ def is_red_hat(row):
     return 'red hat' in (row.get('vendor') or '').lower()
 
 
-def components(facts, image_ref, arch, cache, registry):
+def components(facts, image_ref, arch, _cache, registry):
     rows = installed(facts)
     if not rows:
         return 0
@@ -122,14 +122,10 @@ def components(facts, image_ref, arch, cache, registry):
         m = re.match(r'^(.+)-([^-]+)-([^-]+)\.(no)?src\.rpm$', srpm)
         if comp is None:
             licences = sorted({p.get('license') or '' for p in pkgs})
-            results = [classify_expression(l) for l in licences]
-            cat = ('copyleft' if any(r['category'] == 'copyleft' for r in results) else
-                   'unknown' if any(r['category'] == 'unknown' for r in results) else
-                   'elected-permissive' if any(r['category'] == 'elected-permissive' for r in results)
-                   else 'permissive')
+            cat, fams = aggregate_expressions(licences)
             comp = Component(key=key, ecosystem='rpm', name=m.group(1) if m else srpm,
                              version=f'{m.group(2)}-{m.group(3)}' if m else '', licence=' AND '.join(licences),
-                             category=cat, families=sorted({f for r in results for f in r['families']}))
+                             category=cat, families=fams)
             comp.fetch = {'srpm': srpm, 'majors': set(), 'basearch': set(),
                           'vendors': sorted({p.get('vendor') or '' for p in pkgs})}
             registry[key] = comp
@@ -155,7 +151,7 @@ def repo_index(cache, major, basearch, repo):
     if not repomd:
         return {}
     ns = {'r': 'http://linux.duke.edu/metadata/repo', 'c': 'http://linux.duke.edu/metadata/common'}
-    root = ET.fromstring(repomd)
+    root = element_tree.fromstring(repomd)
     data = root.find("r:data[@type='primary']", ns)
     href = data.find('r:location', ns).get('href')
     want = data.find('r:checksum', ns).text
@@ -165,7 +161,7 @@ def repo_index(cache, major, basearch, repo):
         raise VerificationError(f'{base}/{href}: repodata checksum mismatch')
     xml = gzip.decompress(raw) if href.endswith('.gz') else raw
     out = {}
-    for _ev, el in ET.iterparse(__import__('io').BytesIO(xml)):
+    for _ev, el in element_tree.iterparse(__import__('io').BytesIO(xml)):
         if el.tag.endswith('}package'):
             loc = el.find('c:location', ns).get('href')
             ck = el.find('c:checksum', ns)
@@ -190,7 +186,7 @@ def find_srpm(cache, srpm, majors, basearches):
     return None, None
 
 
-def fetch(comp, cache, out_dir, rel_root):
+def fetch(comp, cache, _out_dir, rel_root):
     srpm = comp.fetch['srpm']
     if srpm.endswith('.nosrc.rpm') or not srpm.endswith('.src.rpm'):
         raise Unresolved(f'package records no source RPM ({srpm}); vendor {comp.fetch["vendors"]}')

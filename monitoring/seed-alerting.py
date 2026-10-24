@@ -52,7 +52,7 @@ def seed(path):
                                    'X-Disable-Provenance': 'true'})
         with urlopen(request, timeout=10) as response:
             raw = response.read()
-            return json.loads(raw) if raw else None
+        return json.loads(raw) if raw else None
 
     for attempt in range(60):
         try:

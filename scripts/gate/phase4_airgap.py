@@ -748,7 +748,7 @@ def sweep_probe_networks(ctx):
             ctx.run(['docker', 'network', 'rm', network], timeout=30)
 
 
-def stop_orphaned_watchers(ctx, state_dir):
+def stop_orphaned_watchers(ctx, _state_dir=None):
     """Stop supervisors whose run's marker file is gone (SF3): a `phase4_airgap.py watch-loop` whose --watcher-file no
     longer exists belongs to a run that ended (finish() deletes the run's state), so its supervisor is an orphan from a
     hard-killed or already-finished run.  A watcher whose state file still exists is someone's live subscription (an
@@ -855,7 +855,7 @@ def kill_watcher(watcher):
             continue
 
 
-def control_event(ctx, events_file, action, name, wait=15):
+def control_event(_ctx, events_file, action, name, wait=15):
     """True when the watcher's file shows the volume event for `name`."""
     deadline = time.time() + wait
     while True:
@@ -907,12 +907,15 @@ def watch_loop(args):
     child_holder = []  # the running `docker events` child, if any (a list: it must be assignable from the signal handler)
     state_gone = threading.Event()
 
-    def stop(signum, frame):
-        for child in child_holder:
+    def stop_child():
+        for proc in child_holder:
             try:
-                child.terminate()
+                proc.terminate()  # unblocks the stream read so the main loop can exit
             except OSError:
                 pass
+
+    def stop(_signum, _frame):
+        stop_child()
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, stop)
 
@@ -926,17 +929,8 @@ def watch_loop(args):
                 return
             time.sleep(WATCH_TICK)
 
-    def stop_child():
-        for child in child_holder:
-            try:
-                child.terminate()  # unblocks the stream read so the main loop can exit
-            except OSError:
-                pass
-
-    watcher_thread = None
     if args.watcher_file:
-        watcher_thread = threading.Thread(target=watch_state_file, daemon=True)
-        watcher_thread.start()
+        threading.Thread(target=watch_state_file, daemon=True).start()
     signal.signal(signal.SIGINT, stop)
     since, until = int(args.since), int(args.until)
     with open(args.events_file, 'ab', buffering=0) as events, open(args.err_file, 'ab') as err:

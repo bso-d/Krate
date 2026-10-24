@@ -18,7 +18,7 @@ from pathlib import Path
 from common import Unresolved, http_json, log, run, slug
 
 
-def _bare(cache, repo):
+def bare_repo(cache, repo):
     path = Path(cache.root) / 'git' / (slug(repo.split('://', 1)[-1]) + '.git')
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -27,12 +27,15 @@ def _bare(cache, repo):
     return path
 
 
+_bare = bare_repo
+
+
 def _gh_headers():
     tok = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
     return {'Authorization': f'Bearer {tok}'} if tok else {}
 
 
-def resolve(cache, repo, rev):
+def resolve(_cache, repo, rev):
     """Full commit id for a commit id, short id or tag name."""
     if re.fullmatch(r'[0-9a-f]{40}', rev):
         return rev
@@ -60,7 +63,7 @@ def has_commit(bare, commit):
                           capture_output=True).returncode == 0
 
 
-def archive(cache, repo, commit, workroot: Path):
+def archive(cache, repo, commit, _workroot: Path = None):
     """Return (cached tar.gz path, verification text) for the complete tree of commit."""
     key = f'gitarchive:{repo}@{commit}'
     marker = cache.meta_path(key)
@@ -68,7 +71,7 @@ def archive(cache, repo, commit, workroot: Path):
         p = Path(marker.read_text())
         if p.exists():
             return p, f'complete tree of git commit {commit} fetched by id from {repo}'
-    bare = _bare(cache, repo)
+    bare = bare_repo(cache, repo)
     if not has_commit(bare, commit):
         log(f'git fetch {repo} {commit[:12]}')
         proc = subprocess.run(['git', '-C', bare, 'fetch', '-q', '--depth', '1', 'origin', commit],

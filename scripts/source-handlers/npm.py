@@ -16,7 +16,7 @@ import json
 import re
 
 import depsdev
-from common import (Component, Unresolved, classify_expression, quote_url, slug)
+from common import (Component, Unresolved, aggregate_expressions, quote_url, slug)
 import gitsrc
 
 REGISTRY = 'https://registry.npmjs.org'
@@ -50,7 +50,7 @@ def frontends(facts, image_ref):
     return out
 
 
-def components(facts, image_ref, arch, cache, registry):
+def components(facts, image_ref, arch, _cache, registry):
     n = 0
     for repo, rev, how, kind, lock in frontends(facts, image_ref):
         key = f'npmfrontend:{repo}@{rev}'
@@ -158,6 +158,8 @@ def parse_berry(text):
 
 
 def berry_closure(entries, by_desc, roots):
+    if not by_desc and entries:
+        by_desc = {d: e for e in entries for d in e.get('descs', ())}
     out, todo, seen = set(), list(roots), set()
     while todo:
         name, rng = todo.pop()
@@ -243,16 +245,12 @@ def classify(comps_or_registry, cache):
         if not lic:
             c.licence, c.category = 'undeclared', 'unknown'
             continue
-        exprs = [classify_expression(x) for x in lic]
         c.licence = ' AND '.join(lic)
-        c.category = ('copyleft' if any(e['category'] == 'copyleft' for e in exprs) else
-                      'elected-permissive' if any(e['category'] == 'elected-permissive' for e in exprs) else
-                      'unknown' if all(e['category'] == 'unknown' for e in exprs) else 'permissive')
-        c.families = sorted({f for e in exprs for f in e['families']})
+        c.category, c.families = aggregate_expressions(lic, strict_unknown=False)
         c.notes.append(f'licence from {source}; listed in a production lockfile closure (may be tree-shaken)')
 
 
-def fetch(comp, cache, out_dir, rel_root, workroot=None):
+def fetch(comp, cache, _out_dir, rel_root, _workroot=None):
     if comp.ecosystem == 'npm-frontend':
         raise Unresolved(comp.fetch.get('unresolved') or 'front end without dependency list')
     doc = cache.cached_json(f'{REGISTRY}/{quote_url(comp.name).replace("%40", "@")}/{comp.version}', allow_404=True)

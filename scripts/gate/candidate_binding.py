@@ -260,7 +260,7 @@ def image_problems(rows: Dict[str, Tuple[str, str]]) -> Tuple[List[str], List[st
         if IMAGE_ID.match(held):  # only a well-formed id can point at the store; an empty answer cannot
             held_ids += 1
             differing += int(held != image_id)
-    if held_ids > 1 and differing == held_ids:
+    if 1 < held_ids == differing:
         # A containerd image store reports the manifest digest as the image id, the classic store the
         # config digest: when every id differs, the likely cause is not the bundle but the store.
         notes.append('image store: every image this host holds under a runtime tag (%d) has an id that differs from the '

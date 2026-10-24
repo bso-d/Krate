@@ -924,7 +924,7 @@ def _describe(execution):
     return execution.get('flowAlias') if execution.get('authenticatorFlow') else execution.get('authenticator')
 
 
-def _check_flows(path, flows):
+def check_flows(path, flows):
     """Every flow must equal planned_flows() (matched by alias); an execution list is compared in priority order."""
     expected = {flow['alias']: flow for flow in planned_flows()}
     actual = {flow.get('alias'): flow for flow in flows}
@@ -949,15 +949,18 @@ def _check_flows(path, flows):
                     raise ValueError(f'{path}: flow {alias!r} execution {_describe(want_item)!r} field {key} differs from the Krate plan')
 
 
+_check_flows = check_flows
+
+
 def broker_plan(path):
     """The validated broker plan at `path`; a ValueError names what is wrong (never a value)."""
     try:
-        plan = json.loads(Path(path).read_text())
+        plan_doc = json.loads(Path(path).read_text())
     except ValueError:
         raise ValueError(f'{path} is not valid JSON') from None
-    if not isinstance(plan, dict):
+    if not isinstance(plan_doc, dict):
         raise ValueError(f'{path} must be a JSON object')
-    providers = plan.get('identityProviders')
+    providers = plan_doc.get('identityProviders')
     if not isinstance(providers, list) or len(providers) != 1 or not isinstance(providers[0], dict):
         raise ValueError(f'{path} must define exactly one identity provider')
     provider = providers[0]
@@ -976,7 +979,7 @@ def broker_plan(path):
             raise ValueError(f'{path}: {key} must be an https URL')
     if provider.get('firstBrokerLoginFlowAlias') != FIRST_BROKER_FLOW:
         raise ValueError(f'{path}: firstBrokerLoginFlowAlias must be {FIRST_BROKER_FLOW!r}')
-    mappers = plan.get('identityProviderMappers')
+    mappers = plan_doc.get('identityProviderMappers')
     if not isinstance(mappers, list) or len(mappers) != 2 or any(not isinstance(m, dict) for m in mappers):
         raise ValueError(f'{path} must define exactly two identity-provider mappers')
     names = [m.get('name') for m in mappers]
@@ -985,7 +988,7 @@ def broker_plan(path):
     for mapper in mappers:
         if mapper.get('identityProviderAlias') != BROKER_ALIAS or not isinstance(mapper.get('config'), dict):
             raise ValueError(f'{path}: every mapper must belong to {BROKER_ALIAS}')
-    flows = plan.get('authenticationFlows')
+    flows = plan_doc.get('authenticationFlows')
     if not isinstance(flows, list) or any(not isinstance(flow, dict) for flow in flows):
         raise ValueError(f'{path}: authenticationFlows must be a list of flows')
     aliases = [flow.get('alias') for flow in flows]
@@ -1003,19 +1006,19 @@ def broker_plan(path):
                     raise ValueError(f'{path}: sub-flow {execution.get("flowAlias")!r} of {flow.get("alias")!r} is not planned')
             elif not execution.get('authenticator'):
                 raise ValueError(f'{path}: an execution of {flow.get("alias")!r} names no authenticator')
-    _check_flows(path, flows)
-    configs = plan.get('authenticatorConfig')
+    check_flows(path, flows)
+    configs = plan_doc.get('authenticatorConfig')
     if not isinstance(configs, list) or any(not isinstance(c, dict) or not c.get('alias') or not isinstance(c.get('config'), dict) for c in configs):
         raise ValueError(f'{path}: authenticatorConfig must list named configurations')
     if not _same(configs, planned_authenticator_config()):
         raise ValueError(f'{path}: authenticatorConfig must be exactly the {REDIRECT_CONFIG!r} redirector configuration of the Krate plan')
-    if plan.get('browserFlow') != BROWSER_FLOW:
+    if plan_doc.get('browserFlow') != BROWSER_FLOW:
         raise ValueError(f'{path}: browserFlow must be {BROWSER_FLOW!r}')
-    if plan.get('truststore', 'local') not in TRUSTSTORE_MODES:
+    if plan_doc.get('truststore', 'local') not in TRUSTSTORE_MODES:
         raise ValueError(f'{path}: truststore must be one of {list(TRUSTSTORE_MODES)}')
     # The MFA stance is explicit (never fails open over an unstated one): either the three
     # essential-claim keys together on the provider's config, or the opt-out marker — never both.
-    stance = plan.get(MFA_NOT_ASSERTED_KEY)
+    stance = plan_doc.get(MFA_NOT_ASSERTED_KEY)
     if stance is not None and stance is not True:
         raise ValueError(f'{path}: {MFA_NOT_ASSERTED_KEY} must be the boolean true')
     filter_keys = [key for key in MFA_FILTER_KEYS if key in config]
@@ -1035,18 +1038,18 @@ def broker_plan(path):
     elif stance is not True:
         raise MfaStanceError(f'{path} states no MFA stance: {MFA_STANCE_HINT}; add one of the two to the site file, remove '
                              f'auth/ui/runtime.yml and {BROKER_PLAN}, then run krate auth configure <site.json>')
-    return plan
+    return plan_doc
 
 
-def broker_flow(plan, alias):
-    flow = next((flow for flow in plan['authenticationFlows'] if flow.get('alias') == alias), None)
+def broker_flow(plan_doc, alias):
+    flow = next((flow for flow in plan_doc['authenticationFlows'] if flow.get('alias') == alias), None)
     if flow is None:
         raise ValueError(f'flow {alias!r} is not in the plan')
     return flow
 
 
-def broker_config(plan, alias):
-    config = next((c for c in plan['authenticatorConfig'] if c.get('alias') == alias), None)
+def broker_config(plan_doc, alias):
+    config = next((c for c in plan_doc['authenticatorConfig'] if c.get('alias') == alias), None)
     if config is None:
         raise ValueError(f'authenticator config {alias!r} is not in the plan')
     return {'alias': config['alias'], 'config': dict(config['config'])}
@@ -1060,9 +1063,9 @@ def env_secret(key):
     return value
 
 
-def broker_provider(plan, with_secret=False, enabled=None):
+def broker_provider(plan_doc, with_secret=False, enabled=None):
     """The provider representation; with `with_secret` the placeholder becomes the environment's value."""
-    provider = json.loads(json.dumps(plan['identityProviders'][0]))
+    provider = json.loads(json.dumps(plan_doc['identityProviders'][0]))
     if enabled is not None:
         if isinstance(enabled, str):
             provider['enabled'] = enabled.lower() == 'true'
@@ -1082,7 +1085,7 @@ def differs(wanted, current):
     return wanted != current
 
 
-def provider_differs(plan, current, ignore_enabled=False):
+def provider_differs(plan_doc, current, ignore_enabled=False):
     """True when the live provider `current` differs from the plan.
 
     Beyond differs() (a planned key lacks or differs), the claim-filter keys are managed: a live provider
@@ -1090,7 +1093,7 @@ def provider_differs(plan, current, ignore_enabled=False):
     so the apply sends the plan's representation, whose configuration replaces the live one. A live
     `filteredByClaim` of "false" is a filter that is off and is left alone.
     """
-    wanted = broker_provider(plan)
+    wanted = broker_provider(plan_doc)
     if ignore_enabled and isinstance(current, dict) and isinstance(current.get('enabled'), bool):
         wanted = dict(wanted, enabled=current['enabled'])
     if differs(wanted, current):
@@ -1134,32 +1137,32 @@ def truststore_digest(directory):
 
 def cmd_broker(args):
     """Plan items for the CLI, one JSON document per line (flows and executions in plan order)."""
-    plan = broker_plan(args.plan)
+    plan_doc = broker_plan(args.plan)
     out = sys.stdout
     if args.item == 'provider':
         # The secret travels stdin -> kcadm only; this output is piped, never logged or captured.
-        out.write(json.dumps(broker_provider(plan, args.with_secret, enabled=getattr(args, 'enabled', None))) + '\n')
+        out.write(json.dumps(broker_provider(plan_doc, args.with_secret, enabled=getattr(args, 'enabled', None))) + '\n')
     elif args.item == 'provider-differs':
-        out.write(('differs' if provider_differs(plan, json.load(sys.stdin), ignore_enabled=getattr(args, 'ignore_enabled', False)) else 'same') + '\n')
+        out.write(('differs' if provider_differs(plan_doc, json.load(sys.stdin), ignore_enabled=getattr(args, 'ignore_enabled', False)) else 'same') + '\n')
     elif args.item == 'mappers':
-        for mapper in plan['identityProviderMappers']:
+        for mapper in plan_doc['identityProviderMappers']:
             out.write(json.dumps(mapper) + '\n')
     elif args.item == 'mapper-differs':
-        wanted = next(m for m in plan['identityProviderMappers'] if m['name'] == args.name)
+        wanted = next(m for m in plan_doc['identityProviderMappers'] if m['name'] == args.name)
         out.write(('differs' if differs(wanted, json.load(sys.stdin)) else 'same') + '\n')
     elif args.item == 'flows':
-        for flow in plan['authenticationFlows']:
+        for flow in plan_doc['authenticationFlows']:
             out.write(json.dumps({'alias': flow['alias'], 'topLevel': bool(flow.get('topLevel')),
                                   'description': flow.get('description', ''), 'providerId': flow.get('providerId', 'basic-flow')}) + '\n')
     elif args.item == 'executions':
-        for execution in broker_flow(plan, args.name)['authenticationExecutions']:
+        for execution in broker_flow(plan_doc, args.name)['authenticationExecutions']:
             out.write(json.dumps(execution) + '\n')
     elif args.item == 'config':
-        out.write(json.dumps(broker_config(plan, args.name)) + '\n')
+        out.write(json.dumps(broker_config(plan_doc, args.name)) + '\n')
     elif args.item == 'config-differs':
-        out.write(('differs' if differs(broker_config(plan, args.name), json.load(sys.stdin)) else 'same') + '\n')
+        out.write(('differs' if differs(broker_config(plan_doc, args.name), json.load(sys.stdin)) else 'same') + '\n')
     elif args.item == 'browser-flow':
-        out.write(plan['browserFlow'] + '\n')
+        out.write(plan_doc['browserFlow'] + '\n')
     return 0
 
 
@@ -1197,7 +1200,6 @@ def refuse_loopback_public_url(url):
     # including the inet_aton shorthand, and neither unspecified address is reachable from a
     # container. A host that is not an IP literal is checked against the name list only, so a
     # legal public hostname such as 127.example.com stays accepted (PR #42 review).
-    address = None
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
