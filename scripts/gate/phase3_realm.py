@@ -178,7 +178,7 @@ def compare_flow(state, plan, plan_flows, alias, live_items, diffs, path):
             diffs.append('%s: live execution carries an authenticator config the plan does not' % where)
 
 
-def compare(state, plan):
+def compare(state, plan, ignore_enabled=False):
     diffs = []
     if state['browserFlow'] != plan.get('browserFlow'):
         diffs.append('browserFlow: planned %r, live %r' % (plan.get('browserFlow'), state['browserFlow']))
@@ -190,6 +190,8 @@ def compare(state, plan):
     else:
         planned = providers[0]
         for key in ('providerId', 'enabled', 'firstBrokerLoginFlowAlias', 'trustEmail', 'storeToken'):
+            if ignore_enabled and key == 'enabled':
+                continue
             if key in planned and planned[key] != state['provider'].get(key):
                 diffs.append('provider.%s: planned %r, live %r' % (key, planned[key], state['provider'].get(key)))
         for key, value in (planned.get('config') or {}).items():
@@ -325,6 +327,8 @@ def main(argv=None):
     parser.add_argument('--shape', metavar='PLAN', help='check the plan file\'s D2/D3 shape only (no Keycloak access)')
     parser.add_argument('--expect', metavar='PLAN', help='auth/keycloak/pingfederate-idp.json to compare with')
     parser.add_argument('--expect-absent', action='store_true', help='require the provider and flows to be gone')
+    parser.add_argument('--ignore-enabled', action='store_true',
+                        help='do not treat difference in provider enabled as a diff in --expect')
     parser.add_argument('--required-action', action='append', default=[], metavar='ALIAS=true|false',
                         help='required defaultAction of a required action')
     args = parser.parse_args(argv)
@@ -361,7 +365,7 @@ def main(argv=None):
     if args.expect:
         with open(args.expect, encoding='utf-8') as handle:
             plan = json.load(handle)
-        diffs += compare(state, plan)
+        diffs += compare(state, plan, ignore_enabled=args.ignore_enabled)
     if args.expect_absent:
         diffs += compare_absent(state)
     for item in args.required_action:

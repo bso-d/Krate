@@ -84,6 +84,7 @@ Rules:
 | Host operator | Anyone in the `docker` group or root on the VM | Everything: `./krate`, `docker exec`, read `.env`, read the backups | Nothing is withheld; protect the VM account |
 | Keycloak master admin | `KEYCLOAK_ADMIN_USER` in realm `master` | Any Keycloak change. Used by `identity up`, `identity rotate`, recovery, and by the operator through `kcadm` from the host | Reach Keycloak through the proxy; the admin console and the `master` realm are not published |
 | `krate-cli` service account | Client `krate-cli` in realm `krate` | Realm `krate` user management only: `manage-users`, `view-users`, `query-users`, `query-groups` | Change clients, groups, flows or the realm; touch `master` |
+| `krate-idp-watch` service account | Client `krate-idp-watch` in realm `krate` | Realm `krate` identity provider management only: `view-identity-providers`, `manage-identity-providers` | Manage users, clients, groups, flows, or touch `master` |
 | Kafbat administrator | Members of `KEYCLOAK_ADMIN_GROUP` (default `KRATE_ADMINS`) | Kafbat administrator role on the configured clusters (Phase 2) | Anything in Keycloak |
 | Kafbat viewer | Members of `KEYCLOAK_VIEWER_GROUP` (default `KRATE_VIEWERS`) | Kafbat viewer role (Phase 2) | Anything in Keycloak |
 | Shared Admin | `KAFKA_UI_USER` / `KAFKA_UI_PASSWORD` | Kafbat administrator through the local form while `KAFKA_UI_AUTH_CONFIG=local.yml` | Sign in while `runtime.yml` is active (Kafbat then has no form login); anything in Keycloak; it is not a Keycloak account |
@@ -146,6 +147,7 @@ Read from `kraft/docker-compose.yml`, `epc/docker-compose.yml` and
 | `proxy` | `krate-proxy` / `epc-proxy` | default | `KAFKA_UI_HTTP_PORT` (80), `KAFKA_UI_HTTPS_PORT` (443) | TLS from `certs/`; forwards only `/identity/realms/krate/` and `/identity/resources/` to Keycloak. Networks `kafka-network` and `identity`, with the fixed address `KRATE_IDENTITY_PROXY_IP` (172.29.250.10) on `identity` |
 | `keycloak-db` | Compose default (`<project>-keycloak-db-1`) | `sso` | none | PostgreSQL 17, TLS on, `pg_hba.conf` from `auth/keycloak/db-tls/`. Network `identity` only |
 | `keycloak` | Compose default (`<project>-keycloak-1`) | `sso` | none | HTTP 8080 and management 9000 stay inside the network. Networks `identity` and `identity-egress`; not on `kafka-network`. `KC_PROXY_TRUSTED_ADDRESSES` = the proxy address |
+| `idp-watch` | Compose default (`<project>-idp-watch-1`) | `sso` | none | Reachability watcher for enterprise IdP. Networks `identity` and `identity-egress`; read_only: true. Manages provider enabled state during outages |
 
 ### Services and published host ports: monitoring
 
@@ -179,8 +181,8 @@ Phase 4; Perses (3443) uses the cluster certificate.
 | Network | Driver | Members |
 | --- | --- | --- |
 | `<project>_kafka-network` | bridge | brokers, `kafka-ui`, `proxy`; `kafka-exporter` from the monitoring project joins it as an external network. `keycloak` and `keycloak-db` are no longer on it |
-| `<project>_identity` | bridge, `internal: true`, subnet `KRATE_IDENTITY_SUBNET` (172.29.250.0/24), dynamic pool `KRATE_IDENTITY_IP_RANGE` (172.29.250.128/25) | `keycloak-db`, `keycloak`, `proxy` (fixed address `KRATE_IDENTITY_PROXY_IP`, 172.29.250.10, outside the dynamic pool so no other container can take it), `kafka-ui`. Exactly these four (the preflight checks membership). No route to the host or outside; nothing from the monitoring project |
-| `<project>_identity-egress` | bridge | `keycloak` only: its route out of the host for the Phase 3 identity provider (an internal network has none) |
+| `<project>_identity` | bridge, `internal: true`, subnet `KRATE_IDENTITY_SUBNET` (172.29.250.0/24), dynamic pool `KRATE_IDENTITY_IP_RANGE` (172.29.250.128/25) | `keycloak-db`, `keycloak`, `proxy` (fixed address `KRATE_IDENTITY_PROXY_IP`, 172.29.250.10, outside the dynamic pool so no other container can take it), `kafka-ui`, and `idp-watch`. Exactly these five (the preflight checks membership). No route to the host or outside; nothing from the monitoring project |
+| `<project>_identity-egress` | bridge | `keycloak` and `idp-watch`: their route out of the host for the Phase 3 enterprise identity provider and reachability health probes (an internal network has none) |
 | `<monitoring project>_monitoring` | bridge | exporters, Prometheus, Loki, Fluent Bit, Grafana, VictoriaLogs, Alertmanager |
 | `<monitoring project>_perses` | bridge | Prometheus, VictoriaLogs, Perses, its gateway, seed and SSO helpers |
 
@@ -249,6 +251,7 @@ the authoritative store wins and `./krate` fails to log in.
 | `KEYCLOAK_DB_PASSWORD` | PostgreSQL role `keycloak` in `keycloak_db_data`. `POSTGRES_PASSWORD` is used only when the database is initialised. | `.env` | `./krate identity rotate KEYCLOAK_DB_PASSWORD` |
 | `KEYCLOAK_ADMIN_PASSWORD` | user `KEYCLOAK_ADMIN_USER` in realm `master` | `.env` | `./krate identity rotate KEYCLOAK_ADMIN_PASSWORD` |
 | `KEYCLOAK_CLI_CLIENT_SECRET` | client `krate-cli` in realm `krate`, once imported | `.env`, realm plan placeholder | `./krate identity rotate KEYCLOAK_CLI_CLIENT_SECRET` |
+| `KEYCLOAK_IDP_WATCH_CLIENT_SECRET` | client `krate-idp-watch` in realm `krate`, once imported | `.env`, realm plan placeholder | `./krate identity rotate KEYCLOAK_IDP_WATCH_CLIENT_SECRET` |
 | `KEYCLOAK_KAFBAT_CLIENT_SECRET` | client `krate-ui` in realm `krate`, once imported | `.env`, realm plan placeholder, `runtime.yml` (Phase 2) | `./krate identity rotate KEYCLOAK_KAFBAT_CLIENT_SECRET` |
 | `PING_KEYCLOAK_CLIENT_SECRET` | PingFederate (IAM) | `.env`, identity-provider plan `auth/keycloak/pingfederate-idp.json` (applied in Phase 3) | value from IAM, `./krate config set`, then `auth apply` |
 | temporary bootstrap admin password (`temp-admin`, or `temp-admin-<random>` from `recover-admin`) | nowhere after the command ends | held only by the `identity up` or `identity recover-admin` process while it runs `kc.sh bootstrap-admin user`; never written to `.env` | not applicable; the account is deleted |
@@ -286,7 +289,7 @@ for a running `identity backup`, `restore`, `rotate` or `recover-admin`.
 | `kcadm` administration | `docker exec` into the `keycloak` container against `http://localhost:8080/identity` | Host operator only |
 | PostgreSQL local socket | `local all all trust` in `pg_hba.conf`; used by `pg_isready`, `identity rotate`, `backup` and `restore` through `docker exec` | Accepted: only the `postgres` process and `docker exec` (host operator) can use the socket |
 | `kafka-ui` (and `proxy`) to `keycloak:8080` | plain HTTP inside the `identity` network; the admin API answers there and is protected by credentials only | Accepted: those two are the only other members; brokers and the monitoring project's `kafka-exporter` have no route to Keycloak or its database any more |
-| `keycloak` to the outside (Phase 3 identity provider) | `identity-egress` bridge network, Keycloak only | Enforced membership; the identity provider's TLS is checked against `auth/keycloak/truststores/` |
+| `keycloak` and `idp-watch` to the outside (Phase 3 identity provider) | `identity-egress` bridge network, Keycloak and idp-watch only | Enforced membership; the identity provider's TLS is checked against `auth/keycloak/truststores/` |
 | Prometheus 9090 and Loki 3100 | plain HTTP, bound to `127.0.0.1` on the host (`PROM_BIND`, `LOKI_BIND`) | Enforced by default; an operator may open them with `0.0.0.0` |
 | Grafana 3000 | plain HTTP on every interface, Grafana login | Unchanged until Phase 4 (owner decision 8, option D) |
 
@@ -503,14 +506,16 @@ temporary password and enrols TOTP at first login.
 ### `./krate identity rotate KEY`
 
 `KEY` is one of `KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`,
-`KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`. Order:
+`KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`,
+`KEYCLOAK_IDP_WATCH_CLIENT_SECRET`. Order:
 
 1. Change the authoritative store first: `ALTER ROLE` through `psql` in
    `keycloak-db`; `kcadm set-password` in `master`; or
    `kcadm update clients/<id> -s secret=...` in `krate`.
 2. Write `.env` atomically (temporary file, mode 600, rename).
 3. Recreate the consumer: `keycloak` for the database password; `kafka-ui`
-   for the Kafbat client secret only when `KAFKA_UI_AUTH_CONFIG=runtime.yml`.
+   for the Kafbat client secret only when `KAFKA_UI_AUTH_CONFIG=runtime.yml`;
+   `idp-watch` for `KEYCLOAK_IDP_WATCH_CLIENT_SECRET` when the watcher is active.
 4. Verify (ready, login) and write the journal line.
 
 Before step 1, for `KEYCLOAK_KAFBAT_CLIENT_SECRET` in `runtime.yml` mode and for

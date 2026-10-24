@@ -289,11 +289,17 @@ def validate_networks(config):
     gateway = entries[0].get('gateway') or str(next(subnet.hosts()))
     services = config['services']
     members = {name for name, service in services.items() if IDENTITY_NETWORK in service_networks(service)}
-    if members != IDENTITY_MEMBERS:
-        raise Preflight(f'the {IDENTITY_NETWORK} network must carry exactly {sorted(IDENTITY_MEMBERS)}; rendered: {sorted(members)}')
+    expected_members = set(IDENTITY_MEMBERS)
+    if 'idp-watch' in services:
+        expected_members.add('idp-watch')
+    if members != expected_members:
+        raise Preflight(f'the {IDENTITY_NETWORK} network must carry exactly {sorted(expected_members)}; rendered: {sorted(members)}')
     egress = {name for name, service in services.items() if EGRESS_NETWORK in service_networks(service)}
-    if egress != {'keycloak'}:
-        raise Preflight(f'only keycloak may be on the {EGRESS_NETWORK} network; rendered: {sorted(egress)}')
+    expected_egress = {'keycloak'}
+    if 'idp-watch' in services:
+        expected_egress.add('idp-watch')
+    if egress != expected_egress:
+        raise Preflight(f'only {sorted(expected_egress)} may be on the {EGRESS_NETWORK} network; rendered: {sorted(egress)}')
     if set(service_networks(services['keycloak-db'])) != {IDENTITY_NETWORK}:
         raise Preflight(f'keycloak-db must be attached to the {IDENTITY_NETWORK} network only')
     keycloak_networks = service_networks(services['keycloak'])

@@ -331,6 +331,8 @@ services:
       # Service-account client used by `krate identity users`; the realm import
       # substitutes the placeholder of the same name in krate-realm.json.
       KEYCLOAK_CLI_CLIENT_SECRET: ${KEYCLOAK_CLI_CLIENT_SECRET}
+      KEYCLOAK_IDP_WATCH_CLIENT_SECRET: ${KEYCLOAK_IDP_WATCH_CLIENT_SECRET}
+      KRATE_KEYCLOAK_THEME_SHA: ${KRATE_KEYCLOAK_THEME_SHA:-}
     healthcheck:
       test: ["CMD", "bash", "-ec", "{ printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/127.0.0.1/9000"]
       interval: 5s
@@ -363,10 +365,66 @@ services:
         bind:
           create_host_path: false
           selinux: z
+      - type: bind
+        source: ${KRATE_SSO_DIR:-../sso}/theme/krate
+        target: /opt/keycloak/themes/krate
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
     # identity: the database, the proxy and Kafbat. identity-egress: Keycloak's
     # own route out of the host for the Phase 3 identity provider (an internal
     # network has no such route); nothing else joins it. Not on kafka-network.
     networks: [identity, identity-egress]
+
+  idp-watch:
+    profiles: [idp-watch]
+    image: ${IDP_WATCH_IMAGE}
+    command: ["python3", "/opt/krate/idp_watch.py"]
+    networks: [identity, identity-egress]
+    volumes:
+      - type: bind
+        source: ${KRATE_SSO_DIR:-../sso}/idp_watch.py
+        target: /opt/krate/idp_watch.py
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ./auth/keycloak/pingfederate-idp.json
+        target: /etc/krate/idp.json
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ./auth/keycloak/truststores
+        target: /etc/krate/truststores
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - idp_watch_state:/var/run/idp_watch
+    restart: unless-stopped
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os, sys, time; sys.exit(0 if (time.time() - os.path.getmtime('/var/run/idp_watch/heartbeat')) < 30 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    environment:
+      IDP_WATCH_ENABLED: ${IDP_WATCH_ENABLED:-true}
+      IDP_WATCH_INTERVAL_SECONDS: ${IDP_WATCH_INTERVAL_SECONDS:-10}
+      IDP_WATCH_TIMEOUT_SECONDS: ${IDP_WATCH_TIMEOUT_SECONDS:-5}
+      IDP_WATCH_FAILURES_TO_FALLBACK: ${IDP_WATCH_FAILURES_TO_FALLBACK:-2}
+      IDP_WATCH_SUCCESSES_TO_RECOVER: ${IDP_WATCH_SUCCESSES_TO_RECOVER:-2}
+      IDP_WATCH_DWELL_SECONDS: ${IDP_WATCH_DWELL_SECONDS:-30}
+      IDP_WATCH_FAIL_OPEN: ${IDP_WATCH_FAIL_OPEN:-true}
+      IDP_WATCH_OFFLINE_ONLY: "true"
+      KEYCLOAK_IDP_WATCH_CLIENT_SECRET: ${KEYCLOAK_IDP_WATCH_CLIENT_SECRET}
+      PING_KEYCLOAK_CLIENT_SECRET: ${PING_KEYCLOAK_CLIENT_SECRET}
+      KRATE_IDP_WATCH_SHA: ${KRATE_IDP_WATCH_SHA:-}
 
 # ─── Networks ──────────────────────────────────────────────────────────────────
 # Broker data is bind-mounted onto ${KAFKA_DATA_DIR}.
@@ -394,3 +452,4 @@ networks:
 
 volumes:
   keycloak_db_data:
+  idp_watch_state:

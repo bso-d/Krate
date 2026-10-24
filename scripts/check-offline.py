@@ -13,10 +13,12 @@ POLICIES = {
     "kraft": {
         "kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"},
         "keycloak": {"JAVA_OPTS_APPEND": "-Dliquibase.analytics.enabled=false"},
+        "idp-watch": {"IDP_WATCH_OFFLINE_ONLY": "true"},
     },
     "epc": {
         "kafka-ui": {"GITHUB_RELEASE_INFO_ENABLED": "false"},
         "keycloak": {"JAVA_OPTS_APPEND": "-Dliquibase.analytics.enabled=false"},
+        "idp-watch": {"IDP_WATCH_OFFLINE_ONLY": "true"},
     },
     "monitoring": {
         "grafana": {
@@ -34,7 +36,7 @@ POLICIES = {
 
 
 # Services under a Compose profile render only with that profile enabled.
-PROFILES = {"kraft": ("sso",), "epc": ("sso",)}
+PROFILES = {"kraft": ("sso", "idp-watch"), "epc": ("sso", "idp-watch")}
 
 
 def violations(variant, config):

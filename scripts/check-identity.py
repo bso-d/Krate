@@ -49,7 +49,8 @@ LOGROTATE_FILE = 'sso/logrotate/krate-identity.conf'
 LOGROTATE_DIRECTIVES = ('monthly', 'rotate 12', 'maxage 400', 'copytruncate', 'missingok', 'notifempty',
                         'compress', 'delaycompress')
 TEMPLATE_SECRETS = ('KAFKA_UI_PASSWORD', 'KEYCLOAK_ADMIN_PASSWORD', 'KEYCLOAK_DB_PASSWORD',
-                    'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'PING_KEYCLOAK_CLIENT_SECRET', 'KEYCLOAK_CLI_CLIENT_SECRET')
+                    'KEYCLOAK_KAFBAT_CLIENT_SECRET', 'PING_KEYCLOAK_CLIENT_SECRET', 'KEYCLOAK_CLI_CLIENT_SECRET',
+                    'KEYCLOAK_IDP_WATCH_CLIENT_SECRET')
 # Values that must never appear in any output; chosen so a leak is unambiguous.
 SYNTHETIC = {
     'KAFKA_UI_USER': 'admin',
@@ -60,6 +61,7 @@ SYNTHETIC = {
     'KEYCLOAK_DB_PASSWORD': 'synthetic-db-secret-9c7d5e3f2b',
     'KEYCLOAK_KAFBAT_CLIENT_SECRET': 'synthetic-kafbat-secret-4a8b6c2d0e',
     'KEYCLOAK_CLI_CLIENT_SECRET': 'synthetic-cli-secret-1d9e7f5a3b',
+    'KEYCLOAK_IDP_WATCH_CLIENT_SECRET': 'synthetic-idp-watch-secret-5e6f7a8b9c',
     'PING_KEYCLOAK_CLIENT_SECRET': 'REPLACE_ME',
     'KEYCLOAK_ENABLED': 'false',
     'KEYCLOAK_VIEWER_GROUP': 'VIEWERS_X',
@@ -176,11 +178,17 @@ def check_realm_contract(checks):
     e([group.get('name') for group in realm.get('groups', [])] == ['VIEWERS_X', 'ADMINS_X'],
       'realm plan: groups must be [KEYCLOAK_VIEWER_GROUP, KEYCLOAK_ADMIN_GROUP]')
     clients = {client['clientId']: client for client in realm.get('clients', [])}
-    e(set(clients) == {'krate-cli', 'krate-ui'}, f'realm plan: clients must be krate-cli and krate-ui; got {sorted(clients)}')
+    e(set(clients) == {'krate-cli', 'krate-ui', 'krate-idp-watch'}, f'realm plan: clients must be krate-cli, krate-ui and krate-idp-watch; got {sorted(clients)}')
     cli = clients.get('krate-cli', {})
     for key, expected in (('publicClient', False), ('serviceAccountsEnabled', True), ('standardFlowEnabled', False),
                           ('directAccessGrantsEnabled', False), ('secret', '${KEYCLOAK_CLI_CLIENT_SECRET}')):
         e(cli.get(key) == expected, f'realm plan: krate-cli {key} must be {expected!r}')
+    watch = clients.get('krate-idp-watch', {})
+    for key, expected in (('publicClient', False), ('serviceAccountsEnabled', True), ('standardFlowEnabled', False),
+                          ('directAccessGrantsEnabled', False), ('secret', '${KEYCLOAK_IDP_WATCH_CLIENT_SECRET}')):
+        e(watch.get(key) == expected, f'realm plan: krate-idp-watch {key} must be {expected!r}')
+    e(watch.get('defaultClientScopes') == list(identity.DEFAULT_SCOPES) + [identity.SERVICE_ACCOUNT_SCOPE],
+      'realm plan: krate-idp-watch defaultClientScopes must include service_account')
     ui = clients.get('krate-ui', {})
     origin = 'https://kafka.example.test'
     for key, expected in (('publicClient', False), ('serviceAccountsEnabled', False), ('standardFlowEnabled', True),
@@ -207,15 +215,21 @@ def check_realm_contract(checks):
         scopes = client.get('optionalClientScopes', ['offline_access']) + client.get('defaultClientScopes', [])
         e('offline_access' not in scopes and 'optionalClientScopes' in client,
           f'realm plan: {name} must list optionalClientScopes without offline_access')
-    users = realm.get('users', [])
-    account = users[0] if len(users) == 1 else {}
-    e(account.get('username') == 'service-account-krate-cli' and account.get('serviceAccountClientId') == 'krate-cli'
-      and account.get('enabled') is True
+    users = {u.get('serviceAccountClientId'): u for u in realm.get('users', [])}
+    e(set(users) == {'krate-cli', 'krate-idp-watch'},
+      f'realm plan: users must be service accounts for krate-cli and krate-idp-watch; got {sorted(users)}')
+    account = users.get('krate-cli', {})
+    e(account.get('username') == 'service-account-krate-cli' and account.get('enabled') is True
       and sorted(account.get('clientRoles', {}).get('realm-management', [])) == sorted(identity.CLI_ROLES),
-      'realm plan: the only user must be the krate-cli service account with realm-management manage/view/query roles')
+      'realm plan: krate-cli service account must have realm-management manage/view/query roles')
+    watch_account = users.get('krate-idp-watch', {})
+    e(watch_account.get('username') == 'service-account-krate-idp-watch' and watch_account.get('enabled') is True
+      and sorted(watch_account.get('clientRoles', {}).get('realm-management', [])) == sorted(identity.IDP_WATCH_ROLES),
+      'realm plan: krate-idp-watch service account must have realm-management view/manage-identity-providers roles')
+    e(realm.get('loginTheme') == 'krate', f"realm plan: loginTheme must be 'krate'; got {realm.get('loginTheme')!r}")
     placeholders = set(re.findall(r'\$\{[A-Z0-9_]+\}', text))
-    e(placeholders == {'${KEYCLOAK_CLI_CLIENT_SECRET}', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}'},
-      f'realm plan: placeholders must be exactly the two client secrets; got {sorted(placeholders)}')
+    e(placeholders == {'${KEYCLOAK_CLI_CLIENT_SECRET}', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}', '${KEYCLOAK_IDP_WATCH_CLIENT_SECRET}'},
+      f'realm plan: placeholders must be exactly the three client secrets; got {sorted(placeholders)}')
     e(not any(secret in text for secret in SYNTHETIC_SECRETS), 'realm plan: a configured secret value leaked into the plan')
 
 
@@ -373,7 +387,9 @@ def compose_config(env_file, edition, project_dir=None):
     command = ['docker', 'compose', '--env-file', str(env_file), '-f', str(ROOT / edition / 'docker-compose.yml')]
     if project_dir is not None:
         command += ['--project-directory', str(project_dir)]
-    result = subprocess.run(command + ['--profile', 'sso', 'config', '--format', 'json'], cwd=ROOT, text=True, capture_output=True)
+    env = dict(os.environ, KRATE_SSO_DIR=str(ROOT / 'sso'))
+    result = subprocess.run(command + ['--profile', 'sso', '--profile', 'idp-watch', 'config', '--format', 'json'],
+                            cwd=ROOT, text=True, capture_output=True, env=env)
     return result.returncode, result.stdout
 
 
@@ -395,11 +411,27 @@ def check_compose(checks):
         e(kc.get('JAVA_OPTS_APPEND') == '-Dliquibase.analytics.enabled=false',
           f'{edition}/keycloak: JAVA_OPTS_APPEND must be -Dliquibase.analytics.enabled=false; got {kc.get("JAVA_OPTS_APPEND")!r}')
         e('KEYCLOAK_CLI_CLIENT_SECRET' in kc, f'{edition}/keycloak: KEYCLOAK_CLI_CLIENT_SECRET must be passed for the realm placeholder')
+        e('KEYCLOAK_IDP_WATCH_CLIENT_SECRET' in kc, f'{edition}/keycloak: KEYCLOAK_IDP_WATCH_CLIENT_SECRET must be passed for the realm placeholder')
+        e('KRATE_KEYCLOAK_THEME_SHA' in kc, f'{edition}/keycloak: KRATE_KEYCLOAK_THEME_SHA must be present in keycloak environment')
         e(bool(services.get('keycloak', {}).get('healthcheck', {}).get('test')), f'{edition}/keycloak: healthcheck must be present')
         targets = {mount.get('target') for mount in services.get('keycloak', {}).get('volumes', [])}
         e(kc.get('KC_DB_TLS_TRUST_STORE_FILE') in targets, f'{edition}/keycloak: KC_DB_TLS_TRUST_STORE_FILE must be a mounted file')
+        e('/opt/keycloak/themes/krate' in targets, f'{edition}/keycloak: must mount sso/theme/krate at /opt/keycloak/themes/krate')
         db_targets = {mount.get('target') for mount in services.get('keycloak-db', {}).get('volumes', [])}
         e('/run/krate-db-tls' in db_targets, f'{edition}/keycloak-db: must mount auth/keycloak/db-tls at /run/krate-db-tls')
+        e('idp-watch' in services, f'{edition}: service idp-watch missing from the sso profile')
+        watch = services.get('idp-watch', {})
+        e(watch.get('read_only') is True, f'{edition}/idp-watch: must have read_only: true')
+        e(watch.get('security_opt') == ['no-new-privileges:true'], f'{edition}/idp-watch: security_opt must be [no-new-privileges:true]')
+        watch_targets = {mount.get('target') for mount in watch.get('volumes', [])}
+        for target in ('/opt/krate/idp_watch.py', '/etc/krate/idp.json', '/etc/krate/truststores', '/var/run/idp_watch'):
+            e(target in watch_targets, f'{edition}/idp-watch: missing volume mount {target}')
+        watch_env = watch.get('environment', {})
+        for key in ('IDP_WATCH_ENABLED', 'IDP_WATCH_INTERVAL_SECONDS', 'IDP_WATCH_TIMEOUT_SECONDS',
+                    'IDP_WATCH_FAILURES_TO_FALLBACK', 'IDP_WATCH_SUCCESSES_TO_RECOVER', 'IDP_WATCH_DWELL_SECONDS',
+                    'IDP_WATCH_FAIL_OPEN', 'IDP_WATCH_OFFLINE_ONLY', 'KEYCLOAK_IDP_WATCH_CLIENT_SECRET',
+                    'PING_KEYCLOAK_CLIENT_SECRET'):
+            e(key in watch_env, f'{edition}/idp-watch: missing environment key {key}')
         ui_dependencies = services.get('kafka-ui', {}).get('depends_on', {})
         e('keycloak' not in ui_dependencies and 'keycloak-db' not in ui_dependencies,
           f'{edition}/kafka-ui: must not depend_on keycloak services')
@@ -427,6 +459,8 @@ def check_networks(checks, edition, config):
     services = config['services']
     expected = {'keycloak-db': {'identity'}, 'keycloak': {'identity', 'identity-egress'},
                 'proxy': {'kafka-network', 'identity'}, 'kafka-ui': {'kafka-network', 'identity'}}
+    if 'idp-watch' in services:
+        expected['idp-watch'] = {'identity', 'identity-egress'}
     for name, wanted in expected.items():
         attached = set(networks_of(services.get(name, {})))
         e(attached == wanted, f'{edition}/{name}: must be attached to {sorted(wanted)}; got {sorted(attached)}')
@@ -4509,6 +4543,16 @@ def check_broker_plan_shape(checks, idp):
         e(False, 'configure-dual must refuse an unknown idp_truststore value')
     except ValueError as exc:
         e('idp_truststore' in str(exc), f'the idp_truststore refusal names the key; got {exc}')
+    live_disabled = json.loads(json.dumps(idp['identityProviders'][0]))
+    live_disabled['enabled'] = False
+    e(identity.provider_differs(idp, live_disabled, ignore_enabled=False) is True,
+      'provider_differs without ignore_enabled must report diff on disabled provider')
+    e(identity.provider_differs(idp, live_disabled, ignore_enabled=True) is False,
+      'provider_differs with ignore_enabled must ignore disabled status')
+    e(identity.broker_provider(idp, enabled=False)['enabled'] is False,
+      'broker_provider with enabled=False must set enabled=False')
+    e(identity.broker_provider(idp, enabled=True)['enabled'] is True,
+      'broker_provider with enabled=True must set enabled=True')
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / 'plan.json'
         path.write_text(json.dumps(idp))
@@ -6713,8 +6757,9 @@ def check_broker_apply(checks):
           f'{edition}/krate: the owned flow aliases must be defined once and the rebind must test the current binding against them')
         for name in ('identity_apply_idp', 'identity_apply_idp_plan', 'identity_apply_flow', 'identity_remove_idp', 'identity_owned_alias', 'identity_owned_flows_present', 'identity_put_idp_provider', 'identity_rotate_ping_secret'):
             e('docker ' not in function_body(cli, name), f'{edition}/krate: {name} must go through the kcadm helper, never docker exec directly')
-        e('--with-secret \\\n      | KCADM_STDIN=1 kcadm -- create identity-provider/instances' in cli
-          and '--with-secret \\\n      | KCADM_STDIN=1 kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS"' in cli,
+        e('--with-secret' in cli
+          and '| KCADM_STDIN=1 kcadm -- create identity-provider/instances' in cli
+          and '| KCADM_STDIN=1 kcadm -- update "identity-provider/instances/$IDENTITY_IDP_ALIAS"' in cli,
           f'{edition}/krate: the provider with its secret reaches kcadm through stdin (-f -), never an argument')
         # B2: every comparison verdict is captured with || die and consumed by a case that refuses anything but same/differs.
         for verdict in ('provider-differs', 'mapper-differs', 'config-differs'):
@@ -7875,7 +7920,8 @@ def check_mfa_docs(checks):
         rotate = function_body(cli, 'cmd_identity_rotate')
         e('compose_cmd up' in rotate and 'identity_rotate_ping_secret' in rotate,
           f'{edition}/krate: cmd_identity_rotate must recreate kafka-ui through compose_cmd up and update the provider through identity_rotate_ping_secret')
-        e('identity.py" broker --plan "$plan" provider --with-secret' in function_body(cli, 'identity_put_idp_provider'),
+        e('identity.py" broker --plan "$plan"' in function_body(cli, 'identity_put_idp_provider')
+          and 'provider --with-secret' in function_body(cli, 'identity_put_idp_provider'),
           f'{edition}/krate: the provider update must read the plan through identity.py broker (broker_plan)')
     e('python3 "$sso_dir/preflight.py" --directory "$SCRIPT_DIR" --mode "$mode"' in (ROOT / 'sso/activate.sh').read_text(),
       'sso/activate.sh: apply_auth must run the preflight (auth apply)')
@@ -7949,6 +7995,9 @@ def check_mfa_docs(checks):
 
     # The row's wiring and the guide's counts (carried over from round 1; the inventory arithmetic is derived from the runner's arrays).
     e('P18' in runner and re.search(r'^REQUIRED_P3=\(.*\bP18\b.*\)$', runner, re.M) is not None, 'the runner inventory REQUIRED_P3 must carry P18')
+    for pid in ('P22', 'P23', 'P24', 'P25', 'P26', 'P27'):
+        e(pid in runner and re.search(rf'^REQUIRED_P3=\(.*\b{pid}\b.*\)$', runner, re.M) is not None,
+          f'the runner inventory REQUIRED_P3 must carry {pid}')
     e(len([line for line in runner.splitlines() if line.startswith('  ok_if P18 3 P')]) == 1, 'the runner must hold exactly one ok_if P18 3 P row')
     e('IDENTITY_PROVIDER_LOGIN_ERROR' in runner and runner.count('login_probe ping-mfa') == 2,
       'the P18 row must drive the refusal through the runner login_probe twice (the refused attempt and the sign-in after the withdrawal)')
@@ -7957,7 +8006,7 @@ def check_mfa_docs(checks):
         e(needle in row, f'the identity-gate.md P18 row must state {needle!r}')
     e('enforce-if-asserted' in gate and 'mfa_not_asserted' in gate and 'MFA enforced at Ping only' in gate,
       'identity-gate.md must state the enforce-if-asserted decision and the opt-out wording')
-    e(re.search(r'`REQUIRED_P3` is P1–P16, P18 and Z3 \(18 ids\)', gate) is not None, 'identity-gate.md must count P18 in REQUIRED_P3 (18 ids)')
+    e(re.search(r'`REQUIRED_P3` is P1–P16, P18, P22–P27 and Z3 \(24 ids\)', gate) is not None, 'identity-gate.md must count P18, P22-P27 in REQUIRED_P3 (24 ids)')
 
     def required(name):
         found = re.search(r'^REQUIRED_%s=\((.*)\)$' % name, runner, re.M)
