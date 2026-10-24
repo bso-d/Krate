@@ -24,6 +24,15 @@ exclude:
       - monitoring/fluent-bit/vendor
       - monitoring/perses/vendor
 
+# Bootstrap: generate coverage report before Qodana analysis
+bootstrap: |
+  set -eu
+  pip install --quiet coverage
+  python3 -m coverage run --source=scripts,sso scripts/check-offline.py || true
+  python3 -m coverage xml -o coverage.xml || true
+  mkdir -p .qodana/code-coverage
+  cp coverage.xml .qodana/code-coverage/ || true
+
 # Project license and license audit rules
 projectLicenses:
   - key: "AGPL-3.0-only"
@@ -47,6 +56,106 @@ licenseRules:
       - "AGPL-3.0-only"
       - "LGPL-3.0-only"
       - "MPL-2.0"
+      - "PostgreSQL"
+
+# Custom dependencies for bundled third-party components (evaluated by License Audit)
+customDependencies:
+  - name: "apache-kafka"
+    version: "3.9.1"
+    url: "https://kafka.apache.org"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "kafbat-ui"
+    version: "1.5.0"
+    url: "https://github.com/kafbat/kafka-ui"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "keycloak"
+    version: "26.8.0"
+    url: "https://www.keycloak.org"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "postgresql"
+    version: "17.6"
+    url: "https://www.postgresql.org"
+    licenses:
+      - key: "PostgreSQL"
+        url: "https://www.postgresql.org/about/licence/"
+  - name: "nginx"
+    version: "1.27"
+    url: "https://nginx.org"
+    licenses:
+      - key: "BSD-2-Clause"
+        url: "https://nginx.org/LICENSE"
+  - name: "prometheus"
+    version: "3.6.0"
+    url: "https://prometheus.io"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "grafana"
+    version: "12.2.0"
+    url: "https://grafana.com"
+    licenses:
+      - key: "AGPL-3.0-only"
+        url: "https://www.gnu.org/licenses/agpl-3.0.html"
+  - name: "loki"
+    version: "3.5.0"
+    url: "https://grafana.com/oss/loki/"
+    licenses:
+      - key: "AGPL-3.0-only"
+        url: "https://www.gnu.org/licenses/agpl-3.0.html"
+  - name: "fluent-bit"
+    version: "5.1.3"
+    url: "https://fluentbit.io"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "perses"
+    version: "0.54.0"
+    url: "https://perses.dev"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "victorialogs"
+    version: "1.53.0"
+    url: "https://victoriametrics.com"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "alertmanager"
+    version: "0.34.1"
+    url: "https://prometheus.io"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "oauth2-proxy"
+    version: "7.15.5"
+    url: "https://oauth2-proxy.github.io/oauth2-proxy/"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "node-exporter"
+    version: "1.9.1"
+    url: "https://prometheus.io"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "kafka-exporter"
+    version: "1.8.0"
+    url: "https://github.com/danielqsj/kafka_exporter"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://www.apache.org/licenses/LICENSE-2.0"
+  - name: "playwright"
+    version: "1.60.0"
+    url: "https://playwright.dev"
+    licenses:
+      - key: "Apache-2.0"
+        url: "https://github.com/microsoft/playwright/blob/main/LICENSE"
 
 # Raise license audit problems in the inspection report alongside code inspections
 raiseLicenseProblems: true

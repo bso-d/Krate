@@ -39,11 +39,13 @@
   - [Build an offline package](#build-an-offline-package)
   - [Install the package on a VM](#install-the-package-on-a-vm)
   - [Everyday commands](#everyday-commands)
+  - [Identity and SSO for EPC and regular Krate](#identity-and-sso-for-epc-and-regular-krate)
   - [Monitoring](#monitoring)
   - [How the parts fit together](#how-the-parts-fit-together)
   - [Limits to understand](#limits-to-understand)
   - [Development and checks](#development-and-checks)
   - [Component credits](#component-credits)
+  - [License](#license)
   - [Contributing and community conduct](#contributing-and-community-conduct)
 
 </details>
@@ -102,13 +104,16 @@ Current offline install packages. Each includes Keycloak SSO, the Grafana and Pe
 
 | Release | Edition | Packages |
 | --- | --- | --- |
-| [`package-kraft-v2`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v2) | KRaft, Ubuntu 24.04 | `krate-kraft-v2-amd64.tar.gz` (x86_64), `krate-kraft-v2-arm64.tar.gz` (ARM64) |
-| [`package-epc-v4`](https://github.com/bso-d/Krate/releases/tag/package-epc-v4) | EPC, RHEL 9 | `krate-epc-v4-amd64.tar.gz` (x86_64), `krate-epc-v4-arm64.tar.gz` (ARM64) |
+| [`package-kraft-v4`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v4) | KRaft, Ubuntu 24.04 | `krate-kraft-v4-amd64.tar.gz` (x86_64), `krate-kraft-v4-arm64.tar.gz` (ARM64) |
+| [`package-epc-v5`](https://github.com/bso-d/Krate/releases/tag/package-epc-v5) | EPC, RHEL 9 | `krate-epc-v5-amd64.tar.gz` (x86_64), `krate-epc-v5-arm64.tar.gz` (ARM64) |
 
 Earlier packages:
 
 | Release | Package |
 | --- | --- |
+| [`package-kraft-v3`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v3) | KRaft with Keycloak SSO, Grafana and Perses monitoring, x86_64 and ARM64: `krate-kraft-v3-<arch>.tar.gz` |
+| [`package-kraft-v2`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v2) | KRaft with Keycloak SSO, Grafana and Perses monitoring, x86_64 and ARM64: `krate-kraft-v2-<arch>.tar.gz` |
+| [`package-epc-v4`](https://github.com/bso-d/Krate/releases/tag/package-epc-v4) | RHEL/EPC with Keycloak SSO, Grafana and Perses monitoring, x86_64 and ARM64: `krate-epc-v4-<arch>.tar.gz` |
 | [`package-kraft-v1`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v1) | KRaft with Keycloak SSO, Grafana monitoring only, x86_64 and ARM64: `krate-kraft-v1-<arch>.tar.gz` |
 | [`package-epc-v3`](https://github.com/bso-d/Krate/releases/tag/package-epc-v3) | RHEL/EPC with Keycloak SSO, Grafana monitoring only, x86_64: `krate-epc-v3-amd64.tar.gz` |
 | [`epc-v2`](https://github.com/bso-d/Krate/releases/tag/epc-v2) | RHEL/EPC with Keycloak SSO, x86_64: `krate-epc-v2-amd64.tar.gz` |
@@ -225,9 +230,12 @@ Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`)
 | `./krate stop` / `./krate start` | Stops or starts services, keeping stored messages |
 | `./krate down` | Removes containers while keeping stored messages |
 | `./krate identity up` | Starts the Keycloak identity service and its database, creates its admin on first start |
-| `./krate identity status` / `./krate identity users list` | Shows identity service health; lists local users |
+| `./krate identity status` / `./krate identity users ...` | Shows identity service health; manages local realm users (`list`, `add`, `enable`, `disable`, `reset-password`, `groups`, `logout`, `set-email`) |
+| `./krate identity idp-watch {status\|reset\|pause\|resume}` | Shows or controls the enterprise IdP reachability watcher and automatic local login fallback |
 | `./krate identity renew-db-tls` / `./krate identity logrotate --install` | Renews the identity database certificate; hands the identity journal to the host's logrotate |
-| `./krate auth configure [--force] [--viewer-messages]` / `./krate auth apply` | Plans Kafbat's Keycloak login (`auth/ui/runtime.yml`) from `.env`; validates and applies it to the UI |
+| `./krate auth configure [--force] [--[no-]viewer-messages]` / `./krate auth apply` | Plans Kafbat's Keycloak login (`auth/ui/runtime.yml`) from `.env`; validates and applies it to the UI |
+| `./krate monitor {up\|down\|status\|logs\|reload\|ui}` | Starts, stops or inspects the monitoring stack; reloads Prometheus configuration (`SIGHUP`) |
+| `./krate monitor realm` / `./krate monitor grafana-user retire <login>` | Prepares Grafana sign-in through the Krate realm (`monitoring/auth/realm.ini`); retires a colliding local Grafana user |
 | `./krate help` | Lists the available commands |
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
@@ -244,7 +252,10 @@ operator flow is: `./krate setup` or `./krate start`, then
 `./krate identity up`, then (Phase 2) `./krate auth configure` and
 `./krate auth apply`.
 
-Acceptance of the identity work is decided by the executable gate
+Acceptance of the identity work — Phases 1–3 (Keycloak foundation, Kafbat OIDC
+and PingFederate brokering with automatic fallback), the Phase 4 slices (4a
+Grafana, 4b Perses and 4c backing-service exposure) and the bundle-host air-gap
+verifications (`AG1`–`AG5`) — is decided by the executable gate
 `scripts/gate-identity.sh` (criteria, tests and receipts:
 [sso/guides/identity-gate.md](sso/guides/identity-gate.md)).
 
@@ -287,16 +298,25 @@ also on a Rocky Linux 9.8 cloud VM with neither firewalld nor iptables, where it
 `nftables`, `libnftnl` and `container-selinux` from `optional/`.
 
 `./krate identity up` generates the database TLS material and the realm, starts
-PostgreSQL and Keycloak, creates the permanent Keycloak admin and verifies the
-`krate-cli` service account. Until it has run, `./krate start` prints
+PostgreSQL and Keycloak (with Liquibase analytics disabled via
+`-Dliquibase.analytics.enabled=false` for air-gapped operation), creates the
+permanent Keycloak admin and verifies the `krate-cli` service account. Until it
+has run, `./krate start` prints
 `Identity services skipped (run: krate identity up)` and starts the cluster
-without Keycloak. `./krate identity users` manages local users;
-`./krate identity rotate`, `backup`, `restore` and `recover-admin` cover
-secrets, the database and a lost admin login; `renew-db-tls` reissues the
-database certificate and `logrotate --install` rotates the journal. Keycloak,
-its database, the proxy and Kafbat share a private `identity` Docker network
-on which the proxy has a fixed address that Keycloak trusts for forwarded
-headers (`KRATE_IDENTITY_SUBNET`, `KRATE_IDENTITY_PROXY_IP` in `.env`). The
+without Keycloak. `./krate identity users` manages local users (`list`, `add`,
+`enable`, `disable`, `reset-password`, `groups`, `logout` and `set-email`;
+`logout` ends every realm session of the user and triggers OIDC back-channel
+logout in Kafbat); `./krate identity rotate`, `backup`, `restore` and
+`recover-admin` cover secrets (`KEYCLOAK_DB_PASSWORD`,
+`KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`,
+`KEYCLOAK_KAFBAT_CLIENT_SECRET`, `KEYCLOAK_IDP_WATCH_CLIENT_SECRET` and
+`PING_KEYCLOAK_CLIENT_SECRET --value`), the database and a lost admin login;
+`renew-db-tls` reissues the database certificate and `logrotate --install`
+rotates the journal. Keycloak, its database, the proxy, Kafbat and `idp-watch`
+share a private `identity` Docker network on which the proxy has a fixed
+address that Keycloak trusts for forwarded headers (`KRATE_IDENTITY_SUBNET`,
+`KRATE_IDENTITY_PROXY_IP` in `.env`), while `keycloak` and `idp-watch` use
+`identity-egress` to reach the enterprise IdP. The
 [identity foundation guide](sso/guides/identity-foundation.md) holds the
 inventory of projects, ports, volumes and credentials, the trust boundaries,
 every procedure and the upgrade steps for a Keycloak database from before
@@ -321,6 +341,27 @@ trust material in `auth/keycloak/truststores` or its Compose definition
 changed (ending Keycloak sessions), then applies or removes the PingFederate
 plan in the realm; `./krate identity rotate PING_KEYCLOAK_CLIENT_SECRET
 --value` recreates it once as well.
+
+When the PingFederate plan is active (`IDP_WATCH_ENABLED=true` by default), the
+`idp-watch` daemon (`sso/idp_watch.py`, using the `krate-idp-watch` service
+account) continuously probes the allowlisted PingFederate discovery, JWKS,
+token and UserInfo endpoints (using PEM CA certificates in
+`auth/keycloak/truststores/`). After `IDP_WATCH_FAILURES_TO_FALLBACK`
+consecutive failed probe cycles (default 2, every
+`IDP_WATCH_INTERVAL_SECONDS=10` seconds) and the minimum dwell time
+(`IDP_WATCH_DWELL_SECONDS=30`), `idp-watch` disables the `pingfederate`
+provider in Keycloak so sign-in falls through automatically to the local
+Keycloak form (`krate forms`: username, password and TOTP) without manual
+intervention, and `krate` login theme (`sso/theme/krate`) renders an outage
+warning banner (`#kc-idp-fallback-warning`) so corporate users do not enter AD
+passwords into the local break-glass form. While `idp-watch` is active,
+`./krate auth apply` and `./krate identity up` preserve the provider's runtime
+`enabled` state (`--ignore-enabled`). Once PingFederate passes
+`IDP_WATCH_SUCCESSES_TO_RECOVER` consecutive probe cycles (default 2) and dwell
+time, `idp-watch` re-enables the provider and normal enterprise SSO redirects
+resume automatically. Inspect or control the watcher with
+`./krate identity idp-watch {status|reset|pause|resume}`.
+
 Keycloak and PostgreSQL are included in both offline packages even when the
 SSO profile is inactive. See the
 [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) and the
@@ -343,7 +384,12 @@ Its settings and passwords are prepared with the cluster's; `./krate credentials
 ./krate monitor ui
 ```
 
-The default Grafana address uses port `3000`; Perses uses HTTPS on `3443`. Prometheus (`9090`) and Loki (`3100`) have no login and are bound to `127.0.0.1` on the host (`PROM_BIND`, `LOKI_BIND` in `monitoring/.env`; set `0.0.0.0` to publish them). Email alerts require your own mail server and recipients; they are off by default. When enabled, Grafana and Alertmanager both send them. Perses supports company SSO with native IdP-group roles; see the [Perses SSO guide](sso/guides/perses-sso.md).
+The default Grafana address uses port `3000`; Perses uses HTTPS on `3443`. Prometheus (`9090`) and Loki (`3100`) have no login and are bound to `127.0.0.1` on the host (`PROM_BIND`, `LOKI_BIND` in `monitoring/.env`; set `0.0.0.0` to publish them). Prometheus runs with its HTTP lifecycle API disabled; after editing `monitoring/prometheus/prometheus.yml` or `alerts.yml` in place, run `./krate monitor reload` to send `SIGHUP` and verify the reload. Email alerts require your own mail server and recipients; they are off by default. When enabled, Grafana and Alertmanager both send them.
+
+Both dashboards can sign users in through the Krate Keycloak realm (`<KEYCLOAK_PUBLIC_URL>/realms/krate` on a non-loopback host, with verified user e-mail addresses set via `./krate identity users add --email` or `users set-email`):
+
+- **Grafana (`GRAFANA_AUTH_CONFIG=realm.ini`):** While Grafana is still on `local.ini`, run `./krate monitor realm` to check for state that realm mode hides, generate `GRAFANA_OAUTH_CLIENT_SECRET`, create the `krate-seed` service account and 90-day token for alert seeding (auto-renewed by `monitor up` within 30 days of expiry), list any colliding local Grafana accounts to retire with `./krate monitor grafana-user retire <login>`, register the `krate-grafana` OIDC client, and write `monitoring/auth/realm.ini`. Then run `./krate config set GRAFANA_AUTH_CONFIG=realm.ini` and `./krate monitor up`. In realm mode, Grafana is served over HTTPS at `https://<public-host>/grafana/` behind the cluster proxy, its host port `3000` binds to `127.0.0.1` only, its login form and Basic auth are disabled, `KEYCLOAK_VIEWER_GROUP` and `KEYCLOAK_ADMIN_GROUP` map to Viewer and Admin roles, and its Loki datasource queries through the read-only `loki-gateway`. Switching between `local.ini` and `realm.ini` with `./krate monitor up` revokes sessions from the previous sign-in mode. See the [Grafana SSO guide](sso/guides/grafana-sso.md).
+- **Perses (`PERSES_IDP=krate` with `PERSES_AUTH_MODE=native`, or external company SSO):** Set `PERSES_AUTH_MODE=native` and `PERSES_IDP=krate` in `monitoring/.env` (or via `./krate config set`) and run `./krate monitor up` to reconcile the `krate-perses` and `krate-perses-sync` clients in the Krate realm and enforce Viewer/Admin roles through OAuth2 Proxy, the `perses-sync` guard, and native Perses RBAC (`idp-wait` holds dependent services until the realm answers, and `perses-migrate` cleans up stale foreign-issuer OIDC users on an issuer change). For external IdPs, Perses supports `native` and `gateway` modes via `sso/configure.py --app perses`; see the [Perses SSO guide](sso/guides/perses-sso.md).
 
 ZooKeeper has its own smaller stack: Kafka measurements, Prometheus, and Grafana, started with `./kafka monitor up`. It does not include Loki or host measurements.
 
@@ -386,8 +432,8 @@ The [package release workflow](.github/workflows/package-release.yml) runs `scri
 
 ```bash
 # macOS: MAKE=gmake; Node 22 recommended
-scripts/package-release.sh kraft v3 amd64        # Docker packages: noble for kraft, rhel9 for epc
-scripts/package-release.sh epc v5 amd64 none     # without Docker packages
+scripts/package-release.sh kraft v5 amd64        # Docker packages: noble for kraft, rhel9 for epc
+scripts/package-release.sh epc v6 amd64 none     # without Docker packages
 ```
 
 Then start **Release offline install packages** from `main` in GitHub Actions with the same edition, version, processor and Docker package choice. The workflow creates the `package-<edition>-vN` tag and refuses a version that already exists. For EPC, it also refuses a version already released under the earlier `epc-vN` tags. A KRaft package with the highest version becomes the repository's Latest release; EPC and broker image releases do not. Broker image releases use the separate [broker release workflow](.github/workflows/broker-release.yml) and `kraft-v*`/`zk-v*` tags.
