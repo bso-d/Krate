@@ -9,44 +9,64 @@
 #################################################################################
 version: "1.0"
 
-#Specify inspection profile for code analysis
+# Specify Qodana linter for analysis
+# Krate is a Python and Shell script based repository (with Docker and Compose)
+linter: jetbrains/qodana-python:2026.2
+
+# Specify inspection profile for code quality analysis
 profile:
-  name: qodana.starter
+  name: qodana.recommended
 
-#Enable inspections
-#include:
-#  - name: <SomeEnabledInspectionId>
+# Disable inspections for vendor/third-party notice files
+exclude:
+  - name: All
+    paths:
+      - monitoring/fluent-bit/vendor
+      - monitoring/perses/vendor
 
-#Disable inspections
-#exclude:
-#  - name: <SomeDisabledInspectionId>
-#    paths:
-#      - <path/where/not/run/inspection>
+# Project license and license audit rules
+projectLicenses:
+  - key: "AGPL-3.0-only"
+    url: "https://www.gnu.org/licenses/agpl-3.0.html"
 
-projectJDK: "27" #(Applied in CI/CD pipeline)
+licenseRules:
+  - keys:
+      - "AGPL-3.0-only"
+    allowed:
+      - "Apache-2.0"
+      - "MIT"
+      - "BSD-2-Clause"
+      - "BSD-3-Clause"
+      - "ISC"
+      - "Python-2.0"
+      - "PSF-2.0"
+      - "0BSD"
+      - "CC0-1.0"
+      - "Unlicense"
+      - "GPL-3.0-only"
+      - "AGPL-3.0-only"
+      - "LGPL-3.0-only"
+      - "MPL-2.0"
 
-#Execute shell command before Qodana execution (Applied in CI/CD pipeline)
-#bootstrap: sh ./prepare-qodana.sh
+# Raise license audit problems in the inspection report alongside code inspections
+raiseLicenseProblems: true
 
-#Install IDE plugins before Qodana execution (Applied in CI/CD pipeline)
-#plugins:
-#  - id: <plugin.id> #(plugin id can be found at https://plugins.jetbrains.com)
+# Code coverage configuration
+coverage:
+  reportProblems: true
+  codeCoverageLocations:
+    - ".qodana/code-coverage"
+    - "coverage-reports"
+    - "reports"
 
-# Quality gate. Will fail the CI/CD pipeline if any condition is not met
-# severityThresholds - configures maximum thresholds for different problem severities
-# testCoverageThresholds - configures minimum code coverage on a whole project and newly added code
-# dependencyLicenses - fails the run on prohibited or unknown dependency licenses
-# Code Coverage is available in Ultimate and Ultimate Plus plans
-#failureConditions:
-#  severityThresholds:
-#    any: 15
-#    critical: 5
-#  testCoverageThresholds:
-#    fresh: 70
-#    total: 50
-#  dependencyLicenses:
-#    failOnProhibited: true
-#    failOnUnknown: false
-
-#Specify Qodana linter for analysis (Applied in CI/CD pipeline)
-linter: jetbrains/qodana-jvm:2026.2
+# Quality gate: fail the CI/CD pipeline if any condition is not met
+failureConditions:
+  severityThresholds:
+    any: 15
+    critical: 5
+  testCoverageThresholds:
+    fresh: 70
+    total: 50
+  dependencyLicenses:
+    failOnProhibited: true
+    failOnUnknown: false
