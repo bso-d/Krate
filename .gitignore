@@ -51,6 +51,9 @@ sso/site*.json
 # Python tooling bytecode
 __pycache__/
 *.pyc
+.coverage
+coverage.xml
+.qodana/
 
 # Phase 4 open-source drafts — kept local until adoption is approved
 GOVERNANCE.md

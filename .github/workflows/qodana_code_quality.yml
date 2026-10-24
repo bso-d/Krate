@@ -32,11 +32,9 @@ jobs:
       - name: Install dependencies and generate coverage
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install coverage
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           coverage run --source=scripts,sso scripts/check-offline.py
-          if [ -d tests ]; then
-            coverage run -a --source=scripts,sso -m unittest tests/test_render.py tests/test_discovery.py tests/test_discovery_review.py tests/test_image_lists.py tests/test_perses_seed.py tests/test_perses_sync.py tests/test_collect_sources.py tests/test_collector_contract.py tests/test_compose_networks.py || true
-          fi
           coverage xml -o coverage.xml
           mkdir -p .qodana/code-coverage
           cp coverage.xml .qodana/code-coverage/

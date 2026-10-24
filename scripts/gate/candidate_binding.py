@@ -297,6 +297,7 @@ def extra_files(installed: str, items: Dict[str, str]) -> List[str]:
     return extras
 
 
+# noinspection PyTypeHints
 def compare_installed(repo: str, candidate: str, installed: str, edition: str,
                       check_images: bool = False,
                       notes: Optional[List[str]] = None) -> Tuple[int, List[Mismatch]]:
