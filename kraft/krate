@@ -1432,8 +1432,8 @@ identity_reconcile_idp_watch_client() {
   kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" || die "admin login failed"
   id="$(kcadm_client_id "$IDENTITY_REALM" krate-idp-watch 2>/dev/null || echo "")"
   if [[ -z "$id" ]]; then
-    info "Reconciling krate-idp-watch client in realm $IDENTITY_REALM..."
-    local client_rep sa_user_id mgmt_id r_view r_manage
+    info "Creating krate-idp-watch client in realm $IDENTITY_REALM..."
+    local client_rep
     client_rep="$(python3 -c '
 import json, sys
 c = next(c for c in json.load(open(sys.argv[1]))["clients"] if c["clientId"] == "krate-idp-watch")
@@ -1441,53 +1441,54 @@ c["secret"] = sys.argv[2]
 print(json.dumps(c))' "$plan" "$(env_value KEYCLOAK_IDP_WATCH_CLIENT_SECRET)")" || die "Cannot render krate-idp-watch client"
     printf '%s\n' "$client_rep" | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null \
       || die "Keycloak refused to create krate-idp-watch client"
-    id="$(kcadm_client_id "$IDENTITY_REALM" krate-idp-watch)" || die "Keycloak query failed"
-    sa_user_id="$(kcadm -- get "clients/$id/service-account-user" -r "$IDENTITY_REALM" --fields id --format csv --noquotes 2>/dev/null || echo "")"
-    if [[ -n "$sa_user_id" ]]; then
-      mgmt_id="$(kcadm_client_id "$IDENTITY_REALM" realm-management 2>/dev/null || echo "")"
-      if [[ -n "$mgmt_id" ]]; then
-        r_view="$(kcadm -- get "clients/$mgmt_id/roles/view-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
-        r_manage="$(kcadm -- get "clients/$mgmt_id/roles/manage-identity-providers" -r "$IDENTITY_REALM" 2>/dev/null || echo "")"
-        if [[ -n "$r_view" ]]; then
-          printf '[%s]\n' "$r_view" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
-            || die "Keycloak refused to assign view-identity-providers role to krate-idp-watch service account"
-        fi
-        if [[ -n "$r_manage" ]]; then
-          printf '[%s]\n' "$r_manage" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
-            || die "Keycloak refused to assign manage-identity-providers role to krate-idp-watch service account"
-        fi
-      fi
-    fi
-    identity_journal "${1:-up}" reconciled "krate-idp-watch client and service account"
+    id="$(kcadm_client_id "$IDENTITY_REALM" krate-idp-watch)" || die "Keycloak query failed for krate-idp-watch"
     IDENTITY_CHANGED=true
-    ok "krate-idp-watch client and service account reconciled in realm $IDENTITY_REALM"
-  else
-    # Client already exists: verify and repair roles if needed
-    local sa_user_id mgmt_id current_roles r_view r_manage needs_view needs_manage
-    sa_user_id="$(kcadm -- get "clients/$id/service-account-user" -r "$IDENTITY_REALM" --fields id --format csv --noquotes 2>/dev/null || echo "")"
-    if [[ -n "$sa_user_id" ]]; then
-      mgmt_id="$(kcadm_client_id "$IDENTITY_REALM" realm-management 2>/dev/null || echo "")"
-      if [[ -n "$mgmt_id" ]]; then
-        current_roles="$(kcadm -- get "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" 2>/dev/null || echo "[]")"
-        r_view="$(kcadm -- get "clients/$mgmt_id/roles/view-identity-providers" -r "$IDENTITY_REALM")" || die "Keycloak query failed for role view-identity-providers"
-        r_manage="$(kcadm -- get "clients/$mgmt_id/roles/manage-identity-providers" -r "$IDENTITY_REALM")" || die "Keycloak query failed for role manage-identity-providers"
-        needs_view="$(python3 -c 'import json, sys; roles={r.get("name") for r in json.load(sys.stdin)}; print("false" if "view-identity-providers" in roles else "true")' <<< "$current_roles")"
-        needs_manage="$(python3 -c 'import json, sys; roles={r.get("name") for r in json.load(sys.stdin)}; print("false" if "manage-identity-providers" in roles else "true")' <<< "$current_roles")"
-        if [[ "$needs_view" == true ]]; then
-          info "Assigning view-identity-providers role to krate-idp-watch service account..."
-          printf '[%s]\n' "$r_view" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
-            || die "Keycloak refused to assign view-identity-providers role"
-          IDENTITY_CHANGED=true
-        fi
-        if [[ "$needs_manage" == true ]]; then
-          info "Assigning manage-identity-providers role to krate-idp-watch service account..."
-          printf '[%s]\n' "$r_manage" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
-            || die "Keycloak refused to assign manage-identity-providers role"
-          IDENTITY_CHANGED=true
-        fi
-      fi
-    fi
   fi
+
+  # Service account user and realm-management client lookups (required, fail closed)
+  local sa_user_id mgmt_id current_roles r_view r_manage needs_view needs_manage
+  sa_user_id="$(kcadm -- get "clients/$id/service-account-user" -r "$IDENTITY_REALM" --fields id --format csv --noquotes)" \
+    || die "Keycloak query failed for service-account-user of krate-idp-watch"
+  [[ -n "$sa_user_id" ]] || die "service-account-user not found for krate-idp-watch"
+  mgmt_id="$(kcadm_client_id "$IDENTITY_REALM" realm-management)" \
+    || die "Keycloak query failed for client realm-management"
+  [[ -n "$mgmt_id" ]] || die "Client realm-management not found in realm $IDENTITY_REALM"
+
+  # Structural role inspection (whitespace-independent JSON parsing)
+  current_roles="$(kcadm -- get "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM")" \
+    || die "Keycloak query failed for role mappings of krate-idp-watch"
+  needs_view="$(python3 -c 'import json, sys; roles={r.get("name") for r in json.load(sys.stdin)}; print("false" if "view-identity-providers" in roles else "true")' <<< "$current_roles")"
+  needs_manage="$(python3 -c 'import json, sys; roles={r.get("name") for r in json.load(sys.stdin)}; print("false" if "manage-identity-providers" in roles else "true")' <<< "$current_roles")"
+
+  if [[ "$needs_view" == true ]]; then
+    r_view="$(kcadm -- get "clients/$mgmt_id/roles/view-identity-providers" -r "$IDENTITY_REALM")" \
+      || die "Keycloak query failed for role view-identity-providers"
+    info "Assigning view-identity-providers role to krate-idp-watch service account..."
+    printf '[%s]\n' "$r_view" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
+      || die "Keycloak refused to assign view-identity-providers role"
+    IDENTITY_CHANGED=true
+  fi
+  if [[ "$needs_manage" == true ]]; then
+    r_manage="$(kcadm -- get "clients/$mgmt_id/roles/manage-identity-providers" -r "$IDENTITY_REALM")" \
+      || die "Keycloak query failed for role manage-identity-providers"
+    info "Assigning manage-identity-providers role to krate-idp-watch service account..."
+    printf '[%s]\n' "$r_manage" | KCADM_STDIN=1 kcadm -- create "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM" -f - >/dev/null \
+      || die "Keycloak refused to assign manage-identity-providers role"
+    IDENTITY_CHANGED=true
+  fi
+
+  # Final verification readback
+  local verified_roles
+  verified_roles="$(kcadm -- get "users/$sa_user_id/role-mappings/clients/$mgmt_id" -r "$IDENTITY_REALM")" \
+    || die "Keycloak query failed for verified role mappings"
+  python3 -c '
+import json, sys
+roles = {r.get("name") for r in json.load(sys.stdin)}
+required = {"view-identity-providers", "manage-identity-providers"}
+missing = required - roles
+if missing:
+    sys.exit(f"Role verification failed; missing: {sorted(missing)}")
+' <<< "$verified_roles" || die "krate-idp-watch service account role verification failed"
   local wanted_theme current_theme
   wanted_theme="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("loginTheme", ""))' "$plan" 2>/dev/null || echo "")"
   if [[ -n "$wanted_theme" ]]; then
