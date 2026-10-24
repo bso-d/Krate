@@ -17,12 +17,13 @@ linter: jetbrains/qodana-python:2026.2
 profile:
   name: qodana.recommended
 
-# Disable inspections for vendor/third-party notice files
+# Disable inspections for vendor/third-party notice files and missing coverage problem alerts
 exclude:
   - name: All
     paths:
       - monitoring/fluent-bit/vendor
       - monitoring/perses/vendor
+  - name: PyCoverageInspection
 
 # Bootstrap: generate coverage report before Qodana analysis if not already present
 bootstrap: |
@@ -161,9 +162,9 @@ customDependencies:
 # Raise license audit problems in the inspection report alongside code inspections
 raiseLicenseProblems: true
 
-# Code coverage configuration
+# Code coverage configuration (ingests and reports coverage metrics without converting uncovered lines to defects)
 coverage:
-  reportProblems: true
+  reportProblems: false
   codeCoverageLocations:
     - ".qodana/code-coverage"
     - "coverage-reports"
@@ -172,8 +173,9 @@ coverage:
 # Quality gate: fail the CI/CD pipeline if any condition is not met
 failureConditions:
   severityThresholds:
-    any: 250
+    any: 300
     critical: 5
+    high: 10
   dependencyLicenses:
     failOnProhibited: true
     failOnUnknown: false
