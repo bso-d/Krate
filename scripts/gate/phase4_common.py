@@ -818,5 +818,5 @@ def helper_main(gate_cls, prog, argv=None, doc=None, extra=None):
                                                            args.base_url, args.monitor_project))
     mapping = p2.netmap.mapped() if hasattr(p2, 'netmap') else None
     if mapping:
-        log('name mapping: %s -> %s (getaddrinfo only; TLS keeps the real name)' % mapping)
+        log('name mapping: %s -> %s (getaddrinfo only; TLS keeps the real name)' % (mapping[0], mapping[1]))
     return gate_cls(args).main()

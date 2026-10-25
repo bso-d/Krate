@@ -280,10 +280,12 @@ def write_by_image(out_dir, images, registry):
 
 
 def human_size(n):
+    size = float(n)
     for unit in ('B', 'KiB', 'MiB', 'GiB'):
-        if n < 1024 or unit == 'GiB':
-            return f'{n:.1f} {unit}' if unit != 'B' else f'{n} B'
-        n /= 1024
+        if size < 1024 or unit == 'GiB':
+            return f'{size:.1f} {unit}' if unit != 'B' else f'{int(n)} B'
+        size /= 1024
+    return f'{size:.1f} GiB'
 
 
 def write_sources_md(out_dir, manifest):

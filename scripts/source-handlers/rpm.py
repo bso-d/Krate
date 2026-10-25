@@ -14,8 +14,8 @@ import sqlite3
 import struct
 import subprocess
 import uuid
-import xml.etree.ElementTree as element_tree
 from pathlib import Path
+from xml.etree import ElementTree
 
 from common import (Component, Unresolved, VerificationError, aggregate_expressions,
                     sha256_bytes, sha256_file, slug)
@@ -151,7 +151,7 @@ def repo_index(cache, major, basearch, repo):
     if not repomd:
         return {}
     ns = {'r': 'http://linux.duke.edu/metadata/repo', 'c': 'http://linux.duke.edu/metadata/common'}
-    root = element_tree.fromstring(repomd)
+    root = ElementTree.fromstring(repomd)
     data = root.find("r:data[@type='primary']", ns)
     href = data.find('r:location', ns).get('href')
     want = data.find('r:checksum', ns).text
@@ -161,7 +161,7 @@ def repo_index(cache, major, basearch, repo):
         raise VerificationError(f'{base}/{href}: repodata checksum mismatch')
     xml = gzip.decompress(raw) if href.endswith('.gz') else raw
     out = {}
-    for _ev, el in element_tree.iterparse(__import__('io').BytesIO(xml)):
+    for _ev, el in ElementTree.iterparse(__import__('io').BytesIO(xml)):
         if el.tag.endswith('}package'):
             loc = el.find('c:location', ns).get('href')
             ck = el.find('c:checksum', ns)

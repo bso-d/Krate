@@ -199,10 +199,15 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
                 allowed_authorities = allowed_authorities.copy()
                 allowed_authorities.add(backend_authority.lower())
 
-        rem = deadline - time.time()
-        if rem <= 0:
-            raise TimeoutError('Probe deadline exceeded')
-        status, body, err = probe_http(disc_url, ssl_context, rem, allowed_authorities=allowed_authorities, deadline=deadline)
+        def run_probe(url, method='GET', post_data=None):
+            rem = deadline - time.time()
+            if rem <= 0:
+                raise TimeoutError('Probe deadline exceeded')
+            return probe_http(url, ssl_context, rem, method=method,
+                              allowed_authorities=allowed_authorities,
+                              post_data=post_data, deadline=deadline)
+
+        status, body, err = run_probe(disc_url)
         if err:
             return False, f'Discovery probe failed: {err}'
         if status != 200:
@@ -217,10 +222,7 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
 
         # Probe 2: JWKS Keys
         if jwks_url:
-            rem = deadline - time.time()
-            if rem <= 0:
-                raise TimeoutError('Probe deadline exceeded')
-            status, body, err = probe_http(jwks_url, ssl_context, rem, allowed_authorities=allowed_authorities, deadline=deadline)
+            status, body, err = run_probe(jwks_url)
             if err:
                 return False, f'JWKS probe failed: {err}'
             if status != 200:
@@ -235,22 +237,14 @@ def probe_idp(plan, ssl_context, timeout, allowed_authorities):
 
         # Probe 3: Token / UserInfo reachability (any HTTP status < 500 confirms application reachability)
         if token_url:
-            rem = deadline - time.time()
-            if rem <= 0:
-                raise TimeoutError('Probe deadline exceeded')
-            status, _, err = probe_http(token_url, ssl_context, rem, method='POST',
-                                        allowed_authorities=allowed_authorities, post_data='grant_type=invalid_probe', deadline=deadline)
+            status, _, err = run_probe(token_url, method='POST', post_data='grant_type=invalid_probe')
             if err:
                 return False, f'Token endpoint reachability probe failed: {err}'
             if status >= 500:
                 return False, f'Token endpoint returned server error HTTP {status}'
 
         if user_info_url:
-            rem = deadline - time.time()
-            if rem <= 0:
-                raise TimeoutError('Probe deadline exceeded')
-            status, _, err = probe_http(user_info_url, ssl_context, rem, method='GET',
-                                        allowed_authorities=allowed_authorities, deadline=deadline)
+            status, _, err = run_probe(user_info_url, method='GET')
             if err:
                 return False, f'UserInfo reachability probe failed: {err}'
             if status >= 500:
