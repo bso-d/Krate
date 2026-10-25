@@ -279,7 +279,7 @@ def write_by_image(out_dir, images, registry):
                 os.symlink(os.path.relpath(out_dir / f.path, link.parent), link)
 
 
-def human_size(n: int | float) -> str:
+def human_size(n):
     size = float(n)
     for unit in ('B', 'KiB', 'MiB', 'GiB'):
         if size < 1024 or unit == 'GiB':
