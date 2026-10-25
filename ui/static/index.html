@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge">
+  <title>Krate Studio</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <!-- Top Navigation / Status Bar (Material UI AppBar) -->
+  <header class="top-bar">
+    <div class="top-bar-left">
+      <button class="mui-icon-btn btn-drawer-toggle" id="btn-drawer-toggle" title="Toggle Navigation Rail" aria-label="Toggle Navigation">
+        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+      </button>
+
+      <div class="brand">
+        <img src="/krate-logo.png" alt="Krate Logo" class="brand-logo-img">
+        <div class="brand-text">
+          <span class="brand-name">Krate Studio</span>
+          <span class="brand-tag mui-chip" id="badge-edition">KRaft Mode</span>
+        </div>
+      </div>
+
+      <div class="workspace-selector-wrap">
+        <label for="select-workspace" class="sr-only">Workspace</label>
+        <svg class="icon-inline" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+        <select id="select-workspace" class="select-input">
+          <option value="kraft">KRaft Cluster (kraft/)</option>
+          <option value="epc">EPC RHEL Cluster (epc/)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Right: Color-Changing Outline Lucide Status Icons & Action Buttons (Material UI Style) -->
+    <div class="top-bar-right">
+      <!-- Cluster Runtime Health -->
+      <div class="mui-status-indicator status-stopped" id="badge-cluster-status" title="Cluster: Stopped" role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+        <span class="status-label" id="text-cluster-status">Cluster: <strong>Stopped</strong></span>
+      </div>
+
+      <!-- Preflight Doctor Status -->
+      <div class="mui-status-indicator status-info" id="badge-doctor-status" title="Doctor: Checking..." role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        <span class="status-label" id="text-doctor-status">Doctor: Checking...</span>
+      </div>
+
+      <!-- Host Storage / Disk Space -->
+      <div class="mui-status-indicator status-neutral" id="badge-disk-status" title="Host Disk Space" role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></svg>
+        <span class="status-label" id="text-disk-status">Disk: ...</span>
+      </div>
+
+      <!-- Session Status -->
+      <div class="mui-status-indicator status-success" id="badge-auth-status" title="Session Authenticated" role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span class="status-label" id="text-auth-status">Ready</span>
+      </div>
+
+      <div class="top-bar-divider"></div>
+
+      <!-- Remote SSH Action Button -->
+      <button class="mui-icon-btn" id="btn-remote-connect" title="Remote SSH Connection" aria-label="Remote SSH">
+        <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg>
+      </button>
+
+      <!-- Theme Mode Toggle Button -->
+      <button class="mui-icon-btn" id="btn-theme-toggle" title="Toggle Dark / Light Theme" aria-label="Toggle theme">
+        <svg class="theme-icon-dark" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <svg class="theme-icon-light" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+      </button>
+
+      <!-- Terminal Drawer Toggle Button -->
+      <button class="mui-icon-btn btn-terminal-nav" id="btn-toggle-terminal" title="Toggle Live Execution Logs" aria-label="Toggle Terminal">
+        <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+        <span class="terminal-pulse-dot" id="terminal-badge-status"></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- App Layout: Nav Rail + Content Canvas -->
+  <div class="app-layout">
+    <!-- Left Navigation Rail -->
+    <nav class="nav-rail" id="nav-rail" aria-label="Main Navigation">
+      <ul class="nav-list">
+        <li class="nav-item">
+          <button class="nav-link active" data-view="setup" id="nav-setup" title="Setup &amp; Doctor">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 0 0-2 2v5a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6V4a2 2 0 0 0-2-2h-1a.2.2 0 1 0 .3.3"/><path d="M8 15v1a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6v-4"/><circle cx="20" cy="10" r="2"/></svg>
+            <span class="nav-text">Setup &amp; Doctor</span>
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="services" id="nav-services" title="Cluster Services">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+            <span class="nav-text">Cluster Services</span>
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="lag" id="nav-lag" title="Lag &amp; Health Matrix">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            <span class="nav-text">Lag &amp; Health Matrix</span>
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="config" id="nav-config" title="Configuration">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="1" x2="7" y1="14" y2="14"/><line x1="9" x2="15" y1="8" y2="8"/><line x1="17" x2="23" y1="16" y2="16"/></svg>
+            <span class="nav-text">Configuration</span>
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="identity" id="nav-identity" title="Identity &amp; Users">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            <span class="nav-text">Identity &amp; Users</span>
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="sso" id="nav-sso" title="SSO Wizard">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z"/><circle cx="16.5" cy="7.5" r="1"/></svg>
+            <span class="nav-text">SSO Wizard</span>
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="observability" id="nav-observability" title="Observability">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+            <span class="nav-text">Observability</span>
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" data-view="release" id="nav-release" title="Release &amp; Gates">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 16 2 2 4-4"/><path d="M21 10V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l2-1.14"/><path d="m7.5 4.27 9 5.15"/><polyline points="3.29 7 12 12 20.71 7"/><line x1="12" x2="12" y1="22" y2="12"/></svg>
+            <span class="nav-text">Release &amp; Gates</span>
+          </button>
+        </li>
+      </ul>
+
+      <div class="nav-footer">
+        <button class="btn-rail-collapse" id="btn-rail-collapse" title="Collapse sidebar" aria-label="Collapse sidebar">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-collapse"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
+          <span class="rail-collapse-text">Collapse sidebar</span>
+        </button>
+
+        <div class="airgap-badge" title="Zero remote requests. Completely self-contained offline deployment.">
+          <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span>100% Offline Air-Gapped</span>
+        </div>
+        <div class="build-info" id="build-info-text">Krate Studio v1.0.0</div>
+      </div>
+    </nav>
+
+    <!-- Main Content Canvas -->
+    <main class="main-content" id="main-content">
+
+      <!-- ========================================== -->
+      <!-- VIEW 1: SETUP & DOCTOR                     -->
+      <!-- ========================================== -->
+      <section class="view-panel active" id="view-setup">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Setup &amp; System Doctor</h1>
+            <p class="view-subtitle">Offline preflight verification, automated environment remediation, and lifecycle initialization.</p>
+          </div>
+          <div class="view-actions">
+            <button class="btn btn-secondary" id="btn-run-doctor">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              <span>Run Doctor</span>
+            </button>
+            <button class="btn btn-primary" id="btn-quick-start">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              <span>Start Cluster</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- First-Run Wizard Stepper Card -->
+        <div class="card wizard-card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">Air-Gapped Setup Workflow</h2>
+              <p class="card-desc">Zero-CLI guided deployment pipeline from bare machine to live cluster.</p>
+            </div>
+            <span class="badge badge-info">Zero-CLI Pipeline</span>
+          </div>
+          <div class="wizard-steps">
+            <div class="wizard-step" id="step-docker">
+              <div class="step-badge-row">
+                <span class="step-num">1</span>
+                <span class="step-status-chip" id="step-docker-chip">Socket Verified</span>
+              </div>
+              <div class="step-content">
+                <div class="step-title">Docker Engine</div>
+                <div class="step-desc" id="step-docker-desc">Verifying Docker daemon &amp; Compose socket...</div>
+              </div>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-docker">Install Docker</button>
+            </div>
+            <div class="wizard-step" id="step-certs">
+              <div class="step-badge-row">
+                <span class="step-num">2</span>
+                <span class="step-status-chip" id="step-certs-chip">Valid SANs</span>
+              </div>
+              <div class="step-content">
+                <div class="step-title">TLS Certificates</div>
+                <div class="step-desc" id="step-certs-desc">CA &amp; SANs for Kafka/UI/Proxy</div>
+              </div>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-certs">Gen Certs</button>
+            </div>
+            <div class="wizard-step" id="step-images">
+              <div class="step-badge-row">
+                <span class="step-num">3</span>
+                <span class="step-status-chip" id="step-images-chip">Digest Pinned</span>
+              </div>
+              <div class="step-content">
+                <div class="step-title">Offline Images</div>
+                <div class="step-desc" id="step-images-desc">Pinned digests in .env.template</div>
+              </div>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-images">Load Images</button>
+            </div>
+            <div class="wizard-step" id="step-install">
+              <div class="step-badge-row">
+                <span class="step-num">4</span>
+                <span class="step-status-chip" id="step-install-chip">Package Step</span>
+              </div>
+              <div class="step-content">
+                <div class="step-title">Install Package</div>
+                <div class="step-desc" id="step-install-desc">Install bundle into $KRATE_HOME and start</div>
+              </div>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-install">Install</button>
+            </div>
+            <div class="wizard-step" id="step-start">
+              <div class="step-badge-row">
+                <span class="step-num">5</span>
+                <span class="step-status-chip" id="step-start-chip">Production Live</span>
+              </div>
+              <div class="step-content">
+                <div class="step-title">Start Cluster</div>
+                <div class="step-desc" id="step-start-desc">Launch Kafka, Kafbat UI &amp; Proxy</div>
+              </div>
+              <button class="btn btn-sm btn-primary step-btn" id="btn-step-start">Start</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Doctor Diagnostics Section -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">Preflight Diagnostics Checklist</h2>
+              <p class="card-desc">Evaluates host OS, port collisions, Docker permissions, certificate validity, and system limits.</p>
+            </div>
+            <div class="doctor-summary-badges">
+              <span class="badge badge-success" id="doc-badge-passed">0 Passing</span>
+              <span class="badge badge-warning" id="doc-badge-warn">0 Warnings</span>
+              <span class="badge badge-danger" id="doc-badge-failed">0 Issues</span>
+            </div>
+          </div>
+          <div class="table-container">
+            <table class="data-table" id="table-doctor">
+              <thead>
+                <tr>
+                  <th style="width: 250px;">Check Component</th>
+                  <th style="width: 120px;">Status</th>
+                  <th>Observed State &amp; Details</th>
+                  <th style="width: 140px; text-align: right;">Action</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-doctor">
+                <tr>
+                  <td colspan="4" class="text-center text-muted">Running diagnostics...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- VIEW 2: CLUSTER SERVICES                   -->
+      <!-- ========================================== -->
+      <section class="view-panel" id="view-services">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Cluster Services &amp; Nodes</h1>
+            <p class="view-subtitle">Live health status, container inspection, port bindings, and operational lifecycle control.</p>
+          </div>
+          <div class="view-actions">
+            <button class="btn btn-secondary" id="btn-services-health">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              <span>Check Health</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-services-restart">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+              <span>Restart All</span>
+            </button>
+            <button class="btn btn-danger" id="btn-services-stop">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
+              <span>Stop All</span>
+            </button>
+            <button class="btn btn-primary" id="btn-services-start">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              <span>Start All</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="services-filter-bar">
+          <input type="text" class="text-input" id="input-services-search" placeholder="Filter services by name, port, or status...">
+          <div class="pill-filter-group">
+            <button class="pill-filter active" data-filter="all">All Services</button>
+            <button class="pill-filter" data-filter="brokers">Brokers</button>
+            <button class="pill-filter" data-filter="ui-proxy">UI &amp; Proxy</button>
+            <button class="pill-filter" data-filter="identity">Identity / SSO</button>
+            <button class="pill-filter" data-filter="monitoring">Monitoring</button>
+          </div>
+        </div>
+
+        <div class="services-grid" id="services-grid">
+          <!-- Dynamic service cards rendered by app.js -->
+          <div class="card card-loading">
+            <div class="spinner"></div>
+            <span>Loading cluster containers...</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- VIEW 3: LAG & HEALTH MATRIX                -->
+      <!-- ========================================== -->
+      <section class="view-panel" id="view-lag">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Consumer Lag &amp; Health Matrix</h1>
+            <p class="view-subtitle">Single-JVM batched consumer group metrics, partition distribution, log-end offsets, and consumer skew.</p>
+          </div>
+          <div class="view-actions">
+            <button class="btn btn-secondary" id="btn-refresh-lag">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              <span>Refresh Metrics</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Lag Metric Cards -->
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-title">Consumer Groups</div>
+            <div class="metric-value" id="lag-stat-groups">0</div>
+            <div class="metric-sub" id="lag-stat-groups-sub">0 Active Consumers</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-title">Total Partitions</div>
+            <div class="metric-value" id="lag-stat-partitions">0</div>
+            <div class="metric-sub">Across All Groups</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-title">Max Observed Lag</div>
+            <div class="metric-value text-success" id="lag-stat-max">0</div>
+            <div class="metric-sub">Messages Behind</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-title">Lag Status</div>
+            <div class="metric-value text-success" id="lag-stat-status">Healthy</div>
+            <div class="metric-sub">Zero High-Lag Groups</div>
+          </div>
+        </div>
+
+        <!-- Interactive Lag Hierarchy Tree / Table -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">Consumer Groups &amp; Partitions Tree</h2>
+              <p class="card-desc">Expand any consumer group to inspect individual topic partitions, commit offsets, and lag depth.</p>
+            </div>
+            <div class="card-actions">
+              <input type="text" class="text-input text-input-sm" id="input-lag-filter" placeholder="Search group or topic...">
+              <label class="mui-switch" for="chk-lag-only">
+                <input type="checkbox" id="chk-lag-only">
+                <span class="mui-switch-track"><span class="mui-switch-thumb"></span></span>
+                <span class="mui-switch-label">Show Lagging Only</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="lag-tree-container" id="lag-tree-container">
+            <div class="text-center text-muted p-4">Loading consumer group lag metrics...</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- VIEW 4: CONFIGURATION EDITOR               -->
+      <!-- ========================================== -->
+      <section class="view-panel" id="view-config">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Configuration Editor</h1>
+            <p class="view-subtitle">Manage cluster environment variables, broker parameters, security settings, and runtime overrides.</p>
+          </div>
+          <div class="view-actions">
+            <button class="btn btn-secondary" id="btn-reload-config">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+              <span>Reload File</span>
+            </button>
+            <button class="btn btn-primary" id="btn-save-config">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              <span>Save &amp; Apply</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="config-tabs-bar">
+          <button class="tab-btn active" data-tab="cluster-env">Cluster .env</button>
+          <button class="tab-btn" data-tab="monitoring-env">Monitoring .env</button>
+          <button class="tab-btn" data-tab="raw-editor">Raw File Editor</button>
+        </div>
+
+        <div class="config-pane active" id="pane-cluster-env">
+          <div class="card">
+            <div class="card-header">
+              <h2 class="card-title">Core Cluster Variables</h2>
+              <span class="badge badge-info">Auto-Backed Up to .env.bak</span>
+            </div>
+            <div class="config-grid" id="config-fields-cluster">
+              <!-- Dynamically populated key-value rows -->
+              <div class="text-center text-muted p-4">Loading configuration variables...</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="config-pane" id="pane-monitoring-env">
+          <div class="card">
+            <div class="card-header">
+              <h2 class="card-title">Monitoring Stack Variables</h2>
+              <span class="badge badge-info">Prometheus, Grafana, Loki</span>
+            </div>
+            <div class="config-grid" id="config-fields-monitoring">
+              <div class="text-center text-muted p-4">Loading monitoring configuration...</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="config-pane" id="pane-raw-editor">
+          <div class="card">
+            <div class="card-header">
+              <h2 class="card-title">Direct Raw Config Editor</h2>
+              <span class="badge badge-warning">Changes require service restart</span>
+            </div>
+            <div class="raw-editor-wrap">
+              <textarea id="textarea-raw-config" class="raw-editor-textarea" spellcheck="false" placeholder="# Krate Cluster Environment Configuration"></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- VIEW 5: IDENTITY & USERS                   -->
+      <!-- ========================================== -->
+      <section class="view-panel" id="view-identity">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Identity &amp; User Management</h1>
+            <p class="view-subtitle">Manage local Kafka / Keycloak directory accounts, assign roles, and administer identity databases.</p>
+          </div>
+          <div class="view-actions">
+            <button class="btn btn-secondary" id="btn-open-rotate-modal">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+              <span>Rotate Secret</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-backup-identity">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              <span>Backup DB</span>
+            </button>
+            <button class="btn btn-primary" id="btn-open-add-user">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+              <span>Add User</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Identity Status Cards -->
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-title">Keycloak Service</div>
+            <div class="metric-value text-success" id="identity-stat-status">Running</div>
+            <div class="metric-sub" id="identity-stat-db">PostgreSQL Connected</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-title">Directory Users</div>
+            <div class="metric-value" id="identity-stat-count">0</div>
+            <div class="metric-sub">Provisioned Accounts</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-title">IdP Watchdog</div>
+            <div class="metric-value text-success" id="identity-stat-watch">Active</div>
+            <div class="metric-sub">Failover Monitoring</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-title">Local Admin</div>
+            <div class="metric-value text-info" id="identity-stat-admin">Protected</div>
+            <div class="metric-sub">Dual Auth Fallback</div>
+          </div>
+        </div>
+
+        <!-- Users Table -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">User Directory</h2>
+              <p class="card-desc">Temporary passwords are presented in the One-Time Reveal Card and scrubbed from logs.</p>
+            </div>
+            <button class="btn btn-sm btn-ghost" id="btn-refresh-users">Refresh</button>
+          </div>
+          <div class="table-container">
+            <table class="data-table" id="table-users">
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Email</th>
+                  <th>Roles &amp; Permissions</th>
+                  <th>Status</th>
+                  <th style="width: 220px; text-align: right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-users">
+                <tr>
+                  <td colspan="5" class="text-center text-muted">Loading users directory...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- VIEW 6: SSO WIZARD (5-STAGE ORCHESTRATOR) -->
+      <!-- ========================================== -->
+      <section class="view-panel" id="view-sso">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">SSO &amp; Dual Auth Orchestrator</h1>
+            <p class="view-subtitle">Automate Keycloak client provisioning, OIDC configuration, and zero-downtime service reconciliation.</p>
+          </div>
+          <div class="view-actions">
+            <button class="btn btn-secondary" id="btn-sso-fallback">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+              <span>Emergency Fallback to Local</span>
+            </button>
+            <button class="btn btn-primary" id="btn-run-sso">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              <span>Run SSO Orchestration</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 5-Stage Orchestration Pipeline Visualizer -->
+        <div class="card sso-pipeline-card">
+          <div class="card-header">
+            <h2 class="card-title">5-Stage Execution Pipeline</h2>
+            <span class="badge badge-info" id="sso-pipeline-status">Ready to Execute</span>
+          </div>
+
+          <div class="sso-pipeline-grid">
+            <div class="pipeline-stage" id="sso-stage-1">
+              <div class="stage-header">
+                <span class="stage-badge">Stage 1</span>
+                <span class="stage-status-icon" id="stage-icon-1">○</span>
+              </div>
+              <h3 class="stage-name">Discovery &amp; Preflight</h3>
+              <p class="stage-desc">Assert Postgres readiness, Keycloak admin token availability, and TLS SAN validity.</p>
+            </div>
+
+            <div class="pipeline-stage" id="sso-stage-2">
+              <div class="stage-header">
+                <span class="stage-badge">Stage 2</span>
+                <span class="stage-status-icon" id="stage-icon-2">○</span>
+              </div>
+              <h3 class="stage-name">Realm &amp; Clients</h3>
+              <p class="stage-desc">Configure Krate realm, client secrets, redirect URIs, and user claim mappers.</p>
+            </div>
+
+            <div class="pipeline-stage" id="sso-stage-3">
+              <div class="stage-header">
+                <span class="stage-badge">Stage 3</span>
+                <span class="stage-status-icon" id="stage-icon-3">○</span>
+              </div>
+              <h3 class="stage-name">Dual Auth Provisioning</h3>
+              <p class="stage-desc">Generate runtime.yml and site.json preserving emergency local admin credentials.</p>
+            </div>
+
+            <div class="pipeline-stage" id="sso-stage-4">
+              <div class="stage-header">
+                <span class="stage-badge">Stage 4</span>
+                <span class="stage-status-icon" id="stage-icon-4">○</span>
+              </div>
+              <h3 class="stage-name">Service Reconciliation</h3>
+              <p class="stage-desc">Execute krate auth apply with zero-downtime rolling reload for Kafbat &amp; Grafana.</p>
+            </div>
+
+            <div class="pipeline-stage" id="sso-stage-5">
+              <div class="stage-header">
+                <span class="stage-badge">Stage 5</span>
+                <span class="stage-status-icon" id="stage-icon-5">○</span>
+              </div>
+              <h3 class="stage-name">Verification &amp; Probe</h3>
+              <p class="stage-desc">Probe OIDC token endpoints and verify local fallback authentication paths.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- SSO Settings Form -->
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">SSO Target &amp; Identity Configuration</h2>
+            <p class="card-desc">Specify orchestrator parameters for Grafana and Perses OIDC federation.</p>
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="select-sso-target" class="form-label">Target Application</label>
+              <select id="select-sso-target" class="select-input">
+                <option value="grafana">Grafana Monitoring Portal</option>
+                <option value="perses">Perses Modern Dashboards</option>
+                <option value="both">Both (Unified OIDC Federation)</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="select-sso-mode" class="form-label">Realm Mode</label>
+              <select id="select-sso-mode" class="select-input">
+                <option value="realm">Standard Krate Realm</option>
+                <option value="master">Master Realm (Direct Admin)</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="input-sso-realm-url" class="form-label">Keycloak Base URL</label>
+              <input type="text" id="input-sso-realm-url" class="text-input" value="https://localhost:8443" placeholder="https://localhost:8443">
+            </div>
+
+            <div class="form-group">
+              <label for="input-sso-admin-user" class="form-label">Local Admin Fallback User</label>
+              <input type="text" id="input-sso-admin-user" class="text-input" value="admin" readonly>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- VIEW 7: OBSERVABILITY                      -->
+      <!-- ========================================== -->
+      <section class="view-panel" id="view-observability">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Cluster Observability &amp; Metrics</h1>
+            <p class="view-subtitle">Unified monitoring portals, Prometheus telemetry, and active alerting rules.</p>
+          </div>
+          <div class="view-actions">
+            <button class="btn btn-secondary" id="btn-monitor-toggle">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              <span>Restart Monitoring Stack</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Portals Grid -->
+        <div class="portals-grid">
+          <div class="portal-card">
+            <div class="portal-icon">
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+            </div>
+            <div class="portal-body">
+              <h3 class="portal-title">Grafana Dashboards</h3>
+              <p class="portal-desc">Pre-seeded Kafka broker, KRaft consensus, and OS performance graphs.</p>
+              <a href="https://localhost/grafana/" id="link-portal-grafana" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open Grafana</a>
+            </div>
+          </div>
+
+          <div class="portal-card">
+            <div class="portal-icon">
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            </div>
+            <div class="portal-body">
+              <h3 class="portal-title">Kafbat UI</h3>
+              <p class="portal-desc">Visual topic manager, message inspector, and schema registry explorer.</p>
+              <a href="https://localhost/" id="link-portal-kafbat" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open Kafbat UI</a>
+            </div>
+          </div>
+
+          <div class="portal-card">
+            <div class="portal-icon">
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            </div>
+            <div class="portal-body">
+              <h3 class="portal-title">Perses Observability</h3>
+              <p class="portal-desc">Modern declarative dashboards with GitOps synchronization.</p>
+              <a href="https://localhost:3443/" id="link-portal-perses" target="_blank" rel="noopener" class="btn btn-sm btn-secondary">Open Perses :3443</a>
+            </div>
+          </div>
+
+          <div class="portal-card">
+            <div class="portal-icon">
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            </div>
+            <div class="portal-body">
+              <h3 class="portal-title">Loki Log Streams</h3>
+              <p class="portal-desc">Log aggregation across Kafka brokers, Envoy/Nginx, and Keycloak.</p>
+              <a href="https://localhost/grafana/explore" id="link-portal-loki" target="_blank" rel="noopener" class="btn btn-sm btn-secondary">Explore Logs</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- Active Alerts Table -->
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">Active Alert Rules &amp; Health Probes</h2>
+            <span class="badge badge-neutral" id="alerts-summary-badge">Unknown</span>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Rule Name</th>
+                  <th>Severity</th>
+                  <th>Component</th>
+                  <th>Evaluation Summary</th>
+                  <th>State</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-alerts">
+                <tr>
+                  <td><strong>UnderReplicatedPartitions</strong></td>
+                  <td><span class="badge badge-danger">Critical</span></td>
+                  <td>Kafka Brokers</td>
+                  <td>Partitions below target replica quorum</td>
+                  <td><span class="badge badge-neutral" data-alert-rule="UnderReplicatedPartitions">Unknown</span></td>
+                </tr>
+                <tr>
+                  <td><strong>OfflinePartitionsCount</strong></td>
+                  <td><span class="badge badge-danger">Critical</span></td>
+                  <td>Kafka Brokers</td>
+                  <td>Partitions with no active leader</td>
+                  <td><span class="badge badge-neutral" data-alert-rule="OfflinePartitionsCount">Unknown</span></td>
+                </tr>
+                <tr>
+                  <td><strong>BrokerActiveController</strong></td>
+                  <td><span class="badge badge-warning">Warning</span></td>
+                  <td>KRaft Quorum</td>
+                  <td>Assert exactly 1 active KRaft controller</td>
+                  <td><span class="badge badge-neutral" data-alert-rule="BrokerActiveController">Unknown</span></td>
+                </tr>
+                <tr>
+                  <td><strong>DiskSpaceLow</strong></td>
+                  <td><span class="badge badge-warning">Warning</span></td>
+                  <td>Host Volume</td>
+                  <td>Storage utilization exceeds 85%</td>
+                  <td><span class="badge badge-neutral" data-alert-rule="DiskSpaceLow">Unknown</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================== -->
+      <!-- VIEW 8: RELEASE & GATES                    -->
+      <!-- ========================================== -->
+      <section class="view-panel" id="view-release">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Release Artifacts &amp; Acceptance Gates</h1>
+            <p class="view-subtitle">Offline tarball packaging, image digest validation, formal gate test suite, and remote zero-CLI deployment.</p>
+          </div>
+          <div class="view-actions">
+            <button class="btn btn-primary" id="btn-run-gates">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              <span>Execute Formal Gates</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="release-grid">
+          <!-- Package Integrity Card -->
+          <div class="card">
+            <div class="card-header">
+              <h2 class="card-title">Offline Package Metadata</h2>
+              <span class="badge badge-success">Self-Contained</span>
+            </div>
+            <div class="info-list">
+              <div class="info-item">
+                <span class="info-label">Active Edition</span>
+                <span class="info-value" id="release-info-edition">KRaft (Default 4-node)</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Package Mode</span>
+                <span class="info-value" id="release-info-mode">Development Tree</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Architecture</span>
+                <span class="info-value">amd64 / x86_64</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Pinned Images</span>
+                <span class="info-value text-success">@sha256 digest pinned</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Offline Policies</span>
+                <span class="info-value text-success">Outbound telemetry disabled</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Zero-CLI Remote Host Connector -->
+          <div class="card">
+            <div class="card-header">
+              <h2 class="card-title">Remote Host Bootstrapper</h2>
+              <span class="badge badge-info">Zero-CLI OpenSSH</span>
+            </div>
+            <form id="form-remote-ssh" onsubmit="return false;">
+              <div class="form-group">
+                <label for="input-remote-host" class="form-label">Target Remote Host / IP</label>
+                <input type="text" id="input-remote-host" class="text-input" placeholder="e.g. 192.168.1.100 or rhel9-node1">
+              </div>
+              <div class="form-row">
+                <div class="form-group" style="flex: 2;">
+                  <label for="input-remote-user" class="form-label">SSH Username</label>
+                  <input type="text" id="input-remote-user" class="text-input" placeholder="e.g. root or appuser">
+                </div>
+                <div class="form-group" style="flex: 1;">
+                  <label for="input-remote-port" class="form-label">Port</label>
+                  <input type="number" id="input-remote-port" class="text-input" value="22">
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="input-remote-pass" class="form-label">SSH Password (optional if using keys)</label>
+                <input type="password" id="input-remote-pass" class="text-input" placeholder="••••••••">
+              </div>
+              <button class="btn btn-secondary w-full" id="btn-remote-verify">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <span>Verify Host Fingerprint (TOFU)</span>
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <!-- Acceptance Gates Verification Table -->
+        <div class="card mt-4">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">Formal Acceptance Gates Matrix</h2>
+              <p class="card-desc">Binding assertions required before production offline deployment.</p>
+            </div>
+            <span class="badge badge-neutral" id="gates-summary-badge">Not Run</span>
+          </div>
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Gate Test Identifier</th>
+                  <th>Domain</th>
+                  <th>Criteria &amp; Contract</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-gates">
+                <tr data-gate-id="GATE-1">
+                  <td><strong>GATE-1: Parity</strong></td>
+                  <td>kraft/ vs epc/</td>
+                  <td>Helper functions and CLI options must be identical between editions</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-1">Not Run</span></td>
+                </tr>
+                <tr data-gate-id="GATE-2">
+                  <td><strong>GATE-2: Digest Pinning</strong></td>
+                  <td>Reproducibility</td>
+                  <td>All container images in .env.template pinned to @sha256 digest</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-2">Not Run</span></td>
+                </tr>
+                <tr data-gate-id="GATE-3">
+                  <td><strong>GATE-3: Compose Validation</strong></td>
+                  <td>Configuration</td>
+                  <td>Docker Compose schema and service configuration valid across editions</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-3">Not Run</span></td>
+                </tr>
+                <tr data-gate-id="GATE-4">
+                  <td><strong>GATE-4: Offline Policy</strong></td>
+                  <td>Security</td>
+                  <td>No outbound HTTP calls, CDN links, telemetry, or external assets allowed</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-4">Not Run</span></td>
+                </tr>
+                <tr data-gate-id="GATE-5">
+                  <td><strong>GATE-5: Host &amp; Identity Preflight</strong></td>
+                  <td>Identity &amp; Doctor</td>
+                  <td>Host preflight checks and Keycloak/TLS invariants verified</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-5">Not Run</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ========================================== -->
+  <!-- BOTTOM COLLAPSIBLE LIVE LOG TERMINAL DRAWER -->
+  <!-- ========================================== -->
+  <aside class="terminal-drawer collapsed" id="terminal-drawer" aria-label="Live Execution Terminal">
+    <div class="drawer-header" id="drawer-header">
+      <div class="drawer-header-left">
+        <button class="drawer-toggle-btn" id="btn-toggle-drawer-arrow" aria-label="Expand or collapse terminal">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <span class="drawer-title">Live Execution Log</span>
+        <span class="terminal-pill" id="terminal-action-pill">Idle</span>
+        <span class="terminal-conn" id="terminal-conn-status">Disconnected</span>
+      </div>
+
+      <div class="drawer-header-right">
+        <input type="text" class="terminal-filter-input" id="input-terminal-filter" placeholder="Filter output...">
+        <label class="mui-switch mui-switch-sm" for="chk-terminal-autoscroll">
+          <input type="checkbox" id="chk-terminal-autoscroll" checked>
+          <span class="mui-switch-track"><span class="mui-switch-thumb"></span></span>
+          <span class="mui-switch-label">Auto-Scroll</span>
+        </label>
+        <button class="btn btn-xs btn-ghost" id="btn-terminal-clear" title="Clear terminal">Clear</button>
+        <button class="btn btn-xs btn-ghost" id="btn-terminal-expand" title="Maximize/Restore height">
+          <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="drawer-body" id="drawer-body">
+      <pre class="terminal-pre"><code id="terminal-code" class="terminal-code"></code></pre>
+    </div>
+  </aside>
+
+  <!-- ========================================== -->
+  <!-- ENTERPRISE MODALS (6 REQUIRED MODALS)      -->
+  <!-- ========================================== -->
+
+  <!-- 1. SUDO PASSWORD PROMPT MODAL -->
+  <div class="modal-backdrop" id="modal-sudo" role="dialog" aria-modal="true" aria-labelledby="modal-sudo-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-icon icon-warning">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-sudo-title">Root Privileges Required</h3>
+          <p class="modal-subtitle">This operation requires administrative privileges on the host system.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <p class="mb-3 text-muted" id="modal-sudo-action-desc">An operation requires host root access via <code>sudo -A</code>. Your password is piped securely via memory and never logged.</p>
+        <div class="form-group">
+          <label for="input-sudo-password" class="form-label">Sudo Password</label>
+          <input type="password" id="input-sudo-password" class="text-input" placeholder="Enter root or sudo password" autocomplete="current-password">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-sudo-cancel">Cancel</button>
+        <button class="btn btn-primary" id="btn-sudo-submit">Authorize &amp; Proceed</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. TEMPORARY / ONE-TIME PASSWORD REVEAL CARD MODAL -->
+  <div class="modal-backdrop" id="modal-otp" role="dialog" aria-modal="true" aria-labelledby="modal-otp-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-icon icon-success">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-otp-title">One-Time Password Generated</h3>
+          <p class="modal-subtitle">Ephemeral credential created successfully.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="security-banner">
+          <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span>This credential is shown <strong>once only</strong> and has been automatically scrubbed from server logs. Copy it now.</span>
+        </div>
+
+        <div class="credential-box mt-3">
+          <div class="credential-row">
+            <span class="cred-label">Target Account:</span>
+            <strong class="cred-value" id="otp-username">admin</strong>
+          </div>
+          <div class="credential-row">
+            <span class="cred-label">Temporary Password:</span>
+            <code class="cred-secret" id="otp-password">••••••••••••••••</code>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-otp-copy">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span id="text-otp-copy">Copy to Clipboard</span>
+        </button>
+        <button class="btn btn-primary" id="btn-otp-done">Done &amp; Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. PURGE CONFIRM MODAL (DESTRUCTIVE) -->
+  <div class="modal-backdrop" id="modal-purge" role="dialog" aria-modal="true" aria-labelledby="modal-purge-title">
+    <div class="modal-dialog modal-dialog-danger">
+      <div class="modal-header">
+        <div class="modal-icon icon-danger">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title text-danger" id="modal-purge-title">Confirm Destructive Purge</h3>
+          <p class="modal-subtitle">Permanent deletion of all Kafka cluster data.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="danger-box mb-3">
+          <p><strong>Warning:</strong> You are about to execute <code>krate uninstall --purge</code>. This will completely delete all Kafka topic logs, partition segments, consumer group offsets, SSL certificates, and Keycloak database storage.</p>
+          <p class="mt-2 text-sm">This action cannot be undone. All offline partition data will be irrecoverably lost.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="input-purge-confirm" class="form-label">Type <strong>PURGE</strong> to confirm:</label>
+          <input type="text" id="input-purge-confirm" class="text-input" placeholder="Type PURGE in capital letters">
+        </div>
+
+        <label class="mui-switch mt-2" for="chk-purge-confirm">
+          <input type="checkbox" id="chk-purge-confirm">
+          <span class="mui-switch-track"><span class="mui-switch-thumb"></span></span>
+          <span class="mui-switch-label">I understand that this cluster data wipe is immediate and permanent.</span>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-purge-cancel">Cancel</button>
+        <button class="btn btn-danger" id="btn-purge-submit" disabled>Purge All Data</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. SECRET ROTATE MODAL -->
+  <div class="modal-backdrop" id="modal-rotate" role="dialog" aria-modal="true" aria-labelledby="modal-rotate-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-icon icon-info">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-rotate-title">Rotate Service Credential</h3>
+          <p class="modal-subtitle">Rotate cryptographic secrets and passwords with automatic restart.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="form-group mb-3">
+          <label for="select-rotate-key" class="form-label">Target Secret</label>
+          <select id="select-rotate-key" class="select-input">
+            <option value="KEYCLOAK_ADMIN_PASSWORD">KEYCLOAK_ADMIN_PASSWORD</option>
+            <option value="KEYCLOAK_DB_PASSWORD">KEYCLOAK_DB_PASSWORD</option>
+            <option value="KEYCLOAK_KAFBAT_CLIENT_SECRET">KEYCLOAK_KAFBAT_CLIENT_SECRET</option>
+            <option value="KEYCLOAK_CLI_CLIENT_SECRET">KEYCLOAK_CLI_CLIENT_SECRET</option>
+            <option value="KEYCLOAK_IDP_WATCH_CLIENT_SECRET">KEYCLOAK_IDP_WATCH_CLIENT_SECRET</option>
+          </select>
+        </div>
+
+        <div class="form-group mb-3">
+          <label for="input-rotate-value" class="form-label">New Secret Value</label>
+          <div class="input-with-button">
+            <input type="text" id="input-rotate-value" class="text-input" placeholder="Enter new strong passphrase">
+            <button class="btn btn-secondary" id="btn-generate-secret">Generate</button>
+          </div>
+        </div>
+
+        <p class="text-xs text-muted">A rolling restart will be initiated on the affected services to load the updated credentials.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-rotate-cancel">Cancel</button>
+        <button class="btn btn-primary" id="btn-rotate-submit">Rotate &amp; Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. ADD USER MODAL -->
+  <div class="modal-backdrop" id="modal-add-user" role="dialog" aria-modal="true" aria-labelledby="modal-add-user-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-icon icon-info">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-add-user-title">Provision User Account</h3>
+          <p class="modal-subtitle">Add a user to the local Keycloak identity directory.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="form-group mb-3">
+          <label for="input-new-username" class="form-label">Username *</label>
+          <input type="text" id="input-new-username" class="text-input" placeholder="e.g. jdoe" required>
+        </div>
+
+        <div class="form-group mb-3">
+          <label for="input-new-email" class="form-label">Email (optional)</label>
+          <input type="email" id="input-new-email" class="text-input" placeholder="jdoe@example.local">
+        </div>
+
+        <div class="form-group mb-3">
+          <label class="form-label">Assigned Roles</label>
+          <div class="checkbox-group flex-column gap-2">
+            <label class="mui-switch" for="chk-role-admin">
+              <input type="checkbox" id="chk-role-admin">
+              <span class="mui-switch-track"><span class="mui-switch-thumb"></span></span>
+              <span class="mui-switch-label">Admin (Full cluster, topic, and security rights)</span>
+            </label>
+            <label class="mui-switch" for="chk-role-viewer">
+              <input type="checkbox" id="chk-role-viewer" checked>
+              <span class="mui-switch-track"><span class="mui-switch-thumb"></span></span>
+              <span class="mui-switch-label">Viewer (Read-only topic inspection &amp; metrics)</span>
+            </label>
+          </div>
+        </div>
+
+        <p class="text-xs text-muted">A secure one-time temporary password will be generated automatically and revealed upon creation.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-add-user-cancel">Cancel</button>
+        <button class="btn btn-primary" id="btn-add-user-submit">Provision User</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. TOFU SSH HOST KEY FINGERPRINT MODAL -->
+  <div class="modal-backdrop" id="modal-tofu" role="dialog" aria-modal="true" aria-labelledby="modal-tofu-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-icon icon-warning">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-tofu-title">SSH Host Key Verification (TOFU)</h3>
+          <p class="modal-subtitle">Trust On First Use verification for remote host.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <p class="mb-3">The authenticity of host <strong id="tofu-target-host">192.168.1.100</strong> cannot be established without verification. Confirm the host key fingerprint matches your server console:</p>
+
+        <div class="credential-box mb-3">
+          <div class="credential-row">
+            <span class="cred-label">Key Type:</span>
+            <code class="cred-value" id="tofu-key-type">ssh-ed25519</code>
+          </div>
+          <div class="credential-row cred-column">
+            <span class="cred-label">SHA-256 Fingerprint:</span>
+            <code class="cred-secret cred-wrap-text" id="tofu-fingerprint">SHA256:7uK...</code>
+          </div>
+        </div>
+
+        <p class="text-xs text-muted">Accepting this fingerprint will record the host in <code>~/.ssh/known_hosts</code> via OpenSSH askpass helper.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-tofu-reject">Reject &amp; Disconnect</button>
+        <button class="btn btn-primary" id="btn-tofu-accept">Trust &amp; Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 7. BACKUP IDENTITY DATABASE MODAL -->
+  <div class="modal-backdrop" id="modal-backup" role="dialog" aria-modal="true" aria-labelledby="modal-backup-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-icon icon-info">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-backup-title">Encrypted Identity Database Backup</h3>
+          <p class="modal-subtitle">Export an encrypted dump of the Keycloak PostgreSQL database.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="form-group mb-3">
+          <label for="input-backup-file" class="form-label">Destination File Path *</label>
+          <input type="text" id="input-backup-file" class="text-input" placeholder="e.g. identity-backup.enc" required>
+        </div>
+        <div class="form-group mb-3">
+          <label for="input-backup-passphrase" class="form-label">Encryption Passphrase (min. 8 characters) *</label>
+          <input type="password" id="input-backup-passphrase" class="text-input" placeholder="Enter strong encryption passphrase" autocomplete="new-password" required>
+        </div>
+        <div class="form-group mb-3">
+          <label for="input-backup-passphrase-confirm" class="form-label">Confirm Encryption Passphrase *</label>
+          <input type="password" id="input-backup-passphrase-confirm" class="text-input" placeholder="Re-enter passphrase" autocomplete="new-password" required>
+        </div>
+        <p class="text-xs text-muted">The destination file must not already exist. Keep the passphrase safe—it is required by <code>krate identity restore</code>.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-backup-cancel">Cancel</button>
+        <button class="btn btn-primary" id="btn-backup-submit">Create Encrypted Backup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+  <!-- App Script -->
+  <script src="./app.js"></script>
+</body>
+</html>

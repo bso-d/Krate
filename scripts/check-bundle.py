@@ -50,6 +50,9 @@ def main():
                  'auth/ui/local.yml', 'docs/dual-login.md', 'docs/identity-foundation.md', 'docs/grafana-sso.md'):
         if not (root / name).is_file():
             raise SystemExit('Missing authentication package file: ' + name)
+    for name in ('ui/krate_ui.py', 'ui/static/index.html', 'ui/static/styles.css', 'ui/static/app.js'):
+        if not (root / name).is_file():
+            raise SystemExit('Missing UI package file: ' + name)
     monitor_template = root / 'monitoring/.env.template'
     if monitor_template.is_file() and 'FLUENT_BIT_IMAGE=' in monitor_template.read_text():
         for name in ('fluent-bit.conf', 'parsers-multiline.conf', 'metadata.lua', 'discovery.py', 'vendor/dkjson.lua',
@@ -98,7 +101,8 @@ def main():
     if bytecode:
         raise SystemExit('Python bytecode must not ship in release packages: ' + ', '.join(bytecode))
     for site_file in ('.env', 'auth/ui/runtime.yml', 'auth/keycloak/krate-realm.json',
-                      'auth/keycloak/pingfederate-idp.json', 'auth/keycloak/db-tls', 'auth/identity-journal.log'):
+                      'auth/keycloak/pingfederate-idp.json', 'auth/keycloak/db-tls', 'auth/identity-journal.log',
+                      '.krate-ui-token', '.krate-ui-url'):
         if (root / site_file).exists():
             raise SystemExit('Site configuration must not ship in release packages: ' + site_file)
     print(f'Package coverage verified: {len(images)} images, including all optional profiles and SSO helpers.')

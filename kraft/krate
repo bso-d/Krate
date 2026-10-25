@@ -318,7 +318,7 @@ deploy_release() {
   if ! ( cd "$SCRIPT_DIR" && tar -cf - --exclude=./images --exclude=./docker-offline --exclude=./.env \
       --exclude=./certs --exclude=./auth --exclude=./monitoring/.env --exclude=./monitoring/auth \
       --exclude='./sso/site*.json' --exclude='./.env.*' --exclude='./monitoring/.env.*' \
-      --exclude='.identity-backup.*' . ) > "$work/release.tar" \
+      --exclude='.identity-backup.*' --exclude='.krate-ui-*' --exclude='__pycache__' --exclude='*.pyc' . ) > "$work/release.tar" \
     || ! tar -tf "$work/release.tar" > "$work/release.list" \
     || ! ( cd "$KRATE_HOME" && tar -xf "$work/release.tar" ); then
     rm -rf "$work"
@@ -809,6 +809,13 @@ KCADM_CONFIG=""
 sso_dir() {
   local dir="$SCRIPT_DIR/sso"
   [[ -d "$dir" ]] || dir="$SCRIPT_DIR/../sso"
+  echo "$dir"
+}
+
+ui_dir() {
+  local dir="$SCRIPT_DIR/ui"
+  [[ -d "$dir" ]] || dir="$SCRIPT_DIR/../ui"
+  [[ -d "$dir" ]] || die "ui directory not found in $SCRIPT_DIR/ui or $SCRIPT_DIR/../ui"
   echo "$dir"
 }
 
@@ -3085,18 +3092,30 @@ cmd_load_images() {
 cmd_start() {
   identity_lock_if_enabled
   prepare
-  info "Starting cluster..."
-  compose_cmd up -d
-  echo ""
-  cmd_health || true      # wait for the cluster to settle, then show final health
+  local svc="${1:-}"
+  if [[ -n "$svc" ]]; then
+    info "Starting $svc..."
+    compose_cmd up -d "$svc"
+  else
+    info "Starting cluster..."
+    compose_cmd up -d
+    echo ""
+    cmd_health || true      # wait for the cluster to settle, then show final health
+  fi
 }
 
 # ─── stop ─────────────────────────────────────────────────────────────────────
 cmd_stop() {
   require_compose; require_compose_file
   identity_lock_if_enabled
-  info "Stopping cluster (containers paused, data preserved)..."
-  compose_cmd stop
+  local svc="${1:-}"
+  if [[ -n "$svc" ]]; then
+    info "Stopping $svc (container paused, data preserved)..."
+    compose_cmd stop "$svc"
+  else
+    info "Stopping cluster (containers paused, data preserved)..."
+    compose_cmd stop
+  fi
   ok "Stopped"
 }
 
@@ -3288,6 +3307,13 @@ cmd_ui() {
   fi
   echo -e "  ${DIM}TLS is a self-signed cert — trust certs/server.crt or proceed past the browser warning.${RESET}"
   sep
+}
+
+# ─── studio ───────────────────────────────────────────────────────────────────
+cmd_studio() {
+  command -v python3 >/dev/null || die "python3 is required to run Krate Studio"
+  export PYTHONDONTWRITEBYTECODE=1
+  exec python3 -B "$(ui_dir)/krate_ui.py" --workspace "$SCRIPT_DIR" "$@"
 }
 
 # ─── config ───────────────────────────────────────────────────────────────────
@@ -5052,6 +5078,7 @@ cmd_help() {
   printf "  %-30s %s\n" "identity renew-db-tls" "Reissue the database TLS server certificate (398 days) under the existing CA and reload it"
   printf "  %-30s %s\n" "identity logrotate [--install]" "Print, or install under /etc/logrotate.d, the journal's logrotate rules"
   printf "  %-30s %s\n" "ui"                   "Show Kafbat UI URL and credentials"
+  printf "  %-30s %s\n" "studio"               "Start Krate Studio desktop management UI"
   printf "  %-30s %s\n" "config"               "Show current .env config"
   printf "  %-30s %s\n" "config set KEY=VAL"   "Set a config value in .env"
   printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
@@ -5096,7 +5123,7 @@ shift || true
 # installed copy, which holds the site's settings and certificates.
 if is_package; then
   case "$CMD" in
-    install|doctor|docker-check|docker-install|load-images|help|--help|-h) ;;
+    install|doctor|docker-check|docker-install|load-images|studio|help|--help|-h) ;;
     *)
       [[ -x "$KRATE_HOME/krate" ]] || die "Not installed yet. Run: ./krate install"
       exec "$KRATE_HOME/krate" "$CMD" "$@"
@@ -5107,12 +5134,12 @@ fi
 case "$CMD" in
   install)        cmd_install "$@" ;;
   load-images)    cmd_load_images ;;
-  start)          cmd_start ;;
+  start)          cmd_start "$@" ;;
   setup)          cmd_setup ;;
   credentials)    cmd_credentials ;;
   build)          cmd_build ;;
   package)        cmd_package "$@" ;;
-  stop)           cmd_stop ;;
+  stop)           cmd_stop "$@" ;;
   restart)        cmd_restart "$@" ;;
   down)           cmd_down ;;
   status)         cmd_status ;;
@@ -5120,6 +5147,7 @@ case "$CMD" in
   health)         cmd_health "$@" ;;
   lag)            cmd_lag "$@" ;;
   ui)             cmd_ui ;;
+  studio)         cmd_studio "$@" ;;
   auth)           cmd_auth "$@" ;;
   identity)       cmd_identity "$@" ;;
   config)         cmd_config "$@" ;;
