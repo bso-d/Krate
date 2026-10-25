@@ -24,14 +24,11 @@ import http.server
 import hmac
 import json
 import os
-import pathlib
 import queue
 import re
 import secrets
 import shutil
-import signal
 import socket
-import ssl
 import subprocess
 import tempfile
 import threading
@@ -261,7 +258,7 @@ class WorkspaceManager:
 
 
 # --- Docker & System IPC Helpers ---
-def check_docker_socket_permission() -> tuple[bool, bool]:
+def check_docker_socket_permission() -> Tuple[bool, bool]:
     """
     Returns (direct_access_ok, sg_docker_needed).
     """
@@ -464,6 +461,10 @@ class Job:
                 pass
         return False
 
+    def get_logs_since(self, last_seq: int) -> List[dict]:
+        with self._lock:
+            return [e for e in self.logs if e["seq"] > last_seq]
+
     def consume_ephemeral(self) -> dict:
         with self._lock:
             if not self.ephemeral:
@@ -489,15 +490,32 @@ class Job:
 class JobSupervisor:
     def __init__(self):
         self._mutation_lock = threading.Lock()
-        self._active_mutation_job_id = None
+        self._active_mutation_job_id: Optional[str] = None
         self._jobs_lock = threading.Lock()
-        self._jobs: dict[str, Job] = {}
+        self._jobs: Dict[str, Job] = {}
+
+    def register_custom_job(self, job: Job, is_mutation: bool = False) -> None:
+        if is_mutation:
+            acquired = self._mutation_lock.acquire(blocking=False)
+            if not acquired:
+                with self._jobs_lock:
+                    active_id = self._active_mutation_job_id
+                raise RuntimeError(f"Another mutation job is currently in progress: {active_id}")
+            self._active_mutation_job_id = job.id
+        with self._jobs_lock:
+            self._jobs[job.id] = job
+
+    def release_mutation_job(self, job_id: str) -> None:
+        with self._jobs_lock:
+            if self._active_mutation_job_id == job_id:
+                self._active_mutation_job_id = None
+        self._mutation_lock.release()
 
     def get_job(self, job_id: str) -> Optional[Job]:
         with self._jobs_lock:
             return self._jobs.get(job_id)
 
-    def list_jobs(self, limit: int = 50) -> list[dict]:
+    def list_jobs(self, limit: int = 50) -> List[dict]:
         with self._jobs_lock:
             jobs_list = sorted(self._jobs.values(), key=lambda j: j.started_at, reverse=True)
             return [j.to_dict() for j in jobs_list[:limit]]
@@ -1668,16 +1686,7 @@ def run_sso_orchestration(
 
     job_id = str(uuid.uuid4())
     job = Job(job_id, f"sso-orchestrate-{norm_target}-{norm_mode}", is_mutation=True)
-
-    acquired = supervisor._mutation_lock.acquire(blocking=False)
-    if not acquired:
-        with supervisor._jobs_lock:
-            active_id = supervisor._active_mutation_job_id
-        raise RuntimeError(f"Another mutation job is currently in progress: {active_id}")
-    supervisor._active_mutation_job_id = job_id
-
-    with supervisor._jobs_lock:
-        supervisor._jobs[job_id] = job
+    supervisor.register_custom_job(job, is_mutation=True)
 
     def orchestrator_worker():
         try:
@@ -1778,10 +1787,7 @@ def run_sso_orchestration(
             job.add_log("stderr", f"[Orchestration error: {ex}]")
             job.finish(-1)
         finally:
-            with supervisor._jobs_lock:
-                if supervisor._active_mutation_job_id == job.id:
-                    supervisor._active_mutation_job_id = None
-            supervisor._mutation_lock.release()
+            supervisor.release_mutation_job(job.id)
 
     t = threading.Thread(target=orchestrator_worker, daemon=True)
     t.start()
@@ -1803,8 +1809,7 @@ def run_gates_verification(
 
     job_id = str(uuid.uuid4())
     job = Job(job_id, "gates", is_mutation=False)
-    with supervisor._jobs_lock:
-        supervisor._jobs[job_id] = job
+    supervisor.register_custom_job(job, is_mutation=False)
 
     def gates_worker():
         overall_rc = 0
@@ -1922,6 +1927,9 @@ def run_gates_verification(
 
 # --- Zero-CLI Remote SSH Bootstrapper ---
 class RemoteSSHBootstrapper:
+    def __init__(self) -> None:
+        pass
+
     @staticmethod
     def verify_host(host: str, port: int = 22) -> dict:
         """
@@ -1988,9 +1996,7 @@ class RemoteSSHBootstrapper:
 
         job_id = str(uuid.uuid4())
         job = Job(job_id, f"remote-ssh-{host}", is_mutation=False)
-
-        with supervisor._jobs_lock:
-            supervisor._jobs[job_id] = job
+        supervisor.register_custom_job(job, is_mutation=False)
 
         def worker():
             known_hosts_file = None
@@ -2655,8 +2661,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        with job._lock:
-            cached_entries = [e for e in job.logs if e["seq"] > last_seq]
+        cached_entries = job.get_logs_since(last_seq)
 
         for entry in cached_entries:
             data = json.dumps(entry)
