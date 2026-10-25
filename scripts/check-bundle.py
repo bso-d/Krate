@@ -32,6 +32,21 @@ def main():
         archive = root / row['archive']
         if not archive.is_file() or not archive.stat().st_size:
             raise SystemExit('Missing saved image archive')
+        expected_sha = (row.get('archive_sha256') or '').strip().lower()
+        if not expected_sha:
+            raise SystemExit('Missing archive_sha256 in images.lock.tsv for: ' + str(row.get('archive', '')))
+        hasher = hashlib.sha256()
+        with archive.open('rb') as archive_stream:
+            while True:
+                chunk = archive_stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        actual_sha = hasher.hexdigest().lower()
+        if actual_sha != expected_sha:
+            raise SystemExit(
+                f"Saved image archive SHA256 mismatch for {row['archive']}: expected {expected_sha}, got {actual_sha}"
+            )
     manifests = [root / 'docker-compose.yml', root / 'monitoring/docker-compose.yml']
     for manifest in manifests:
         if not manifest.exists():
@@ -45,6 +60,7 @@ def main():
         if not (root / name).is_file():
             raise SystemExit('Missing licence file: ' + name)
     for name in ('sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh', 'sso/operations.sh', 'sso/operations.py',
+                 'sso/check-bundle.py', 'sso/check-offline.py',
                  'sso/preflight.py', 'sso/probe.py', 'sso/identity.py', 'sso/idp_watch.py', 'sso/logrotate/krate-identity.conf',
                  'sso/theme/krate/login/theme.properties', 'sso/theme/krate/login/login.ftl',
                  'auth/ui/local.yml', 'docs/dual-login.md', 'docs/identity-foundation.md', 'docs/grafana-sso.md'):

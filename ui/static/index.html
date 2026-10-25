@@ -401,11 +401,38 @@
               <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
               <span>Reload File</span>
             </button>
+            <button class="btn btn-secondary" id="btn-preview-config">
+              <span>Preview Plan</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-save-draft">
+              <span>Save Draft</span>
+            </button>
+            <button class="btn btn-ghost" id="btn-discard-draft" style="display: none;">
+              <span>Discard Draft</span>
+            </button>
+            <button class="btn btn-warning" id="btn-recover-config" style="display: none;">
+              <span>Recover Operation</span>
+            </button>
             <button class="btn btn-primary" id="btn-save-config">
               <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
               <span>Save &amp; Apply</span>
             </button>
           </div>
+        </div>
+
+        <div class="card" id="config-operation-banner" style="margin-bottom: 1rem;">
+          <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+            <div>
+              <strong>Effective Installation:</strong> <span id="config-effective-dir" class="text-muted">—</span>
+              <span style="margin-left: 1rem;"><strong>Revision:</strong> <code id="config-revision-label">—</code></span>
+            </div>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <span class="badge badge-neutral" id="config-state-badge">Synced</span>
+              <span class="badge badge-warning" id="config-draft-badge" style="display: none;">Staged Draft Pending</span>
+              <span class="badge badge-warning" id="config-pending-badge" style="display: none;">Pending Service Reconcile</span>
+            </div>
+          </div>
+          <div id="config-plan-preview" style="display: none; padding: 0.75rem 1rem; border-top: 1px solid var(--border-color);"></div>
         </div>
 
         <div class="config-tabs-bar">
@@ -619,15 +646,17 @@
               <select id="select-sso-target" class="select-input">
                 <option value="grafana">Grafana Monitoring Portal</option>
                 <option value="perses">Perses Modern Dashboards</option>
-                <option value="both">Both (Unified OIDC Federation)</option>
+                <option value="both">Both Monitoring Portals (Grafana &amp; Perses)</option>
+                <option value="kafbat">Kafbat UI</option>
+                <option value="all">All Portals (Kafbat, Grafana &amp; Perses)</option>
               </select>
             </div>
 
             <div class="form-group">
-              <label for="select-sso-mode" class="form-label">Realm Mode</label>
+              <label for="select-sso-mode" class="form-label">Authentication Mode</label>
               <select id="select-sso-mode" class="select-input">
                 <option value="realm">Standard Krate Realm</option>
-                <option value="master">Master Realm (Direct Admin)</option>
+                <option value="local">Emergency Local Fallback</option>
               </select>
             </div>
 
@@ -727,31 +756,31 @@
               </thead>
               <tbody id="tbody-alerts">
                 <tr>
-                  <td><strong>UnderReplicatedPartitions</strong></td>
+                  <td><strong>KafkaExporterDown</strong></td>
                   <td><span class="badge badge-danger">Critical</span></td>
-                  <td>Kafka Brokers</td>
-                  <td>Partitions below target replica quorum</td>
-                  <td><span class="badge badge-neutral" data-alert-rule="UnderReplicatedPartitions">Unknown</span></td>
+                  <td>krate-cluster</td>
+                  <td>kafka-exporter is unreachable</td>
+                  <td><span class="badge badge-neutral" data-alert-rule="KafkaExporterDown">Unknown</span></td>
                 </tr>
                 <tr>
-                  <td><strong>OfflinePartitionsCount</strong></td>
+                  <td><strong>KafkaBrokerDisappeared</strong></td>
                   <td><span class="badge badge-danger">Critical</span></td>
-                  <td>Kafka Brokers</td>
-                  <td>Partitions with no active leader</td>
-                  <td><span class="badge badge-neutral" data-alert-rule="OfflinePartitionsCount">Unknown</span></td>
+                  <td>krate-cluster</td>
+                  <td>A Kafka broker disappeared</td>
+                  <td><span class="badge badge-neutral" data-alert-rule="KafkaBrokerDisappeared">Unknown</span></td>
                 </tr>
                 <tr>
-                  <td><strong>BrokerActiveController</strong></td>
+                  <td><strong>KafkaUnderReplicatedPartitions</strong></td>
                   <td><span class="badge badge-warning">Warning</span></td>
-                  <td>KRaft Quorum</td>
-                  <td>Assert exactly 1 active KRaft controller</td>
-                  <td><span class="badge badge-neutral" data-alert-rule="BrokerActiveController">Unknown</span></td>
+                  <td>krate-cluster</td>
+                  <td>Under-replicated partitions present</td>
+                  <td><span class="badge badge-neutral" data-alert-rule="KafkaUnderReplicatedPartitions">Unknown</span></td>
                 </tr>
                 <tr>
                   <td><strong>DiskSpaceLow</strong></td>
                   <td><span class="badge badge-warning">Warning</span></td>
-                  <td>Host Volume</td>
-                  <td>Storage utilization exceeds 85%</td>
+                  <td>krate-capacity</td>
+                  <td>Less than 20% free on mountpoint</td>
                   <td><span class="badge badge-neutral" data-alert-rule="DiskSpaceLow">Unknown</span></td>
                 </tr>
               </tbody>
@@ -766,13 +795,13 @@
       <section class="view-panel" id="view-release">
         <div class="view-header">
           <div>
-            <h1 class="view-title">Release Artifacts &amp; Acceptance Gates</h1>
-            <p class="view-subtitle">Offline tarball packaging, image digest validation, formal gate test suite, and remote zero-CLI deployment.</p>
+            <h1 class="view-title">Release Artifacts &amp; Verification</h1>
+            <p class="view-subtitle">Input-bound engineering static checks, package lock/archive SHA-256 integrity, host preflight, and formal gate receipts.</p>
           </div>
           <div class="view-actions">
             <button class="btn btn-primary" id="btn-run-gates">
               <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-              <span>Execute Formal Gates</span>
+              <span>Run Verification Checks</span>
             </button>
           </div>
         </div>
@@ -845,8 +874,8 @@
         <div class="card mt-4">
           <div class="card-header">
             <div>
-              <h2 class="card-title">Formal Acceptance Gates Matrix</h2>
-              <p class="card-desc">Binding assertions required before production offline deployment.</p>
+              <h2 class="card-title">Input-Bound Verification &amp; Formal Acceptance Matrix</h2>
+              <p class="card-desc" id="gates-binding-label">Bound to active installation, candidate SHA, and configuration revision.</p>
             </div>
             <span class="badge badge-neutral" id="gates-summary-badge">Not Run</span>
           </div>
@@ -854,46 +883,59 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>Gate Test Identifier</th>
-                  <th>Domain</th>
-                  <th>Criteria &amp; Contract</th>
+                  <th>Check ID</th>
+                  <th>Category &amp; Producer</th>
+                  <th>Scope &amp; Evidence Detail</th>
                   <th>Result</th>
                 </tr>
               </thead>
               <tbody id="tbody-gates">
-                <tr data-gate-id="GATE-1">
-                  <td><strong>GATE-1: Parity</strong></td>
-                  <td>kraft/ vs epc/</td>
-                  <td>Helper functions and CLI options must be identical between editions</td>
-                  <td><span class="badge badge-neutral" data-gate-badge="GATE-1">Not Run</span></td>
+                <tr data-gate-id="SYNTAX">
+                  <td><strong>SYNTAX</strong></td>
+                  <td>engineering_static &middot; <code>bash -n &amp; py_compile</code></td>
+                  <td>CLI &amp; Helper Syntax</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="SYNTAX">Not Run</span></td>
                 </tr>
-                <tr data-gate-id="GATE-2">
-                  <td><strong>GATE-2: Digest Pinning</strong></td>
-                  <td>Reproducibility</td>
-                  <td>All container images in .env.template pinned to @sha256 digest</td>
-                  <td><span class="badge badge-neutral" data-gate-badge="GATE-2">Not Run</span></td>
+                <tr data-gate-id="PARITY">
+                  <td><strong>PARITY</strong></td>
+                  <td>engineering_static &middot; <code>scripts/check-identity.py:check_parity</code></td>
+                  <td>KRaft/EPC CLI Parity &amp; ZK Frozen</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="PARITY">Not Run</span></td>
                 </tr>
-                <tr data-gate-id="GATE-3">
-                  <td><strong>GATE-3: Compose Validation</strong></td>
-                  <td>Configuration</td>
-                  <td>Docker Compose schema and service configuration valid across editions</td>
-                  <td><span class="badge badge-neutral" data-gate-badge="GATE-3">Not Run</span></td>
+                <tr data-gate-id="BUNDLE_LOCK">
+                  <td><strong>BUNDLE_LOCK</strong></td>
+                  <td>package_integrity &middot; <code>scripts/check-bundle.py</code></td>
+                  <td>Offline Image Lock &amp; Archive SHA256</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="BUNDLE_LOCK">Not Run</span></td>
                 </tr>
-                <tr data-gate-id="GATE-4">
-                  <td><strong>GATE-4: Offline Policy</strong></td>
-                  <td>Security</td>
-                  <td>No outbound HTTP calls, CDN links, telemetry, or external assets allowed</td>
-                  <td><span class="badge badge-neutral" data-gate-badge="GATE-4">Not Run</span></td>
+                <tr data-gate-id="COMPOSE">
+                  <td><strong>COMPOSE</strong></td>
+                  <td>engineering_static &middot; <code>docker compose config</code></td>
+                  <td>Compose Configuration &amp; Digest Pins</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="COMPOSE">Not Run</span></td>
                 </tr>
-                <tr data-gate-id="GATE-5">
-                  <td><strong>GATE-5: Host &amp; Identity Preflight</strong></td>
-                  <td>Identity &amp; Doctor</td>
-                  <td>Host preflight checks and Keycloak/TLS invariants verified</td>
-                  <td><span class="badge badge-neutral" data-gate-badge="GATE-5">Not Run</span></td>
+                <tr data-gate-id="OFFLINE">
+                  <td><strong>OFFLINE</strong></td>
+                  <td>engineering_static &middot; <code>scripts/check-offline.py</code></td>
+                  <td>Air-Gapped Offline Policy</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="OFFLINE">Not Run</span></td>
+                </tr>
+                <tr data-gate-id="PREFLIGHT">
+                  <td><strong>PREFLIGHT</strong></td>
+                  <td>host_preflight &middot; <code>krate doctor</code></td>
+                  <td>Host Doctor Preflight (not formal acceptance)</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="PREFLIGHT">Not Run</span></td>
+                </tr>
+                <tr data-gate-id="FORMAL_IDENTITY_GATE">
+                  <td><strong>FORMAL_IDENTITY_GATE</strong></td>
+                  <td>formal_acceptance &middot; <code>scripts/gate-identity.sh</code></td>
+                  <td>Formal Identity Gate Receipt</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="FORMAL_IDENTITY_GATE">Not Run</span></td>
                 </tr>
               </tbody>
             </table>
           </div>
+          <div id="gates-history-container" style="display: none; padding: 0.75rem 1rem; border-top: 1px solid var(--border-color);"></div>
         </div>
       </section>
 

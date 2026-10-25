@@ -61,6 +61,8 @@ try:
 except ImportError:
     _krate_ops = None
 
+_ops_helper = _krate_ops
+
 
 class WorkspaceSwitchConflictError(RuntimeError):
     """Raised when a workspace switch is attempted while a mutation operation is active."""
@@ -1138,21 +1140,43 @@ class StructuredDataCollector:
         self.gate_results: List[dict] = [dict(g) for g in DEFAULT_ACCEPTANCE_GATES]
         self.gates_last_run: Optional[float] = None
 
-    def get_gates(self) -> dict:
+    def _ws_dict_from_context(self, ctx: OperationContext) -> Dict[str, Any]:
+        return {
+            "source_dir": ctx.source_dir,
+            "install_dir": ctx.install_dir,
+            "effective_dir": ctx.effective_dir,
+            "installation_id": ctx.installation_id,
+            "edition": ctx.edition,
+            "runtime_kind": ctx.runtime_kind,
+            "is_package": ctx.is_package,
+            "is_installed": ctx.is_installed,
+            "env_path": ctx.env_path,
+            "monitoring_env_path": ctx.monitoring_env_path,
+            "config_revision": ctx.config_revision,
+            "has_draft": ctx.has_draft,
+            "pending_services": list(ctx.pending_services),
+            "recovery_required": ctx.recovery_required,
+            "recovery_summary": ctx.recovery_summary,
+            "projects": {
+                "cluster": ctx.cluster_project,
+                "monitoring": ctx.monitoring_project,
+            },
+        }
+
+    def get_gates(self, context: Optional[OperationContext] = None) -> dict:
+        ctx = context or self.ws_mgr.get_context()
+        if _ops_helper is not None:
+            ws_dict = self._ws_dict_from_context(ctx)
+            repo_for_ws = REPO_ROOT if ctx.runtime_kind == "checkout" else ""
+            return _ops_helper.read_verification_state(ws_dict, repo_dir=repo_for_ws)
+
         with self._gates_lock:
             gates_copy = [dict(g) for g in self.gate_results]
             last_run = self.gates_last_run
         passed = sum(1 for g in gates_copy if g["status"] == "passed")
         failed = sum(1 for g in gates_copy if g["status"] == "failed")
         not_run = sum(1 for g in gates_copy if g["status"] not in ("passed", "failed"))
-        if failed > 0:
-            overall = "failed"
-        elif passed == len(gates_copy) and len(gates_copy) > 0:
-            overall = "passed"
-        elif passed > 0:
-            overall = "partial"
-        else:
-            overall = "not_run"
+        overall = "failed" if failed > 0 else ("passed" if passed == len(gates_copy) and gates_copy else "not_run")
         return {
             "status": overall,
             "passed": passed,
@@ -1160,6 +1184,8 @@ class StructuredDataCollector:
             "not_run": not_run,
             "last_run": last_run,
             "gates": gates_copy,
+            "checks": gates_copy,
+            "history": [],
         }
 
     def update_gate(self, gate_id: str, status: str, detail: str = "") -> None:
@@ -1184,97 +1210,21 @@ class StructuredDataCollector:
         context: Optional[OperationContext] = None,
     ) -> dict:
         ctx = context or self.ws_mgr.get_context()
-        default_rules = {
-            "UnderReplicatedPartitions": {"state": "unknown", "label": "Unknown"},
-            "OfflinePartitionsCount": {"state": "unknown", "label": "Unknown"},
-            "BrokerActiveController": {"state": "unknown", "label": "Unknown"},
-            "DiskSpaceLow": {"state": "unknown", "label": "Unknown"},
-        }
-        if monitoring_state != "up":
-            return {
-                "evaluated": False,
-                "status": "unknown",
-                "summary": "Unknown (Monitoring Inactive)",
-                "rules": default_rules,
-            }
+        if _ops_helper is not None:
+            ws_dict = self._ws_dict_from_context(ctx)
+            return _ops_helper.evaluate_alerts(
+                ws_dict,
+                monitoring_state=monitoring_state,
+                mon_env=mon_env,
+            )
 
-        mon = mon_env if mon_env is not None else self.get_config(context=ctx).get("monitoring_env", {})
-        prom_bind = mon.get("PROM_BIND", "127.0.0.1") or "127.0.0.1"
-        if prom_bind == "0.0.0.0":
-            prom_bind = "127.0.0.1"
-        prom_port = mon.get("PROM_PORT", "9090") or "9090"
-        url = f"http://{prom_bind}:{prom_port}/api/v1/rules?type=alert"
-        try:
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            if payload.get("status") != "success":
-                return {
-                    "evaluated": False,
-                    "status": "unknown",
-                    "summary": "Unknown",
-                    "rules": default_rules,
-                }
-            groups = payload.get("data", {}).get("groups", [])
-            rules_out = {k: dict(v) for k, v in default_rules.items()}
-            firing_count = 0
-            pending_count = 0
-            evaluated_any = False
-            for grp in groups:
-                for rule in grp.get("rules", []):
-                    rname = rule.get("name", "")
-                    rstate = (rule.get("state") or "inactive").lower()
-                    health = (rule.get("health") or "").lower()
-                    if health not in ("ok", "good") and not rule.get("lastEvaluation"):
-                        continue
-                    evaluated_any = True
-                    alerts_list = rule.get("alerts") or []
-                    if rstate == "firing":
-                        firing_count += 1
-                        rules_out[rname] = {
-                            "state": "firing",
-                            "label": f"Firing ({len(alerts_list)} active)" if alerts_list else "Firing",
-                        }
-                    elif rstate == "pending":
-                        pending_count += 1
-                        rules_out[rname] = {
-                            "state": "pending",
-                            "label": "Pending",
-                        }
-                    else:
-                        rules_out[rname] = {
-                            "state": "ok",
-                            "label": "OK (Clear)",
-                        }
-            if not evaluated_any:
-                return {
-                    "evaluated": False,
-                    "status": "unknown",
-                    "summary": "Unknown (Awaiting Evaluation)",
-                    "rules": default_rules,
-                }
-            if firing_count > 0:
-                summary = f"{firing_count} Alert(s) Firing"
-                overall = "firing"
-            elif pending_count > 0:
-                summary = f"{pending_count} Alert(s) Pending"
-                overall = "pending"
-            else:
-                summary = "All Alerts Clear"
-                overall = "ok"
-            return {
-                "evaluated": True,
-                "status": overall,
-                "summary": summary,
-                "rules": rules_out,
-            }
-        except Exception:
-            return {
-                "evaluated": False,
-                "status": "unknown",
-                "summary": "Unknown",
-                "rules": default_rules,
-            }
+        return {
+            "evaluated": False,
+            "status": "unknown",
+            "summary": "Unknown",
+            "rules": {},
+            "rule_list": [],
+        }
 
     def get_status(self, context: Optional[OperationContext] = None) -> dict:
         ctx = context or self.ws_mgr.get_context()
@@ -1624,7 +1574,24 @@ class StructuredDataCollector:
 
     def get_config(self, context: Optional[OperationContext] = None) -> dict:
         ctx = context or self.ws_mgr.get_context()
-        ws_path = ctx.working_dir
+        krate_bin, ws_path = ctx.cli_for_action("config")
+        if os.path.isfile(krate_bin) and os.access(krate_bin, os.X_OK):
+            try:
+                res = subprocess.run(
+                    [krate_bin, "config", "show", "--json"],
+                    cwd=ws_path,
+                    env=ctx.subprocess_env(),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout.strip())
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+
         env_file = self._resolve_config_file_path(".env", context=ctx)
         if not os.path.isfile(env_file) and os.path.isfile(os.path.join(ws_path, ".env.template")):
             env_source = os.path.join(ws_path, ".env.template")
@@ -1669,80 +1636,70 @@ class StructuredDataCollector:
             "config_revision": ctx.config_revision,
             "effective_dir": ctx.effective_dir,
             "runtime_kind": ctx.runtime_kind,
+            "has_draft": ctx.has_draft,
+            "pending_services": list(ctx.pending_services),
+            "recovery_required": ctx.recovery_required,
+            "recovery_summary": ctx.recovery_summary,
         }
 
-    def set_config_value(
+    def run_config_operation(
         self,
-        key: str,
-        value: str,
-        target: str = ".env",
+        subcommand: str,
+        payload: Optional[Dict[str, Any]] = None,
         context: Optional[OperationContext] = None,
-    ) -> bool:
+        timeout: int = 180,
+    ) -> Tuple[int, Dict[str, Any]]:
+        """
+        Execute `krate config {plan|apply|draft|recover} [--stdin] --json`
+        bound to the immutable OperationContext. Sensitive values travel over stdin only.
+        """
         ctx = context or self.ws_mgr.get_context()
-        file_path = self._resolve_config_file_path(target, context=ctx)
-        parent = os.path.dirname(file_path)
-        if parent and not os.path.isdir(parent):
-            os.makedirs(parent, exist_ok=True)
-
-        lines = []
-        found = False
-        if os.path.isfile(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-        elif os.path.isfile(file_path + ".template"):
-            with open(file_path + ".template", "r", encoding="utf-8") as f:
-                lines = f.readlines()
-
-        new_lines = []
-        for line in lines:
-            if line.strip().startswith(f"{key}=") or line.strip() == key:
-                new_lines.append(f"{key}={value}\n")
-                found = True
-            else:
-                new_lines.append(line)
-
-        if not found:
-            new_lines.append(f"{key}={value}\n")
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        if not ctx.effective_dir:
+            return 1, {
+                "schema_version": 1,
+                "state": "failed",
+                "error_code": "uninstalled_package",
+                "error": "Package is not installed yet. Run 'krate install' before modifying configuration.",
+                "effective_dir": None,
+            }
+        krate_bin, ws_path = ctx.cli_for_action("config")
+        cmd = [krate_bin, "config", subcommand]
+        if subcommand in ("plan", "apply", "draft"):
+            cmd.append("--stdin")
+        cmd.append("--json")
+        stdin_str = json.dumps(payload or {}) if subcommand in ("plan", "apply", "draft") else None
         try:
-            os.chmod(file_path, 0o600)
-        except OSError:
-            pass
-        return True
-
-    def set_config_entries(
-        self,
-        entries: Dict[str, Any],
-        target: str = ".env",
-        context: Optional[OperationContext] = None,
-    ) -> bool:
-        ctx = context or self.ws_mgr.get_context()
-        for k, v in entries.items():
-            if k:
-                self.set_config_value(str(k).strip(), str(v), target, context=ctx)
-        return True
-
-    def set_raw_config(
-        self,
-        raw_content: str,
-        target: str = ".env",
-        context: Optional[OperationContext] = None,
-    ) -> bool:
-        ctx = context or self.ws_mgr.get_context()
-        file_path = self._resolve_config_file_path(target, context=ctx)
-        parent = os.path.dirname(file_path)
-        if parent and not os.path.isdir(parent):
-            os.makedirs(parent, exist_ok=True)
-        text = raw_content if raw_content.endswith("\n") else (raw_content + "\n")
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(text)
-        try:
-            os.chmod(file_path, 0o600)
-        except OSError:
-            pass
-        return True
+            res = subprocess.run(
+                cmd,
+                cwd=ws_path,
+                env=ctx.subprocess_env(),
+                input=stdin_str,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            out_text = (res.stdout or "").strip()
+            if out_text:
+                try:
+                    parsed = json.loads(out_text)
+                    if isinstance(parsed, dict):
+                        return res.returncode, parsed
+                except ValueError:
+                    pass
+            err_msg = (res.stderr or out_text or f"krate config {subcommand} failed (exit {res.returncode})").strip()
+            return (res.returncode or 1), {
+                "schema_version": 1,
+                "state": "failed",
+                "error": err_msg,
+                "effective_dir": ctx.effective_dir,
+            }
+        except Exception as exc:
+            return 1, {
+                "schema_version": 1,
+                "state": "failed",
+                "error": str(exc),
+                "effective_dir": ctx.effective_dir,
+            }
 
     def get_credentials(self, context: Optional[OperationContext] = None) -> dict:
         ctx = context or self.ws_mgr.get_context()
@@ -2002,20 +1959,13 @@ class StructuredDataCollector:
                         except Exception:
                             pass
 
-                    lower_groups = [g.lower() for g in user_groups]
-                    is_admin = (
-                        admin_group in user_groups
-                        or admin_group.lower() in lower_groups
-                        or "krate_admins" in lower_groups
-                        or "admin" in lower_groups
-                    )
-                    is_viewer = not is_admin and (
-                        viewer_group in user_groups
-                        or viewer_group.lower() in lower_groups
-                        or "krate_viewers" in lower_groups
-                        or "viewer" in lower_groups
-                    )
-                    role = "admin" if is_admin else ("viewer" if is_viewer else "none")
+                    if _ops_helper is not None:
+                        is_admin, role = _ops_helper.map_user_role(user_groups, admin_group, viewer_group)
+                    else:
+                        clean_groups = [str(g).strip().lstrip("/") for g in user_groups if str(g).strip()]
+                        is_admin = admin_group.strip().lstrip("/") in clean_groups
+                        is_viewer = not is_admin and (viewer_group.strip().lstrip("/") in clean_groups)
+                        role = "admin" if is_admin else ("viewer" if is_viewer else "none")
                     users.append({
                         "username": username,
                         "enabled": enabled,
@@ -2038,155 +1988,57 @@ class StructuredDataCollector:
             }
 
 
-# --- 5-Stage Grafana/Perses SSO Orchestrator ---
+# --- Authoritative SSO & Fallback Transition Adapter ---
 def run_sso_orchestration(
     supervisor: JobSupervisor,
     workspace_mgr: WorkspaceManager,
-    target: str,  # "grafana" | "perses" | "both"
+    target: str,  # "kafbat" | "grafana" | "perses" | "both" | "all"
     mode: str = "realm",
     context: Optional[OperationContext] = None,
+    include_kafbat: Optional[bool] = None,
 ) -> Job:
     """
-    Executes the 5-stage Grafana/Perses SSO orchestrator:
-    Stage 1: Preflight Verification
-    Stage 2: Realm Client Provisioning
-    Stage 3: Configuration Update
-    Stage 4: Stack Recreation & Session Revocation
-    Stage 5: Post-Deployment Verification
+    Delegates SSO and emergency local fallback transitions to the authoritative CLI
+    `krate auth transition --stdin --json` handler bound to an immutable OperationContext.
+    Explicitly rejects `master` realm mode.
     """
     ctx = context or workspace_mgr.get_context()
-    ws_path = ctx.working_dir
-    krate_bin = ctx.krate_bin
-    sub_env = ctx.subprocess_env()
-    norm_target = (target or "grafana").strip().lower()
+    norm_target = (target or "both").strip().lower()
     norm_mode = (mode or "realm").strip().lower()
-    include_grafana = norm_target in ("grafana", "both")
-    include_perses = norm_target in ("perses", "both")
+    if norm_mode == "master":
+        raise ValueError("Master realm mode is not supported; use 'realm' (Krate Realm) or 'local' mode.")
+    if norm_mode in ("krate", "sso", "oidc"):
+        norm_mode = "realm"
+    if norm_mode not in ("realm", "local"):
+        raise ValueError(f"Unsupported auth transition mode {norm_mode!r}; supported modes are 'realm' and 'local'.")
+    if norm_target not in ("kafbat", "grafana", "perses", "both", "all"):
+        raise ValueError(
+            f"Unsupported auth transition target {norm_target!r}; must be kafbat, grafana, perses, both, or all."
+        )
 
-    job_id = str(uuid.uuid4())
-    job = Job(job_id, f"sso-orchestrate-{norm_target}-{norm_mode}", is_mutation=True, context=ctx)
-    supervisor.register_custom_job(job, is_mutation=True)
+    krate_bin, ws_path = ctx.cli_for_action("auth")
+    payload: Dict[str, Any] = {
+        "target": norm_target,
+        "mode": norm_mode,
+    }
+    if include_kafbat is not None:
+        payload["include_kafbat"] = bool(include_kafbat)
+    elif norm_mode == "local" and norm_target in ("both", "all"):
+        payload["include_kafbat"] = True
 
-    def orchestrator_worker():
-        lock_released = False
-        try:
-            job.add_log("stdout", f"==> Starting 5-Stage SSO Orchestrator for {norm_target} ({norm_mode})...")
-
-            # Stage 1: Preflight Verification
-            job.add_log("stdout", "--- Stage 1/5: Preflight Verification ---")
-            doctor_collector = StructuredDataCollector(workspace_mgr)
-            doc = doctor_collector.get_doctor(context=ctx)
-            if not doc.get("ok"):
-                for c in doc.get("checks", []):
-                    if c["status"] in ("warn", "error"):
-                        job.add_log("stderr", f"  ! Preflight warning: {c['name']} - {c['message']}")
-
-            status_collector = StructuredDataCollector(workspace_mgr)
-            st = status_collector.get_status(context=ctx)
-            if st.get("cluster_state") != "running":
-                job.add_log("stderr", f"  ! Cluster is {st.get('cluster_state')}; cluster must be running first")
-            else:
-                job.add_log("stdout", "  ✓ Cluster health verified")
-
-            # Stage 2: Realm Client Provisioning
-            job.add_log("stdout", "--- Stage 2/5: Realm Client Provisioning ---")
-            if norm_mode == "local":
-                job.add_log("stdout", "  Local fallback mode selected; skipping realm client provisioning.")
-            else:
-                if include_grafana:
-                    job.add_log("stdout", f"  Invoking {krate_bin} monitor realm...")
-                    res = subprocess.run(
-                        [krate_bin, "monitor", "realm"],
-                        cwd=ws_path,
-                        env=sub_env,
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                    )
-                    for line in res.stdout.splitlines():
-                        job.add_log("stdout", f"  {line}")
-                    if res.returncode != 0:
-                        for err_line in res.stderr.splitlines():
-                            job.add_log("stderr", f"  {err_line}")
-                        job.add_log(
-                            "stderr",
-                            f"  ✗ Failed provisioning Grafana realm client (exit {res.returncode}); aborting transition.",
-                        )
-                        supervisor.release_mutation_job(job.id)
-                        lock_released = True
-                        job.finish(res.returncode)
-                        return
-                if include_perses:
-                    job.add_log("stdout", "  Perses realm client reconciliation will execute during monitor up...")
-
-            # Stage 3: Configuration Update
-            job.add_log("stdout", "--- Stage 3/5: Configuration Update ---")
-            if norm_mode == "local":
-                if include_grafana:
-                    job.add_log("stdout", "  Setting GRAFANA_AUTH_CONFIG=local.ini...")
-                    doctor_collector.set_config_value("GRAFANA_AUTH_CONFIG", "local.ini", "monitoring/.env", context=ctx)
-                if include_perses:
-                    job.add_log("stdout", "  Setting PERSES_AUTH_MODE=local and clearing PERSES_IDP...")
-                    doctor_collector.set_config_value("PERSES_AUTH_MODE", "local", "monitoring/.env", context=ctx)
-                    doctor_collector.set_config_value("PERSES_IDP", "", "monitoring/.env", context=ctx)
-            else:
-                if include_grafana:
-                    job.add_log("stdout", "  Setting GRAFANA_AUTH_CONFIG=realm.ini...")
-                    doctor_collector.set_config_value("GRAFANA_AUTH_CONFIG", "realm.ini", "monitoring/.env", context=ctx)
-                if include_perses:
-                    job.add_log("stdout", "  Setting PERSES_AUTH_MODE=native and PERSES_IDP=krate...")
-                    doctor_collector.set_config_value("PERSES_AUTH_MODE", "native", "monitoring/.env", context=ctx)
-                    doctor_collector.set_config_value("PERSES_IDP", "krate", "monitoring/.env", context=ctx)
-            job.add_log("stdout", "  ✓ Configurations persisted")
-
-            # Stage 4: Stack Recreation & Session Revocation
-            job.add_log("stdout", "--- Stage 4/5: Stack Recreation & Session Revocation ---")
-            job.add_log("stdout", f"  Invoking {krate_bin} monitor up...")
-            res = subprocess.run(
-                [krate_bin, "monitor", "up"],
-                cwd=ws_path,
-                env=sub_env,
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            for line in res.stdout.splitlines():
-                job.add_log("stdout", f"  {line}")
-            if res.returncode != 0:
-                for err_line in res.stderr.splitlines():
-                    job.add_log("stderr", f"  {err_line}")
-                job.add_log("stderr", f"  ✗ monitor up exited with code {res.returncode}")
-                supervisor.release_mutation_job(job.id)
-                lock_released = True
-                job.finish(res.returncode)
-                return
-            job.add_log("stdout", "  ✓ Monitoring stack reconciled with SSO profile")
-
-            # Stage 5: Post-Deployment Verification
-            job.add_log("stdout", "--- Stage 5/5: Post-Deployment Verification ---")
-            verify_st = status_collector.get_status(context=ctx)
-            job.add_log("stdout", f"  Monitoring state: {verify_st.get('monitoring', {}).get('state')}")
-            job.add_log("stdout", "==> 5-Stage SSO Orchestration completed successfully! ✓")
-            supervisor.release_mutation_job(job.id)
-            lock_released = True
-            job.finish(0)
-
-        except Exception as ex:
-            job.add_log("stderr", f"[Orchestration error: {ex}]")
-            if not lock_released:
-                supervisor.release_mutation_job(job.id)
-                lock_released = True
-            job.finish(-1)
-        finally:
-            if not lock_released:
-                supervisor.release_mutation_job(job.id)
-
-    t = threading.Thread(target=orchestrator_worker, daemon=True)
-    t.start()
-    return job
+    direct_ok, sg_needed = check_docker_socket_permission()
+    return supervisor.start_job(
+        action=f"sso-orchestrate-{norm_target}-{norm_mode}",
+        cmd=[krate_bin, "auth", "transition", "--stdin", "--json"],
+        cwd=ws_path,
+        stdin_data=json.dumps(payload) + "\n",
+        is_mutation=True,
+        use_sg_docker=sg_needed,
+        context=ctx,
+    )
 
 
-# --- Acceptance Gates Runner ---
+# --- Acceptance & Static Verification Runner ---
 def run_gates_verification(
     supervisor: JobSupervisor,
     workspace_mgr: WorkspaceManager,
@@ -2194,11 +2046,11 @@ def run_gates_verification(
     context: Optional[OperationContext] = None,
 ) -> Job:
     """
-    Executes the 5 formal acceptance gates and records actual pass/fail outcomes in data_collector.
+    Delegates verification to the authoritative CLI `krate verify --json` operation,
+    persisting input-bound results in `<effective_dir>/auth/.verify-ledger.json`.
     """
     ctx = context or workspace_mgr.get_context()
-    ws_path = ctx.working_dir
-    krate_bin = ctx.krate_bin
+    krate_bin, ws_path = ctx.cli_for_action("verify")
     sub_env = ctx.subprocess_env()
 
     job_id = str(uuid.uuid4())
@@ -2206,119 +2058,40 @@ def run_gates_verification(
     supervisor.register_custom_job(job, is_mutation=False)
 
     def gates_worker():
-        overall_rc = 0
         try:
-            job.add_log("stdout", f"==> Executing Formal Acceptance Gates in {ws_path}...")
-
-            # GATE-1: CLI & Bash Syntax
-            job.add_log("stdout", "--- [GATE-1] CLI & Bash Syntax Verification ---")
-            scripts_to_check = [krate_bin]
-            for extra in [os.path.join(REPO_ROOT, "kraft", "krate"), os.path.join(REPO_ROOT, "epc", "krate")]:
-                if os.path.isfile(extra) and extra not in scripts_to_check:
-                    scripts_to_check.append(extra)
-            r1 = subprocess.run(
-                ["bash", "-n"] + scripts_to_check,
+            job.add_log("stdout", f"==> Running authoritative krate verify --json in {ws_path}...")
+            res = subprocess.run(
+                [krate_bin, "verify", "--json"],
                 cwd=ws_path,
                 env=sub_env,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=120,
             )
-            if r1.returncode == 0:
-                data_collector.update_gate("GATE-1", "passed", "Bash syntax verified")
-                job.add_log("stdout", "  ✓ GATE-1 Passed: Bash syntax valid")
-            else:
-                overall_rc = 1
-                data_collector.update_gate("GATE-1", "failed", r1.stderr.strip() or "Syntax error")
-                job.add_log("stderr", f"  ✗ GATE-1 Failed: {r1.stderr.strip()}")
-
-            # GATE-2: Image Digest Pinning
-            job.add_log("stdout", "--- [GATE-2] Image Digest Pinning Verification ---")
-            digest_script = os.path.join(REPO_ROOT, "scripts", "check-digests.py")
-            if os.path.isfile(digest_script):
-                r2 = subprocess.run([sys.executable, "-B", digest_script], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
-                if r2.returncode == 0:
-                    data_collector.update_gate("GATE-2", "passed", "All image digests pinned")
-                    job.add_log("stdout", "  ✓ GATE-2 Passed: Digest pins verified")
-                else:
-                    overall_rc = 1
-                    data_collector.update_gate("GATE-2", "failed", r2.stderr.strip() or r2.stdout.strip() or "Digest check failed")
-                    job.add_log("stderr", f"  ✗ GATE-2 Failed: {r2.stderr.strip() or r2.stdout.strip()}")
-            else:
-                env_tpl = os.path.join(ws_path, ".env.template")
-                has_sha = False
-                if os.path.isfile(env_tpl):
-                    with open(env_tpl, "r", encoding="utf-8", errors="replace") as f:
-                        has_sha = "@sha256:" in f.read()
-                if has_sha:
-                    data_collector.update_gate("GATE-2", "passed", ".env.template digests present")
-                    job.add_log("stdout", "  ✓ GATE-2 Passed: Image digests present in .env.template")
-                else:
-                    overall_rc = 1
-                    data_collector.update_gate("GATE-2", "failed", "Missing @sha256: pins")
-                    job.add_log("stderr", "  ✗ GATE-2 Failed: Missing @sha256: pins")
-
-            # GATE-3: Compose Configuration
-            job.add_log("stdout", "--- [GATE-3] Compose Configuration Validation ---")
-            compose_file = os.path.join(ws_path, "docker-compose.yml")
-            env_file = os.path.join(ws_path, ".env")
-            if not os.path.isfile(env_file):
-                env_file = os.path.join(ws_path, ".env.template")
-            if os.path.isfile(compose_file) and os.path.isfile(env_file):
-                r3 = subprocess.run(
-                    ["docker", "compose", "--env-file", env_file, "-f", compose_file, "config", "--quiet"],
-                    cwd=ws_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if r3.returncode == 0:
-                    data_collector.update_gate("GATE-3", "passed", "Compose schema valid")
-                    job.add_log("stdout", "  ✓ GATE-3 Passed: docker compose config --quiet succeeded")
-                else:
-                    overall_rc = 1
-                    data_collector.update_gate("GATE-3", "failed", r3.stderr.strip() or "Compose validation failed")
-                    job.add_log("stderr", f"  ✗ GATE-3 Failed: {r3.stderr.strip()}")
-            else:
-                overall_rc = 1
-                data_collector.update_gate("GATE-3", "failed", "Compose or .env file missing")
-                job.add_log("stderr", "  ✗ GATE-3 Failed: Compose or .env file missing")
-
-            # GATE-4: Air-Gapped Offline Policy
-            job.add_log("stdout", "--- [GATE-4] Air-Gapped Offline Policy Verification ---")
-            offline_script = os.path.join(REPO_ROOT, "scripts", "check-offline.py")
-            if os.path.isfile(offline_script):
-                r4 = subprocess.run([sys.executable, "-B", offline_script], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
-                if r4.returncode == 0:
-                    data_collector.update_gate("GATE-4", "passed", "Zero external URLs / offline clean")
-                    job.add_log("stdout", "  ✓ GATE-4 Passed: Air-gap offline policy verified")
-                else:
-                    overall_rc = 1
-                    data_collector.update_gate("GATE-4", "failed", r4.stderr.strip() or r4.stdout.strip() or "Offline check failed")
-                    job.add_log("stderr", f"  ✗ GATE-4 Failed: {r4.stderr.strip() or r4.stdout.strip()}")
-            else:
-                data_collector.update_gate("GATE-4", "passed", "Static assets self-contained")
-                job.add_log("stdout", "  ✓ GATE-4 Passed: Static assets self-contained")
-
-            # GATE-5: Identity & Host Doctor Preflight
-            job.add_log("stdout", "--- [GATE-5] Identity & Host Preflight Verification ---")
-            r5 = subprocess.run([krate_bin, "doctor"], cwd=ws_path, env=sub_env, capture_output=True, text=True, timeout=60)
-            for ln in r5.stdout.splitlines():
-                job.add_log("stdout", f"  {ln}")
-            if r5.returncode == 0:
-                data_collector.update_gate("GATE-5", "passed", "Preflight & identity invariants passed")
-                job.add_log("stdout", "  ✓ GATE-5 Passed: Doctor & identity checks succeeded")
-            else:
-                overall_rc = 1
-                for ln in r5.stderr.splitlines():
-                    job.add_log("stderr", f"  {ln}")
-                data_collector.update_gate("GATE-5", "failed", "Doctor preflight reported issues")
-                job.add_log("stderr", f"  ✗ GATE-5 Failed: krate doctor exited with {r5.returncode}")
-
-            job.finish(overall_rc)
-            job.add_log("stdout", f"==> Formal Acceptance Gates finished with exit code {overall_rc}")
+            out_str = (res.stdout or "").strip()
+            if out_str:
+                try:
+                    payload = json.loads(out_str)
+                    binding = payload.get("binding", {})
+                    job.add_log(
+                        "stdout",
+                        f"  Binding: {binding.get('installation_id')} | candidate={str(binding.get('candidate'))[:12]} | rev={str(binding.get('config_revision'))[:12]}",
+                    )
+                    for chk in payload.get("checks", []):
+                        st = str(chk.get("status", "not_run")).upper()
+                        line = f"  [{st}] {chk.get('id')} ({chk.get('category')} / {chk.get('tool')}): {chk.get('detail')}"
+                        if chk.get("status") == "failed":
+                            job.add_log("stderr", line)
+                        else:
+                            job.add_log("stdout", line)
+                except ValueError:
+                    for ln in out_str.splitlines():
+                        job.add_log("stdout", ln)
+            for err_ln in (res.stderr or "").splitlines():
+                job.add_log("stderr", err_ln)
+            job.finish(res.returncode)
         except Exception as ex:
-            job.add_log("stderr", f"[Gates error: {ex}]")
+            job.add_log("stderr", f"[Verification error: {ex}]")
             job.finish(-1)
 
     t = threading.Thread(target=gates_worker, daemon=True)
@@ -2773,35 +2546,74 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(ex)})
             return
 
-        # 5. Config update
-        if path == "/api/v1/config":
+        # 5. Config plan / apply / draft / recover
+        if path in (
+            "/api/v1/config",
+            "/api/v1/config/plan",
+            "/api/v1/config/apply",
+            "/api/v1/config/draft",
+            "/api/v1/config/recover",
+        ):
             try:
                 body = self._read_json_body()
+                op_ctx = self.workspace_mgr.get_context()
+                if path.endswith("/plan"):
+                    sub_op = "plan"
+                elif path.endswith("/draft"):
+                    sub_op = "draft"
+                elif path.endswith("/recover"):
+                    sub_op = "recover"
+                else:
+                    sub_op = str(body.get("operation") or "apply").strip().lower()
+
+                if sub_op not in ("plan", "apply", "draft", "recover"):
+                    self._send_json(400, {"error": f"Unsupported configuration operation: {sub_op}"})
+                    return
+
+                if sub_op == "recover":
+                    rc, out = self.data_collector.run_config_operation("recover", context=op_ctx)
+                    status_code = 200 if rc == 0 else 409
+                    self._send_json(status_code, out)
+                    return
+
                 target = body.get("target", ".env")
                 if target not in (".env", "monitoring/.env"):
                     self._send_json(400, {"error": f"Unsupported configuration target: {target}"})
                     return
-                op_ctx = self.workspace_mgr.get_context()
+
+                req_payload: Dict[str, Any] = {
+                    "target": target,
+                    "expected_revision": body.get("expected_revision"),
+                    "action": body.get("action", "save"),
+                }
+                if req_payload["action"] == "discard" and sub_op == "draft":
+                    rc, out = self.data_collector.run_config_operation("draft", req_payload, context=op_ctx)
+                    self._send_json(200 if rc == 0 else 400, out)
+                    return
 
                 if "raw" in body and body.get("raw") is not None:
-                    raw_text = str(body.get("raw"))
-                    self.data_collector.set_raw_config(raw_text, target, context=op_ctx)
-                    self._send_json(200, {"status": "ok", "target": target, "mode": "raw"})
-                    return
-
-                if isinstance(body.get("entries"), dict):
-                    entries = body["entries"]
-                    self.data_collector.set_config_entries(entries, target, context=op_ctx)
-                    self._send_json(200, {"status": "ok", "target": target, "updated": entries})
-                    return
-
-                key = body.get("key")
-                val = body.get("value")
-                if not key:
+                    req_payload["mode"] = "raw"
+                    req_payload["raw"] = str(body.get("raw"))
+                elif isinstance(body.get("entries"), dict):
+                    req_payload["mode"] = "entries"
+                    req_payload["entries"] = body["entries"]
+                elif body.get("key"):
+                    req_payload["mode"] = "entries"
+                    req_payload["entries"] = {str(body["key"]): "" if body.get("value") is None else str(body["value"])}
+                else:
                     self._send_json(400, {"error": "Missing 'key', 'entries', or 'raw' parameter"})
                     return
-                self.data_collector.set_config_value(key, str(val), target, context=op_ctx)
-                self._send_json(200, {"status": "ok", "target": target, "updated": {key: val}})
+
+                rc, out = self.data_collector.run_config_operation(sub_op, req_payload, context=op_ctx)
+                if rc == 0:
+                    out.setdefault("status", "ok")
+                    out.setdefault("target", target)
+                    self._send_json(200, out)
+                else:
+                    err_code = out.get("error_code")
+                    st = out.get("state")
+                    http_code = 409 if (err_code in ("stale_revision", "recovery_required") or st == "recovery_required") else 400
+                    self._send_json(http_code, out)
             except Exception as ex:
                 self._send_json(400, {"error": str(ex)})
             return
@@ -2873,22 +2685,72 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 elif action in ("auth_fallback", "sso_fallback") or (
                     action == "auth" and ("fallback" in args or params.get("fallback") or params.get("mode") == "local")
                 ):
-                    self.data_collector.set_config_value("KAFKA_UI_AUTH_CONFIG", "local.yml", ".env", context=op_ctx)
-                    target_mon = params.get("target", "both")
-                    if target_mon in ("grafana", "both"):
-                        self.data_collector.set_config_value("GRAFANA_AUTH_CONFIG", "local.ini", "monitoring/.env", context=op_ctx)
-                    if target_mon in ("perses", "both"):
-                        self.data_collector.set_config_value("PERSES_AUTH_MODE", "local", "monitoring/.env", context=op_ctx)
-                        self.data_collector.set_config_value("PERSES_IDP", "", "monitoring/.env", context=op_ctx)
-                    cmd = [krate_bin, "auth", "apply"]
+                    target_mon = str(params.get("target") or "all").strip().lower()
+                    if target_mon == "both":
+                        target_mon = "all"
+                    cmd = [krate_bin, "auth", "transition", "--stdin", "--json"]
+                    stdin_data = json.dumps({
+                        "target": target_mon,
+                        "mode": "local",
+                        "include_kafbat": True,
+                    }) + "\n"
+
+                elif action in ("auth_transition", "sso_orchestrate"):
+                    target_app = str(params.get("target") or "both").strip().lower()
+                    mode_val = str(params.get("mode") or "realm").strip().lower()
+                    if mode_val == "master":
+                        self._send_json(400, {
+                            "error": "Master realm mode is not supported; use 'realm' (Krate Realm) or 'local' mode.",
+                            "error_code": "unsupported_mode",
+                        })
+                        return
+                    cmd = [krate_bin, "auth", "transition", "--stdin", "--json"]
+                    stdin_data = json.dumps({
+                        "target": target_app,
+                        "mode": mode_val,
+                        "include_kafbat": bool(params.get("include_kafbat", target_app in ("kafbat", "all"))),
+                    }) + "\n"
 
                 elif action == "auth":
                     sub_args = list(args) if args else ["apply"]
-                    if sub_args[0] not in ("configure", "apply"):
+                    if sub_args[0] not in ("configure", "apply", "transition"):
                         self._send_json(400, {"error": f"Unsupported auth subcommand: {sub_args[0]}"})
                         return
                     cmd.append("auth")
                     cmd.extend(sub_args)
+
+                elif action.startswith("service_"):
+                    sub = action.replace("service_", "", 1)
+                    if sub not in ("start", "stop", "restart", "logs"):
+                        self._send_json(400, {"error": f"Unsupported service subcommand: {sub}"})
+                        return
+                    proj_param = str(params.get("project") or "").strip()
+                    svc_param = str(params.get("service") or (args[0] if args else "")).strip()
+                    if not proj_param or not svc_param:
+                        self._send_json(400, {"error": "Both 'project' and 'service' parameters are required"})
+                        return
+                    if _ops_helper is not None:
+                        ws_dict = {
+                            "source_dir": op_ctx.source_dir,
+                            "effective_dir": op_ctx.effective_dir,
+                            "installation_id": op_ctx.installation_id,
+                            "monitoring_env_path": op_ctx.monitoring_env_path,
+                            "projects": {
+                                "cluster": op_ctx.cluster_project,
+                                "monitoring": op_ctx.monitoring_project,
+                            },
+                        }
+                        ok_svc, _, err_detail = _ops_helper.validate_service_operation(ws_dict, proj_param, svc_param)
+                        if not ok_svc:
+                            self._send_json(400, {"error": err_detail, "error_code": "invalid_service_target"})
+                            return
+                    cmd.extend(["service", sub, "--project", proj_param, "--service", svc_param])
+                    if sub == "logs":
+                        is_mutation = False
+                        tail_n = str(params.get("tail") or 100)
+                        cmd.extend(["--tail", tail_n])
+                    else:
+                        cmd.append("--json")
 
                 elif action == "uninstall":
                     cmd.append("uninstall")
@@ -2964,7 +2826,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 elif action.startswith("monitor_"):
                     sub = action.replace("monitor_", "", 1)
                     if sub == "restart":
-                        cmd = ["bash", "-c", '"$1" monitor down && "$1" monitor up', "bash", krate_bin]
+                        cmd.extend(["monitor", "restart"])
                     elif sub in ("up", "down", "status", "logs", "reload", "ui", "realm"):
                         cmd.append("monitor")
                         cmd.append(sub)
@@ -3041,6 +2903,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                     target,
                     mode,
                     context=op_ctx,
+                    include_kafbat=body.get("include_kafbat"),
                 )
                 self._send_json(
                     202,
@@ -3052,6 +2915,8 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                         "context": op_ctx.to_dict(),
                     },
                 )
+            except ValueError as val_err:
+                self._send_json(400, {"error": str(val_err), "error_code": "unsupported_mode"})
             except RuntimeError as re_err:
                 self._send_json(409, {"error": str(re_err)})
             except Exception as ex:

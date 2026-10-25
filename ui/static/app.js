@@ -105,6 +105,16 @@
     textareaRawConfig: document.getElementById("textarea-raw-config"),
     btnSaveConfig: document.getElementById("btn-save-config"),
     btnReloadConfig: document.getElementById("btn-reload-config"),
+    btnPreviewConfig: document.getElementById("btn-preview-config"),
+    btnSaveDraft: document.getElementById("btn-save-draft"),
+    btnDiscardDraft: document.getElementById("btn-discard-draft"),
+    btnRecoverConfig: document.getElementById("btn-recover-config"),
+    configEffectiveDir: document.getElementById("config-effective-dir"),
+    configRevisionLabel: document.getElementById("config-revision-label"),
+    configStateBadge: document.getElementById("config-state-badge"),
+    configDraftBadge: document.getElementById("config-draft-badge"),
+    configPendingBadge: document.getElementById("config-pending-badge"),
+    configPlanPreview: document.getElementById("config-plan-preview"),
 
     // View 5: Identity & Users
     tbodyUsers: document.getElementById("tbody-users"),
@@ -1091,24 +1101,58 @@
       }
     }
 
-    const ruleBadges = document.querySelectorAll("[data-alert-rule]");
-    ruleBadges.forEach((badge) => {
-      const ruleName = badge.dataset.alertRule;
-      const ruleObj = alertsData?.evaluated && alertsData?.rules ? alertsData.rules[ruleName] : null;
-      if (!ruleObj || ruleObj.state === "unknown") {
-        badge.className = "badge badge-neutral";
-        badge.textContent = "Unknown";
-      } else if (ruleObj.state === "firing") {
-        badge.className = "badge badge-danger";
-        badge.textContent = ruleObj.label || "Firing";
-      } else if (ruleObj.state === "pending") {
-        badge.className = "badge badge-warning";
-        badge.textContent = ruleObj.label || "Pending";
-      } else {
-        badge.className = "badge badge-success";
-        badge.textContent = ruleObj.label || "OK";
-      }
-    });
+    const tbodyAlerts = document.getElementById("tbody-alerts");
+    const ruleList = Array.isArray(alertsData?.rule_list)
+      ? alertsData.rule_list
+      : Object.entries(alertsData?.rules || {}).map(([name, r]) => ({ name, ...r }));
+
+    if (tbodyAlerts && ruleList.length > 0) {
+      tbodyAlerts.innerHTML = ruleList
+        .map((rule) => {
+          const rName = rule.name || "";
+          const sev = String(rule.severity || "warning").toLowerCase();
+          const sevClass =
+            sev === "critical" ? "badge-danger" : sev === "warning" ? "badge-warning" : "badge-info";
+          const rState = alertsData?.evaluated ? rule.state || "unknown" : "unknown";
+          let stBadge = `<span class="badge badge-neutral" data-alert-rule="${escapeHtml(rName)}">Unknown</span>`;
+          if (rState === "firing") {
+            stBadge = `<span class="badge badge-danger" data-alert-rule="${escapeHtml(rName)}">${escapeHtml(rule.label || "Firing")}</span>`;
+          } else if (rState === "pending") {
+            stBadge = `<span class="badge badge-warning" data-alert-rule="${escapeHtml(rName)}">${escapeHtml(rule.label || "Pending")}</span>`;
+          } else if (rState === "ok") {
+            stBadge = `<span class="badge badge-success" data-alert-rule="${escapeHtml(rName)}">${escapeHtml(rule.label || "OK (Clear)")}</span>`;
+          }
+          return `
+            <tr>
+              <td><strong>${escapeHtml(rName)}</strong></td>
+              <td><span class="badge ${sevClass}">${escapeHtml(sev.toUpperCase())}</span></td>
+              <td>${escapeHtml(rule.group || "krate")}</td>
+              <td>${escapeHtml(rule.summary || rule.description || "")}</td>
+              <td>${stBadge}</td>
+            </tr>
+          `;
+        })
+        .join("");
+    } else {
+      const ruleBadges = document.querySelectorAll("[data-alert-rule]");
+      ruleBadges.forEach((badge) => {
+        const ruleName = badge.dataset.alertRule;
+        const ruleObj = alertsData?.evaluated && alertsData?.rules ? alertsData.rules[ruleName] : null;
+        if (!ruleObj || ruleObj.state === "unknown") {
+          badge.className = "badge badge-neutral";
+          badge.textContent = "Unknown";
+        } else if (ruleObj.state === "firing") {
+          badge.className = "badge badge-danger";
+          badge.textContent = ruleObj.label || "Firing";
+        } else if (ruleObj.state === "pending") {
+          badge.className = "badge badge-warning";
+          badge.textContent = ruleObj.label || "Pending";
+        } else {
+          badge.className = "badge badge-success";
+          badge.textContent = ruleObj.label || "OK";
+        }
+      });
+    }
   }
 
   function renderServicesGrid(containers) {
@@ -1151,15 +1195,33 @@
         }
 
         const svcName = deriveComposeServiceName(c.name, c.service);
+        const edition = state.clusterStatus?.edition || "kraft";
+        const isMonSvc = [
+          "prometheus",
+          "grafana",
+          "loki",
+          "promtail",
+          "alertmanager",
+          "kafka-exporter",
+          "node-exporter",
+          "perses",
+          "oauth2-proxy",
+          "perses-sync",
+        ].includes(svcName);
+        const projName =
+          c.project ||
+          (isMonSvc
+            ? state.clusterStatus?.projects?.monitoring || `krate-${edition}-monitoring`
+            : state.clusterStatus?.projects?.cluster || `krate-${edition}`);
         const containerTag = c.name && c.name !== svcName ? c.name : c.container_id || c.name || "";
 
         return `
-          <div class="service-card">
+          <div class="service-card" data-project="${escapeHtml(projName)}" data-service="${escapeHtml(svcName)}">
             <div>
               <div class="service-card-top">
                 <div>
                   <div class="service-name">${escapeHtml(svcName || c.name || "Service")}</div>
-                  <div class="service-container-tag">${escapeHtml(containerTag)}</div>
+                  <div class="service-container-tag">${escapeHtml(projName)} &middot; ${escapeHtml(containerTag)}</div>
                 </div>
                 ${statusBadge}
               </div>
@@ -1175,12 +1237,12 @@
               </div>
             </div>
             <div class="service-card-actions">
-              <button class="btn btn-xs btn-ghost btn-svc-logs" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Logs</button>
-              <button class="btn btn-xs btn-secondary btn-svc-restart" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Restart</button>
+              <button class="btn btn-xs btn-ghost btn-svc-logs" data-project="${escapeHtml(projName)}" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Logs</button>
+              <button class="btn btn-xs btn-secondary btn-svc-restart" data-project="${escapeHtml(projName)}" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Restart</button>
               ${
                 isRunning
-                  ? `<button class="btn btn-xs btn-danger btn-svc-stop" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Stop</button>`
-                  : `<button class="btn btn-xs btn-primary btn-svc-start" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Start</button>`
+                  ? `<button class="btn btn-xs btn-danger btn-svc-stop" data-project="${escapeHtml(projName)}" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Stop</button>`
+                  : `<button class="btn btn-xs btn-primary btn-svc-start" data-project="${escapeHtml(projName)}" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Start</button>`
               }
             </div>
           </div>
@@ -1188,21 +1250,29 @@
       })
       .join("");
 
-    // Wire service card actions
+    // Wire project-qualified service card actions
     dom.servicesGrid.querySelectorAll(".btn-svc-restart").forEach((btn) => {
-      btn.addEventListener("click", () => triggerJob("restart", {}, [btn.dataset.svc]));
+      btn.addEventListener("click", () =>
+        triggerJob("service_restart", { project: btn.dataset.project, service: btn.dataset.svc })
+      );
     });
     dom.servicesGrid.querySelectorAll(".btn-svc-stop").forEach((btn) => {
-      btn.addEventListener("click", () => triggerJob("stop", {}, [btn.dataset.svc]));
+      btn.addEventListener("click", () =>
+        triggerJob("service_stop", { project: btn.dataset.project, service: btn.dataset.svc })
+      );
     });
     dom.servicesGrid.querySelectorAll(".btn-svc-start").forEach((btn) => {
-      btn.addEventListener("click", () => triggerJob("start", {}, [btn.dataset.svc]));
+      btn.addEventListener("click", () =>
+        triggerJob("service_start", { project: btn.dataset.project, service: btn.dataset.svc })
+      );
     });
     dom.servicesGrid.querySelectorAll(".btn-svc-logs").forEach((btn) => {
       btn.addEventListener("click", () => {
         openTerminalDrawer();
-        dom.inputTerminalFilter.value = btn.dataset.svc;
-        filterTerminalLines();
+        if (dom.inputTerminalFilter) {
+          dom.inputTerminalFilter.value = "";
+        }
+        triggerJob("service_logs", { project: btn.dataset.project, service: btn.dataset.svc, tail: 100 });
       });
     });
   }
@@ -1439,9 +1509,53 @@
   function renderConfig(data) {
     if (!data) return;
 
+    if (dom.configEffectiveDir) {
+      dom.configEffectiveDir.textContent = data.effective_dir || "(Uninstalled Package — run Install first)";
+    }
+    if (dom.configRevisionLabel) {
+      dom.configRevisionLabel.textContent = data.config_revision ? data.config_revision.slice(0, 12) : "—";
+    }
+    if (dom.configDraftBadge) {
+      dom.configDraftBadge.style.display = data.has_draft ? "inline-flex" : "none";
+    }
+    if (dom.btnDiscardDraft) {
+      dom.btnDiscardDraft.style.display = data.has_draft ? "inline-flex" : "none";
+    }
+    const pendingCount = Array.isArray(data.pending_services) ? data.pending_services.length : 0;
+    if (dom.configPendingBadge) {
+      dom.configPendingBadge.style.display = pendingCount > 0 ? "inline-flex" : "none";
+      dom.configPendingBadge.textContent = `${pendingCount} Pending Service Reconcile`;
+    }
+    if (dom.btnRecoverConfig) {
+      dom.btnRecoverConfig.style.display = data.recovery_required ? "inline-flex" : "none";
+    }
+    if (dom.configStateBadge) {
+      if (data.recovery_required) {
+        dom.configStateBadge.className = "badge badge-danger";
+        dom.configStateBadge.textContent = "Recovery Required";
+      } else if (pendingCount > 0) {
+        dom.configStateBadge.className = "badge badge-warning";
+        dom.configStateBadge.textContent = "Pending Apply";
+      } else if (data.has_draft) {
+        dom.configStateBadge.className = "badge badge-info";
+        dom.configStateBadge.textContent = "Draft Staged";
+      } else {
+        dom.configStateBadge.className = "badge badge-success";
+        dom.configStateBadge.textContent = "Applied";
+      }
+    }
+
+    const draftTargets = (data.draft && data.draft.targets) || {};
+    const clusterSource =
+      (draftTargets[".env"] && draftTargets[".env"].entries) || data.env || {};
+    const monitoringSource =
+      (draftTargets["monitoring/.env"] && draftTargets["monitoring/.env"].entries) ||
+      data.monitoring_env ||
+      {};
+
     // Cluster env fields
-    if (dom.configFieldsCluster && data.env) {
-      dom.configFieldsCluster.innerHTML = Object.entries(data.env)
+    if (dom.configFieldsCluster) {
+      dom.configFieldsCluster.innerHTML = Object.entries(clusterSource)
         .map(
           ([k, v]) => `
           <div class="config-item">
@@ -1454,8 +1568,8 @@
     }
 
     // Monitoring env fields
-    if (dom.configFieldsMonitoring && data.monitoring_env) {
-      dom.configFieldsMonitoring.innerHTML = Object.entries(data.monitoring_env)
+    if (dom.configFieldsMonitoring) {
+      dom.configFieldsMonitoring.innerHTML = Object.entries(monitoringSource)
         .map(
           ([k, v]) => `
           <div class="config-item">
@@ -1469,6 +1583,70 @@
 
     // Raw editor
     updateRawEditorFromConfig(data);
+  }
+
+  function collectActiveConfigPayload() {
+    const activeTab =
+      document.querySelector(".config-tabs-bar .tab-btn.active")?.dataset.tab ||
+      state.activeConfigTab ||
+      "cluster-env";
+    const expected_revision = state.configData?.config_revision || null;
+
+    if (activeTab === "raw-editor") {
+      const target = state.rawConfigTarget || ".env";
+      const rawContent = dom.textareaRawConfig ? dom.textareaRawConfig.value : "";
+      return { mode: "raw", raw: rawContent, target, expected_revision };
+    }
+    const isMonitoring = activeTab === "monitoring-env";
+    const target = isMonitoring ? "monitoring/.env" : ".env";
+    const container = isMonitoring ? dom.configFieldsMonitoring : dom.configFieldsCluster;
+    const inputs = (container || document).querySelectorAll(".text-input-config");
+    const entries = {};
+    for (const input of inputs) {
+      if (input.dataset.key) {
+        entries[input.dataset.key] = input.value;
+      }
+    }
+    return { mode: "entries", entries, target, expected_revision };
+  }
+
+  function renderConfigPlanPreview(result) {
+    if (!dom.configPlanPreview || !result) return;
+    const changes = result.changes || [];
+    const services = result.affected_services || [];
+    const steps = result.steps || [];
+    dom.configPlanPreview.style.display = "block";
+
+    const changesHtml =
+      changes.length === 0
+        ? `<div class="text-muted text-xs">No configuration changes detected.</div>`
+        : `<ul style="margin: 0.25rem 0 0.5rem 1.25rem; font-size: 0.85rem;">` +
+          changes
+            .map(
+              (c) =>
+                `<li><code>${escapeHtml(c.key)}</code> (${escapeHtml(c.classification)}) &rarr; <strong>${escapeHtml(c.action)}</strong></li>`
+            )
+            .join("") +
+          `</ul>`;
+    const svcsHtml =
+      services.length === 0
+        ? `<span class="text-muted text-xs">None</span>`
+        : services
+            .map((s) => `<span class="badge badge-info" style="margin-right: 4px;">${escapeHtml(s.project)}/${escapeHtml(s.service)}</span>`)
+            .join("");
+    const stepsHtml =
+      steps.length === 0
+        ? ""
+        : `<div style="margin-top: 0.35rem; font-size: 0.8rem;"><strong>Steps:</strong> ` +
+          steps.map((s) => `${escapeHtml(s.step)} [${escapeHtml(s.status)}]`).join(" &rarr; ") +
+          `</div>`;
+
+    dom.configPlanPreview.innerHTML = `
+      <div><strong>State:</strong> <code>${escapeHtml(result.state || "planned")}</code></div>
+      <div style="margin-top: 0.25rem;"><strong>Planned Changes (${changes.length}):</strong> ${changesHtml}</div>
+      <div><strong>Affected Services:</strong> ${svcsHtml}</div>
+      ${stepsHtml}
+    `;
   }
 
   function updateRawEditorFromConfig(data) {
@@ -1503,36 +1681,77 @@
 
   function renderGates(data) {
     if (!data) return;
+    const checks = data.checks || data.gates || [];
+    const binding = data.binding || {};
+    const bindingLabel = document.getElementById("gates-binding-label");
+    if (bindingLabel && binding.installation_id) {
+      const candShort = binding.candidate ? String(binding.candidate).slice(0, 12) : "—";
+      const revShort = binding.config_revision ? String(binding.config_revision).slice(0, 12) : "—";
+      bindingLabel.textContent = `Target: ${binding.installation_id} | Candidate: ${candShort} | Config Rev: ${revShort}`;
+    }
+
     if (dom.gatesSummaryBadge) {
       if (data.status === "passed") {
         dom.gatesSummaryBadge.className = "badge badge-success";
-        dom.gatesSummaryBadge.textContent = `Passed (${data.passed}/${(data.gates || []).length})`;
+        dom.gatesSummaryBadge.textContent = `Passed (${data.passed}/${checks.length})`;
       } else if (data.status === "failed") {
         dom.gatesSummaryBadge.className = "badge badge-danger";
         dom.gatesSummaryBadge.textContent = `Failed (${data.failed} failed)`;
+      } else if (data.status === "partial") {
+        dom.gatesSummaryBadge.className = "badge badge-info";
+        dom.gatesSummaryBadge.textContent = `Partial (${data.passed} passed, ${data.not_run || 0} not run)`;
       } else {
         dom.gatesSummaryBadge.className = "badge badge-neutral";
         dom.gatesSummaryBadge.textContent = "Not Run";
       }
     }
 
-    (data.gates || []).forEach((g) => {
-      const badge = document.querySelector(`[data-gate-badge="${g.id}"]`);
-      if (!badge) return;
-      if (g.status === "passed") {
-        badge.className = "badge badge-success";
-        badge.textContent = "Passed";
-      } else if (g.status === "failed") {
-        badge.className = "badge badge-danger";
-        badge.textContent = "Failed";
+    const tbodyGates = document.getElementById("tbody-gates");
+    if (tbodyGates && checks.length > 0) {
+      tbodyGates.innerHTML = checks
+        .map((g) => {
+          let badgeClass = "badge-neutral";
+          let badgeText = "Not Run";
+          if (g.status === "passed") {
+            badgeClass = "badge-success";
+            badgeText = "Passed";
+          } else if (g.status === "failed") {
+            badgeClass = "badge-danger";
+            badgeText = "Failed";
+          }
+          return `
+            <tr data-gate-id="${escapeHtml(g.id)}">
+              <td><strong>${escapeHtml(g.id)}</strong></td>
+              <td>${escapeHtml(g.category || "check")} &middot; <code>${escapeHtml(g.tool || "")}</code></td>
+              <td><div>${escapeHtml(g.scope || "")}</div><div class="text-muted text-xs">${escapeHtml(g.detail || "")}</div></td>
+              <td><span class="badge ${badgeClass}" data-gate-badge="${escapeHtml(g.id)}" title="${escapeHtml(g.detail || "")}">${badgeText}</span></td>
+            </tr>
+          `;
+        })
+        .join("");
+    }
+
+    const historyEl = document.getElementById("gates-history-container");
+    const historyList = Array.isArray(data.history) ? data.history : [];
+    if (historyEl) {
+      if (historyList.length === 0) {
+        historyEl.style.display = "none";
+        historyEl.innerHTML = "";
       } else {
-        badge.className = "badge badge-neutral";
-        badge.textContent = "Not Run";
+        historyEl.style.display = "block";
+        historyEl.innerHTML =
+          `<div class="text-xs text-muted"><strong>Historical / Invalidated Runs (${historyList.length}):</strong></div>` +
+          `<ul style="margin: 0.25rem 0 0 1.25rem; font-size: 0.8rem;">` +
+          historyList
+            .slice(0, 5)
+            .map((h) => {
+              const hb = h.binding || {};
+              return `<li><code>${escapeHtml(hb.installation_id || "")}</code> @ rev <code>${escapeHtml(String(hb.config_revision || "").slice(0, 12))}</code> &mdash; invalidated (${escapeHtml(h.invalidated_reason || "superseded")})</li>`;
+            })
+            .join("") +
+          `</ul>`;
       }
-      if (g.detail) {
-        badge.title = g.detail;
-      }
-    });
+    }
   }
 
   // Identity & Users
@@ -1566,22 +1785,13 @@
 
     dom.tbodyUsers.innerHTML = users
       .map((u) => {
-        const groups = Array.isArray(u.groups) ? u.groups : [];
-        const lowerGroups = groups.map((g) => String(g).toLowerCase());
-        const isAdmin =
-          u.is_admin === true ||
-          u.role === "admin" ||
-          groups.includes(adminGroup) ||
-          lowerGroups.includes(adminGroup.toLowerCase()) ||
-          lowerGroups.includes("krate_admins") ||
-          lowerGroups.includes("admin");
-        const isViewer =
-          !isAdmin &&
-          (u.role === "viewer" ||
-            groups.includes(viewerGroup) ||
-            lowerGroups.includes(viewerGroup.toLowerCase()) ||
-            lowerGroups.includes("krate_viewers") ||
-            lowerGroups.includes("viewer"));
+        const groups = Array.isArray(u.groups)
+          ? u.groups.map((g) => String(g).trim().replace(/^\/+/, ""))
+          : [];
+        const cleanAdmin = String(adminGroup).trim().replace(/^\/+/, "");
+        const cleanViewer = String(viewerGroup).trim().replace(/^\/+/, "");
+        const isAdmin = u.is_admin === true || u.role === "admin" || groups.includes(cleanAdmin);
+        const isViewer = !isAdmin && (u.role === "viewer" || groups.includes(cleanViewer));
         const roleBadge = isAdmin
           ? `<span class="badge badge-danger">Admin</span>`
           : isViewer
@@ -1822,41 +2032,91 @@
     });
 
     dom.btnReloadConfig?.addEventListener("click", fetchConfig);
-    dom.btnSaveConfig?.addEventListener("click", async () => {
-      showToast("Saving configuration...", "info");
+    dom.btnPreviewConfig?.addEventListener("click", async () => {
       try {
-        const activeTab =
-          document.querySelector(".config-tabs-bar .tab-btn.active")?.dataset.tab ||
-          state.activeConfigTab ||
-          "cluster-env";
-
-        if (activeTab === "raw-editor") {
-          const target = state.rawConfigTarget || ".env";
-          const rawContent = dom.textareaRawConfig ? dom.textareaRawConfig.value : "";
-          await apiFetch("/api/v1/config", {
-            method: "POST",
-            body: { raw: rawContent, target },
-          });
-        } else {
-          const isMonitoring = activeTab === "monitoring-env";
-          const target = isMonitoring ? "monitoring/.env" : ".env";
-          const container = isMonitoring ? dom.configFieldsMonitoring : dom.configFieldsCluster;
-          const inputs = (container || document).querySelectorAll(".text-input-config");
-          const entries = {};
-          for (const input of inputs) {
-            if (input.dataset.key) {
-              entries[input.dataset.key] = input.value;
-            }
-          }
-          await apiFetch("/api/v1/config", {
-            method: "POST",
-            body: { entries, target },
-          });
-        }
-        await fetchConfig();
-        showToast("Configuration saved successfully", "success");
+        const payload = collectActiveConfigPayload();
+        const res = await apiFetch("/api/v1/config/plan", {
+          method: "POST",
+          body: payload,
+        });
+        renderConfigPlanPreview(res);
+        showToast(`Plan computed (${(res.changes || []).length} change(s))`, "info");
       } catch (err) {
-        showToast(`Save failed: ${err.message}`, "danger");
+        showToast(`Plan failed: ${err.message}`, "danger");
+      }
+    });
+
+    dom.btnSaveDraft?.addEventListener("click", async () => {
+      try {
+        const payload = collectActiveConfigPayload();
+        payload.action = "save";
+        const res = await apiFetch("/api/v1/config/draft", {
+          method: "POST",
+          body: payload,
+        });
+        renderConfigPlanPreview(res);
+        await fetchConfig();
+        showToast("Staged draft saved (live .env untouched)", "success");
+      } catch (err) {
+        showToast(`Draft save failed: ${err.message}`, "danger");
+      }
+    });
+
+    dom.btnDiscardDraft?.addEventListener("click", async () => {
+      try {
+        await apiFetch("/api/v1/config/draft", {
+          method: "POST",
+          body: { action: "discard", target: ".env" },
+        });
+        if (dom.configPlanPreview) dom.configPlanPreview.style.display = "none";
+        await fetchConfig();
+        showToast("Staged draft discarded", "info");
+      } catch (err) {
+        showToast(`Discard draft failed: ${err.message}`, "danger");
+      }
+    });
+
+    dom.btnRecoverConfig?.addEventListener("click", async () => {
+      try {
+        if (dom.configStateBadge) {
+          dom.configStateBadge.className = "badge badge-warning";
+          dom.configStateBadge.textContent = "Recovering...";
+        }
+        const res = await apiFetch("/api/v1/config/recover", {
+          method: "POST",
+          body: {},
+        });
+        renderConfigPlanPreview(res);
+        await fetchConfig();
+        showToast("Configuration recovery completed and verified", "success");
+      } catch (err) {
+        await fetchConfig();
+        showToast(`Recovery failed: ${err.message}`, "danger");
+      }
+    });
+
+    dom.btnSaveConfig?.addEventListener("click", async () => {
+      showToast("Applying and verifying configuration...", "info");
+      if (dom.configStateBadge) {
+        dom.configStateBadge.className = "badge badge-info";
+        dom.configStateBadge.textContent = "Applying...";
+      }
+      updateWorkspaceSelectorLock(true);
+      try {
+        const payload = collectActiveConfigPayload();
+        const res = await apiFetch("/api/v1/config/apply", {
+          method: "POST",
+          body: payload,
+        });
+        renderConfigPlanPreview(res);
+        await fetchConfig();
+        await fetchStatus();
+        showToast("Configuration applied and verified", "success");
+      } catch (err) {
+        await fetchConfig();
+        showToast(`Apply failed: ${err.message}`, "danger");
+      } finally {
+        updateWorkspaceSelectorLock(Boolean(state.activeJob && state.activeJob.status === "running" && state.activeJob.isMutation));
       }
     });
 
@@ -1904,13 +2164,9 @@
       triggerJob("auth_fallback", { target, mode: "local" });
     });
 
-    // Observability actions
+    // Observability actions: single backend monitoring-restart job
     dom.btnMonitorToggle?.addEventListener("click", async () => {
-      const downJob = await triggerJob("monitor_down");
-      if (downJob && downJob.job_id) {
-        await waitForJobCompletion(downJob.job_id);
-      }
-      await triggerJob("monitor_up");
+      await triggerJob("monitor_restart");
     });
 
     // Release & Gates actions
