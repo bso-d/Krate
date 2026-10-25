@@ -237,18 +237,24 @@ _execute_staged_config_work() {
     case "$kind" in
       ROTATE)
         _ops_py config-exec-helper "${common_args[@]}" --action step --step "rotate_${arg1}" --status applying >/dev/null
-        local staged_sec rot_rc=0
-        staged_sec="$(_ops_py config-exec-helper "${common_args[@]}" --action print-secret --key "$arg1")"
-        if [[ "$(env_value "$arg1")" == "$staged_sec" && "$arg1" == "KEYCLOAK_DB_PASSWORD" ]]; then
+        local rot_in_file rot_rc=0
+        rot_in_file="$(mktemp "$SCRIPT_DIR/auth/.operation-recovery/rot.XXXXXX")"
+        chmod 600 "$rot_in_file"
+        if ! _ops_py config-exec-helper "${common_args[@]}" --action stage-rotation-input --key "$arg1" --out-file "$rot_in_file"; then
+          rm -f "$rot_in_file"
+          return 1
+        fi
+        if [[ "$(env_value "$arg1")" == "$(tr -d '\r\n' < "$rot_in_file")" && "$arg1" == "KEYCLOAK_DB_PASSWORD" ]]; then
           set_env_file_value "$ENV_FILE" "$arg1" "pending-recovery-placeholder-0000"
         fi
         set +e
         rot_out="$(
           set -eo pipefail
-          printf '%s\n' "$staged_sec" | cmd_identity_rotate "$arg1" --value 2>&1
+          cmd_identity_rotate "$arg1" --value < "$rot_in_file" 2>&1
         )"
         rot_rc=$?
         set -e
+        rm -f "$rot_in_file"
         if [[ $rot_rc -ne 0 ]]; then
           err_msg="Failed rotating $arg1: $(printf '%s' "$rot_out" | tail -1)"
           if [[ "$emit_json" == "true" ]]; then

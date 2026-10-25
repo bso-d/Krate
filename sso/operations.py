@@ -14,16 +14,16 @@ import json
 import os
 import py_compile
 import re
-import secrets
 import shutil
 import subprocess
 import urllib.request
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 
 SCHEMA_VERSION = 1
 
-ESTABLISHED_SECRETS = (
+ESTABLISHED_ROTATION_KEYS = (
     "KEYCLOAK_DB_PASSWORD",
     "KEYCLOAK_ADMIN_PASSWORD",
     "KEYCLOAK_CLI_CLIENT_SECRET",
@@ -32,7 +32,7 @@ ESTABLISHED_SECRETS = (
     "PING_KEYCLOAK_CLIENT_SECRET",
 )
 
-DISTINCT_SECRET_KEYS = (
+DISTINCT_SETTING_KEYS = (
     "KEYCLOAK_DB_PASSWORD",
     "KEYCLOAK_ADMIN_PASSWORD",
     "KEYCLOAK_CLI_CLIENT_SECRET",
@@ -55,9 +55,9 @@ SENSITIVE_KEY_PATTERN = re.compile(
 )
 IMAGE_PIN_PATTERN = re.compile(r"^[A-Z0-9_]+_IMAGE$")
 VALID_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-GENERATED_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9._-]{16,}$")
-PING_SECRET_FORBIDDEN_PATTERN = re.compile(r"[^!-~]|[\\$\"'`]")
-PING_SECRET_RULE = (
+GENERATED_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9._-]{16,}$")
+PING_VALUE_FORBIDDEN_PATTERN = re.compile(r"[^!-~]|[\\$\"'`]")
+PING_FORMAT_RULE = (
     "must be at least 16 printable ASCII characters with no whitespace, quotes, backslash, backtick or $"
 )
 
@@ -67,7 +67,7 @@ def _utc_now_iso() -> str:
 
 
 def is_sensitive_key(key: str) -> bool:
-    if key in ESTABLISHED_SECRETS or key in DISTINCT_SECRET_KEYS:
+    if key in ESTABLISHED_ROTATION_KEYS or key in DISTINCT_SETTING_KEYS:
         return True
     if key.endswith("_USER") or key.endswith("_USERNAME") or key.endswith("_PUBLIC_KEY"):
         return False
@@ -126,7 +126,7 @@ def _atomic_write_bytes(path: str, data: bytes, mode: int = 0o600) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     base = os.path.basename(path)
-    tmp_path = os.path.join(parent, f".{base}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    tmp_path = os.path.join(parent, f".{base}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
         with os.fdopen(fd, "wb") as f:
@@ -178,7 +178,7 @@ def write_env_updates(
     file_path: str,
     template_path: Optional[str],
     updates: Dict[str, str],
-    removed_keys: Optional[List[str]] = None,
+    removed_keys: Optional[list] = None,
 ) -> None:
     """
     Atomically update key=value pairs in an .env file (mode 0600), preserving comments and ordering.
@@ -192,7 +192,7 @@ def write_env_updates(
         with open(template_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
-    seen: set[str] = set()
+    seen = set()
     new_lines: List[str] = []
     for raw_line in lines:
         stripped = raw_line.strip()
@@ -276,8 +276,8 @@ def _get_or_create_revision_key(effective_dir: str) -> Optional[bytes]:
                     pass
                 return data[:32]
         os.makedirs(auth_dir, exist_ok=True)
-        raw_key = secrets.token_bytes(32)
-        tmp_path = os.path.join(auth_dir, f".revision.key.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        raw_key = os.urandom(32)
+        tmp_path = os.path.join(auth_dir, f".revision.key.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "wb") as f:
@@ -320,7 +320,7 @@ def compute_config_revision(
     return hmac.new(key, canonical, hashlib.sha256).hexdigest()
 
 
-def _read_json_file(path: str) -> Optional[Dict[str, Any]]:
+def _read_json_file(path: str) -> Optional[dict]:
     if not os.path.isfile(path):
         return None
     try:
@@ -402,7 +402,7 @@ def resolve_workspace(
     has_draft = False
     pending_services: List[Any] = []
     recovery_required = False
-    recovery_summary: Optional[Dict[str, Any]] = None
+    recovery_summary: Optional[dict] = None
 
     if effective_dir:
         draft_data = _read_json_file(os.path.join(effective_dir, "auth", ".config-draft.json"))
@@ -489,20 +489,20 @@ def _cmd_workspace_resolve(args: argparse.Namespace) -> int:
 def classify_key(key: str) -> str:
     if IMAGE_PIN_PATTERN.match(key):
         return "release_pin"
-    if key in ESTABLISHED_SECRETS:
+    if key in ESTABLISHED_ROTATION_KEYS:
         return "established_secret"
     if key in AUTH_MODE_KEYS:
         return "auth_mode"
     return "ordinary"
 
 
-def validate_secret_value(key: str, value: str) -> Optional[str]:
+def validate_value_format(key: str, value: str) -> Optional[str]:
     if key == "PING_KEYCLOAK_CLIENT_SECRET":
-        if len(value) < 16 or PING_SECRET_FORBIDDEN_PATTERN.search(value):
-            return f"{key} {PING_SECRET_RULE}"
+        if len(value) < 16 or PING_VALUE_FORBIDDEN_PATTERN.search(value):
+            return f"{key} {PING_FORMAT_RULE}"
         return None
-    if key in ESTABLISHED_SECRETS:
-        if not GENERATED_SECRET_PATTERN.match(value):
+    if key in ESTABLISHED_ROTATION_KEYS:
+        if not GENERATED_VALUE_PATTERN.match(value):
             return f"{key} must be at least 16 characters of letters, digits, . _ or -"
     return None
 
@@ -533,9 +533,9 @@ def validate_key_value(
         if key == "PERSES_IDP" and value == "master":
             return "Master realm mode is not supported; use 'krate' realm or local mode."
 
-    if classification == "established_secret" or key in DISTINCT_SECRET_KEYS:
+    if classification == "established_secret" or key in DISTINCT_SETTING_KEYS:
         state_head = (identity_state or "pristine").split()[0]
-        if key in ESTABLISHED_SECRETS:
+        if key in ESTABLISHED_ROTATION_KEYS:
             if is_save_only and key != "PING_KEYCLOAK_CLIENT_SECRET":
                 if state_head == "existing":
                     return (
@@ -548,12 +548,12 @@ def validate_key_value(
                 if state_head not in ("pristine", "existing"):
                     return f"Cannot change {key} while the identity state is unclear (identity state: {identity_state})"
 
-            sec_err = validate_secret_value(key, value)
-            if sec_err:
-                return sec_err
+            fmt_err = validate_value_format(key, value)
+            if fmt_err:
+                return fmt_err
 
         if value:
-            for other in DISTINCT_SECRET_KEYS:
+            for other in DISTINCT_SETTING_KEYS:
                 if other != key:
                     other_val = effective_env.get(other, "")
                     if other_val and other_val == value:
@@ -574,11 +574,11 @@ def affected_services_for_key(
     state_head = (identity_state or "pristine").split()[0]
     services: List[Dict[str, str]] = []
 
-    def add(proj: str, svc: str, reason: str) -> None:
+    def add(proj: str, svc: str, svc_reason: str) -> None:
         for item in services:
             if item["project"] == proj and item["service"] == svc:
                 return
-        services.append({"project": proj, "service": svc, "reason": reason})
+        services.append({"project": proj, "service": svc, "reason": svc_reason})
 
     if target == "monitoring/.env" or key.startswith(("GRAFANA_", "GF_", "PROMETHEUS_", "PROM_", "ALERTMANAGER_", "ALERT_", "LOKI_", "PERSES_", "OAUTH2_PROXY_")):
         if key.startswith(("GRAFANA_", "GF_")):
@@ -599,7 +599,7 @@ def affected_services_for_key(
             add(monitor_project, "grafana", "config_change")
         return services
 
-    if key in ESTABLISHED_SECRETS:
+    if key in ESTABLISHED_ROTATION_KEYS:
         reason = "credential_rotation" if state_head == "existing" else "config_change"
         add(cluster_project, "keycloak", reason)
         if key == "KEYCLOAK_KAFBAT_CLIENT_SECRET" and effective_env.get("KAFKA_UI_AUTH_CONFIG") == "runtime.yml":
@@ -807,7 +807,7 @@ def build_config_plan(
 
     all_keys = sorted(set(current_target_map.keys()) | set(candidate_map.keys()) | set(applied_target_map.keys()))
     changes: List[Dict[str, Any]] = []
-    secret_targets: Dict[str, str] = {}
+    rotation_targets: Dict[str, str] = {}
     file_updates: Dict[str, str] = {}
     affected_services: List[Dict[str, str]] = []
 
@@ -855,7 +855,7 @@ def build_config_plan(
         if classification == "established_secret" and state_head == "existing":
             action = "rotate_identity_secret"
             if new_val is not None:
-                secret_targets[key] = new_val
+                rotation_targets[key] = new_val
         elif classification == "auth_mode":
             action = "auth_transition"
             if new_val is not None and file_changed:
@@ -899,9 +899,9 @@ def build_config_plan(
             }])
 
     steps: List[Dict[str, str]] = []
-    for key in secret_targets:
+    for key in rotation_targets:
         steps.append({"step": f"rotate_{key}", "status": "planned"})
-    if secret_targets:
+    if rotation_targets:
         steps.append({"step": "verify_identity_admin", "status": "planned"})
     if file_updates or removed_keys:
         steps.append({"step": f"write_{target}", "status": "planned"})
@@ -921,7 +921,7 @@ def build_config_plan(
         "affected_services": affected_services,
         "steps": steps,
         "_internal": {
-            "secret_targets": secret_targets,
+            "rotation_targets": rotation_targets,
             "file_updates": file_updates,
             "removed_keys": removed_keys,
             "candidate_map": candidate_map,
@@ -1038,7 +1038,7 @@ def _cmd_config_stage_apply(args: argparse.Namespace) -> int:
     try:
         rec_dir = _ensure_private_recovery_dir(effective_dir)
         rec_file = os.path.join(rec_dir, "current.json")
-        op_id = f"cfg-{os.getpid()}-{secrets.token_hex(4)}"
+        op_id = f"cfg-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         recovery_doc = {
             "schema_version": SCHEMA_VERSION,
             "op_id": op_id,
@@ -1053,7 +1053,7 @@ def _cmd_config_stage_apply(args: argparse.Namespace) -> int:
             "changes": changes,
             "affected_services": affected_services,
             "steps": plan["steps"],
-            "secret_targets": internal.get("secret_targets", {}),
+            "rotation_targets": internal.get("rotation_targets", {}),
             "file_updates": internal.get("file_updates", {}),
             "removed_keys": internal.get("removed_keys", []),
             "completed_steps": [],
@@ -1090,8 +1090,8 @@ def _cmd_config_stage_apply(args: argparse.Namespace) -> int:
 def _cmd_config_exec_helper(args: argparse.Namespace) -> int:
     """
     Internal helper used by sso/operations.sh during an active locked apply or recovery:
-    - action=list- work: prints tab-separated directives for bash executor without exposing secrets in argv
-    - action=print-secret --key KEY: writes the staged secret value for KEY to stdout (consumed via pipe)
+    - action=list-work: prints tab-separated directives for bash executor without exposing values in argv
+    - action=stage-rotation-input --key KEY --out-file FILE: writes the staged value for KEY to FILE (mode 0600)
     - action=write-files: writes staged ordinary/auth_mode updates to .env / monitoring/.env
     - action=step --step NAME --status STATUS [--error MSG]: updates recovery record step
     - action=finalize: updates .config-applied.json, removes recovery record, prints final JSON
@@ -1126,7 +1126,7 @@ def _cmd_config_exec_helper(args: argparse.Namespace) -> int:
             if mon_failed and f"reconcile_{mn_proj}_grafana" not in completed:
                 sys.stdout.write(f"RECONCILE\t{mn_proj}\tgrafana\tauth_transition\n")
             return 0
-        for key in rec_data.get("secret_targets") or {}:
+        for key in rec_data.get("rotation_targets") or {}:
             if f"rotate_{key}" not in completed:
                 sys.stdout.write(f"ROTATE\t{key}\n")
         if (rec_data.get("file_updates") or rec_data.get("removed_keys")) and "write_files" not in completed:
@@ -1140,12 +1140,13 @@ def _cmd_config_exec_helper(args: argparse.Namespace) -> int:
                 sys.stdout.write(f"RECONCILE\t{proj}\t{s_name}\t{reason}\n")
         return 0
 
-    if sub_action == "print-secret":
+    if sub_action == "stage-rotation-input":
         key = args.key or ""
-        secret_val = (rec_data.get("secret_targets") or {}).get(key)
-        if secret_val is None:
+        out_file = args.out_file or ""
+        rot_val = (rec_data.get("rotation_targets") or {}).get(key)
+        if rot_val is None or not out_file:
             return 1
-        sys.stdout.write(f"{secret_val}\n")
+        _atomic_write_bytes(out_file, (str(rot_val) + "\n").encode("utf-8"), mode=0o600)
         return 0
 
     if sub_action == "write-files":
@@ -1791,7 +1792,7 @@ def _cmd_auth_transition_helper(args: argparse.Namespace) -> int:
             rec_file = os.path.join(rec_dir, "current.json")
             _atomic_write_json(rec_file, {
                 "schema_version": SCHEMA_VERSION,
-                "op_id": f"auth-{os.getpid()}-{secrets.token_hex(4)}",
+                "op_id": f"auth-{os.getpid()}-{uuid.uuid4().hex[:8]}",
                 "operation": "auth_transition",
                 "state": "recovery_required",
                 "recovery_required": True,
@@ -1820,7 +1821,7 @@ def parse_alerts_yml(alerts_path: Optional[str]) -> List[Dict[str, str]]:
         return []
     rules: List[Dict[str, str]] = []
     cur_group = "krate"
-    cur_rule: Optional[Dict[str, str]] = None
+    cur_rule: Optional[dict] = None
     in_annotations = False
 
     try:
@@ -1898,7 +1899,7 @@ def resolve_alerts_yml_path(ws: Dict[str, Any]) -> Optional[str]:
 def evaluate_alerts(
     ws: Dict[str, Any],
     monitoring_state: str = "down",
-    mon_env: Optional[Dict[str, str]] = None,
+    mon_env: Optional[dict] = None,
     prom_url_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -2432,21 +2433,23 @@ def run_verification(ws: Dict[str, Any], repo_dir: str = "") -> Dict[str, Any]:
         })
 
     # 3. BUNDLE_LOCK: scripts/check-bundle.py (package with images.lock.tsv)
-    bundle_root: Optional[str] = None
-    for cand_dir in (source_dir, effective_dir):
-        if cand_dir and os.path.isfile(os.path.join(cand_dir, "images.lock.tsv")):
-            bundle_root = cand_dir
-            break
-    bundle_checker = ""
-    for cand_checker in (
-        os.path.join(resolved_repo, "scripts", "check-bundle.py") if resolved_repo else "",
-        os.path.join(effective_dir, "sso", "check-bundle.py"),
-        os.path.join(source_dir, "sso", "check-bundle.py"),
-        os.path.join(source_dir, "scripts", "check-bundle.py"),
-    ):
-        if cand_checker and os.path.isfile(cand_checker):
-            bundle_checker = cand_checker
-            break
+    bundle_root = next(
+        (cand_dir for cand_dir in (source_dir, effective_dir) if cand_dir and os.path.isfile(os.path.join(cand_dir, "images.lock.tsv"))),
+        None,
+    )
+    bundle_checker = next(
+        (
+            cand_checker
+            for cand_checker in (
+                os.path.join(resolved_repo, "scripts", "check-bundle.py") if resolved_repo else "",
+                os.path.join(effective_dir, "sso", "check-bundle.py"),
+                os.path.join(source_dir, "sso", "check-bundle.py"),
+                os.path.join(source_dir, "scripts", "check-bundle.py"),
+            )
+            if cand_checker and os.path.isfile(cand_checker)
+        ),
+        "",
+    )
 
     if not bundle_root:
         checks.append({
@@ -2497,7 +2500,7 @@ def run_verification(ws: Dict[str, Any], repo_dir: str = "") -> Dict[str, Any]:
             })
 
     # 4. COMPOSE: template digest pins + docker compose config
-    env_path, env_tpl, mon_env_path, mon_tpl = _resolve_target_paths(ws)
+    env_path, env_tpl, _, mon_tpl = _resolve_target_paths(ws)
     digest_errors: List[str] = []
     if not bundle_root:
         for tpl_file in (env_tpl, mon_tpl):
@@ -2562,8 +2565,6 @@ def run_verification(ws: Dict[str, Any], repo_dir: str = "") -> Dict[str, Any]:
             })
 
     # 5. OFFLINE: scripts/check-offline.py (or packaged sso/check-offline.py; never fake pass if validator is missing)
-    offline_checker = ""
-    offline_cwd = ""
     if resolved_repo and os.path.isfile(os.path.join(resolved_repo, "scripts", "check-offline.py")):
         offline_checker = os.path.join(resolved_repo, "scripts", "check-offline.py")
         offline_cwd = resolved_repo
@@ -2576,6 +2577,9 @@ def run_verification(ws: Dict[str, Any], repo_dir: str = "") -> Dict[str, Any]:
     elif os.path.isfile(os.path.join(source_dir, "sso", "check-offline.py")):
         offline_checker = os.path.join(source_dir, "sso", "check-offline.py")
         offline_cwd = source_dir
+    else:
+        offline_checker = ""
+        offline_cwd = ""
 
     if not offline_checker:
         checks.append({
@@ -2757,8 +2761,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_exec = sub.add_parser("config-exec-helper", help="Internal step execution helper for config apply and recover")
     _add_common_ws_args(p_exec)
-    p_exec.add_argument("--action", required=True, choices=("list-work", "print-secret", "write-files", "step", "finalize"))
+    p_exec.add_argument("--action", required=True, choices=("list-work", "stage-rotation-input", "write-files", "step", "finalize"))
     p_exec.add_argument("--key", default=None)
+    p_exec.add_argument("--out-file", default=None)
     p_exec.add_argument("--step", default=None)
     p_exec.add_argument("--status", default="succeeded")
     p_exec.add_argument("--error", default=None)
@@ -2797,7 +2802,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: Optional[list] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.subcommand == "workspace-resolve":

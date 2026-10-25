@@ -116,10 +116,52 @@ class OperationContext:
     has_draft: bool = False
     pending_services: Tuple[Any, ...] = ()
     recovery_required: bool = False
-    recovery_summary: Optional[Dict[str, Any]] = None
+    recovery_summary: Optional[dict] = None
     cluster_project: str = "krate-kraft"
     monitoring_project: str = "krate-kraft-monitoring"
     explicit_krate_home: Optional[str] = None
+
+    def __init__(
+        self,
+        schema_version: int = 1,
+        source_dir: str = "",
+        install_dir: str = "",
+        effective_dir: Optional[str] = None,
+        installation_id: str = "",
+        edition: str = "kraft",
+        runtime_kind: str = "checkout",
+        is_package: bool = False,
+        is_installed: bool = True,
+        env_path: Optional[str] = None,
+        monitoring_env_path: Optional[str] = None,
+        config_revision: Optional[str] = None,
+        has_draft: bool = False,
+        pending_services: Tuple[Any, ...] = (),
+        recovery_required: bool = False,
+        recovery_summary: Optional[dict] = None,
+        cluster_project: str = "krate-kraft",
+        monitoring_project: str = "krate-kraft-monitoring",
+        explicit_krate_home: Optional[str] = None,
+    ) -> None:
+        object.__setattr__(self, "schema_version", schema_version)
+        object.__setattr__(self, "source_dir", source_dir)
+        object.__setattr__(self, "install_dir", install_dir)
+        object.__setattr__(self, "effective_dir", effective_dir)
+        object.__setattr__(self, "installation_id", installation_id)
+        object.__setattr__(self, "edition", edition)
+        object.__setattr__(self, "runtime_kind", runtime_kind)
+        object.__setattr__(self, "is_package", is_package)
+        object.__setattr__(self, "is_installed", is_installed)
+        object.__setattr__(self, "env_path", env_path)
+        object.__setattr__(self, "monitoring_env_path", monitoring_env_path)
+        object.__setattr__(self, "config_revision", config_revision)
+        object.__setattr__(self, "has_draft", has_draft)
+        object.__setattr__(self, "pending_services", pending_services)
+        object.__setattr__(self, "recovery_required", recovery_required)
+        object.__setattr__(self, "recovery_summary", recovery_summary)
+        object.__setattr__(self, "cluster_project", cluster_project)
+        object.__setattr__(self, "monitoring_project", monitoring_project)
+        object.__setattr__(self, "explicit_krate_home", explicit_krate_home)
 
     @property
     def working_dir(self) -> str:
@@ -134,7 +176,7 @@ class OperationContext:
             return os.path.join(self.source_dir, "krate"), self.source_dir
         return self.krate_bin, self.working_dir
 
-    def subprocess_env(self, extra_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    def subprocess_env(self, extra_env: Optional[dict] = None) -> Dict[str, str]:
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         if self.explicit_krate_home:
@@ -325,8 +367,8 @@ class WorkspaceManager:
 
         return os.path.abspath(cwd)
 
+    @staticmethod
     def _resolve_context_for_path(
-        self,
         ws_path: str,
         explicit_krate_home: Optional[str] = None,
     ) -> OperationContext:
@@ -419,7 +461,7 @@ class WorkspaceManager:
             )
             self._active_context = ctx
             self.active_workspace = ctx.working_dir
-            return ctx
+        return ctx
 
     def get_info(self, ws_path: Optional[str] = None) -> dict:
         if ws_path:
@@ -465,7 +507,7 @@ class WorkspaceManager:
                 self._selected_source_dir = new_ctx.effective_dir
             else:
                 self.active_workspace = new_ctx.working_dir
-            return new_ctx
+        return new_ctx
 
     def list_workspaces(self) -> List[dict]:
         candidates = set()
@@ -1140,7 +1182,8 @@ class StructuredDataCollector:
         self.gate_results: List[dict] = [dict(g) for g in DEFAULT_ACCEPTANCE_GATES]
         self.gates_last_run: Optional[float] = None
 
-    def _ws_dict_from_context(self, ctx: OperationContext) -> Dict[str, Any]:
+    @staticmethod
+    def _ws_dict_from_context(ctx: OperationContext) -> Dict[str, Any]:
         return {
             "source_dir": ctx.source_dir,
             "install_dir": ctx.install_dir,
@@ -1608,7 +1651,7 @@ class StructuredDataCollector:
         def parse_env(path):
             if not os.path.isfile(path):
                 return {}
-            res = {}
+            parsed_env = {}
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
@@ -1616,8 +1659,8 @@ class StructuredDataCollector:
                         continue
                     if "=" in line:
                         k, v = line.split("=", 1)
-                        res[k.strip()] = v.strip().strip("'\"")
-            return res
+                        parsed_env[k.strip()] = v.strip().strip("'\"")
+            return parsed_env
 
         def read_raw(path):
             if not os.path.isfile(path):
@@ -1645,7 +1688,7 @@ class StructuredDataCollector:
     def run_config_operation(
         self,
         subcommand: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: Optional[dict] = None,
         context: Optional[OperationContext] = None,
         timeout: int = 180,
     ) -> Tuple[int, Dict[str, Any]]:
@@ -2026,7 +2069,7 @@ def run_sso_orchestration(
     elif norm_mode == "local" and norm_target in ("both", "all"):
         payload["include_kafbat"] = True
 
-    direct_ok, sg_needed = check_docker_socket_permission()
+    _, sg_needed = check_docker_socket_permission()
     return supervisor.start_job(
         action=f"sso-orchestrate-{norm_target}-{norm_mode}",
         cmd=[krate_bin, "auth", "transition", "--stdin", "--json"],
@@ -2042,7 +2085,7 @@ def run_sso_orchestration(
 def run_gates_verification(
     supervisor: JobSupervisor,
     workspace_mgr: WorkspaceManager,
-    data_collector: StructuredDataCollector,
+    data_collector: Optional[StructuredDataCollector] = None,
     context: Optional[OperationContext] = None,
 ) -> Job:
     """
@@ -2052,6 +2095,8 @@ def run_gates_verification(
     ctx = context or workspace_mgr.get_context()
     krate_bin, ws_path = ctx.cli_for_action("verify")
     sub_env = ctx.subprocess_env()
+    if data_collector is not None:
+        data_collector.reset_gates()
 
     job_id = str(uuid.uuid4())
     job = Job(job_id, "gates", is_mutation=False, context=ctx)
@@ -2080,6 +2125,12 @@ def run_gates_verification(
                     for chk in payload.get("checks", []):
                         st = str(chk.get("status", "not_run")).upper()
                         line = f"  [{st}] {chk.get('id')} ({chk.get('category')} / {chk.get('tool')}): {chk.get('detail')}"
+                        if data_collector is not None and chk.get("legacy_id"):
+                            data_collector.update_gate(
+                                str(chk["legacy_id"]),
+                                str(chk.get("status", "not_run")),
+                                str(chk.get("detail", "")),
+                            )
                         if chk.get("status") == "failed":
                             job.add_log("stderr", line)
                         else:
