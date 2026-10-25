@@ -817,7 +817,13 @@
         source.close();
         state.sseSource = null;
         state.activeJob = null;
+        updateWorkspaceSelectorLock(false);
         fetchStatus();
+        if (finishedAction === "install" || finishedAction === "doctor_fix") {
+          fetchWorkspaces();
+          fetchDoctor();
+          fetchConfig();
+        }
         if (finishedAction === "gates") {
           fetchGates();
         }
@@ -852,6 +858,19 @@
     return { status: "failed", exit_code: -1 };
   }
 
+  function updateWorkspaceSelectorLock(mutationActive = false) {
+    const isMutating = Boolean(
+      mutationActive ||
+        (state.activeJob && state.activeJob.status === "running" && state.activeJob.isMutation !== false)
+    );
+    if (dom.selectWorkspace) {
+      dom.selectWorkspace.disabled = isMutating;
+      dom.selectWorkspace.title = isMutating
+        ? "Workspace switching is disabled while a mutation operation is running"
+        : "Select active Krate workspace";
+    }
+  }
+
   // --------------------------------------------------------------------------
   // Job Triggers & Supervisors
   // --------------------------------------------------------------------------
@@ -879,12 +898,24 @@
         body: payload,
       });
 
-      state.activeJob = { id: res.job_id, action, status: "running" };
+      const isMutation =
+        res.is_mutation !== undefined
+          ? Boolean(res.is_mutation)
+          : !["health", "credentials", "status", "logs", "doctor", "gates", "identity_status", "monitor_status", "monitor_logs", "monitor_ui"].includes(action);
+      state.activeJob = {
+        id: res.job_id,
+        action,
+        status: "running",
+        isMutation,
+        context: res.context || null,
+      };
+      updateWorkspaceSelectorLock(isMutation);
       state.lastEventId = 0;
       appendTerminalLine(`\n[System] Initiated job '${action}' (ID: ${res.job_id})...\n`, "system");
       connectJobStream(res.job_id);
       return res;
     } catch (err) {
+      updateWorkspaceSelectorLock(false);
       if (dom.terminalBadgeStatus) {
         dom.terminalBadgeStatus.textContent = "";
         dom.terminalBadgeStatus.className = "terminal-pulse-dot status-error";
@@ -934,6 +965,9 @@
           dom.selectWorkspace.value = data.workspace;
         }
       }
+    }
+    if (data.mutation_active !== undefined) {
+      updateWorkspaceSelectorLock(Boolean(data.mutation_active));
     }
 
     // Update Package Install Wizard Step
@@ -1608,6 +1642,9 @@
         state.activeWorkspace = data.active_workspace;
         dom.selectWorkspace.value = data.active_workspace;
       }
+      if (data.mutation_active !== undefined) {
+        updateWorkspaceSelectorLock(Boolean(data.mutation_active));
+      }
     } catch (err) {
       // ignore
     }
@@ -1701,6 +1738,9 @@
         await fetchConfig();
         await fetchGates();
       } catch (err) {
+        if (dom.selectWorkspace && state.activeWorkspace) {
+          dom.selectWorkspace.value = state.activeWorkspace;
+        }
         showToast(`Failed to switch workspace: ${err.message}`, "danger");
       }
     });
@@ -1845,7 +1885,14 @@
           method: "POST",
           body: { target, mode },
         });
-        state.activeJob = { id: res.job_id, action: "sso_orchestrate", status: "running" };
+        state.activeJob = {
+          id: res.job_id,
+          action: "sso_orchestrate",
+          status: "running",
+          isMutation: true,
+          context: res.context || null,
+        };
+        updateWorkspaceSelectorLock(true);
         connectJobStream(res.job_id);
       } catch (err) {
         showToast(`SSO orchestrator error: ${err.message}`, "danger");

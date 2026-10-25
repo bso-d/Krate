@@ -5115,6 +5115,12 @@ cmd_help() {
   echo ""
 }
 
+# Shared operational boundary handlers for workspace resolution and Studio IPC.
+if [[ -f "$(sso_dir)/operations.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$(sso_dir)/operations.sh"
+fi
+
 # ─── dispatch ─────────────────────────────────────────────────────────────────
 CMD="${1:-help}"
 shift || true
@@ -5123,7 +5129,7 @@ shift || true
 # installed copy, which holds the site's settings and certificates.
 if is_package; then
   case "$CMD" in
-    install|doctor|docker-check|docker-install|load-images|studio|help|--help|-h) ;;
+    install|doctor|docker-check|docker-install|load-images|studio|workspace|help|--help|-h) ;;
     *)
       [[ -x "$KRATE_HOME/krate" ]] || die "Not installed yet. Run: ./krate install"
       exec "$KRATE_HOME/krate" "$CMD" "$@"
@@ -5148,6 +5154,7 @@ case "$CMD" in
   lag)            cmd_lag "$@" ;;
   ui)             cmd_ui ;;
   studio)         cmd_studio "$@" ;;
+  workspace)      cmd_workspace "$@" ;;
   auth)           cmd_auth "$@" ;;
   identity)       cmd_identity "$@" ;;
   config)         cmd_config "$@" ;;

@@ -44,7 +44,7 @@ def main():
     for name in ('LICENSE', 'LICENSE-SOURCES.md'):
         if not (root / name).is_file():
             raise SystemExit('Missing licence file: ' + name)
-    for name in ('sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh',
+    for name in ('sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh', 'sso/operations.sh', 'sso/operations.py',
                  'sso/preflight.py', 'sso/probe.py', 'sso/identity.py', 'sso/idp_watch.py', 'sso/logrotate/krate-identity.conf',
                  'sso/theme/krate/login/theme.properties', 'sso/theme/krate/login/login.ftl',
                  'auth/ui/local.yml', 'docs/dual-login.md', 'docs/identity-foundation.md', 'docs/grafana-sso.md'):
