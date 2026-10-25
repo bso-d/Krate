@@ -27,7 +27,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh scripts/package-release.sh scripts/gate-identity.sh
+CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh scripts/package-release.sh scripts/gate-identity.sh Krate-UI.command krate-ui.sh
 VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
@@ -78,6 +78,7 @@ help:
 >                                                Generate opt-in SSO config (no activation)
 >  make kafbat-ui ARCH=amd64                     Build native Kafbat login + SSO image (online build host)
 >  make dual-config SSO_SETTINGS=sso/site.json     Generate Kafbat runtime.yml and the PingFederate plan (no shared form login)
+>  make ui                                        Launch Krate Studio desktop management UI
 >  make test                                      Alias for make check
 >  make validate                                  Alias for make check
 >  make bundle VERSION=v2 ARCH=amd64              Build Krate and EPC bundles
@@ -107,7 +108,10 @@ help:
 
 .PHONY: offline-check identity-check
 .PHONY: sso-config
-.PHONY: dual-config kafbat-ui
+.PHONY: dual-config kafbat-ui ui
+
+ui:
+>PYTHONDONTWRITEBYTECODE=1 python3 -B ui/krate_ui.py
 
 kafbat-ui:
 >python3 kafbat-ui/build.py --arch "$(ARCH)"
@@ -305,6 +309,17 @@ bundle: offline-check
 >    # Only the local default is copied: never stage site auth files or secrets.
 >    mkdir -p "$$bundle_dir/monitoring/auth"
 >    cp monitoring/auth/local.ini "$$bundle_dir/monitoring/auth/local.ini"
+>  fi
+>
+>  # Krate Studio desktop UI and multiplatform double-click launchers.
+>  # The frozen ZooKeeper edition is skipped.
+>  if [[ "$$mode" != "zk" && -d ui ]]; then
+>    cp -r ui "$$bundle_dir/ui"
+>    find "$$bundle_dir/ui" -name __pycache__ -type d -prune -exec rm -rf {} +
+>    find "$$bundle_dir/ui" -type f \( -name .DS_Store -o -name '._*' -o -name '*.pyc' \) -delete
+>    chmod 755 "$$bundle_dir/ui/krate_ui.py"
+>    cp Krate-UI.command Krate-UI.bat krate-ui.sh Krate-UI.desktop "$$bundle_dir/"
+>    chmod +x "$$bundle_dir/Krate-UI.command" "$$bundle_dir/krate-ui.sh"
 >  fi
 >  cp "$$src_dir/.env.template" "$$bundle_dir/.env.template"
 >  printf '%s\n' "$(ARCH)" > "$$bundle_dir/.bundle-arch"

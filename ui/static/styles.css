@@ -1,0 +1,1151 @@
+/* ==========================================================================
+   KRATE STUDIO - MATERIAL UI (MUI v5) DESIGN SYSTEM
+   Zero External Dependencies / 100% Air-Gapped Compliant
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   CSS Variables & Material UI Color Tokens
+   -------------------------------------------------------------------------- */
+:root,
+:root[data-theme="dark"] {
+  /* Material Palette (Dark Mode) */
+  --mui-primary: #1976d2;
+  --mui-primary-hover: #1565c0;
+  --mui-primary-light: rgba(25, 118, 210, 0.16);
+  --mui-primary-border: rgba(25, 118, 210, 0.5);
+
+  --mui-secondary: #9c27b0;
+  --mui-secondary-hover: #7b1fa2;
+  --mui-secondary-light: rgba(156, 39, 176, 0.16);
+
+  --mui-error: #f44336;
+  --mui-error-bg: rgba(244, 67, 54, 0.16);
+  --mui-error-border: #d32f2f;
+
+  --mui-warning: #ffa726;
+  --mui-warning-bg: rgba(255, 167, 38, 0.16);
+  --mui-warning-border: #f57c00;
+
+  --mui-info: #29b6f6;
+  --mui-info-bg: rgba(41, 182, 246, 0.16);
+  --mui-info-border: #0288d1;
+
+  --mui-success: #66bb6a;
+  --mui-success-bg: rgba(102, 187, 106, 0.16);
+  --mui-success-border: #388e3c;
+
+  /* Material Surfaces & Backgrounds */
+  --mui-bg-default: #121212;
+  --mui-bg-paper: #1e1e1e;
+  --mui-bg-paper-elevation-2: #232323;
+  --mui-bg-paper-elevation-3: #282828;
+  --mui-bg-paper-elevation-4: #2e2e2e;
+  --mui-bg-overlay: rgba(0, 0, 0, 0.72);
+
+  --mui-text-primary: #ffffff;
+  --mui-text-secondary: rgba(255, 255, 255, 0.7);
+  --mui-text-disabled: rgba(255, 255, 255, 0.38);
+  --mui-text-hint: rgba(255, 255, 255, 0.5);
+
+  --mui-divider: rgba(255, 255, 255, 0.12);
+  --mui-border-input: rgba(255, 255, 255, 0.23);
+  --mui-border-input-hover: rgba(255, 255, 255, 0.87);
+
+  /* Elevation Shadows */
+  --mui-shadow-0: none;
+  --mui-shadow-1: 0px 2px 1px -1px rgba(0,0,0,0.2), 0px 1px 1px 0px rgba(0,0,0,0.14), 0px 1px 3px 0px rgba(0,0,0,0.12);
+  --mui-shadow-2: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
+  --mui-shadow-3: 0px 3px 3px -2px rgba(0,0,0,0.2), 0px 3px 4px 0px rgba(0,0,0,0.14), 0px 1px 8px 0px rgba(0,0,0,0.12);
+  --mui-shadow-4: 0px 2px 4px -1px rgba(0,0,0,0.2), 0px 4px 5px 0px rgba(0,0,0,0.14), 0px 1px 10px 0px rgba(0,0,0,0.12);
+  --mui-shadow-8: 0px 5px 5px -3px rgba(0,0,0,0.2), 0px 8px 10px 1px rgba(0,0,0,0.14), 0px 3px 14px 2px rgba(0,0,0,0.12);
+  --mui-shadow-24: 0px 11px 15px -7px rgba(0,0,0,0.2), 0px 24px 38px 3px rgba(0,0,0,0.14), 0px 9px 46px 8px rgba(0,0,0,0.12);
+
+  /* Terminal Colors */
+  --terminal-bg: #0d1117;
+  --terminal-text: #e6edf3;
+  --terminal-border: rgba(255, 255, 255, 0.12);
+  --terminal-header-bg: #161b22;
+
+  /* ANSI 16-color Theme Palette */
+  --ansi-black: #484f58;
+  --ansi-red: #ff7b72;
+  --ansi-green: #7ee787;
+  --ansi-yellow: #f2cc60;
+  --ansi-blue: #79c0ff;
+  --ansi-magenta: #d2a8ff;
+  --ansi-cyan: #56d4dd;
+  --ansi-white: #f0f6fc;
+
+  /* Typography & Transitions */
+  --font-sans: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 16px;
+  --transition-standard: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+:root[data-theme="light"] {
+  /* Material Palette (Light Mode) */
+  --mui-primary: #1976d2;
+  --mui-primary-hover: #115293;
+  --mui-primary-light: rgba(25, 118, 210, 0.08);
+  --mui-primary-border: rgba(25, 118, 210, 0.5);
+
+  --mui-secondary: #9c27b0;
+  --mui-secondary-hover: #7b1fa2;
+  --mui-secondary-light: rgba(156, 39, 176, 0.08);
+
+  --mui-error: #d32f2f;
+  --mui-error-bg: rgba(211, 47, 47, 0.08);
+  --mui-error-border: #ef5350;
+
+  --mui-warning: #ed6c02;
+  --mui-warning-bg: rgba(237, 108, 2, 0.08);
+  --mui-warning-border: #ff9800;
+
+  --mui-info: #0288d1;
+  --mui-info-bg: rgba(2, 136, 209, 0.08);
+  --mui-info-border: #03a9f4;
+
+  --mui-success: #2e7d32;
+  --mui-success-bg: rgba(46, 125, 50, 0.08);
+  --mui-success-border: #4caf50;
+
+  /* Material Surfaces & Backgrounds */
+  --mui-bg-default: #f4f6f8;
+  --mui-bg-paper: #ffffff;
+  --mui-bg-paper-elevation-2: #f8fafc;
+  --mui-bg-paper-elevation-3: #f1f5f9;
+  --mui-bg-paper-elevation-4: #ffffff;
+  --mui-bg-overlay: rgba(0, 0, 0, 0.5);
+
+  --mui-text-primary: rgba(0, 0, 0, 0.87);
+  --mui-text-secondary: rgba(0, 0, 0, 0.6);
+  --mui-text-disabled: rgba(0, 0, 0, 0.38);
+  --mui-text-hint: rgba(0, 0, 0, 0.38);
+
+  --mui-divider: rgba(0, 0, 0, 0.12);
+  --mui-border-input: rgba(0, 0, 0, 0.23);
+  --mui-border-input-hover: rgba(0, 0, 0, 0.87);
+
+  /* Elevation Shadows (Light Mode) */
+  --mui-shadow-0: none;
+  --mui-shadow-1: 0px 2px 1px -1px rgba(0,0,0,0.1), 0px 1px 1px 0px rgba(0,0,0,0.08), 0px 1px 3px 0px rgba(0,0,0,0.06);
+  --mui-shadow-2: 0px 3px 1px -2px rgba(0,0,0,0.1), 0px 2px 2px 0px rgba(0,0,0,0.08), 0px 1px 5px 0px rgba(0,0,0,0.06);
+  --mui-shadow-3: 0px 3px 3px -2px rgba(0,0,0,0.1), 0px 3px 4px 0px rgba(0,0,0,0.08), 0px 1px 8px 0px rgba(0,0,0,0.06);
+  --mui-shadow-4: 0px 2px 4px -1px rgba(0,0,0,0.1), 0px 4px 5px 0px rgba(0,0,0,0.08), 0px 1px 10px 0px rgba(0,0,0,0.06);
+  --mui-shadow-8: 0px 5px 5px -3px rgba(0,0,0,0.1), 0px 8px 10px 1px rgba(0,0,0,0.08), 0px 3px 14px 2px rgba(0,0,0,0.06);
+  --mui-shadow-24: 0px 11px 15px -7px rgba(0,0,0,0.15), 0px 24px 38px 3px rgba(0,0,0,0.1), 0px 9px 46px 8px rgba(0,0,0,0.08);
+
+  /* Terminal Colors (Light Mode) */
+  --terminal-bg: #1e1e1e;
+  --terminal-text: #f0f6fc;
+  --terminal-border: rgba(0, 0, 0, 0.12);
+  --terminal-header-bg: #282c34;
+}
+
+/* --------------------------------------------------------------------------
+   Reset & Base Styles
+   -------------------------------------------------------------------------- */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: var(--font-sans);
+  background-color: var(--mui-bg-default);
+  color: var(--mui-text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* --------------------------------------------------------------------------
+   Material UI Top AppBar
+   -------------------------------------------------------------------------- */
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+  padding: 0 24px;
+  background-color: var(--mui-bg-paper);
+  border-bottom: 1px solid var(--mui-divider);
+  box-shadow: var(--mui-shadow-4);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  gap: 16px;
+}
+
+.top-bar-left, .top-bar-center, .top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.brand-logo-img {
+  height: 34px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15));
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.brand-name {
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--mui-text-primary);
+  line-height: 1.2;
+}
+
+.brand-tag {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--mui-primary);
+  background: var(--mui-primary-light);
+  padding: 2px 6px;
+  border-radius: 4px;
+  width: fit-content;
+  margin-top: 2px;
+}
+
+.workspace-selector-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--mui-bg-paper-elevation-2);
+  border: 1px solid var(--mui-border-input);
+  border-radius: var(--radius-xs);
+  padding: 4px 10px;
+  transition: var(--transition-standard);
+}
+
+.workspace-selector-wrap:hover {
+  border-color: var(--mui-border-input-hover);
+}
+
+.workspace-selector-wrap:focus-within {
+  border-color: var(--mui-primary);
+  box-shadow: 0 0 0 1px var(--mui-primary);
+}
+
+.select-input {
+  background: transparent;
+  border: none;
+  color: var(--mui-text-primary);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+}
+
+.select-input option {
+  background: var(--mui-bg-paper);
+  color: var(--mui-text-primary);
+}
+
+/* Material Chips in TopBar */
+.status-pill-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 0.75rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+  background: var(--mui-bg-paper-elevation-2);
+  color: var(--mui-text-secondary);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-healthy {
+  background: var(--mui-success-bg);
+  color: var(--mui-success);
+  border-color: var(--mui-success-border);
+}
+.status-healthy .status-dot { background: var(--mui-success); }
+
+.status-stopped {
+  background: var(--mui-error-bg);
+  color: var(--mui-error);
+  border-color: var(--mui-error-border);
+}
+.status-stopped .status-dot { background: var(--mui-error); }
+
+.status-degraded {
+  background: var(--mui-warning-bg);
+  color: var(--mui-warning);
+  border-color: var(--mui-warning-border);
+}
+.status-degraded .status-dot { background: var(--mui-warning); }
+
+.status-info {
+  background: var(--mui-info-bg);
+  color: var(--mui-info);
+  border-color: var(--mui-info-border);
+}
+
+.status-neutral {
+  background: var(--mui-bg-paper-elevation-2);
+  color: var(--mui-text-secondary);
+  border-color: var(--mui-divider);
+}
+
+/* --------------------------------------------------------------------------
+   App Layout: Material Drawer + Content Canvas
+   -------------------------------------------------------------------------- */
+.app-layout {
+  display: flex;
+  min-height: calc(100vh - 64px);
+  position: relative;
+}
+
+/* Left Navigation Rail (MUI Permanent Drawer) */
+.nav-rail {
+  width: 240px;
+  background-color: var(--mui-bg-paper);
+  border-right: 1px solid var(--mui-divider);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 16px 12px;
+  flex-shrink: 0;
+}
+
+.nav-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-link {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--mui-text-secondary);
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: var(--transition-standard);
+}
+
+.nav-link:hover {
+  background-color: var(--mui-primary-light);
+  color: var(--mui-text-primary);
+}
+
+.nav-link.active {
+  background-color: var(--mui-primary-light);
+  color: var(--mui-primary);
+  font-weight: 600;
+}
+
+.nav-link svg {
+  flex-shrink: 0;
+}
+
+.nav-footer {
+  padding-top: 16px;
+  border-top: 1px solid var(--mui-divider);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.airgap-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--mui-success);
+  padding: 4px 8px;
+  background: var(--mui-success-bg);
+  border: 1px solid var(--mui-success-border);
+  border-radius: var(--radius-pill);
+  letter-spacing: 0.04em;
+}
+
+.build-info {
+  font-size: 0.75rem;
+  color: var(--mui-text-disabled);
+  padding-left: 4px;
+}
+
+/* --------------------------------------------------------------------------
+   Content Canvas & Material Views
+   -------------------------------------------------------------------------- */
+.content-canvas {
+  flex: 1;
+  padding: 32px;
+  max-width: 1440px;
+  margin: 0 auto;
+  overflow-y: auto;
+}
+
+.view-panel {
+  display: none;
+  animation: fadeIn 150ms ease-in-out;
+}
+
+.view-panel.active {
+  display: block;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.view-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  gap: 16px;
+}
+
+.view-title {
+  font-size: 1.75rem;
+  font-weight: 600;
+  color: var(--mui-text-primary);
+  letter-spacing: -0.01em;
+  margin-bottom: 4px;
+}
+
+.view-desc {
+  font-size: 0.875rem;
+  color: var(--mui-text-secondary);
+  max-width: 800px;
+}
+
+.view-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Material UI Cards & Surfaces (Paper)
+   -------------------------------------------------------------------------- */
+.card {
+  background-color: var(--mui-bg-paper);
+  border: 1px solid var(--mui-divider);
+  border-radius: var(--radius-md);
+  box-shadow: var(--mui-shadow-1);
+  padding: 24px;
+  margin-bottom: 24px;
+  transition: box-shadow var(--transition-standard);
+}
+
+.card:hover {
+  box-shadow: var(--mui-shadow-2);
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  gap: 12px;
+}
+
+.card-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--mui-text-primary);
+}
+
+.card-desc {
+  font-size: 0.8125rem;
+  color: var(--mui-text-secondary);
+  margin-top: 2px;
+}
+
+.card-badge {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--mui-bg-paper-elevation-3);
+  color: var(--mui-text-secondary);
+  border: 1px solid var(--mui-divider);
+}
+
+/* Metric / KPI Cards Grid */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.metric-card {
+  background-color: var(--mui-bg-paper);
+  border: 1px solid var(--mui-divider);
+  border-radius: var(--radius-md);
+  box-shadow: var(--mui-shadow-1);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+}
+
+.metric-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--mui-text-secondary);
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+
+.metric-value {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--mui-text-primary);
+  margin-bottom: 4px;
+}
+
+.metric-sub {
+  font-size: 0.75rem;
+  color: var(--mui-text-secondary);
+}
+
+/* --------------------------------------------------------------------------
+   Material UI Buttons
+   -------------------------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: var(--radius-xs);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.02857em;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: var(--transition-standard);
+  text-decoration: none;
+  outline: none;
+}
+
+.btn svg {
+  flex-shrink: 0;
+}
+
+.btn-primary {
+  background-color: var(--mui-primary);
+  color: #ffffff;
+  box-shadow: var(--mui-shadow-2);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--mui-primary-hover);
+  box-shadow: var(--mui-shadow-4);
+}
+
+.btn-secondary {
+  background-color: transparent;
+  color: var(--mui-primary);
+  border-color: var(--mui-primary-border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--mui-primary-light);
+  border-color: var(--mui-primary);
+}
+
+.btn-danger {
+  background-color: var(--mui-error);
+  color: #ffffff;
+  box-shadow: var(--mui-shadow-2);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: var(--mui-error-border);
+  box-shadow: var(--mui-shadow-4);
+}
+
+.btn-ghost {
+  background-color: transparent;
+  color: var(--mui-text-primary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background-color: var(--mui-primary-light);
+  color: var(--mui-primary);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none !important;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+}
+
+.btn-xs {
+  padding: 4px 8px;
+  font-size: 0.6875rem;
+}
+
+/* --------------------------------------------------------------------------
+   Material UI Toggle Switch Component (Replaces Raw Checkboxes)
+   -------------------------------------------------------------------------- */
+.mui-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--mui-text-primary);
+}
+
+.mui-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.mui-switch-track {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  background-color: var(--mui-divider);
+  border-radius: 11px;
+  transition: background-color var(--transition-standard);
+  flex-shrink: 0;
+}
+
+.mui-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background-color: #ffffff;
+  border-radius: 50%;
+  box-shadow: var(--mui-shadow-2);
+  transition: transform var(--transition-standard), background-color var(--transition-standard);
+}
+
+.mui-switch input:checked + .mui-switch-track {
+  background-color: var(--mui-primary);
+}
+
+.mui-switch input:checked + .mui-switch-track .mui-switch-thumb {
+  transform: translateX(18px);
+  background-color: #ffffff;
+}
+
+.mui-switch input:focus-visible + .mui-switch-track {
+  outline: 2px solid var(--mui-primary);
+  outline-offset: 2px;
+}
+
+.mui-switch-sm .mui-switch-track {
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+}
+
+.mui-switch-sm .mui-switch-thumb {
+  width: 14px;
+  height: 14px;
+}
+
+.mui-switch-sm input:checked + .mui-switch-track .mui-switch-thumb {
+  transform: translateX(14px);
+}
+
+/* --------------------------------------------------------------------------
+   Material UI Form Inputs
+   -------------------------------------------------------------------------- */
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-label {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--mui-text-secondary);
+  margin-bottom: 6px;
+}
+
+.text-input {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--mui-border-input);
+  background-color: var(--mui-bg-paper-elevation-2);
+  color: var(--mui-text-primary);
+  font-family: inherit;
+  font-size: 0.875rem;
+  transition: border-color var(--transition-standard), box-shadow var(--transition-standard);
+  outline: none;
+}
+
+.text-input:hover {
+  border-color: var(--mui-border-input-hover);
+}
+
+.text-input:focus {
+  border-color: var(--mui-primary);
+  box-shadow: 0 0 0 1px var(--mui-primary);
+}
+
+.text-input-sm {
+  padding: 6px 10px;
+  font-size: 0.8125rem;
+}
+
+.flex-column {
+  display: flex;
+  flex-direction: column;
+}
+
+.gap-2 { gap: 12px; }
+
+/* --------------------------------------------------------------------------
+   Material UI Data Tables
+   -------------------------------------------------------------------------- */
+.data-table-wrap {
+  overflow-x: auto;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--mui-divider);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.875rem;
+}
+
+.data-table th {
+  background-color: var(--mui-bg-paper-elevation-2);
+  color: var(--mui-text-secondary);
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--mui-divider);
+}
+
+.data-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--mui-divider);
+  color: var(--mui-text-primary);
+}
+
+.data-table tr:hover td {
+  background-color: var(--mui-primary-light);
+}
+
+/* --------------------------------------------------------------------------
+   Pipeline Stepper Component (SSO & Setup)
+   -------------------------------------------------------------------------- */
+.pipeline-stepper {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.pipeline-step {
+  background-color: var(--mui-bg-paper);
+  border: 1px solid var(--mui-divider);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  box-shadow: var(--mui-shadow-1);
+  position: relative;
+  transition: var(--transition-standard);
+}
+
+.pipeline-step:hover {
+  box-shadow: var(--mui-shadow-2);
+}
+
+.step-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.step-label {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--mui-text-secondary);
+}
+
+.step-status-icon {
+  font-size: 0.875rem;
+  color: var(--mui-text-disabled);
+}
+
+.step-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--mui-text-primary);
+  margin-bottom: 6px;
+}
+
+.step-desc {
+  font-size: 0.75rem;
+  color: var(--mui-text-secondary);
+  line-height: 1.4;
+}
+
+/* --------------------------------------------------------------------------
+   Material UI Modals & Responsive Dialogs
+   -------------------------------------------------------------------------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: var(--mui-bg-overlay);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+  animation: fadeIn 150ms ease-in-out;
+}
+
+.modal-backdrop.open {
+  display: flex;
+}
+
+.modal-dialog {
+  background-color: var(--mui-bg-paper);
+  border-radius: var(--radius-md);
+  box-shadow: var(--mui-shadow-24);
+  border: 1px solid var(--mui-divider);
+  width: 100%;
+  max-width: 520px;
+  box-sizing: border-box;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--mui-divider);
+}
+
+.modal-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.icon-warning {
+  background-color: var(--mui-warning-bg);
+  color: var(--mui-warning);
+}
+
+.icon-success {
+  background-color: var(--mui-success-bg);
+  color: var(--mui-success);
+}
+
+.icon-danger {
+  background-color: var(--mui-error-bg);
+  color: var(--mui-error);
+}
+
+.icon-info {
+  background-color: var(--mui-info-bg);
+  color: var(--mui-info);
+}
+
+.modal-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--mui-text-primary);
+  line-height: 1.2;
+}
+
+.modal-subtitle {
+  font-size: 0.8125rem;
+  color: var(--mui-text-secondary);
+  margin-top: 2px;
+}
+
+.modal-body {
+  padding: 24px;
+  overflow-y: auto;
+  max-height: 70vh;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--mui-divider);
+  background-color: var(--mui-bg-paper-elevation-2);
+}
+
+/* Responsive Credential & SSH Fingerprint Box (ZERO LEAKAGE) */
+.credential-box {
+  background-color: var(--mui-bg-paper-elevation-3);
+  border: 1px solid var(--mui-divider);
+  border-radius: var(--radius-xs);
+  padding: 14px;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.credential-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.credential-row:last-child {
+  margin-bottom: 0;
+}
+
+.cred-column {
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  gap: 6px !important;
+}
+
+.cred-label {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--mui-text-secondary);
+}
+
+.cred-value {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--mui-primary);
+}
+
+.cred-secret {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--mui-info);
+  background-color: var(--mui-bg-paper);
+  padding: 4px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--mui-divider);
+}
+
+/* Mandatory break-word rule so long SSH fingerprints wrap without horizontal overflow */
+.cred-wrap-text {
+  word-break: break-all !important;
+  overflow-wrap: anywhere !important;
+  white-space: normal !important;
+  max-width: 100% !important;
+  display: block !important;
+  line-height: 1.45 !important;
+  padding: 8px 10px !important;
+}
+
+.security-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  background-color: var(--mui-warning-bg);
+  border: 1px solid var(--mui-warning-border);
+  border-radius: var(--radius-xs);
+  color: var(--mui-warning);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+/* --------------------------------------------------------------------------
+   Live Execution Terminal Drawer
+   -------------------------------------------------------------------------- */
+.terminal-drawer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 320px;
+  background-color: var(--terminal-bg);
+  border-top: 2px solid var(--mui-primary);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  transition: transform 250ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.terminal-drawer.collapsed {
+  transform: translateY(calc(100% - 44px));
+}
+
+.terminal-drawer.maximized {
+  height: 80vh;
+}
+
+.drawer-header {
+  height: 44px;
+  padding: 0 16px;
+  background-color: var(--terminal-header-bg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--terminal-border);
+  cursor: pointer;
+  user-select: none;
+}
+
+.drawer-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--terminal-text);
+}
+
+.drawer-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.terminal-pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--terminal-text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ANSI Colors in Terminal */
+.ansi-bold { font-weight: 700; }
+.ansi-red { color: var(--ansi-red); }
+.ansi-green { color: var(--ansi-green); }
+.ansi-yellow { color: var(--ansi-yellow); }
+.ansi-blue { color: var(--ansi-blue); }
+.ansi-magenta { color: var(--ansi-magenta); }
+.ansi-cyan { color: var(--ansi-cyan); }
+.ansi-white { color: var(--ansi-white); }
+
+/* --------------------------------------------------------------------------
+   Utility & Responsiveness
+   -------------------------------------------------------------------------- */
+.mb-2 { margin-bottom: 8px; }
+.mb-3 { margin-bottom: 16px; }
+.mt-2 { margin-top: 8px; }
+.mt-3 { margin-top: 16px; }
+.text-xs { font-size: 0.75rem; }
+.text-muted { color: var(--mui-text-secondary); }
+.text-danger { color: var(--mui-error); }
+.text-success { color: var(--mui-success); }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+@media (max-width: 900px) {
+  .nav-rail { width: 72px; padding: 12px 6px; }
+  .nav-text, .airgap-badge span, .build-info { display: none; }
+  .nav-link { justify-content: center; padding: 12px 0; }
+  .content-canvas { padding: 20px 16px; }
+}

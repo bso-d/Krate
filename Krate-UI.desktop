@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Krate Studio
+GenericName=Kafka Cluster Studio & Management
+Comment=Desktop management and control plane studio for Krate offline Kafka clusters
+Exec=bash -c 'cd "$(dirname "$1")" && exec ./krate-ui.sh' _ %k
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;System;Utility;
+Keywords=kafka;krate;cluster;docker;studio;
+StartupNotify=true

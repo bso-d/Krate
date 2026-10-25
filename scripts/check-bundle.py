@@ -50,6 +50,9 @@ def main():
                  'auth/ui/local.yml', 'docs/dual-login.md', 'docs/identity-foundation.md', 'docs/grafana-sso.md'):
         if not (root / name).is_file():
             raise SystemExit('Missing authentication package file: ' + name)
+    for name in ('ui/krate_ui.py', 'ui/static/index.html', 'ui/static/styles.css', 'ui/static/app.js'):
+        if not (root / name).is_file():
+            raise SystemExit('Missing UI package file: ' + name)
     monitor_template = root / 'monitoring/.env.template'
     if monitor_template.is_file() and 'FLUENT_BIT_IMAGE=' in monitor_template.read_text():
         for name in ('fluent-bit.conf', 'parsers-multiline.conf', 'metadata.lua', 'discovery.py', 'vendor/dkjson.lua',
