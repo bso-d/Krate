@@ -1763,8 +1763,11 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                 get_req = urllib.request.Request(self.gateway(path),
                                                  headers={'Authorization': 'Bearer ' + token})
                 try:
-                    with urllib.request.urlopen(get_req, context=self.tls, timeout=30) as get_resp:
+                    get_resp = urllib.request.urlopen(get_req, context=self.tls, timeout=30)
+                    try:
                         result = json.load(get_resp)
+                    finally:
+                        get_resp.close()
                 except urllib.error.HTTPError as error:
                     if error.code == 404 and path in ('/api/v1/globaldatasources',
                                                       '/api/v1/globalvariables'):

@@ -10,7 +10,7 @@ repository's checksum of the binary to confirm the exact version."""
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as element_tree
+from xml.etree import ElementTree
 
 import depsdev
 from common import (Component, Unresolved, classify_texts, log, quote_url, slug)
@@ -33,8 +33,8 @@ def walk_jars(jars):
 def _pom_licences(pom_text):
     """(licence names/urls, parent gav) from a POM document."""
     try:
-        root = element_tree.fromstring(re.sub(r'\sxmlns="[^"]+"', '', pom_text, count=1))
-    except element_tree.ParseError:
+        root = ElementTree.fromstring(re.sub(r'\sxmlns="[^"]+"', '', pom_text, count=1))
+    except ElementTree.ParseError:
         return [], None
     names = []
     for lic in root.findall('./licenses/license'):

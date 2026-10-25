@@ -229,19 +229,15 @@ def validate_db_tls(root):
             raise Preflight(f'Protect {TLS_DIR}/{name} with chmod 600')
     if (tls / 'pg_hba.conf').read_text() != identity.PG_HBA:
         raise Preflight(f'{TLS_DIR}/pg_hba.conf differs from the generated policy; run krate identity up to restore it')
-    ca = str(tls / 'ca.crt')
-    if openssl('x509', '-in', ca, '-checkend', '86400', '-noout').returncode:
-        raise Preflight(f'{TLS_DIR}/ca.crt is unreadable or expires within a day; run krate identity renew-db-tls (it renews the CA too)')
-    if openssl('x509', '-in', ca, '-checkend', str(RENEW_WARNING), '-noout').returncode:
-        print(f'warning: {TLS_DIR}/ca.crt expires within {RENEW_WARNING // 86400} days'
-              f' ({openssl("x509", "-in", ca, "-noout", "-enddate").stdout.strip()}); run krate identity renew-db-tls', file=sys.stderr)
     server = str(tls / 'server.crt')
-    if openssl('x509', '-in', server, '-checkend', '86400', '-noout').returncode:
-        raise Preflight(f'{TLS_DIR}/server.crt is unreadable or expires within a day; run krate identity renew-db-tls')
-    if openssl('x509', '-in', server, '-checkend', str(RENEW_WARNING), '-noout').returncode:
-        print(f'warning: {TLS_DIR}/server.crt expires within {RENEW_WARNING // 86400} days'
-              f' ({openssl("x509", "-in", server, "-noout", "-enddate").stdout.strip()}); run krate identity renew-db-tls',
-              file=sys.stderr)
+    for cert_name, suffix in (('ca.crt', ' (it renews the CA too)'), ('server.crt', '')):
+        cert_path = str(tls / cert_name)
+        if openssl('x509', '-in', cert_path, '-checkend', '86400', '-noout').returncode:
+            raise Preflight(f'{TLS_DIR}/{cert_name} is unreadable or expires within a day; run krate identity renew-db-tls{suffix}')
+        if openssl('x509', '-in', cert_path, '-checkend', str(RENEW_WARNING), '-noout').returncode:
+            enddate = openssl('x509', '-in', cert_path, '-noout', '-enddate').stdout.strip()
+            print(f'warning: {TLS_DIR}/{cert_name} expires within {RENEW_WARNING // 86400} days ({enddate}); run krate identity renew-db-tls',
+                  file=sys.stderr)
     names = openssl('x509', '-in', server, '-noout', '-ext', 'subjectAltName').stdout
     entries = {entry.strip() for line in names.splitlines() for entry in line.split(',')}
     if 'DNS:' + identity.DB_HOST not in entries:
