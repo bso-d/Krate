@@ -81,7 +81,7 @@ def components(facts, image_ref, arch, cache, registry):
     return n
 
 
-def fetch(comp, cache, out_dir, rel_root):
+def fetch(comp, cache, _out_dir, rel_root):
     data = cache.cached_json(f'https://pypi.org/pypi/{comp.name}/{comp.version}/json', allow_404=True)
     if not data:
         raise Unresolved(f'PyPI has no release {comp.name} {comp.version}')

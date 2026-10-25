@@ -100,7 +100,8 @@ class Cache:
 
     def _lock(self, key):
         with self._guard:
-            return self._locks.setdefault(key, threading.Lock())
+            lock = self._locks.setdefault(key, threading.Lock())
+        return lock
 
     def blob(self, algo, digest):
         return self.root / 'blobs' / algo / digest[:2] / digest
@@ -113,9 +114,11 @@ class Cache:
         """Fetch a metadata document, cached on disk by URL (not a release input)."""
         path = self.meta_path(url)
         with self._lock('meta:' + url):
-            return self._cached_get(url, path, max_age, allow_404, timeout)
+            cached = self._cached_get(url, path, max_age, allow_404, timeout)
+        return cached
 
     def _cached_get(self, url, path, max_age, allow_404, timeout=120):
+        _ = self.root
         if path.exists() and (max_age is None or time.time() - path.stat().st_mtime < max_age):
             data = path.read_bytes()
             return None if data == b'\0__404__' else data
@@ -138,7 +141,8 @@ class Cache:
             urls = [urls]
         digest = digest.lower()
         with self._lock(f'{algo}:{digest}'):
-            return self._fetch(urls, algo, digest, size)
+            fetched = self._fetch(urls, algo, digest, size)
+        return fetched
 
     def _fetch(self, urls, algo, digest, size):
         target = self.blob(algo, digest)
@@ -357,6 +361,28 @@ def classify_texts(texts):
     return {'category': 'unknown', 'families': [], 'elected': None}
 
 
+def aggregate_expressions(expressions, *, strict_unknown=True):
+    """Aggregate multiple licence expressions under AND semantics into (category, families)."""
+    classified = [classify_expression(expr) for expr in expressions]
+    unknown = (
+        (not classified or any(e['category'] == 'unknown' for e in classified))
+        if strict_unknown else
+        (not classified or all(e['category'] == 'unknown' for e in classified))
+    )
+    if any(e['category'] == 'copyleft' for e in classified):
+        category = 'copyleft'
+    elif strict_unknown and unknown:
+        category = 'unknown'
+    elif any(e['category'] == 'elected-permissive' for e in classified):
+        category = 'elected-permissive'
+    elif unknown:
+        category = 'unknown'
+    else:
+        category = 'permissive'
+    families = sorted({fam for e in classified for fam in e['families']})
+    return category, families
+
+
 # ---------------------------------------------------------------- records
 
 @dataclasses.dataclass
@@ -366,6 +392,13 @@ class SourceFile:
     size: int
     origin: str          # URL (or git URL@commit:path) it came from
     verification: str    # how its integrity was established
+
+    def __init__(self, path: str, sha256: str, size: int, origin: str, verification: str):
+        self.path = path
+        self.sha256 = sha256
+        self.size = size
+        self.origin = origin
+        self.verification = verification
 
     def asdict(self):
         return dataclasses.asdict(self)
@@ -387,6 +420,38 @@ class Component:
     reason: str = ''
     notes: list = dataclasses.field(default_factory=list)
     fetch: dict = dataclasses.field(default_factory=dict)     # handler-private plan
+
+    def __init__(
+        self,
+        key: str,
+        ecosystem: str,
+        name: str,
+        version: str,
+        licence: str,
+        category: str,
+        families: list,
+        images: dict = None,
+        evidence: list = None,
+        files: list = None,
+        status: str = 'pending',
+        reason: str = '',
+        notes: list = None,
+        fetch: dict = None,
+    ):
+        self.key = key
+        self.ecosystem = ecosystem
+        self.name = name
+        self.version = version
+        self.licence = licence
+        self.category = category
+        self.families = list(families)
+        self.images = dict(images) if images is not None else {}
+        self.evidence = list(evidence) if evidence is not None else []
+        self.files = list(files) if files is not None else []
+        self.status = status
+        self.reason = reason
+        self.notes = list(notes) if notes is not None else []
+        self.fetch = dict(fetch) if fetch is not None else {}
 
     def needs_source(self):
         return self.category in ('copyleft', 'unknown')

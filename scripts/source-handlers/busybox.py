@@ -93,7 +93,7 @@ def _files_with_hash(bare, commit, want):
 def identify(cache, info, arch):
     if not info.get('built'):
         raise Unresolved('BusyBox binary has no build date banner; cannot locate its build')
-    bare = gitsrc._bare(cache, DL_REPO)
+    bare = gitsrc.bare_repo(cache, DL_REPO)
     tried = []
     for oi in official_images_commits(cache, info['built']):
         src, dist = _dist_entries(cache, oi, arch)
@@ -146,10 +146,10 @@ def _sign_sha256(text, filename):
     return None
 
 
-def fetch(comp, cache, out_dir, rel_root, workroot):
+def fetch(comp, cache, _out_dir, rel_root, workroot):
     info, arch = comp.fetch['info'], comp.fetch['arch']
     found = identify(cache, info, arch)
-    bare = gitsrc._bare(cache, DL_REPO)
+    bare = gitsrc.bare_repo(cache, DL_REPO)
     src = found['source_commit']
     comp.version = f'{info["version"]} ({found["variant"]})'
     comp.notes.append(f'binary matched docker-library/busybox dist-{ARCH[arch]} commit {found["dist_commit"]} '

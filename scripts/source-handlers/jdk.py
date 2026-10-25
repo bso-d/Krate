@@ -25,7 +25,7 @@ def parse_release(text):
     return out
 
 
-def components(facts, image_ref, arch, cache, registry):
+def components(facts, image_ref, arch, _cache, registry):
     n = 0
     for path, text in sorted((facts.get('jdk_release') or {}).items()):
         rel = parse_release(text)
@@ -57,7 +57,7 @@ def components(facts, image_ref, arch, cache, registry):
     return n
 
 
-def fetch(comp, cache, out_dir, rel_root, workroot):
+def fetch(comp, cache, _out_dir, rel_root, workroot):
     rel = comp.fetch['release']
     if comp.key.startswith('jdk:temurin@'):
         m = re.match(r'^Temurin-(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?\+(\d+)$', rel.get('IMPLEMENTOR_VERSION', ''))

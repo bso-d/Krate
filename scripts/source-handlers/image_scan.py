@@ -43,6 +43,7 @@ def _inspect(ref, arch):
 def resolve_image(candidates, arch, *, pull=True, expected_id=None):
     """Return (ref, inspect) for the first candidate present locally for arch, pulling
     registry references by digest when allowed."""
+    _ = expected_id
     for ref in candidates:
         data = _inspect(ref, arch)
         if data:
@@ -253,7 +254,7 @@ def scan_container(cid, workdir: Path, go_bin='go'):
                                               else json.dumps(pj.get('license') or pj.get('licenses'))}
                     except (ValueError, AttributeError):
                         pass
-                elif m.size > 4096 and m.size < MAX_MEMBER and (m.mode & 0o111 or '.so' in base):
+                elif 4096 < m.size < MAX_MEMBER and (m.mode & 0o111 or '.so' in base):
                     f = tar.extractfile(m)
                     head = f.read(4)
                     if head != b'\x7fELF':

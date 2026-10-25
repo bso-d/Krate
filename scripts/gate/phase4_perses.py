@@ -223,7 +223,8 @@ class Gate(Phase4Gate):
         if not os.path.exists(path):
             fail('no enrolment state file for %s (looked in %s)' % (user, path))
         with open(path, encoding='utf-8') as handle:
-            return json.load(handle)
+            loaded = json.load(handle)
+        return loaded
 
     def direct_perses(self, method, path, headers=None, data=None):
         """Direct request to http://perses:8080 from the perses network."""
@@ -234,7 +235,6 @@ class Gate(Phase4Gate):
         body_headers = dict(headers or {})
         if data and not any(k.lower() == 'content-type' for k in body_headers):
             body_headers['Content-Type'] = 'application/json'
-        cmd = []
         if gw_cid:
             cmd = ['exec', gw_cid, 'curl', '-s', '-i', '-X', method, 'http://perses:8080' + path]
             for k, v in body_headers.items():
@@ -366,6 +366,7 @@ class Gate(Phase4Gate):
         return st
 
     def signin(self, user, label, expect='ok'):
+        _ = expect
         d = self.driver(label)
         d.jar.clear()
         state = self.load_state(user)
@@ -480,7 +481,6 @@ class Gate(Phase4Gate):
         """
         t0 = time.monotonic()
         attempts = 0
-        res = {'kind': 'NOT_RUN'}
         while True:
             attempts += 1
             try:
@@ -1139,8 +1139,6 @@ class Gate(Phase4Gate):
         self.user_state['p4logout'] = state
         kc = self.master_kcadm()
         uid = kc.user_id('p4logout')
-        res = {}
-        sessions_before = -1
         for attempt in ('v9-logout', 'v9-logout-retry'):
             rc_out, _o, _e = self.krate('identity', 'users', 'logout', 'p4logout', timeout=180)
             if rc_out != 0:
@@ -1281,7 +1279,6 @@ class Gate(Phase4Gate):
 
         new_pw = 'P4Onboard_NewPass_2026!'
         self.add_runtime_secret(new_pw)
-        totp_seed = None
         actions_seen = []
         for _ in range(4):
             if st_post == 200 and 'name="totpSecret"' in page_post:
@@ -1432,12 +1429,12 @@ class Gate(Phase4Gate):
         viewer_grp = self.env.get('KEYCLOAK_VIEWER_GROUP', 'KRATE_VIEWERS')
         gid = kc.group_id(viewer_grp)
 
-        def create_dup_user(uname, email, pw):
+        def create_dup_user(dup_uname, email, dup_pw):
             kc.call('create', 'users', '-r', p2.REALM,
-                    '-s', 'username=' + uname, '-s', 'email=' + email,
+                    '-s', 'username=' + dup_uname, '-s', 'email=' + email,
                     '-s', 'emailVerified=true', '-s', 'enabled=true')
-            uid = kc.user_id(uname)
-            kc.call('set-password', '-r', p2.REALM, '--username', uname, password=pw)
+            uid = kc.user_id(dup_uname)
+            kc.call('set-password', '-r', p2.REALM, '--username', dup_uname, password=dup_pw)
             if uid and gid:
                 kc.add_group(uid, gid)
             return uid
@@ -1462,7 +1459,6 @@ class Gate(Phase4Gate):
         # Sign in first user
         d1 = self.driver('v13-dup1')
         st_first = -1
-        whoami_dup = False
         res1, res2 = {'kind': 'NOT_RUN'}, {'kind': 'NOT_RUN'}
         try:
             res1 = self.signin('p4dup1', 'v13-dup1')
@@ -1479,7 +1475,6 @@ class Gate(Phase4Gate):
         # refusals count -- any other REFUSED (e.g. Account is disabled)
         # proves a different defect, not the registration conflict.
         st_second_refused = False
-        second_ev = ''
         try:
             res2 = self.signin('p4dup2', 'v13-dup2')
             st_second_refused = (res2.get('kind') == 'REFUSED'
@@ -1612,7 +1607,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
     def v15_body(self):
         # walk log 115: Keycloak stopped mid-session: 200 until next refresh, then refused
         # (bound 420 s = proof window + 2 min), RestartCount unchanged, sign-in again within 60 s of healthy.
-        res = self.signin('p4v', 'v15-active', expect='ok')
+        self.signin('p4v', 'v15-active', expect='ok')
         d = self.driver('v15-active')
         if not d:
             fail('p4v signin failed')
@@ -1765,11 +1760,11 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
             else:
                 if not isinstance(token, str):
                     raise RuntimeError('Perses state read has no bearer token')
-                request = urllib.request.Request(self.gateway(path),
+                get_req = urllib.request.Request(self.gateway(path),
                                                  headers={'Authorization': 'Bearer ' + token})
                 try:
-                    with urllib.request.urlopen(request, context=self.tls, timeout=30) as response:
-                        result = json.load(response)
+                    with urllib.request.urlopen(get_req, context=self.tls, timeout=30) as get_resp:
+                        result = json.load(get_resp)
                 except urllib.error.HTTPError as error:
                     if error.code == 404 and path in ('/api/v1/globaldatasources',
                                                       '/api/v1/globalvariables'):
@@ -2450,7 +2445,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                 return None, 'Docker system unit is not active'
             return command, None
 
-        def outage_case(label, daemon_command=None):
+        def outage_case(label, daemon_cmd=None):
             signed = self.signin('p4v', 'v24-' + label + '-existing', expect='ok')
             if signed.get('kind') != 'OK' or signed.get('role') != 'viewer':
                 return 'FAIL', label + ': pre-existing Viewer sign-in failed'
@@ -2472,13 +2467,13 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                 rc, _, err = p2.docker('stop', '-t', '5', kc_cid, timeout=15)
                 if rc != 0:
                     raise RuntimeError('docker stop Keycloak rc %d: %s' % (rc, err[-100:]))
-                if daemon_command is None:
+                if daemon_cmd is None:
                     rc, _, err = p2.docker('restart', o2p_cid, perses_cid, timeout=30)
                     if rc != 0:
                         raise RuntimeError('docker restart consumers rc %d: %s' % (
                             rc, err[-100:]))
                 else:
-                    result = subprocess.run(daemon_command, capture_output=True,
+                    result = subprocess.run(daemon_cmd, capture_output=True,
                                             text=True, timeout=120)
                     if result.returncode != 0:
                         raise RuntimeError('systemctl restart docker rc %d: %s' % (
@@ -2494,7 +2489,7 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                         raise RuntimeError('Docker API unavailable after daemon restart')
                 if container_status(kc_cid) != 'exited':
                     raise RuntimeError('Keycloak did not remain stopped during outage')
-                restart_deadline = time.monotonic() + (90 if daemon_command else 45)
+                restart_deadline = time.monotonic() + (90 if daemon_cmd else 45)
                 while time.monotonic() < restart_deadline:
                     after_p = restart_count(perses_cid)
                     after_o = restart_count(o2p_cid)
@@ -2507,14 +2502,14 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                 viewer_status, viewer_headers, _ = viewer.req(
                     self.gateway('/api/v1/projects'), timeout=10)
                 viewer_location = viewer_headers.get('Location', '')
-            except (OSError, subprocess.TimeoutExpired, RuntimeError) as error:
-                outage_error = '%s: %s' % (type(error).__name__, error)
+            except (OSError, subprocess.TimeoutExpired, RuntimeError) as outage_exc:
+                outage_error = '%s: %s' % (type(outage_exc).__name__, outage_exc)
             finally:
                 start_rc, _, start_err = p2.docker('start', kc_cid, timeout=30)
-                if start_rc != 0 and daemon_command is not None:
+                if start_rc != 0 and daemon_cmd is not None:
                     # A failed daemon restart must not leave this VM fixture's
                     # identity service stopped without a recovery attempt.
-                    recover_command = daemon_command[:-2] + ['start', 'docker']
+                    recover_command = daemon_cmd[:-2] + ['start', 'docker']
                     try:
                         recovery = subprocess.run(recover_command, capture_output=True,
                                                   text=True, timeout=60)
@@ -2524,9 +2519,9 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
                         else:
                             start_err += '; systemctl start docker rc %d: %s' % (
                                 recovery.returncode, recovery.stderr[-100:])
-                    except (OSError, subprocess.TimeoutExpired) as error:
+                    except (OSError, subprocess.TimeoutExpired) as recover_exc:
                         start_err += '; Docker daemon recovery: %s: %s' % (
-                            type(error).__name__, error)
+                            type(recover_exc).__name__, recover_exc)
             if start_rc != 0:
                 return 'FAIL', '%s: Keycloak restore rc %d: %s; outage %s' % (
                     label, start_rc, start_err[-100:], outage_error or 'none')

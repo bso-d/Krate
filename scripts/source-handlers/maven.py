@@ -10,7 +10,7 @@ repository's checksum of the binary to confirm the exact version."""
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as element_tree
 
 import depsdev
 from common import (Component, Unresolved, classify_texts, log, quote_url, slug)
@@ -33,8 +33,8 @@ def walk_jars(jars):
 def _pom_licences(pom_text):
     """(licence names/urls, parent gav) from a POM document."""
     try:
-        root = ET.fromstring(re.sub(r'\sxmlns="[^"]+"', '', pom_text, count=1))
-    except ET.ParseError:
+        root = element_tree.fromstring(re.sub(r'\sxmlns="[^"]+"', '', pom_text, count=1))
+    except element_tree.ParseError:
         return [], None
     names = []
     for lic in root.findall('./licenses/license'):
@@ -283,7 +283,7 @@ def _checksum(cache, url):
     return None, None
 
 
-def fetch(comp, cache, out_dir, rel_root):
+def fetch(comp, cache, _out_dir, rel_root):
     if comp.ecosystem == 'jar':
         raise Unresolved('JAR has no Maven coordinates and no Central SHA-1 match, so its exact '
                          'source cannot be located from an authoritative repository')

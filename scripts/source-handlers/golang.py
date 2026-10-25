@@ -65,7 +65,7 @@ def main_revision(binfo, labels, image_ref):
     return None, 'no revision evidence'
 
 
-def components(facts, image_ref, arch, cache, registry):
+def components(facts, image_ref, arch, _cache, registry):
     n = 0
     for path, info in sorted((facts.get('go_binaries') or {}).items()):
         if not info.get('path') and not info.get('main'):
@@ -207,7 +207,7 @@ def classify(comps, cache, workroot):
             c.families = sorted(set(c.families) | {'LGPL-relink'})
 
 
-def fetch(comp, cache, out_dir, rel_root, workroot):
+def fetch(comp, cache, _out_dir, rel_root, workroot):
     if comp.ecosystem == 'git':
         commit = comp.fetch.get('commit')
         if not commit:

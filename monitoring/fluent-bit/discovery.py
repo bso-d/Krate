@@ -115,7 +115,7 @@ def main():
     excluded = set(os.getenv('KRATE_EXCLUDED_CONTAINERS', '').split(','))
     running = True
 
-    def stop(signum, frame):
+    def stop(_signum, _frame):
         nonlocal running
         running = False
 

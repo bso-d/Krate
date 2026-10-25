@@ -79,6 +79,7 @@ add_runtime_secret(); the runner adds that file to its leak set.
 """
 import base64
 import calendar
+import contextlib
 import datetime
 import hashlib
 import hmac
@@ -539,7 +540,8 @@ class Gate(Phase4Gate):
         if not path:
             raise RuntimeError('no enrolment state for %s (setup did not run?)' % user)
         with open(path, encoding='utf-8') as handle:
-            return json.load(handle)
+            loaded = json.load(handle)
+        return loaded
 
     def signin(self, user, label, expect='ok'):
         """Full realm sign-in to Grafana (walk method p4driver.py cmd_signin, logs/123-128):
@@ -807,7 +809,9 @@ class Gate(Phase4Gate):
             hosts += ['--add-host', '%s:%s' % (self.origin.hostname, gateway)]
         # The container signs the user in on its own clock (phase4-browser.mjs reads Date.now()), with no
         # ledger: the ledger holds this user's lock for the run and starts it in a step nobody used.
-        with self.totp_steps.guard_external_signin(user):
+        totp_steps = getattr(self, 'totp_steps', None)
+        totp_guard = totp_steps.guard_external_signin(user) if totp_steps is not None else contextlib.nullcontext()
+        with totp_guard:
             rc, out, err = p2.docker(
                 'run', '--rm', *hosts,
                 '-v', '%s:/out' % outdir, '-v', '%s:/gate:ro' % HERE,
@@ -847,7 +851,8 @@ class Gate(Phase4Gate):
         are returned for the receipt. Returns (summary dict | None, steps list,
         first-attempt failed requests or None)."""
         state = self.load_state(user)
-        outdir = os.path.join(self.scratch_dir, 'browser', user)
+        scratch_root = getattr(self, 'scratch_dir', None) or self.state_dir
+        outdir = os.path.join(scratch_root, 'browser', user)
         os.makedirs(outdir, exist_ok=True)
         summary, steps = self._browser_attempt(user, dash, gateway, state, outdir)
         retried = None
@@ -866,10 +871,7 @@ class Gate(Phase4Gate):
         rows, 0 panel-error icons)."""
         if self.browser_results is not None:
             return self.browser_results
-        out = {}
-        out['problem'] = None
-        out['viewer'] = None
-        out['admin'] = None
+        out = {'problem': None, 'viewer': None, 'admin': None}
         self.browser_results = out
         rc, _o, _e = p2.docker('image', 'inspect', self.BROWSER_IMAGE)
         if rc != 0:
@@ -1136,9 +1138,9 @@ class Gate(Phase4Gate):
             raise RuntimeError('GRAFANA_PASSWORD is empty in monitoring/.env')
 
         def api(method, path, body=None, auth=None, headers=None):
-            status, payload = self.grafana_api(method, path, body, auth or admin, headers=headers)
-            log('setup seed: %s %s -> %s' % (method, path, status))
-            return status, payload
+            api_status, api_payload = self.grafana_api(method, path, body, auth or admin, headers=headers)
+            log('setup seed: %s %s -> %s' % (method, path, api_status))
+            return api_status, api_payload
 
         for login, realm_name in LOCAL_USERS:
             email = ('%s@%s' % (realm_name, EMAIL_DOMAIN)) if realm_name else ('%s@%s' % (login, EMAIL_DOMAIN))
@@ -1165,11 +1167,11 @@ class Gate(Phase4Gate):
                     'schemaVersion': 39, 'version': 0, 'refresh': ''}
 
         def save_dashboard(uid, title, folder_uid, auth=None):
-            status, payload = api('POST', '/api/dashboards/db',
-                                  {'dashboard': dash_model(uid, title), 'folderUid': folder_uid or '',
-                                   'message': 'p4 seed', 'overwrite': False}, auth=auth)
-            if status != 200:
-                raise RuntimeError('dashboard save %s: %s %s' % (uid, status, payload))
+            save_status, save_payload = api('POST', '/api/dashboards/db',
+                                            {'dashboard': dash_model(uid, title), 'folderUid': folder_uid or '',
+                                             'message': 'p4 seed', 'overwrite': False}, auth=auth)
+            if save_status != 200:
+                raise RuntimeError('dashboard save %s: %s %s' % (uid, save_status, save_payload))
 
         status, _p = api('POST', '/api/folders', {'uid': 'p4collidef', 'title': 'P4 Collide Folder'},
                          auth=collide_auth)
@@ -1242,16 +1244,16 @@ class Gate(Phase4Gate):
         creation times. Basic admin before the switch, the seed token after it."""
         auth = None if token else self.admin_basic()
 
-        def read(path):
-            body = self.grafana_read(path, auth=auth, token=token)
+        def read(api_path):
+            body = self.grafana_read(api_path, auth=auth, token=token)
             if body is None:
-                raise RuntimeError('Grafana read %s answered an empty body' % path)
+                raise RuntimeError('Grafana read %s answered an empty body' % api_path)
             return body
 
-        def read_list(path):
-            body = read(path)
+        def read_list(api_path):
+            body = read(api_path)
             if not isinstance(body, list):
-                raise RuntimeError('Grafana read %s is not a list' % path)
+                raise RuntimeError('Grafana read %s is not a list' % api_path)
             return body
 
         out = {'categories': {}, 'dashboards': {}, 'users': [], 'volumes': []}
@@ -1642,7 +1644,9 @@ class Gate(Phase4Gate):
         res = '/grafana/api/datasources/uid/prometheus/resources'
 
         def count_up():
-            st, _h, text = d.req(self.base + res + '/api/v1/query?query=' + urllib.parse.quote('count(up)'))
+            up_st, _up_h, text = d.req(self.base + res + '/api/v1/query?query=' + urllib.parse.quote('count(up)'))
+            if up_st != 200:
+                return None
             try:
                 data = json.loads(text)
                 return data['data']['result'][0]['value'][1]
@@ -1887,7 +1891,6 @@ class Gate(Phase4Gate):
         # token, writes token+meta the way commit 4 does, deletes the 90-day id; monitor up
         # then creates the 90-day successor and the 29-day id is gone.
         renewal_ok = successor_ok = False
-        new_id = new_key = None
         rc, out, err = self.grafana_admin('token-create', '--account-id', str(account_id),
                                           '--days', '29', token=token)
         try:
@@ -2000,7 +2003,7 @@ class Gate(Phase4Gate):
                               self.monitor_env.get('PERSES_PORT') or '3443')
         port = self.monitor_env.get('GRAFANA_PORT') or '3000'
         perses_port = self.monitor_env.get('PERSES_PORT') or '3443'
-        rc, out, _ = p2.run(['ifconfig'], timeout=30)
+        _rc, out, _ = p2.run(['ifconfig'], timeout=30)
         lan4 = iface = None
         current = None
         linklocal_by_iface = {}
@@ -2022,8 +2025,8 @@ class Gate(Phase4Gate):
             args = ['curl', '-s', '-o', '/dev/null', '--max-time', '8', '-w', '%{http_code}']
             if insecure:
                 args.append('-k')
-            rc, out, _err = p2.run(args + [url], timeout=30)
-            return rc, out.strip()
+            c_rc, c_out, _err = p2.run(args + [url], timeout=30)
+            return c_rc, c_out.strip()
 
         rc1, code1 = curl_rc('http://127.0.0.1:%s/api/health' % port)
         control1 = rc1 == 0 and code1 == '200'
@@ -2174,9 +2177,9 @@ class Gate(Phase4Gate):
         def refusals(d):
             bad = []
             for suffix, method in write_paths:
-                st, _h, body = d.req(self.base + proxy + suffix,
-                                     data=b'{}' if method == 'POST' else None, method=method,
-                                     headers={'Content-Type': 'application/json'} if method == 'POST' else None)
+                st, _hdrs, body = d.req(self.base + proxy + suffix,
+                                        data=b'{}' if method == 'POST' else None, method=method,
+                                        headers={'Content-Type': 'application/json'} if method == 'POST' else None)
                 if not (st == 403 and 'nginx' in body.lower()):
                     bad.append('%s=%s' % (suffix, st))
             return bad
@@ -2379,7 +2382,7 @@ class Gate(Phase4Gate):
         def _re_enable():
             # p4dis is owned state for later rows: restore it on every exit,
             # keeping the caller's primary error alongside the cleanup result.
-            rc, _o, _e = self.krate_locked('identity', 'users', 'enable', 'p4dis', timeout=120)
+            rc, _en_out, _en_err = self.krate_locked('identity', 'users', 'enable', 'p4dis', timeout=120)
             return rc
 
         while True:
@@ -2551,7 +2554,6 @@ class Gate(Phase4Gate):
         restarts_after = (get_restarts(graf_cid), get_restarts(proxy_cid), get_restarts(ui_cid))
         restarts_ok = (restarts_before == restarts_after and -1 not in restarts_before)
 
-        t_start = time.monotonic()
         rc_start, _, _ = p2.docker('start', kc_cid)
         healthy_secs = self._wait_container_healthy(kc_cid, limit=180)
 
@@ -2688,13 +2690,13 @@ class Gate(Phase4Gate):
                 if ps_rc != 0:
                     raise RuntimeError('U14 docker ps failed for %s: %s' % (project, ps_err[:120]))
                 for cid in ps_out.split():
-                    inspect_rc, detail, inspect_err = p2.docker(
+                    inspect_rc, inspect_detail, inspect_err = p2.docker(
                         'inspect', '--format',
                         '{{.Id}} {{.State.StartedAt}} {{index .Config.Labels "com.docker.compose.service"}}',
                         cid)
                     if inspect_rc != 0:
                         raise RuntimeError('U14 docker inspect failed: ' + inspect_err[:120])
-                    containers.append((project, detail.strip()))
+                    containers.append((project, inspect_detail.strip()))
             if not containers:
                 raise RuntimeError('U14 found no fixture containers')
             resources = []
@@ -2859,6 +2861,7 @@ class Gate(Phase4Gate):
         only — no values anywhere, so no secret can leave through it. When
         this fingerprint is unchanged yet the container id moved, plain
         `compose up` had no config reason and the mechanism is elsewhere."""
+        _ = self
         if not cid:
             return {}
         rc, out, _ = p2.docker(
@@ -3041,8 +3044,8 @@ class Gate(Phase4Gate):
             core_unchanged = False
             diff_core.append('cluster baseline was not captured (setup cluster_initial is empty)')
 
-        def ledger(svc):
-            changed, note = core_ledger_change(svc, initial[svc], curr_cluster[svc])
+        def ledger(svc_name):
+            changed, note = core_ledger_change(svc_name, initial[svc_name], curr_cluster[svc_name])
             if changed:
                 diff_core.append(note)
                 return False
@@ -3262,13 +3265,13 @@ class Gate(Phase4Gate):
         samples = []
 
         def sample():
-            status, detail = self.one_request(driver)
+            req_status, detail = self.one_request(driver)
             now_ms = time.time_ns() // 1_000_000
             now_mono = time.monotonic()
-            age = (now_ms - start_ms) / 1000
-            samples.append((age, status, now_mono, detail))
-            log('U27 p4v Keycloak-start +%.1fs /grafana/api/user -> %s' % (age, status))
-            return age, status
+            sample_age = (now_ms - start_ms) / 1000
+            samples.append((sample_age, req_status, now_mono, detail))
+            log('U27 p4v Keycloak-start +%.1fs /grafana/api/user -> %s' % (sample_age, req_status))
+            return sample_age, req_status
 
         initial_age, initial_status = sample()
         if initial_status != 200 or initial_age > 60:
@@ -3276,7 +3279,6 @@ class Gate(Phase4Gate):
                    % (initial_status, initial_age)
         target_ms = start_ms + (max_seconds + 15) * 1000
         deadline_ms = start_ms + (max_seconds + 60) * 1000
-        first_after = None
         cadence_ok = True
         early_ok = True
         while True:
@@ -3358,7 +3360,7 @@ class Gate(Phase4Gate):
         idle_form = None
         while True:
             now = time.monotonic()
-            if now >= next_ctrl and now < deadline:
+            if next_ctrl <= now < deadline:
                 stc, _mc = self.one_request(ctrl['driver'])
                 log('U29 control p4ctrl +%.0fs -> %s' % (now - t0, stc))
                 ctrl_statuses.append(stc)

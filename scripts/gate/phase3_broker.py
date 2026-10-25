@@ -662,7 +662,6 @@ class Gate:
             fail('failed to read state.json before stopping watcher')
         pre_data = json.loads(state_pre)
         saved_ts = pre_data.get('last_transition_ts')
-        saved_failures = pre_data.get('consecutive_failures')
 
         # Thread 6: set a distinct state property (pause the watcher)
         rc, _, err = p2.run([os.path.join(self.edition, 'krate'), 'identity', 'idp-watch', 'pause'], timeout=30)

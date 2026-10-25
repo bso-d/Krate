@@ -248,7 +248,7 @@ def perses_provisioning(mode, env, site):
     return []
 
 
-def oauth2_proxy_config(site, env):
+def oauth2_proxy_config(site, _env=None):
     public = site['public_url']
     host = urlsplit(public).netloc
     minutes = bounded_int(site, 'group_proof_minutes', 15, 1, 60)
@@ -482,7 +482,7 @@ map $request_uri $krate_return {
 '''
 
 
-def logout_location(site, env=None):
+def logout_location(site, _env=None):
     """The realm's one-logout location for GATEWAY_SSO.
 
     Variant B2 (default, lab7-verified):

@@ -408,6 +408,13 @@ class IdpWatcher:
 
         # Internal state
         self.running = True
+        self.current_state = 'HEALTHY'
+        self.provider_enabled = True
+        self.consecutive_failures = 0
+        self.consecutive_successes = 0
+        self.last_transition_ts = 0.0
+        self.last_probe_ts = 0.0
+        self.last_error = None
         self.reconciliation_pending = False
         self.load_or_init_state()
 
@@ -652,7 +659,7 @@ def main():
 
     watcher = IdpWatcher(plan_path, truststores_dir, state_dir, config)
 
-    def handle_signal(sig, frame):
+    def handle_signal(sig, _frame):
         watcher.running = False
         sys.stdout.write(f"[idp-watch] Caught signal {sig}, terminating...\n")
         sys.stdout.flush()

@@ -541,7 +541,7 @@ def validate_identity(root, config):
         validate_broker(root, env, origin, secrets, require_secret=False)
 
 
-def validate_monitoring(root, config):
+def validate_monitoring(_root, config):
     """Monitoring stack checks: network membership, and Grafana's realm-mode exposure.
 
     A monitoring service on an identity network would reach Keycloak and its database

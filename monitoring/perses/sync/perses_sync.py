@@ -262,7 +262,8 @@ class Ledger:
 
     def snapshot(self):
         with self.lock:
-            return dict(self.users)
+            copied = dict(self.users)
+        return copied
 
 
 class Reconciler:
@@ -281,19 +282,19 @@ class Reconciler:
 
     def token(self):
         with self.token_lock:
-            if self.service_token and jwt_expiry(self.service_token) - time.time() > 60:
-                return self.service_token
-            secret = Path(self.settings['service_client_secret_file']).read_text().strip()
-            basic = base64.b64encode((self.settings['service_client_id'] + ':' + secret).encode()).decode()
-            status, _, data = self.perses.request(
-                'POST', '/api/auth/providers/oidc/%s/token' % self.settings['oidc_slug'],
-                {'Authorization': 'Basic ' + basic, 'Content-Type': 'application/x-www-form-urlencoded',
-                 'Accept': 'application/json'},
-                urlencode({'grant_type': 'client_credentials'}).encode())
-            if status != 200:
-                raise Denied(403, 'service token request returned %d' % status)
-            self.service_token = json.loads(data)['access_token']
-            return self.service_token
+            if not (self.service_token and jwt_expiry(self.service_token) - time.time() > 60):
+                secret = Path(self.settings['service_client_secret_file']).read_text().strip()
+                basic = base64.b64encode((self.settings['service_client_id'] + ':' + secret).encode()).decode()
+                status, _, data = self.perses.request(
+                    'POST', '/api/auth/providers/oidc/%s/token' % self.settings['oidc_slug'],
+                    {'Authorization': 'Basic ' + basic, 'Content-Type': 'application/x-www-form-urlencoded',
+                     'Accept': 'application/json'},
+                    urlencode({'grant_type': 'client_credentials'}).encode())
+                if status != 200:
+                    raise Denied(403, 'service token request returned %d' % status)
+                self.service_token = json.loads(data)['access_token']
+            current_token = self.service_token
+        return current_token
 
     def whoami(self, user_token):
         status, _, data = self.perses.request('GET', '/api/v1/user/whoami',
@@ -591,9 +592,14 @@ def relay(cookies):
 def make_handler(guard):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
+        log_prefix = 'perses-sync: '
+
+        def __init__(self, *args, **kwargs):
+            self.close_connection = False
+            super().__init__(*args, **kwargs)
 
         def log_message(self, fmt, *args):
-            sys.stderr.write('perses-sync: ' + fmt % args + '\n')
+            sys.stderr.write(self.log_prefix + fmt % args + '\n')
 
         def send(self, status, headers=(), body=b''):
             try:
@@ -619,7 +625,7 @@ def make_handler(guard):
                 headers = []
             self.send(exc.status, headers)
 
-        def do_GET(self):
+        def handle_get(self):
             if self.path == '/healthz':
                 return self.send(200, [('Content-Type', 'text/plain')], b'ok\n')
             if self.path == '/role':
@@ -644,7 +650,7 @@ def make_handler(guard):
                 self.log_message('error: %r', exc)
                 self.send(403)
 
-        def do_POST(self):
+        def handle_post(self):
             if self.path != '/refresh':
                 return self.send(404)
             length = int(self.headers.get('Content-Length') or 0)
@@ -667,6 +673,8 @@ def make_handler(guard):
                 self.log_message('error: %r', exc)
                 self.send(403)
 
+    setattr(Handler, 'do_GET', Handler.handle_get)
+    setattr(Handler, 'do_POST', Handler.handle_post)
     return Handler
 
 
@@ -715,8 +723,8 @@ def main():
         while not stopping.wait(30):
             try:
                 reconciler.sweep()
-            except Exception as exc:
-                sys.stderr.write('perses-sync: sweep failed: %r\n' % (exc,))
+            except Exception as sweep_exc:
+                sys.stderr.write('perses-sync: sweep failed: %r\n' % (sweep_exc,))
 
     if reconciler:
         threading.Thread(target=sweeper, daemon=True).start()

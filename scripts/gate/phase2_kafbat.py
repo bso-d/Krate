@@ -319,8 +319,10 @@ class User:
                 counter = int(now // 30)
                 if counter not in self.used and 30 - now % 30 > 3:
                     self.used.add(counter)
-                    return totp(self.secret, counter)
+                    current_code = totp(self.secret, counter)
+                    break
                 time.sleep(30 - now % 30 + 0.5)
+        return current_code
 
 
 # ─── Docker and kcadm ─────────────────────────────────────────────────────────
@@ -1923,13 +1925,16 @@ class Terminated(BaseException):
     """SIGTERM reached the helper (a BaseException, so case()'s harness-error handler lets it through)."""
 
 
-def _on_sigterm(signum, frame):
+def on_sigterm(_signum, _frame):
     raise Terminated()
+
+
+_on_sigterm = on_sigterm
 
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    signal.signal(signal.SIGTERM, _on_sigterm)
+    signal.signal(signal.SIGTERM, on_sigterm)
     return Gate(args).main()
 
 
