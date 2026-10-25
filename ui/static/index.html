@@ -35,46 +35,46 @@
 
     <!-- Right: Color-Changing Outline Lucide Status Icons & Action Buttons (Material UI Style) -->
     <div class="top-bar-right">
-      <!-- Cluster Runtime Health (Outline Color-Changing Icon) -->
+      <!-- Cluster Runtime Health -->
       <div class="mui-status-indicator status-stopped" id="badge-cluster-status" title="Cluster: Stopped" role="status">
-        <svg class="status-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
-        <span class="status-label sr-only">Cluster: <strong>Stopped</strong></span>
+        <svg class="status-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+        <span class="status-label" id="text-cluster-status">Cluster: <strong>Stopped</strong></span>
       </div>
 
-      <!-- Preflight Doctor Status (Outline Color-Changing Icon) -->
+      <!-- Preflight Doctor Status -->
       <div class="mui-status-indicator status-info" id="badge-doctor-status" title="Doctor: Checking..." role="status">
-        <svg class="status-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        <span class="status-label sr-only" id="text-doctor-status">Doctor: Checking...</span>
+        <svg class="status-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        <span class="status-label" id="text-doctor-status">Doctor: Checking...</span>
       </div>
 
-      <!-- Host Storage / Disk Space (Outline Color-Changing Icon) -->
+      <!-- Host Storage / Disk Space -->
       <div class="mui-status-indicator status-neutral" id="badge-disk-status" title="Host Disk Space" role="status">
-        <svg class="status-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></svg>
-        <span class="status-label sr-only" id="text-disk-status">Disk: ...</span>
+        <svg class="status-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></svg>
+        <span class="status-label" id="text-disk-status">Disk: ...</span>
       </div>
 
-      <!-- Session Status (Outline Color-Changing Icon) -->
+      <!-- Session Status -->
       <div class="mui-status-indicator status-success" id="badge-auth-status" title="Session Authenticated" role="status">
-        <svg class="status-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
-        <span class="status-label sr-only" id="text-auth-status">Ready</span>
+        <svg class="status-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span class="status-label" id="text-auth-status">Ready</span>
       </div>
 
       <div class="top-bar-divider"></div>
 
       <!-- Remote SSH Action Button -->
       <button class="mui-icon-btn" id="btn-remote-connect" title="Remote SSH Connection" aria-label="Remote SSH">
-        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg>
+        <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg>
       </button>
 
       <!-- Theme Mode Toggle Button -->
       <button class="mui-icon-btn" id="btn-theme-toggle" title="Toggle Dark / Light Theme" aria-label="Toggle theme">
-        <svg class="theme-icon-dark" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
-        <svg class="theme-icon-light" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+        <svg class="theme-icon-dark" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <svg class="theme-icon-light" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
       </button>
 
       <!-- Terminal Drawer Toggle Button -->
       <button class="mui-icon-btn btn-terminal-nav" id="btn-toggle-terminal" title="Toggle Live Execution Logs" aria-label="Toggle Terminal">
-        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+        <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
         <span class="terminal-pulse-dot" id="terminal-badge-status"></span>
       </button>
     </div>
@@ -86,49 +86,49 @@
     <nav class="nav-rail" id="nav-rail" aria-label="Main Navigation">
       <ul class="nav-list">
         <li class="nav-item">
-          <button class="nav-link active" data-view="setup" id="nav-setup">
+          <button class="nav-link active" data-view="setup" id="nav-setup" title="Setup &amp; Doctor">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 0 0-2 2v5a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6V4a2 2 0 0 0-2-2h-1a.2.2 0 1 0 .3.3"/><path d="M8 15v1a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6v-4"/><circle cx="20" cy="10" r="2"/></svg>
             <span class="nav-text">Setup &amp; Doctor</span>
           </button>
         </li>
         <li class="nav-item">
-          <button class="nav-link" data-view="services" id="nav-services">
+          <button class="nav-link" data-view="services" id="nav-services" title="Cluster Services">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
             <span class="nav-text">Cluster Services</span>
           </button>
         </li>
         <li class="nav-item">
-          <button class="nav-link" data-view="lag" id="nav-lag">
+          <button class="nav-link" data-view="lag" id="nav-lag" title="Lag &amp; Health Matrix">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
             <span class="nav-text">Lag &amp; Health Matrix</span>
           </button>
         </li>
         <li class="nav-item">
-          <button class="nav-link" data-view="config" id="nav-config">
+          <button class="nav-link" data-view="config" id="nav-config" title="Configuration">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="1" x2="7" y1="14" y2="14"/><line x1="9" x2="15" y1="8" y2="8"/><line x1="17" x2="23" y1="16" y2="16"/></svg>
             <span class="nav-text">Configuration</span>
           </button>
         </li>
         <li class="nav-item">
-          <button class="nav-link" data-view="identity" id="nav-identity">
+          <button class="nav-link" data-view="identity" id="nav-identity" title="Identity &amp; Users">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
             <span class="nav-text">Identity &amp; Users</span>
           </button>
         </li>
         <li class="nav-item">
-          <button class="nav-link" data-view="sso" id="nav-sso">
-            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+          <button class="nav-link" data-view="sso" id="nav-sso" title="SSO Wizard">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z"/><circle cx="16.5" cy="7.5" r="1"/></svg>
             <span class="nav-text">SSO Wizard</span>
           </button>
         </li>
         <li class="nav-item">
-          <button class="nav-link" data-view="observability" id="nav-observability">
+          <button class="nav-link" data-view="observability" id="nav-observability" title="Observability">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
             <span class="nav-text">Observability</span>
           </button>
         </li>
         <li class="nav-item">
-          <button class="nav-link" data-view="release" id="nav-release">
+          <button class="nav-link" data-view="release" id="nav-release" title="Release &amp; Gates">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 16 2 2 4-4"/><path d="M21 10V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l2-1.14"/><path d="m7.5 4.27 9 5.15"/><polyline points="3.29 7 12 12 20.71 7"/><line x1="12" x2="12" y1="22" y2="12"/></svg>
             <span class="nav-text">Release &amp; Gates</span>
           </button>
@@ -208,22 +208,33 @@
             <div class="wizard-step" id="step-images">
               <div class="step-badge-row">
                 <span class="step-num">3</span>
-                <span class="step-status-chip">Digest Pinned</span>
+                <span class="step-status-chip" id="step-images-chip">Digest Pinned</span>
               </div>
               <div class="step-content">
                 <div class="step-title">Offline Images</div>
-                <div class="step-desc">Pinned digests in .env.template</div>
+                <div class="step-desc" id="step-images-desc">Pinned digests in .env.template</div>
               </div>
               <button class="btn btn-sm btn-secondary step-btn" id="btn-step-images">Load Images</button>
             </div>
-            <div class="wizard-step" id="step-start">
+            <div class="wizard-step" id="step-install">
               <div class="step-badge-row">
                 <span class="step-num">4</span>
-                <span class="step-status-chip">Production Live</span>
+                <span class="step-status-chip" id="step-install-chip">Package Step</span>
+              </div>
+              <div class="step-content">
+                <div class="step-title">Install Package</div>
+                <div class="step-desc" id="step-install-desc">Install bundle into $KRATE_HOME and start</div>
+              </div>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-install">Install</button>
+            </div>
+            <div class="wizard-step" id="step-start">
+              <div class="step-badge-row">
+                <span class="step-num">5</span>
+                <span class="step-status-chip" id="step-start-chip">Production Live</span>
               </div>
               <div class="step-content">
                 <div class="step-title">Start Cluster</div>
-                <div class="step-desc">Launch Kafka, Kafbat UI &amp; Proxy</div>
+                <div class="step-desc" id="step-start-desc">Launch Kafka, Kafbat UI &amp; Proxy</div>
               </div>
               <button class="btn btn-sm btn-primary step-btn" id="btn-step-start">Start</button>
             </div>
@@ -654,45 +665,45 @@
         <div class="portals-grid">
           <div class="portal-card">
             <div class="portal-icon">
-              <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" fill="none" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
             </div>
             <div class="portal-body">
               <h3 class="portal-title">Grafana Dashboards</h3>
               <p class="portal-desc">Pre-seeded Kafka broker, KRaft consensus, and OS performance graphs.</p>
-              <a href="http://localhost:3000" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open Grafana :3000</a>
+              <a href="https://localhost/grafana/" id="link-portal-grafana" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open Grafana</a>
             </div>
           </div>
 
           <div class="portal-card">
             <div class="portal-icon">
-              <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" fill="none" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
             </div>
             <div class="portal-body">
               <h3 class="portal-title">Kafbat UI</h3>
               <p class="portal-desc">Visual topic manager, message inspector, and schema registry explorer.</p>
-              <a href="http://localhost:8080" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open Kafbat :8080</a>
+              <a href="https://localhost/" id="link-portal-kafbat" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open Kafbat UI</a>
             </div>
           </div>
 
           <div class="portal-card">
             <div class="portal-icon">
-              <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" fill="none" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
             </div>
             <div class="portal-body">
               <h3 class="portal-title">Perses Observability</h3>
               <p class="portal-desc">Modern declarative dashboards with GitOps synchronization.</p>
-              <a href="http://localhost:8081" target="_blank" rel="noopener" class="btn btn-sm btn-secondary">Open Perses :8081</a>
+              <a href="https://localhost:3443/" id="link-portal-perses" target="_blank" rel="noopener" class="btn btn-sm btn-secondary">Open Perses :3443</a>
             </div>
           </div>
 
           <div class="portal-card">
             <div class="portal-icon">
-              <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" fill="none" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
             </div>
             <div class="portal-body">
               <h3 class="portal-title">Loki Log Streams</h3>
               <p class="portal-desc">Log aggregation across Kafka brokers, Envoy/Nginx, and Keycloak.</p>
-              <a href="http://localhost:3000/explore" target="_blank" rel="noopener" class="btn btn-sm btn-secondary">Explore Logs</a>
+              <a href="https://localhost/grafana/explore" id="link-portal-loki" target="_blank" rel="noopener" class="btn btn-sm btn-secondary">Explore Logs</a>
             </div>
           </div>
         </div>
@@ -701,7 +712,7 @@
         <div class="card">
           <div class="card-header">
             <h2 class="card-title">Active Alert Rules &amp; Health Probes</h2>
-            <span class="badge badge-success">All Alerts Clear</span>
+            <span class="badge badge-neutral" id="alerts-summary-badge">Unknown</span>
           </div>
           <div class="table-container">
             <table class="data-table">
@@ -714,34 +725,34 @@
                   <th>State</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody id="tbody-alerts">
                 <tr>
                   <td><strong>UnderReplicatedPartitions</strong></td>
                   <td><span class="badge badge-danger">Critical</span></td>
                   <td>Kafka Brokers</td>
                   <td>Partitions below target replica quorum</td>
-                  <td><span class="badge badge-success">OK (0 Partitions)</span></td>
+                  <td><span class="badge badge-neutral" data-alert-rule="UnderReplicatedPartitions">Unknown</span></td>
                 </tr>
                 <tr>
                   <td><strong>OfflinePartitionsCount</strong></td>
                   <td><span class="badge badge-danger">Critical</span></td>
                   <td>Kafka Brokers</td>
                   <td>Partitions with no active leader</td>
-                  <td><span class="badge badge-success">OK (0 Partitions)</span></td>
+                  <td><span class="badge badge-neutral" data-alert-rule="OfflinePartitionsCount">Unknown</span></td>
                 </tr>
                 <tr>
                   <td><strong>BrokerActiveController</strong></td>
                   <td><span class="badge badge-warning">Warning</span></td>
                   <td>KRaft Quorum</td>
                   <td>Assert exactly 1 active KRaft controller</td>
-                  <td><span class="badge badge-success">OK (1 Active)</span></td>
+                  <td><span class="badge badge-neutral" data-alert-rule="BrokerActiveController">Unknown</span></td>
                 </tr>
                 <tr>
                   <td><strong>DiskSpaceLow</strong></td>
                   <td><span class="badge badge-warning">Warning</span></td>
                   <td>Host Volume</td>
                   <td>Storage utilization exceeds 85%</td>
-                  <td><span class="badge badge-success">OK (&lt; 50%)</span></td>
+                  <td><span class="badge badge-neutral" data-alert-rule="DiskSpaceLow">Unknown</span></td>
                 </tr>
               </tbody>
             </table>
@@ -833,8 +844,11 @@
         <!-- Acceptance Gates Verification Table -->
         <div class="card mt-4">
           <div class="card-header">
-            <h2 class="card-title">Formal Acceptance Gates Matrix</h2>
-            <p class="card-desc">Binding assertions required before production offline deployment.</p>
+            <div>
+              <h2 class="card-title">Formal Acceptance Gates Matrix</h2>
+              <p class="card-desc">Binding assertions required before production offline deployment.</p>
+            </div>
+            <span class="badge badge-neutral" id="gates-summary-badge">Not Run</span>
           </div>
           <div class="table-container">
             <table class="data-table">
@@ -847,35 +861,35 @@
                 </tr>
               </thead>
               <tbody id="tbody-gates">
-                <tr>
+                <tr data-gate-id="GATE-1">
                   <td><strong>GATE-1: Parity</strong></td>
                   <td>kraft/ vs epc/</td>
                   <td>Helper functions and CLI options must be identical between editions</td>
-                  <td><span class="badge badge-success">Passed</span></td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-1">Not Run</span></td>
                 </tr>
-                <tr>
-                  <td><strong>GATE-2: ZK Frozen</strong></td>
-                  <td>zk/ legacy</td>
-                  <td>Legacy ZooKeeper directory must remain untouched and compatible</td>
-                  <td><span class="badge badge-success">Passed</span></td>
-                </tr>
-                <tr>
-                  <td><strong>GATE-3: Offline Policy</strong></td>
-                  <td>Security</td>
-                  <td>No outbound HTTP calls, telemetry, or update checks allowed</td>
-                  <td><span class="badge badge-success">Passed</span></td>
-                </tr>
-                <tr>
-                  <td><strong>GATE-4: Digest Pinning</strong></td>
+                <tr data-gate-id="GATE-2">
+                  <td><strong>GATE-2: Digest Pinning</strong></td>
                   <td>Reproducibility</td>
                   <td>All container images in .env.template pinned to @sha256 digest</td>
-                  <td><span class="badge badge-success">Passed</span></td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-2">Not Run</span></td>
                 </tr>
-                <tr>
-                  <td><strong>GATE-5: Dual Auth Fallback</strong></td>
-                  <td>Identity</td>
-                  <td>Local admin authentication functions even when Keycloak is down</td>
-                  <td><span class="badge badge-success">Passed</span></td>
+                <tr data-gate-id="GATE-3">
+                  <td><strong>GATE-3: Compose Validation</strong></td>
+                  <td>Configuration</td>
+                  <td>Docker Compose schema and service configuration valid across editions</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-3">Not Run</span></td>
+                </tr>
+                <tr data-gate-id="GATE-4">
+                  <td><strong>GATE-4: Offline Policy</strong></td>
+                  <td>Security</td>
+                  <td>No outbound HTTP calls, CDN links, telemetry, or external assets allowed</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-4">Not Run</span></td>
+                </tr>
+                <tr data-gate-id="GATE-5">
+                  <td><strong>GATE-5: Host &amp; Identity Preflight</strong></td>
+                  <td>Identity &amp; Doctor</td>
+                  <td>Host preflight checks and Keycloak/TLS invariants verified</td>
+                  <td><span class="badge badge-neutral" data-gate-badge="GATE-5">Not Run</span></td>
                 </tr>
               </tbody>
             </table>
@@ -1144,6 +1158,40 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" id="btn-tofu-reject">Reject &amp; Disconnect</button>
         <button class="btn btn-primary" id="btn-tofu-accept">Trust &amp; Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 7. BACKUP IDENTITY DATABASE MODAL -->
+  <div class="modal-backdrop" id="modal-backup" role="dialog" aria-modal="true" aria-labelledby="modal-backup-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-icon icon-info">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-backup-title">Encrypted Identity Database Backup</h3>
+          <p class="modal-subtitle">Export an encrypted dump of the Keycloak PostgreSQL database.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="form-group mb-3">
+          <label for="input-backup-file" class="form-label">Destination File Path *</label>
+          <input type="text" id="input-backup-file" class="text-input" placeholder="e.g. identity-backup.enc" required>
+        </div>
+        <div class="form-group mb-3">
+          <label for="input-backup-passphrase" class="form-label">Encryption Passphrase (min. 8 characters) *</label>
+          <input type="password" id="input-backup-passphrase" class="text-input" placeholder="Enter strong encryption passphrase" autocomplete="new-password" required>
+        </div>
+        <div class="form-group mb-3">
+          <label for="input-backup-passphrase-confirm" class="form-label">Confirm Encryption Passphrase *</label>
+          <input type="password" id="input-backup-passphrase-confirm" class="text-input" placeholder="Re-enter passphrase" autocomplete="new-password" required>
+        </div>
+        <p class="text-xs text-muted">The destination file must not already exist. Keep the passphrase safe—it is required by <code>krate identity restore</code>.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-backup-cancel">Cancel</button>
+        <button class="btn btn-primary" id="btn-backup-submit">Create Encrypted Backup</button>
       </div>
     </div>
   </div>

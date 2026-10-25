@@ -19,6 +19,9 @@
     lagData: null,
     configData: null,
     usersData: null,
+    gatesData: null,
+    activeConfigTab: "cluster-env",
+    rawConfigTarget: ".env",
     activeView: "setup",
     activeJob: null, // { id, action, status }
     sseSource: null,
@@ -69,7 +72,10 @@
     btnStepDocker: document.getElementById("btn-step-docker"),
     btnStepCerts: document.getElementById("btn-step-certs"),
     btnStepImages: document.getElementById("btn-step-images"),
+    btnStepInstall: document.getElementById("btn-step-install"),
     btnStepStart: document.getElementById("btn-step-start"),
+    stepInstallChip: document.getElementById("step-install-chip"),
+    stepInstallDesc: document.getElementById("step-install-desc"),
 
     // View 2: Cluster Services
     servicesGrid: document.getElementById("services-grid"),
@@ -118,9 +124,17 @@
 
     // View 7: Observability
     btnMonitorToggle: document.getElementById("btn-monitor-toggle"),
+    linkPortalGrafana: document.getElementById("link-portal-grafana"),
+    linkPortalKafbat: document.getElementById("link-portal-kafbat"),
+    linkPortalPerses: document.getElementById("link-portal-perses"),
+    linkPortalLoki: document.getElementById("link-portal-loki"),
+    alertsSummaryBadge: document.getElementById("alerts-summary-badge"),
+    tbodyAlerts: document.getElementById("tbody-alerts"),
 
     // View 8: Release & Gates
     btnRunGates: document.getElementById("btn-run-gates"),
+    gatesSummaryBadge: document.getElementById("gates-summary-badge"),
+    tbodyGates: document.getElementById("tbody-gates"),
     formRemoteSsh: document.getElementById("form-remote-ssh"),
     inputRemoteHost: document.getElementById("input-remote-host"),
     inputRemoteUser: document.getElementById("input-remote-user"),
@@ -182,6 +196,13 @@
     tofuFingerprint: document.getElementById("tofu-fingerprint"),
     btnTofuReject: document.getElementById("btn-tofu-reject"),
     btnTofuAccept: document.getElementById("btn-tofu-accept"),
+
+    modalBackup: document.getElementById("modal-backup"),
+    inputBackupFile: document.getElementById("input-backup-file"),
+    inputBackupPassphrase: document.getElementById("input-backup-passphrase"),
+    inputBackupPassphraseConfirm: document.getElementById("input-backup-passphrase-confirm"),
+    btnBackupCancel: document.getElementById("btn-backup-cancel"),
+    btnBackupSubmit: document.getElementById("btn-backup-submit"),
 
     toastContainer: document.getElementById("toast-container"),
   };
@@ -383,26 +404,67 @@
 
     dom.btnTofuAccept?.addEventListener("click", async () => {
       if (!state.tofuData) return;
+      const tofuPayload = { ...state.tofuData };
+      state.tofuData = null;
       closeModal(dom.modalTofu);
       try {
         showToast("Connecting to remote host...", "info");
         const res = await apiFetch("/api/v1/remote/connect", {
           method: "POST",
           body: {
-            host: state.tofuData.host,
-            port: state.tofuData.port,
-            user: state.tofuData.user,
-            password: state.tofuData.password,
-            raw_key: state.tofuData.raw_key,
+            host: tofuPayload.host,
+            port: tofuPayload.port,
+            user: tofuPayload.user,
+            password: tofuPayload.password,
+            raw_key: tofuPayload.raw_key,
             fingerprint_confirmed: true,
           },
         });
-        showToast("Remote host connected successfully!", "success");
+        if (res && res.job_id) {
+          state.activeJob = { id: res.job_id, action: res.action || "remote-ssh", status: "running" };
+          state.lastEventId = 0;
+          connectJobStream(res.job_id);
+          const outcome = await waitForJobCompletion(res.job_id);
+          if (outcome && outcome.status === "succeeded" && outcome.exit_code === 0) {
+            showToast("Remote host connected successfully!", "success");
+          } else {
+            showToast(`Remote connection failed (exit code ${outcome?.exit_code ?? 1})`, "danger");
+          }
+        } else {
+          showToast("Remote connection failed: no job ID returned", "danger");
+        }
       } catch (err) {
         showToast(`Remote connection error: ${err.message}`, "danger");
-      } finally {
-        state.tofuData = null;
       }
+    });
+
+    // Backup Identity Modal controls
+    dom.btnBackupCancel?.addEventListener("click", () => {
+      closeModal(dom.modalBackup);
+    });
+
+    dom.btnBackupSubmit?.addEventListener("click", () => {
+      const file = (dom.inputBackupFile?.value || "").trim();
+      const passphrase = dom.inputBackupPassphrase?.value || "";
+      const confirmPass = dom.inputBackupPassphraseConfirm?.value || "";
+
+      if (!file) {
+        showToast("Backup destination file path is required", "warning");
+        return;
+      }
+      if (passphrase.length < 8) {
+        showToast("Backup passphrase must be at least 8 characters", "warning");
+        return;
+      }
+      if (dom.inputBackupPassphraseConfirm && passphrase !== confirmPass) {
+        showToast("Backup passphrases do not match", "warning");
+        return;
+      }
+
+      closeModal(dom.modalBackup);
+      if (dom.inputBackupPassphrase) dom.inputBackupPassphrase.value = "";
+      if (dom.inputBackupPassphraseConfirm) dom.inputBackupPassphraseConfirm.value = "";
+      triggerJob("identity_backup", { file, passphrase });
     });
   }
 
@@ -453,10 +515,15 @@
 
     // Handle Sudo Challenge
     if (response.status === 403 && data && data.needs_sudo) {
-      dom.modalSudoActionDesc.textContent =
-        data.message || "This operation requires root permissions on the host system (via sudo -A).";
+      if (dom.modalSudoActionDesc) {
+        dom.modalSudoActionDesc.textContent =
+          data.message || "This operation requires root permissions on the host system (via sudo -A).";
+      }
       openModal(dom.modalSudo);
-      throw new Error("Root privileges required");
+      const sudoErr = new Error("Root privileges required");
+      sudoErr.status = 403;
+      sudoErr.data = data;
+      throw sudoErr;
     }
 
     if (!response.ok) {
@@ -730,19 +797,30 @@
           showOtpRevealCard(payload.ephemeral.user || "admin", payload.ephemeral.one_time_password);
         }
 
-        dom.terminalBadgeStatus.textContent = isSuccess ? "Done" : "Failed";
-        dom.terminalBadgeStatus.className = isSuccess ? "badge-counter text-success" : "badge-counter text-danger";
+        if (dom.terminalBadgeStatus) {
+          dom.terminalBadgeStatus.textContent = "";
+          dom.terminalBadgeStatus.className = isSuccess
+            ? "terminal-pulse-dot status-done"
+            : "terminal-pulse-dot status-error";
+        }
         dom.terminalActionPill.textContent = "Idle";
         dom.terminalActionPill.className = "terminal-pill";
 
-        showToast(`Job ${state.activeJob?.action || ""} ${payload.status}`, isSuccess ? "success" : "danger");
+        const finishedAction = state.activeJob?.action || "";
+        if (!finishedAction.startsWith("remote-ssh")) {
+          showToast(`Job ${finishedAction} ${payload.status}`, isSuccess ? "success" : "danger");
+        }
       } catch (e) {
         console.error("Error parsing done event:", e);
       } finally {
+        const finishedAction = state.activeJob?.action || "";
         source.close();
         state.sseSource = null;
         state.activeJob = null;
         fetchStatus();
+        if (finishedAction === "gates") {
+          fetchGates();
+        }
       }
     });
 
@@ -758,18 +836,36 @@
     openModal(dom.modalOtp);
   }
 
+  async function waitForJobCompletion(jobId, timeoutMs = 120000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const j = await apiFetch(`/api/v1/jobs/${jobId}`);
+        if (j && j.status && j.status !== "running") {
+          return { status: j.status, exit_code: j.exit_code };
+        }
+      } catch (err) {
+        return { status: "failed", exit_code: 1, error: err.message };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    return { status: "failed", exit_code: -1 };
+  }
+
   // --------------------------------------------------------------------------
   // Job Triggers & Supervisors
   // --------------------------------------------------------------------------
   async function triggerJob(action, params = {}, args = [], sudoPassword = null) {
     if (state.activeJob && state.activeJob.status === "running") {
       showToast("Another task is currently running", "warning");
-      return;
+      return null;
     }
 
     try {
-      dom.terminalBadgeStatus.textContent = "Running";
-      dom.terminalBadgeStatus.className = "badge-counter text-warning";
+      if (dom.terminalBadgeStatus) {
+        dom.terminalBadgeStatus.textContent = "";
+        dom.terminalBadgeStatus.className = "terminal-pulse-dot active";
+      }
       dom.terminalActionPill.textContent = `Running: ${action}`;
       dom.terminalActionPill.className = "terminal-pill running";
 
@@ -787,8 +883,12 @@
       state.lastEventId = 0;
       appendTerminalLine(`\n[System] Initiated job '${action}' (ID: ${res.job_id})...\n`, "system");
       connectJobStream(res.job_id);
+      return res;
     } catch (err) {
-      dom.terminalBadgeStatus.textContent = "Error";
+      if (dom.terminalBadgeStatus) {
+        dom.terminalBadgeStatus.textContent = "";
+        dom.terminalBadgeStatus.className = "terminal-pulse-dot status-error";
+      }
       dom.terminalActionPill.textContent = "Idle";
       dom.terminalActionPill.className = "terminal-pill";
 
@@ -797,6 +897,7 @@
       } else {
         showToast(`Failed to launch ${action}: ${err.message}`, "danger");
       }
+      return null;
     }
   }
 
@@ -821,11 +922,29 @@
   function renderStatus(data) {
     if (!data) return;
 
-    // Edition Tag
+    // Edition Tag & Active Workspace Path
     if (data.edition) {
-      state.activeWorkspace = data.edition;
       dom.badgeEdition.textContent = data.edition.toUpperCase() + (data.is_package ? " (Bundle)" : " Mode");
-      if (dom.selectWorkspace) dom.selectWorkspace.value = data.edition;
+    }
+    if (data.workspace) {
+      state.activeWorkspace = data.workspace;
+      if (dom.selectWorkspace) {
+        const hasOption = Array.from(dom.selectWorkspace.options).some((opt) => opt.value === data.workspace);
+        if (hasOption) {
+          dom.selectWorkspace.value = data.workspace;
+        }
+      }
+    }
+
+    // Update Package Install Wizard Step
+    if (dom.stepInstallChip) {
+      if (data.is_package && !data.is_installed) {
+        dom.stepInstallChip.textContent = "Install Required";
+      } else if (data.is_package && data.is_installed) {
+        dom.stepInstallChip.textContent = "Installed";
+      } else {
+        dom.stepInstallChip.textContent = "Checkout Ready";
+      }
     }
 
     // Cluster State Badge (Color-Changing Lucide Icon)
@@ -864,12 +983,98 @@
 
     // Identity summary
     if (data.identity && dom.identityStatStatus) {
-      dom.identityStatStatus.textContent = data.identity.state || "Active";
-      dom.identityStatStatus.className = data.identity.state === "healthy" ? "metric-value text-success" : "metric-value text-warning";
+      dom.identityStatStatus.textContent = data.identity.state || "Down";
+      dom.identityStatStatus.className =
+        data.identity.state === "healthy" ? "metric-value text-success" : "metric-value text-warning";
     }
+
+    // Portals & Alerts
+    if (data.portals) {
+      renderPortals(data.portals);
+    }
+    renderAlerts(data.alerts);
 
     // Services Grid
     renderServicesGrid(data.containers || []);
+  }
+
+  function deriveComposeServiceName(name, serviceLabel = "") {
+    if (serviceLabel && serviceLabel.trim()) {
+      return serviceLabel.trim();
+    }
+    const clean = (name || "").trim();
+    const mBroker = clean.match(/^(?:krate|epc)-broker-(\d+)$/);
+    if (mBroker) {
+      return `kafka-${mBroker[1]}`;
+    }
+    if (clean === "krate-kafbat" || clean === "epc-kafbat") {
+      return "kafka-ui";
+    }
+    if (clean === "krate-proxy" || clean === "epc-proxy") {
+      return "proxy";
+    }
+    const mCompose = clean.match(/^krate-(?:kraft|epc)(?:-monitoring)?-([a-zA-Z0-9_-]+)-\d+$/);
+    if (mCompose) {
+      return mCompose[1];
+    }
+    return clean;
+  }
+
+  function renderPortals(portals) {
+    if (!portals) return;
+    if (dom.linkPortalGrafana && portals.grafana_url) {
+      dom.linkPortalGrafana.href = portals.grafana_url;
+      dom.linkPortalGrafana.textContent = "Open Grafana";
+    }
+    if (dom.linkPortalKafbat && portals.kafbat_url) {
+      dom.linkPortalKafbat.href = portals.kafbat_url;
+      dom.linkPortalKafbat.textContent = "Open Kafbat UI";
+    }
+    if (dom.linkPortalPerses && portals.perses_url) {
+      dom.linkPortalPerses.href = portals.perses_url;
+      dom.linkPortalPerses.textContent = "Open Perses";
+    }
+    if (dom.linkPortalLoki && portals.loki_url) {
+      dom.linkPortalLoki.href = portals.loki_url;
+      dom.linkPortalLoki.textContent = "Explore Logs";
+    }
+  }
+
+  function renderAlerts(alertsData) {
+    if (dom.alertsSummaryBadge) {
+      if (!alertsData || !alertsData.evaluated) {
+        dom.alertsSummaryBadge.className = "badge badge-neutral";
+        dom.alertsSummaryBadge.textContent = alertsData?.summary || "Unknown";
+      } else if (alertsData.status === "firing") {
+        dom.alertsSummaryBadge.className = "badge badge-danger";
+        dom.alertsSummaryBadge.textContent = alertsData.summary || "Alerts Firing";
+      } else if (alertsData.status === "pending") {
+        dom.alertsSummaryBadge.className = "badge badge-warning";
+        dom.alertsSummaryBadge.textContent = alertsData.summary || "Alerts Pending";
+      } else {
+        dom.alertsSummaryBadge.className = "badge badge-success";
+        dom.alertsSummaryBadge.textContent = alertsData.summary || "All Alerts Clear";
+      }
+    }
+
+    const ruleBadges = document.querySelectorAll("[data-alert-rule]");
+    ruleBadges.forEach((badge) => {
+      const ruleName = badge.dataset.alertRule;
+      const ruleObj = alertsData?.evaluated && alertsData?.rules ? alertsData.rules[ruleName] : null;
+      if (!ruleObj || ruleObj.state === "unknown") {
+        badge.className = "badge badge-neutral";
+        badge.textContent = "Unknown";
+      } else if (ruleObj.state === "firing") {
+        badge.className = "badge badge-danger";
+        badge.textContent = ruleObj.label || "Firing";
+      } else if (ruleObj.state === "pending") {
+        badge.className = "badge badge-warning";
+        badge.textContent = ruleObj.label || "Pending";
+      } else {
+        badge.className = "badge badge-success";
+        badge.textContent = ruleObj.label || "OK";
+      }
+    });
   }
 
   function renderServicesGrid(containers) {
@@ -911,13 +1116,16 @@
           statusBadge = `<span class="badge badge-warning">Starting</span>`;
         }
 
+        const svcName = deriveComposeServiceName(c.name, c.service);
+        const containerTag = c.name && c.name !== svcName ? c.name : c.container_id || c.name || "";
+
         return `
           <div class="service-card">
             <div>
               <div class="service-card-top">
                 <div>
-                  <div class="service-name">${escapeHtml(c.name || "Service")}</div>
-                  <div class="service-container-tag">${escapeHtml(c.container_id || c.name || "")}</div>
+                  <div class="service-name">${escapeHtml(svcName || c.name || "Service")}</div>
+                  <div class="service-container-tag">${escapeHtml(containerTag)}</div>
                 </div>
                 ${statusBadge}
               </div>
@@ -933,12 +1141,12 @@
               </div>
             </div>
             <div class="service-card-actions">
-              <button class="btn btn-xs btn-ghost btn-svc-logs" data-svc="${escapeHtml(c.name)}">Logs</button>
-              <button class="btn btn-xs btn-secondary btn-svc-restart" data-svc="${escapeHtml(c.name)}">Restart</button>
+              <button class="btn btn-xs btn-ghost btn-svc-logs" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Logs</button>
+              <button class="btn btn-xs btn-secondary btn-svc-restart" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Restart</button>
               ${
                 isRunning
-                  ? `<button class="btn btn-xs btn-danger btn-svc-stop" data-svc="${escapeHtml(c.name)}">Stop</button>`
-                  : `<button class="btn btn-xs btn-primary btn-svc-start" data-svc="${escapeHtml(c.name)}">Start</button>`
+                  ? `<button class="btn btn-xs btn-danger btn-svc-stop" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Stop</button>`
+                  : `<button class="btn btn-xs btn-primary btn-svc-start" data-svc="${escapeHtml(svcName)}" data-container="${escapeHtml(c.name || "")}">Start</button>`
               }
             </div>
           </div>
@@ -1226,10 +1434,71 @@
     }
 
     // Raw editor
-    if (dom.textareaRawConfig && data.env) {
-      const lines = Object.entries(data.env).map(([k, v]) => `${k}=${v}`);
-      dom.textareaRawConfig.value = lines.join("\n");
+    updateRawEditorFromConfig(data);
+  }
+
+  function updateRawEditorFromConfig(data) {
+    if (!dom.textareaRawConfig || !data) return;
+    if (state.rawConfigTarget === "monitoring/.env") {
+      if (typeof data.raw_monitoring_env === "string" && data.raw_monitoring_env.length > 0) {
+        dom.textareaRawConfig.value = data.raw_monitoring_env;
+      } else {
+        const lines = Object.entries(data.monitoring_env || {}).map(([k, v]) => `${k}=${v}`);
+        dom.textareaRawConfig.value = lines.join("\n");
+      }
+    } else {
+      if (typeof data.raw_env === "string" && data.raw_env.length > 0) {
+        dom.textareaRawConfig.value = data.raw_env;
+      } else {
+        const lines = Object.entries(data.env || {}).map(([k, v]) => `${k}=${v}`);
+        dom.textareaRawConfig.value = lines.join("\n");
+      }
     }
+  }
+
+  // Acceptance Gates
+  async function fetchGates() {
+    try {
+      const data = await apiFetch("/api/v1/gates");
+      state.gatesData = data;
+      renderGates(data);
+    } catch (err) {
+      // keep default Not Run state
+    }
+  }
+
+  function renderGates(data) {
+    if (!data) return;
+    if (dom.gatesSummaryBadge) {
+      if (data.status === "passed") {
+        dom.gatesSummaryBadge.className = "badge badge-success";
+        dom.gatesSummaryBadge.textContent = `Passed (${data.passed}/${(data.gates || []).length})`;
+      } else if (data.status === "failed") {
+        dom.gatesSummaryBadge.className = "badge badge-danger";
+        dom.gatesSummaryBadge.textContent = `Failed (${data.failed} failed)`;
+      } else {
+        dom.gatesSummaryBadge.className = "badge badge-neutral";
+        dom.gatesSummaryBadge.textContent = "Not Run";
+      }
+    }
+
+    (data.gates || []).forEach((g) => {
+      const badge = document.querySelector(`[data-gate-badge="${g.id}"]`);
+      if (!badge) return;
+      if (g.status === "passed") {
+        badge.className = "badge badge-success";
+        badge.textContent = "Passed";
+      } else if (g.status === "failed") {
+        badge.className = "badge badge-danger";
+        badge.textContent = "Failed";
+      } else {
+        badge.className = "badge badge-neutral";
+        badge.textContent = "Not Run";
+      }
+      if (g.detail) {
+        badge.title = g.detail;
+      }
+    });
   }
 
   // Identity & Users
@@ -1258,10 +1527,32 @@
       return;
     }
 
+    const adminGroup = data.admin_group || state.configData?.env?.KEYCLOAK_ADMIN_GROUP || "KRATE_ADMINS";
+    const viewerGroup = data.viewer_group || state.configData?.env?.KEYCLOAK_VIEWER_GROUP || "KRATE_VIEWERS";
+
     dom.tbodyUsers.innerHTML = users
       .map((u) => {
-        const isAdmin = (u.groups || []).includes("admin") || u.username === "admin";
-        const roleBadge = isAdmin ? `<span class="badge badge-danger">Admin</span>` : `<span class="badge badge-info">Viewer</span>`;
+        const groups = Array.isArray(u.groups) ? u.groups : [];
+        const lowerGroups = groups.map((g) => String(g).toLowerCase());
+        const isAdmin =
+          u.is_admin === true ||
+          u.role === "admin" ||
+          groups.includes(adminGroup) ||
+          lowerGroups.includes(adminGroup.toLowerCase()) ||
+          lowerGroups.includes("krate_admins") ||
+          lowerGroups.includes("admin");
+        const isViewer =
+          !isAdmin &&
+          (u.role === "viewer" ||
+            groups.includes(viewerGroup) ||
+            lowerGroups.includes(viewerGroup.toLowerCase()) ||
+            lowerGroups.includes("krate_viewers") ||
+            lowerGroups.includes("viewer"));
+        const roleBadge = isAdmin
+          ? `<span class="badge badge-danger">Admin</span>`
+          : isViewer
+          ? `<span class="badge badge-info">Viewer</span>`
+          : `<span class="badge badge-neutral">No Group</span>`;
         const statusBadge = u.enabled
           ? `<span class="badge badge-success">Active</span>`
           : `<span class="badge badge-warning">Disabled</span>`;
@@ -1302,6 +1593,17 @@
     try {
       const data = await apiFetch("/api/v1/workspaces");
       state.workspaces = data.available_workspaces || [];
+      if (dom.selectWorkspace && state.workspaces.length > 0) {
+        dom.selectWorkspace.innerHTML = state.workspaces
+          .map((ws) => {
+            const editionLabel = (ws.variant || ws.name || "krate").toUpperCase();
+            const suffix = ws.is_package ? " (Bundle)" : "";
+            const label = `${editionLabel} — ${ws.path}${suffix}`;
+            const isSelected = ws.path === data.active_workspace || ws.active ? " selected" : "";
+            return `<option value="${escapeHtml(ws.path)}"${isSelected}>${escapeHtml(label)}</option>`;
+          })
+          .join("");
+      }
       if (data.active_workspace && dom.selectWorkspace) {
         state.activeWorkspace = data.active_workspace;
         dom.selectWorkspace.value = data.active_workspace;
@@ -1340,6 +1642,8 @@
     if (viewName === "lag") fetchLag();
     if (viewName === "config") fetchConfig();
     if (viewName === "identity") fetchUsers();
+    if (viewName === "observability") fetchStatus();
+    if (viewName === "release") fetchGates();
   }
 
   function setupNavigation() {
@@ -1391,8 +1695,11 @@
           body: { workspace: newWs },
         });
         showToast(`Switched workspace to ${newWs}`, "success");
-        fetchStatus();
-        fetchDoctor();
+        await fetchWorkspaces();
+        await fetchStatus();
+        await fetchDoctor();
+        await fetchConfig();
+        await fetchGates();
       } catch (err) {
         showToast(`Failed to switch workspace: ${err.message}`, "danger");
       }
@@ -1415,11 +1722,24 @@
 
     // Setup & Wizard actions
     dom.btnRunDoctor?.addEventListener("click", () => triggerJob("doctor"));
-    dom.btnQuickStart?.addEventListener("click", () => triggerJob("start"));
+    dom.btnQuickStart?.addEventListener("click", () => {
+      if (state.clusterStatus?.is_package && !state.clusterStatus?.is_installed) {
+        triggerJob("install");
+      } else {
+        triggerJob("start");
+      }
+    });
     dom.btnStepDocker?.addEventListener("click", () => triggerJob("docker-install"));
     dom.btnStepCerts?.addEventListener("click", () => triggerJob("gen-cert"));
     dom.btnStepImages?.addEventListener("click", () => triggerJob("load-images"));
-    dom.btnStepStart?.addEventListener("click", () => triggerJob("start"));
+    dom.btnStepInstall?.addEventListener("click", () => triggerJob("install"));
+    dom.btnStepStart?.addEventListener("click", () => {
+      if (state.clusterStatus?.is_package && !state.clusterStatus?.is_installed) {
+        triggerJob("install");
+      } else {
+        triggerJob("start");
+      }
+    });
 
     // Services actions
     dom.btnServicesStart?.addEventListener("click", () => triggerJob("start"));
@@ -1447,7 +1767,16 @@
         dom.configTabs.forEach((t) => t.classList.remove("active"));
         dom.configPanes.forEach((p) => p.classList.remove("active"));
         tab.classList.add("active");
-        const pane = document.getElementById(`pane-${tab.dataset.tab}`);
+        const tabId = tab.dataset.tab || "cluster-env";
+        state.activeConfigTab = tabId;
+        if (tabId === "cluster-env") {
+          state.rawConfigTarget = ".env";
+        } else if (tabId === "monitoring-env") {
+          state.rawConfigTarget = "monitoring/.env";
+        } else if (tabId === "raw-editor" && state.configData) {
+          updateRawEditorFromConfig(state.configData);
+        }
+        const pane = document.getElementById(`pane-${tabId}`);
         if (pane) pane.classList.add("active");
       });
     });
@@ -1456,14 +1785,35 @@
     dom.btnSaveConfig?.addEventListener("click", async () => {
       showToast("Saving configuration...", "info");
       try {
-        // Collect updated inputs
-        const inputs = document.querySelectorAll(".text-input-config");
-        for (const input of inputs) {
+        const activeTab =
+          document.querySelector(".config-tabs-bar .tab-btn.active")?.dataset.tab ||
+          state.activeConfigTab ||
+          "cluster-env";
+
+        if (activeTab === "raw-editor") {
+          const target = state.rawConfigTarget || ".env";
+          const rawContent = dom.textareaRawConfig ? dom.textareaRawConfig.value : "";
           await apiFetch("/api/v1/config", {
             method: "POST",
-            body: { key: input.dataset.key, value: input.value },
+            body: { raw: rawContent, target },
+          });
+        } else {
+          const isMonitoring = activeTab === "monitoring-env";
+          const target = isMonitoring ? "monitoring/.env" : ".env";
+          const container = isMonitoring ? dom.configFieldsMonitoring : dom.configFieldsCluster;
+          const inputs = (container || document).querySelectorAll(".text-input-config");
+          const entries = {};
+          for (const input of inputs) {
+            if (input.dataset.key) {
+              entries[input.dataset.key] = input.value;
+            }
+          }
+          await apiFetch("/api/v1/config", {
+            method: "POST",
+            body: { entries, target },
           });
         }
+        await fetchConfig();
         showToast("Configuration saved successfully", "success");
       } catch (err) {
         showToast(`Save failed: ${err.message}`, "danger");
@@ -1474,7 +1824,15 @@
     dom.btnRefreshUsers?.addEventListener("click", fetchUsers);
     dom.btnOpenAddUser?.addEventListener("click", () => openModal(dom.modalAddUser));
     dom.btnOpenRotateModal?.addEventListener("click", () => openModal(dom.modalRotate));
-    dom.btnBackupIdentity?.addEventListener("click", () => triggerJob("identity_backup"));
+    dom.btnBackupIdentity?.addEventListener("click", () => {
+      if (dom.inputBackupFile && !dom.inputBackupFile.value.trim()) {
+        const dateStamp = new Date().toISOString().slice(0, 10);
+        dom.inputBackupFile.value = `identity-backup-${dateStamp}.enc`;
+      }
+      if (dom.inputBackupPassphrase) dom.inputBackupPassphrase.value = "";
+      if (dom.inputBackupPassphraseConfirm) dom.inputBackupPassphraseConfirm.value = "";
+      openModal(dom.modalBackup);
+    });
 
     // SSO actions
     dom.btnRunSso?.addEventListener("click", async () => {
@@ -1495,17 +1853,26 @@
     });
 
     dom.btnSsoFallback?.addEventListener("click", () => {
-      triggerJob("auth", {}, ["fallback"]);
+      const target = dom.selectSsoTarget?.value || "both";
+      triggerJob("auth_fallback", { target, mode: "local" });
     });
 
     // Observability actions
-    dom.btnMonitorToggle?.addEventListener("click", () => {
-      triggerJob("monitor_restart");
+    dom.btnMonitorToggle?.addEventListener("click", async () => {
+      const downJob = await triggerJob("monitor_down");
+      if (downJob && downJob.job_id) {
+        await waitForJobCompletion(downJob.job_id);
+      }
+      await triggerJob("monitor_up");
     });
 
     // Release & Gates actions
-    dom.btnRunGates?.addEventListener("click", () => {
-      triggerJob("doctor");
+    dom.btnRunGates?.addEventListener("click", async () => {
+      const gateJob = await triggerJob("gates");
+      if (gateJob && gateJob.job_id) {
+        await waitForJobCompletion(gateJob.job_id);
+        await fetchGates();
+      }
     });
 
     // Remote SSH Bootstrapper
@@ -1566,9 +1933,10 @@
     setupActions();
 
     await initializeAuth();
+    await fetchWorkspaces();
     await fetchStatus();
     await fetchDoctor();
-    await fetchWorkspaces();
+    await fetchGates();
 
     startPolling();
   }

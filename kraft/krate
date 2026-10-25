@@ -3092,18 +3092,30 @@ cmd_load_images() {
 cmd_start() {
   identity_lock_if_enabled
   prepare
-  info "Starting cluster..."
-  compose_cmd up -d
-  echo ""
-  cmd_health || true      # wait for the cluster to settle, then show final health
+  local svc="${1:-}"
+  if [[ -n "$svc" ]]; then
+    info "Starting $svc..."
+    compose_cmd up -d "$svc"
+  else
+    info "Starting cluster..."
+    compose_cmd up -d
+    echo ""
+    cmd_health || true      # wait for the cluster to settle, then show final health
+  fi
 }
 
 # ─── stop ─────────────────────────────────────────────────────────────────────
 cmd_stop() {
   require_compose; require_compose_file
   identity_lock_if_enabled
-  info "Stopping cluster (containers paused, data preserved)..."
-  compose_cmd stop
+  local svc="${1:-}"
+  if [[ -n "$svc" ]]; then
+    info "Stopping $svc (container paused, data preserved)..."
+    compose_cmd stop "$svc"
+  else
+    info "Stopping cluster (containers paused, data preserved)..."
+    compose_cmd stop
+  fi
   ok "Stopped"
 }
 
@@ -3301,7 +3313,7 @@ cmd_ui() {
 cmd_studio() {
   command -v python3 >/dev/null || die "python3 is required to run Krate Studio"
   export PYTHONDONTWRITEBYTECODE=1
-  exec python3 -B "$(ui_dir)/krate_ui.py" "$@"
+  exec python3 -B "$(ui_dir)/krate_ui.py" --workspace "$SCRIPT_DIR" "$@"
 }
 
 # ─── config ───────────────────────────────────────────────────────────────────
@@ -5122,12 +5134,12 @@ fi
 case "$CMD" in
   install)        cmd_install "$@" ;;
   load-images)    cmd_load_images ;;
-  start)          cmd_start ;;
+  start)          cmd_start "$@" ;;
   setup)          cmd_setup ;;
   credentials)    cmd_credentials ;;
   build)          cmd_build ;;
   package)        cmd_package "$@" ;;
-  stop)           cmd_stop ;;
+  stop)           cmd_stop "$@" ;;
   restart)        cmd_restart "$@" ;;
   down)           cmd_down ;;
   status)         cmd_status ;;
