@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
-from typing import Optional, Union, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List
 
 # --- Constants & Defaults ---
 DEFAULT_PORT = 8686
@@ -68,28 +68,31 @@ class SessionStore:
                 "created_at": now,
                 "expires_at": now + TOKEN_VALIDITY_SECONDS,
             }
-            return session_id, csrf_token
+            pair = (session_id, csrf_token)
+        return pair
 
     def validate_session(self, session_id: str) -> bool:
         if not session_id:
             return False
+        valid = False
         with self._lock:
             info = self._sessions.get(session_id)
-            if not info:
-                return False
-            if time.time() > info["expires_at"]:
-                del self._sessions[session_id]
-                return False
-            return True
+            if info:
+                if time.time() > info["expires_at"]:
+                    del self._sessions[session_id]
+                else:
+                    valid = True
+        return valid
 
     def get_csrf_token(self, session_id: str) -> Optional[str]:
         if not session_id:
             return None
+        token = None
         with self._lock:
             info = self._sessions.get(session_id)
             if info and time.time() <= info["expires_at"]:
-                return info["csrf_token"]
-            return None
+                token = info["csrf_token"]
+        return token
 
     def validate_csrf(self, session_id: str, csrf_token: str) -> bool:
         if not session_id or not csrf_token:
@@ -110,7 +113,8 @@ class WorkspaceManager:
         self._lock = threading.Lock()
         self.active_workspace = self._resolve_workspace(initial_path)
 
-    def _resolve_workspace(self, path: Optional[str]) -> str:
+    @staticmethod
+    def _resolve_workspace(path: Optional[str]) -> str:
         if path and os.path.isdir(path):
             return os.path.abspath(path)
 
@@ -254,7 +258,8 @@ class WorkspaceManager:
         with self._lock:
             self.active_workspace = abs_path
             os.environ["KRATE_HOME"] = abs_path
-            return self.get_info(abs_path)
+            ws_info = self.get_info(abs_path)
+        return ws_info
 
 
 # --- Docker & System IPC Helpers ---
@@ -355,23 +360,19 @@ class SudoAskpassContext:
     """Creates a temporary executable helper script (0700) and sudo -A wrapper for SUDO_ASKPASS."""
 
     def __init__(self, password: Optional[str]):
-        self.password = password
+        self.enabled = bool(password)
         self.helper_path = None
         self.temp_dir = None
 
     def __enter__(self):
-        if not self.password:
+        if not self.enabled:
             return None
         self.temp_dir = tempfile.mkdtemp(prefix="krate_sudo_")
         os.chmod(self.temp_dir, 0o700)
-        pw_file = os.path.join(self.temp_dir, "pw")
-        with open(pw_file, "w", encoding="utf-8") as f:
-            f.write(self.password + "\n")
-        os.chmod(pw_file, 0o600)
 
         self.helper_path = os.path.join(self.temp_dir, "krate_askpass.sh")
         with open(self.helper_path, "w", encoding="utf-8") as f:
-            f.write(f'#!/bin/sh\ncat "{pw_file}"\n')
+            f.write('#!/bin/sh\n# askpass pw helper\nprintf "%s\\n" "$KRATE_ASKPASS_SECRET"\n')
         os.chmod(self.helper_path, 0o700)
 
         real_sudo = shutil.which("sudo") or "/usr/bin/sudo"
@@ -463,15 +464,17 @@ class Job:
 
     def get_logs_since(self, last_seq: int) -> List[dict]:
         with self._lock:
-            return [e for e in self.logs if e["seq"] > last_seq]
+            entries = [e for e in self.logs if e["seq"] > last_seq]
+        return entries
 
     def consume_ephemeral(self) -> dict:
         with self._lock:
             if not self.ephemeral:
-                return {}
-            data = dict(self.ephemeral)
-            self.ephemeral.clear()
-            return data
+                data = {}
+            else:
+                data = dict(self.ephemeral)
+                self.ephemeral.clear()
+        return data
 
     def to_dict(self, consume_ephemeral: bool = False) -> dict:
         return {
@@ -513,17 +516,19 @@ class JobSupervisor:
 
     def get_job(self, job_id: str) -> Optional[Job]:
         with self._jobs_lock:
-            return self._jobs.get(job_id)
+            found = self._jobs.get(job_id)
+        return found
 
     def list_jobs(self, limit: int = 50) -> List[dict]:
         with self._jobs_lock:
             jobs_list = sorted(self._jobs.values(), key=lambda j: j.started_at, reverse=True)
-            return [j.to_dict() for j in jobs_list[:limit]]
+            serialized = [j.to_dict() for j in jobs_list[:limit]]
+        return serialized
 
     def start_job(
         self,
         action: str,
-        cmd: Union[List[str], str],
+        cmd,
         cwd: str,
         env_vars: Optional[dict] = None,
         stdin_data: Optional[str] = None,
@@ -556,7 +561,7 @@ class JobSupervisor:
     def _run_job_process(
         self,
         job: Job,
-        cmd: Union[List[str], str],
+        cmd,
         cwd: str,
         env_vars: Optional[dict],
         stdin_data: Optional[str],
@@ -577,6 +582,7 @@ class JobSupervisor:
                     full_env["SUDO_ASKPASS"] = askpass_path
                     full_env["SUDO_ASKPASS_REQUIRE"] = "force"
                     full_env["DISPLAY"] = "krate:0"
+                    full_env["KRATE_ASKPASS_SECRET"] = sudo_password or ""
                     askpass_dir = os.path.dirname(askpass_path)
                     full_env["PATH"] = f"{askpass_dir}{os.pathsep}{full_env.get('PATH', '')}"
 
@@ -1259,7 +1265,7 @@ class StructuredDataCollector:
             "checks": checks,
         }
 
-    def _resolve_config_file_path(self, target: str = ".env", for_write: bool = False) -> str:
+    def _resolve_config_file_path(self, target: str = ".env") -> str:
         info = self.ws_mgr.get_info()
         ws_path = info["path"]
         if target in ("monitoring/.env", "monitoring"):
@@ -1319,7 +1325,7 @@ class StructuredDataCollector:
         }
 
     def set_config_value(self, key: str, value: str, target: str = ".env") -> bool:
-        file_path = self._resolve_config_file_path(target, for_write=True)
+        file_path = self._resolve_config_file_path(target)
         parent = os.path.dirname(file_path)
         if parent and not os.path.isdir(parent):
             os.makedirs(parent, exist_ok=True)
@@ -1359,7 +1365,7 @@ class StructuredDataCollector:
         return True
 
     def set_raw_config(self, raw_content: str, target: str = ".env") -> bool:
-        file_path = self._resolve_config_file_path(target, for_write=True)
+        file_path = self._resolve_config_file_path(target)
         parent = os.path.dirname(file_path)
         if parent and not os.path.isdir(parent):
             os.makedirs(parent, exist_ok=True)
@@ -1405,7 +1411,8 @@ class StructuredDataCollector:
         }
         return creds
 
-    def _resolve_workspace_bootstrap(self, ws_path: str, variant: str, container_name: str) -> str:
+    @staticmethod
+    def _resolve_workspace_bootstrap(ws_path: str, variant: str, container_name: str) -> str:
         """
         Determines the configured internal bootstrap listener for the active workspace and broker container.
         """
@@ -2011,11 +2018,12 @@ class RemoteSSHBootstrapper:
                 if password:
                     ap_fd, askpass_file = tempfile.mkstemp(prefix="krate_ssh_askpass_")
                     with os.fdopen(ap_fd, "w") as f:
-                        f.write(f"#!/bin/sh\ncat << 'EOF_PASS'\n{password}\nEOF_PASS\n")
+                        f.write('#!/bin/sh\nprintf "%s\\n" "$KRATE_SSH_ASKPASS_SECRET"\n')
                     os.chmod(askpass_file, 0o700)
                     env["SSH_ASKPASS"] = askpass_file
                     env["SSH_ASKPASS_REQUIRE"] = "force"
                     env["DISPLAY"] = "krate:0"
+                    env["KRATE_SSH_ASKPASS_SECRET"] = password
 
                 ssh_args = [
                     "ssh",
@@ -2158,6 +2166,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
             raise ValueError(f"Invalid JSON request body: {e}")
 
     # --- HTTP GET Routing ---
+    # noinspection PyPep8Naming
     def do_GET(self):
         if not self._validate_host():
             self._send_json(421, {"error": "Invalid Host header (DNS rebinding protection)"})
@@ -2280,6 +2289,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
         self._serve_static(path)
 
     # --- HTTP POST Routing ---
+    # noinspection PyPep8Naming
     def do_POST(self):
         if not self._validate_host():
             self._send_json(421, {"error": "Invalid Host header (DNS rebinding protection)"})
@@ -2410,7 +2420,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 env_vars = {}
                 stdin_data = None
                 is_mutation = True
-                cmd: Union[List[str], str] = [krate_bin]
+                cmd = [krate_bin]
 
                 # Action mapping
                 if action in ("start", "stop", "restart", "install", "health", "doctor", "credentials", "setup", "down", "status", "logs"):
