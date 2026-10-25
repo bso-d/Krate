@@ -51,6 +51,8 @@
     btnRemoteConnect: document.getElementById("btn-remote-connect"),
     btnToggleTerminal: document.getElementById("btn-toggle-terminal"),
     terminalBadgeStatus: document.getElementById("terminal-badge-status"),
+    btnDrawerToggle: document.getElementById("btn-drawer-toggle"),
+    btnRailCollapse: document.getElementById("btn-rail-collapse"),
 
     // Navigation
     navRail: document.getElementById("nav-rail"),
@@ -319,7 +321,7 @@
 
     // Secret Rotate Modal controls
     dom.btnGenerateSecret?.addEventListener("click", () => {
-      const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+";
+      const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
       const array = new Uint8Array(24);
       window.crypto.getRandomValues(array);
       let res = "";
@@ -391,6 +393,7 @@
             port: state.tofuData.port,
             user: state.tofuData.user,
             password: state.tofuData.password,
+            raw_key: state.tofuData.raw_key,
             fingerprint_confirmed: true,
           },
         });
@@ -510,11 +513,13 @@
 
   function updateAuthDisplay() {
     if (state.authenticated) {
-      dom.badgeAuthStatus.className = "status-pill status-success";
-      dom.textAuthStatus.textContent = "Session Active";
+      dom.badgeAuthStatus.className = "mui-status-indicator status-success";
+      dom.badgeAuthStatus.title = "Session: Active (Authenticated)";
+      if (dom.textAuthStatus) dom.textAuthStatus.textContent = "Session Active";
     } else {
-      dom.badgeAuthStatus.className = "status-pill status-warning";
-      dom.textAuthStatus.textContent = "Guest Mode";
+      dom.badgeAuthStatus.className = "mui-status-indicator status-neutral";
+      dom.badgeAuthStatus.title = "Session: Guest / Token Required";
+      if (dom.textAuthStatus) dom.textAuthStatus.textContent = "Guest Mode";
     }
   }
 
@@ -806,8 +811,10 @@
       state.clusterStatus = data;
       renderStatus(data);
     } catch (err) {
-      dom.badgeClusterStatus.className = "status-pill status-danger";
-      dom.badgeClusterStatus.querySelector(".status-label").innerHTML = "Cluster: <strong>Offline</strong>";
+      dom.badgeClusterStatus.className = "mui-status-indicator status-stopped";
+      dom.badgeClusterStatus.title = "Cluster: Offline / Unreachable";
+      const lbl = dom.badgeClusterStatus.querySelector(".status-label");
+      if (lbl) lbl.innerHTML = "Cluster: <strong>Offline</strong>";
     }
   }
 
@@ -817,26 +824,42 @@
     // Edition Tag
     if (data.edition) {
       state.activeWorkspace = data.edition;
-      dom.badgeEdition.textContent = data.edition.toUpperCase() + (data.is_package ? " (Offline Bundle)" : " Mode");
+      dom.badgeEdition.textContent = data.edition.toUpperCase() + (data.is_package ? " (Bundle)" : " Mode");
       if (dom.selectWorkspace) dom.selectWorkspace.value = data.edition;
     }
 
-    // Cluster State Badge
+    // Cluster State Badge (Color-Changing Lucide Icon)
     const stateVal = (data.cluster_state || "stopped").toLowerCase();
     if (stateVal === "running" || stateVal === "healthy") {
-      dom.badgeClusterStatus.className = "status-pill status-healthy";
-      dom.badgeClusterStatus.querySelector(".status-label").innerHTML = "Cluster: <strong>Healthy</strong>";
+      dom.badgeClusterStatus.className = "mui-status-indicator status-healthy";
+      dom.badgeClusterStatus.title = "Cluster: Healthy & Running";
+      const lbl = dom.badgeClusterStatus.querySelector(".status-label");
+      if (lbl) lbl.innerHTML = "Cluster: <strong>Healthy</strong>";
     } else if (stateVal === "degraded" || stateVal === "starting") {
-      dom.badgeClusterStatus.className = "status-pill status-warning";
-      dom.badgeClusterStatus.querySelector(".status-label").innerHTML = `Cluster: <strong>${data.cluster_state}</strong>`;
+      dom.badgeClusterStatus.className = "mui-status-indicator status-warning";
+      dom.badgeClusterStatus.title = `Cluster: ${data.cluster_state}`;
+      const lbl = dom.badgeClusterStatus.querySelector(".status-label");
+      if (lbl) lbl.innerHTML = `Cluster: <strong>${data.cluster_state}</strong>`;
     } else {
-      dom.badgeClusterStatus.className = "status-pill status-danger";
-      dom.badgeClusterStatus.querySelector(".status-label").innerHTML = "Cluster: <strong>Stopped</strong>";
+      dom.badgeClusterStatus.className = "mui-status-indicator status-stopped";
+      dom.badgeClusterStatus.title = "Cluster: Stopped";
+      const lbl = dom.badgeClusterStatus.querySelector(".status-label");
+      if (lbl) lbl.innerHTML = "Cluster: <strong>Stopped</strong>";
     }
 
-    // Disk Space
+    // Disk Space (Color-Changing Icon & Tooltip)
     if (data.disk) {
-      dom.textDiskStatus.textContent = `Disk: ${data.disk.percent || 0}% (${data.disk.free_gb || 0} GB Free)`;
+      dom.badgeDiskStatus.title = `Host Disk: ${data.disk.percent || 0}% used (${data.disk.free_gb || 0} GB Free)`;
+      if (data.disk.percent > 85) {
+        dom.badgeDiskStatus.className = "mui-status-indicator status-warning";
+      } else if (data.disk.percent > 95) {
+        dom.badgeDiskStatus.className = "mui-status-indicator status-danger";
+      } else {
+        dom.badgeDiskStatus.className = "mui-status-indicator status-healthy";
+      }
+      if (dom.textDiskStatus) {
+        dom.textDiskStatus.textContent = `Disk: ${data.disk.percent || 0}% (${data.disk.free_gb || 0} GB Free)`;
+      }
     }
 
     // Identity summary
@@ -973,14 +996,17 @@
     if (dom.docBadgeFailed) dom.docBadgeFailed.textContent = `${failed} Issues`;
 
     if (failed > 0) {
-      dom.badgeDoctorStatus.className = "status-pill status-danger";
-      dom.textDoctorStatus.textContent = `Doctor: ${failed} Issues`;
+      dom.badgeDoctorStatus.className = "mui-status-indicator status-danger";
+      dom.badgeDoctorStatus.title = `Doctor: ${failed} Issues Detected`;
+      if (dom.textDoctorStatus) dom.textDoctorStatus.textContent = `Doctor: ${failed} Issues`;
     } else if (warnings > 0) {
-      dom.badgeDoctorStatus.className = "status-pill status-warning";
-      dom.textDoctorStatus.textContent = `Doctor: ${warnings} Warn`;
+      dom.badgeDoctorStatus.className = "mui-status-indicator status-warning";
+      dom.badgeDoctorStatus.title = `Doctor: ${warnings} Warnings`;
+      if (dom.textDoctorStatus) dom.textDoctorStatus.textContent = `Doctor: ${warnings} Warn`;
     } else {
-      dom.badgeDoctorStatus.className = "status-pill status-healthy";
-      dom.textDoctorStatus.textContent = `Doctor: ${passed}/${checks.length} OK`;
+      dom.badgeDoctorStatus.className = "mui-status-indicator status-healthy";
+      dom.badgeDoctorStatus.title = `Doctor: ${passed}/${checks.length} All Checks Passing`;
+      if (dom.textDoctorStatus) dom.textDoctorStatus.textContent = `Doctor: ${passed}/${checks.length} OK`;
     }
 
     if (dom.tbodyDoctor) {
@@ -1317,6 +1343,19 @@
   }
 
   function setupNavigation() {
+    // Drawer mini-variant collapse toggle
+    const isNavCollapsed = localStorage.getItem("krate_nav_collapsed") === "true";
+    if (isNavCollapsed && dom.navRail) {
+      dom.navRail.classList.add("collapsed");
+    }
+    const toggleNavRail = () => {
+      if (!dom.navRail) return;
+      const collapsed = dom.navRail.classList.toggle("collapsed");
+      localStorage.setItem("krate_nav_collapsed", collapsed ? "true" : "false");
+    };
+    dom.btnDrawerToggle?.addEventListener("click", toggleNavRail);
+    dom.btnRailCollapse?.addEventListener("click", toggleNavRail);
+
     dom.navLinks.forEach((link) => {
       link.addEventListener("click", () => {
         switchView(link.dataset.view);
@@ -1493,7 +1532,7 @@
           body: { host, port, user },
         });
 
-        state.tofuData = { host, port, user, password };
+        state.tofuData = { host, port, user, password, raw_key: res.raw_key };
         dom.tofuTargetHost.textContent = `${user ? user + "@" : ""}${host}:${port}`;
         dom.tofuKeyType.textContent = res.key_type || "ssh-ed25519";
         dom.tofuFingerprint.textContent = res.fingerprint || "SHA256:unknown";

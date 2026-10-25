@@ -318,7 +318,7 @@ deploy_release() {
   if ! ( cd "$SCRIPT_DIR" && tar -cf - --exclude=./images --exclude=./docker-offline --exclude=./.env \
       --exclude=./certs --exclude=./auth --exclude=./monitoring/.env --exclude=./monitoring/auth \
       --exclude='./sso/site*.json' --exclude='./.env.*' --exclude='./monitoring/.env.*' \
-      --exclude='.identity-backup.*' --exclude='__pycache__' --exclude='*.pyc' . ) > "$work/release.tar" \
+      --exclude='.identity-backup.*' --exclude='.krate-ui-*' --exclude='__pycache__' --exclude='*.pyc' . ) > "$work/release.tar" \
     || ! tar -tf "$work/release.tar" > "$work/release.list" \
     || ! ( cd "$KRATE_HOME" && tar -xf "$work/release.tar" ); then
     rm -rf "$work"

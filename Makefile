@@ -319,7 +319,7 @@ bundle: offline-check
 >    find "$$bundle_dir/ui" -type f \( -name .DS_Store -o -name '._*' -o -name '*.pyc' \) -delete
 >    chmod 755 "$$bundle_dir/ui/krate_ui.py"
 >    cp Krate-UI.command Krate-UI.bat krate-ui.sh Krate-UI.desktop "$$bundle_dir/"
->    chmod +x "$$bundle_dir/Krate-UI.command" "$$bundle_dir/krate-ui.sh"
+>    chmod +x "$$bundle_dir/Krate-UI.command" "$$bundle_dir/krate-ui.sh" "$$bundle_dir/Krate-UI.desktop"
 >  fi
 >  cp "$$src_dir/.env.template" "$$bundle_dir/.env.template"
 >  printf '%s\n' "$(ARCH)" > "$$bundle_dir/.bundle-arch"

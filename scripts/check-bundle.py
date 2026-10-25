@@ -101,7 +101,8 @@ def main():
     if bytecode:
         raise SystemExit('Python bytecode must not ship in release packages: ' + ', '.join(bytecode))
     for site_file in ('.env', 'auth/ui/runtime.yml', 'auth/keycloak/krate-realm.json',
-                      'auth/keycloak/pingfederate-idp.json', 'auth/keycloak/db-tls', 'auth/identity-journal.log'):
+                      'auth/keycloak/pingfederate-idp.json', 'auth/keycloak/db-tls', 'auth/identity-journal.log',
+                      '.krate-ui-token', '.krate-ui-url'):
         if (root / site_file).exists():
             raise SystemExit('Site configuration must not ship in release packages: ' + site_file)
     print(f'Package coverage verified: {len(images)} images, including all optional profiles and SSO helpers.')

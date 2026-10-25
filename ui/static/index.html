@@ -11,11 +11,15 @@
   <!-- Top Navigation / Status Bar (Material UI AppBar) -->
   <header class="top-bar">
     <div class="top-bar-left">
+      <button class="mui-icon-btn btn-drawer-toggle" id="btn-drawer-toggle" title="Toggle Navigation Rail" aria-label="Toggle Navigation">
+        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+      </button>
+
       <div class="brand">
         <img src="/krate-logo.png" alt="Krate Logo" class="brand-logo-img">
         <div class="brand-text">
           <span class="brand-name">Krate Studio</span>
-          <span class="brand-tag" id="badge-edition">KRaft Mode</span>
+          <span class="brand-tag mui-chip" id="badge-edition">KRaft Mode</span>
         </div>
       </div>
 
@@ -29,42 +33,49 @@
       </div>
     </div>
 
-    <div class="top-bar-center">
-      <div class="status-pill-group">
-        <div class="status-pill status-healthy" id="badge-cluster-status" title="Cluster Runtime Status">
-          <span class="status-dot"></span>
-          <span class="status-label">Cluster: <strong>Healthy</strong></span>
-        </div>
-        <div class="status-pill status-info" id="badge-doctor-status" title="Doctor Diagnostics Status">
-          <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-          <span class="status-label" id="text-doctor-status">Doctor: Checking...</span>
-        </div>
-        <div class="status-pill status-neutral" id="badge-disk-status" title="Host Disk Space">
-          <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
-          <span class="status-label" id="text-disk-status">Disk: ...</span>
-        </div>
-        <div class="status-pill status-success" id="badge-auth-status" title="Authentication / Session">
-          <span class="status-dot"></span>
-          <span class="status-label" id="text-auth-status">Ready</span>
-        </div>
-      </div>
-    </div>
-
+    <!-- Right: Color-Changing Outline Lucide Status Icons & Action Buttons (Material UI Style) -->
     <div class="top-bar-right">
-      <button class="btn btn-sm btn-ghost" id="btn-remote-connect" title="Connect to Remote Krate Host via SSH">
-        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg>
-        <span>Remote SSH</span>
+      <!-- Cluster Runtime Health (Outline Color-Changing Icon) -->
+      <div class="mui-status-indicator status-stopped" id="badge-cluster-status" title="Cluster: Stopped" role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
+        <span class="status-label sr-only">Cluster: <strong>Stopped</strong></span>
+      </div>
+
+      <!-- Preflight Doctor Status (Outline Color-Changing Icon) -->
+      <div class="mui-status-indicator status-info" id="badge-doctor-status" title="Doctor: Checking..." role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        <span class="status-label sr-only" id="text-doctor-status">Doctor: Checking...</span>
+      </div>
+
+      <!-- Host Storage / Disk Space (Outline Color-Changing Icon) -->
+      <div class="mui-status-indicator status-neutral" id="badge-disk-status" title="Host Disk Space" role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></svg>
+        <span class="status-label sr-only" id="text-disk-status">Disk: ...</span>
+      </div>
+
+      <!-- Session Status (Outline Color-Changing Icon) -->
+      <div class="mui-status-indicator status-success" id="badge-auth-status" title="Session Authenticated" role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span class="status-label sr-only" id="text-auth-status">Ready</span>
+      </div>
+
+      <div class="top-bar-divider"></div>
+
+      <!-- Remote SSH Action Button -->
+      <button class="mui-icon-btn" id="btn-remote-connect" title="Remote SSH Connection" aria-label="Remote SSH">
+        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/></svg>
       </button>
 
-      <button class="btn btn-sm btn-ghost" id="btn-theme-toggle" title="Toggle Dark / Light Theme" aria-label="Toggle theme">
-        <svg class="theme-icon-dark" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
-        <svg class="theme-icon-light" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+      <!-- Theme Mode Toggle Button -->
+      <button class="mui-icon-btn" id="btn-theme-toggle" title="Toggle Dark / Light Theme" aria-label="Toggle theme">
+        <svg class="theme-icon-dark" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <svg class="theme-icon-light" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
       </button>
 
-      <button class="btn btn-sm btn-secondary" id="btn-toggle-terminal" title="Toggle Live Execution Logs">
-        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
-        <span>Terminal</span>
-        <span class="badge-counter" id="terminal-badge-status">Idle</span>
+      <!-- Terminal Drawer Toggle Button -->
+      <button class="mui-icon-btn btn-terminal-nav" id="btn-toggle-terminal" title="Toggle Live Execution Logs" aria-label="Toggle Terminal">
+        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+        <span class="terminal-pulse-dot" id="terminal-badge-status"></span>
       </button>
     </div>
   </header>
@@ -125,6 +136,11 @@
       </ul>
 
       <div class="nav-footer">
+        <button class="btn-rail-collapse" id="btn-rail-collapse" title="Collapse sidebar" aria-label="Collapse sidebar">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-collapse"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
+          <span class="rail-collapse-text">Collapse sidebar</span>
+        </button>
+
         <div class="airgap-badge" title="Zero remote requests. Completely self-contained offline deployment.">
           <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
           <span>100% Offline Air-Gapped</span>
@@ -160,36 +176,51 @@
         <!-- First-Run Wizard Stepper Card -->
         <div class="card wizard-card">
           <div class="card-header">
-            <h2 class="card-title">Air-Gapped Setup Workflow</h2>
+            <div>
+              <h2 class="card-title">Air-Gapped Setup Workflow</h2>
+              <p class="card-desc">Zero-CLI guided deployment pipeline from bare machine to live cluster.</p>
+            </div>
             <span class="badge badge-info">Zero-CLI Pipeline</span>
           </div>
           <div class="wizard-steps">
             <div class="wizard-step" id="step-docker">
-              <div class="step-num">1</div>
+              <div class="step-badge-row">
+                <span class="step-num">1</span>
+                <span class="step-status-chip" id="step-docker-chip">Socket Verified</span>
+              </div>
               <div class="step-content">
                 <div class="step-title">Docker Engine</div>
-                <div class="step-desc" id="step-docker-desc">Verifying Docker &amp; Compose socket...</div>
+                <div class="step-desc" id="step-docker-desc">Verifying Docker daemon &amp; Compose socket...</div>
               </div>
-              <button class="btn btn-sm btn-ghost step-btn" id="btn-step-docker">Install Docker</button>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-docker">Install Docker</button>
             </div>
             <div class="wizard-step" id="step-certs">
-              <div class="step-num">2</div>
+              <div class="step-badge-row">
+                <span class="step-num">2</span>
+                <span class="step-status-chip" id="step-certs-chip">Valid SANs</span>
+              </div>
               <div class="step-content">
                 <div class="step-title">TLS Certificates</div>
                 <div class="step-desc" id="step-certs-desc">CA &amp; SANs for Kafka/UI/Proxy</div>
               </div>
-              <button class="btn btn-sm btn-ghost step-btn" id="btn-step-certs">Gen Certs</button>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-certs">Gen Certs</button>
             </div>
             <div class="wizard-step" id="step-images">
-              <div class="step-num">3</div>
+              <div class="step-badge-row">
+                <span class="step-num">3</span>
+                <span class="step-status-chip">Digest Pinned</span>
+              </div>
               <div class="step-content">
                 <div class="step-title">Offline Images</div>
-                <div class="step-desc">Digest pinned in .env.template</div>
+                <div class="step-desc">Pinned digests in .env.template</div>
               </div>
-              <button class="btn btn-sm btn-ghost step-btn" id="btn-step-images">Load Images</button>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-images">Load Images</button>
             </div>
             <div class="wizard-step" id="step-start">
-              <div class="step-num">4</div>
+              <div class="step-badge-row">
+                <span class="step-num">4</span>
+                <span class="step-status-chip">Production Live</span>
+              </div>
               <div class="step-content">
                 <div class="step-title">Start Cluster</div>
                 <div class="step-desc">Launch Kafka, Kafbat UI &amp; Proxy</div>
@@ -1011,8 +1042,9 @@
           <select id="select-rotate-key" class="select-input">
             <option value="KEYCLOAK_ADMIN_PASSWORD">KEYCLOAK_ADMIN_PASSWORD</option>
             <option value="KEYCLOAK_DB_PASSWORD">KEYCLOAK_DB_PASSWORD</option>
-            <option value="GRAFANA_ADMIN_PASSWORD">GRAFANA_ADMIN_PASSWORD</option>
-            <option value="KAFBAT_UI_SECRET">KAFBAT_UI_SECRET</option>
+            <option value="KEYCLOAK_KAFBAT_CLIENT_SECRET">KEYCLOAK_KAFBAT_CLIENT_SECRET</option>
+            <option value="KEYCLOAK_CLI_CLIENT_SECRET">KEYCLOAK_CLI_CLIENT_SECRET</option>
+            <option value="KEYCLOAK_IDP_WATCH_CLIENT_SECRET">KEYCLOAK_IDP_WATCH_CLIENT_SECRET</option>
           </select>
         </div>
 
