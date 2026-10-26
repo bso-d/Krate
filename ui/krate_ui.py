@@ -2904,7 +2904,21 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 if parts.scheme not in ("http", "https"):
                     self._send_json(400, {"error": "URL scheme must be http or https"})
                     return
-                disc_url = raw_url if raw_url.endswith("/.well-known/openid-configuration") else f"{raw_url.rstrip('/')}/.well-known/openid-configuration"
+                host = parts.hostname or ""
+                if not host or not re.fullmatch(r"^[a-zA-Z0-9.-]+$", host):
+                    self._send_json(400, {"error": "Invalid or unsafe host name in URL"})
+                    return
+                # Disallow cloud metadata endpoints
+                if host in ("169.254.169.254", "metadata.google.internal") or host.startswith("169.254."):
+                    self._send_json(400, {"error": "Refusing prohibited metadata host"})
+                    return
+                if parts.username or parts.password or parts.query or parts.fragment:
+                    self._send_json(400, {"error": "URL must not contain credentials, query, or fragment"})
+                    return
+
+                port = parts.port
+                netloc = f"{host}:{port}" if port else host
+                disc_url = urllib.parse.urlunsplit((parts.scheme, netloc, "/.well-known/openid-configuration", "", ""))
 
                 req = urllib.request.Request(disc_url, headers={"User-Agent": "KrateStudio/1.0", "Accept": "application/json"})
                 ctx_ssl = ssl.create_default_context()
