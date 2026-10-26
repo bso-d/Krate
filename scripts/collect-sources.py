@@ -408,7 +408,7 @@ def main(argv=None):
                 os.environ['SSL_CERT_FILE'] = ca
                 return
         except ImportError:
-            pass
+            certifi = None
         for ca_path in (
             '/etc/ssl/cert.pem',
             '/etc/ssl/certs/ca-certificates.crt',

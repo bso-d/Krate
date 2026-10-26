@@ -1271,7 +1271,8 @@ class StructuredDataCollector:
             "rule_list": [],
         }
 
-    def get_host_info(self, context: Optional[OperationContext] = None) -> Dict[str, Any]:
+    @staticmethod
+    def get_host_info(context: Optional[OperationContext] = None) -> Dict[str, Any]:
         target_path = "/"
         if context and context.effective_dir and os.path.exists(context.effective_dir):
             target_path = context.effective_dir
