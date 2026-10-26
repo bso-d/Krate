@@ -2916,6 +2916,18 @@ cmd_gen_cert() {
   local fqdn ip san public_host
   fqdn="$(get_fqdn)"
   ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -z "$ip" ]]; then
+    ip="$(python3 -c '
+import socket
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("10.255.255.255", 1))
+    print(s.getsockname()[0])
+    s.close()
+except Exception:
+    pass
+' 2>/dev/null || true)"
+  fi
   # The browser-facing name is KEYCLOAK_PUBLIC_URL's host (default localhost); the
   # certificate covers it together with the host FQDN so a fresh install passes the
   # authentication preflight without a second gen-cert.
@@ -3511,17 +3523,25 @@ cmd_uninstall() {
   require_compose; require_compose_file
   identity_lock_if_enabled
 
-  local purge=false
-  [[ "${1:-}" == "--purge" ]] && purge=true
+  local purge=false yes=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --purge) purge=true; shift ;;
+      -y|--yes) yes=true; shift ;;
+      *) shift ;;
+    esac
+  done
 
   if $purge; then
-    echo ""
-    warn "WARNING: --purge will delete all Kafka data (broker logs, ZK state, offsets)"
-    warn "and the identity database (Keycloak users and settings, volume keycloak_db_data)."
-    warn "This is irreversible. Keep a copy first: krate identity backup <file>"
-    echo ""
-    read -rp "Type 'yes' to confirm purge: " confirm
-    [[ "$confirm" == "yes" ]] || die "Aborted."
+    if ! $yes; then
+      echo ""
+      warn "WARNING: --purge will delete all Kafka data (broker logs, ZK state, offsets)"
+      warn "and the identity database (Keycloak users and settings, volume keycloak_db_data)."
+      warn "This is irreversible. Keep a copy first: krate identity backup <file>"
+      echo ""
+      read -rp "Type 'yes' to confirm purge: " confirm
+      [[ "$confirm" == "yes" ]] || die "Aborted."
+    fi
     info "Removing containers and volumes..."
     identity_compose down -v
   else
@@ -3529,6 +3549,132 @@ cmd_uninstall() {
     identity_compose down
   fi
   ok "Done"
+}
+
+# ─── clear-cluster ────────────────────────────────────────────────────────────
+cmd_clear_cluster() {
+  require_compose; require_compose_file
+  local yes=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y|--yes) yes=true; shift ;;
+      *) err "Unknown option: $1"; exit 1 ;;
+    esac
+  done
+
+  if ! $yes; then
+    echo ""
+    warn "WARNING: clear-cluster will stop all services and permanently delete"
+    warn "all Kafka broker data, consumer offsets, identity database storage, and monitoring metrics."
+    warn "This action is immediate and irreversible."
+    echo ""
+    read -rp "Type 'yes' to confirm cluster clear: " confirm
+    [[ "$confirm" == "yes" ]] || die "Aborted."
+  fi
+
+  # Stage 1: Teardown monitoring stack and purge monitoring volumes
+  if [[ -d "$MONITOR_DIR" ]]; then
+    info "Stage 1/2: Tearing down monitoring stack and purging volumes..."
+    cmd_monitor down -v 2>/dev/null || warn "Monitoring teardown encountered non-fatal issues or was not running"
+  fi
+
+  # Stage 2: Teardown cluster & identity services and purge Docker volumes
+  info "Stage 2/2: Tearing down cluster containers and purging Docker named volumes..."
+  cmd_uninstall --purge --yes
+
+  # Stage 3: On EPC, clean host data directory under KAFKA_DATA_DIR
+  if [[ "$KRATE_VARIANT" == "epc" ]]; then
+    local base
+    base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
+    if [[ -d "$base/krate" ]]; then
+      info "Cleaning host broker data directories in $base/krate..."
+      local -a sudo_cmd=()
+      if [[ "$(id -u)" -ne 0 ]] && command -v sudo &>/dev/null; then
+        sudo_cmd=(sudo)
+      fi
+      if "${sudo_cmd[@]}" rm -rf "$base/krate/broker-92"/* "$base/krate/broker-93"/* 2>/dev/null; then
+        ok "EPC host broker data cleared"
+      else
+        warn "Could not clean $base/krate (requires root privileges). Clean manually: sudo rm -rf $base/krate"
+      fi
+    fi
+  fi
+
+  ok "Cluster and observability stack cleared successfully."
+}
+
+# ─── clear-images ─────────────────────────────────────────────────────────────
+cmd_clear_images() {
+  require_docker
+  local yes=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y|--yes) yes=true; shift ;;
+      *) err "Unknown option: $1"; exit 1 ;;
+    esac
+  done
+
+  if ! $yes; then
+    echo ""
+    warn "WARNING: clear-images will remove all local Docker images pinned by Krate"
+    warn "and its monitoring stack. Re-running Krate will require reloading or pulling images."
+    echo ""
+    read -rp "Type 'yes' to confirm image removal: " confirm
+    [[ "$confirm" == "yes" ]] || die "Aborted."
+  fi
+
+  local -A targets=()
+  local line raw img
+
+  # 1. Pinned templates & env files
+  local files=("$ENV_TEMPLATE" "$ENV_FILE")
+  [[ -d "$MONITOR_DIR" ]] && files+=("$MONITOR_DIR/.env.template" "$MONITOR_DIR/.env")
+
+  for f in "${files[@]}"; do
+    [[ -f "$f" ]] || continue
+    while IFS= read -r line; do
+      raw="${line#*=}"
+      raw="${raw%\"}"; raw="${raw#\"}"; raw="${raw%\'}"; raw="${raw#\'}"; raw="${raw%$'\r'}"
+      [[ -n "$raw" ]] && targets["$raw"]=1
+      # Also add tag-only reference without @sha256:...
+      if [[ "$raw" == *@sha256:* ]]; then
+        targets["${raw%@sha256:*}"]=1
+      fi
+    done < <(grep -E '^[A-Z0-9_]+_IMAGE=' "$f" 2>/dev/null || true)
+  done
+
+  # 2. Bundle images.lock.tsv if present
+  if [[ -f "$SCRIPT_DIR/images.lock.tsv" ]]; then
+    while IFS=$'\t' read -r orig offline; do
+      [[ -n "$orig" ]] && targets["$orig"]=1
+      [[ -n "$offline" ]] && targets["$offline"]=1
+    done < "$SCRIPT_DIR/images.lock.tsv"
+  fi
+
+  # 3. Known custom built images
+  targets["krate/kafka-ui:1.5.0-sso.9"]=1
+
+  info "Removing pinned Krate Docker images..."
+  local removed=0
+  for img in "${!targets[@]}"; do
+    if docker image inspect "$img" &>/dev/null; then
+      echo -n "    Removing $img ... "
+      if docker rmi "$img" &>/dev/null; then
+        echo "done"
+        ((removed++)) || true
+      else
+        echo "in use or skipped"
+      fi
+    fi
+  done
+
+  # 4. Cleanup any orphan krate-offline tags
+  while IFS= read -r img; do
+    [[ -n "$img" ]] || continue
+    docker rmi "$img" &>/dev/null && ((removed++)) || true
+  done < <(docker images --format '{{.Repository}}:{{.Tag}}' | grep '^krate-offline/' || true)
+
+  ok "Image cleanup completed. Removed $removed image reference(s)."
 }
 
 # ─── monitor (observability stack) ───────────────────────────────────────────
@@ -5480,6 +5626,8 @@ cmd_help() {
   printf "  %-30s %s\n" "load-images"          "Load Docker images from images/ without starting"
   printf "  %-30s %s\n" "uninstall"            "Remove containers (volumes kept)"
   printf "  %-30s %s\n" "uninstall --purge"    "Remove containers AND delete all data"
+  printf "  %-30s %s\n" "clear-cluster [-y|--yes]" "Teardown monitoring, remove cluster containers and purge volumes"
+  printf "  %-30s %s\n" "clear-images [-y|--yes]"  "Remove all Krate and monitoring Docker images pinned by templates"
   printf "  %-30s %s\n" "disk"                 "Data-disk usage vs the configured budget"
   printf "  %-30s %s\n" "monitor {up|down|status|logs|reload|ui}" "Observability stack (Grafana, Prometheus, Loki)"
   printf "  %-30s %s\n" "doctor"               "Preflight checks (ports, firewalld, Docker) before install"
@@ -5526,7 +5674,7 @@ shift || true
 # installed copy, which holds the site's settings and certificates.
 if is_package; then
   case "$CMD" in
-    install|doctor|docker-check|docker-install|load-images|studio|workspace|verify|help|--help|-h) ;;
+    install|doctor|docker-check|docker-install|load-images|clear-images|studio|workspace|verify|help|--help|-h) ;;
     *)
       [[ -x "$KRATE_HOME/krate" ]] || die "Not installed yet. Run: ./krate install"
       exec "$KRATE_HOME/krate" "$CMD" "$@"
@@ -5559,6 +5707,8 @@ case "$CMD" in
   identity)       cmd_identity "$@" ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;
+  clear-cluster)  cmd_clear_cluster "$@" ;;
+  clear-images)   cmd_clear_images "$@" ;;
   disk)           cmd_disk ;;
   monitor)        cmd_monitor "$@" ;;
   doctor)         cmd_doctor ;;

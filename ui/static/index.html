@@ -162,6 +162,10 @@
             <p class="view-subtitle">Offline preflight verification, automated environment remediation, and lifecycle initialization.</p>
           </div>
           <div class="view-actions">
+            <button class="btn btn-primary" id="btn-open-setup-wizard">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+              <span>Setup Wizard</span>
+            </button>
             <button class="btn btn-secondary" id="btn-run-doctor">
               <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
               <span>Run Doctor</span>
@@ -214,7 +218,10 @@
                 <div class="step-title">Offline Images</div>
                 <div class="step-desc" id="step-images-desc">Pinned digests in .env.template</div>
               </div>
-              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-images">Load Images</button>
+              <div class="step-btn-group">
+                <button class="btn btn-sm btn-secondary step-btn" id="btn-step-images">Load Images</button>
+                <button class="btn btn-sm btn-ghost step-btn-danger" id="btn-step-clear-images" title="Clear Krate offline images to reclaim disk">Clear Images</button>
+              </div>
             </div>
             <div class="wizard-step" id="step-install">
               <div class="step-badge-row">
@@ -272,6 +279,95 @@
             </table>
           </div>
         </div>
+
+        <!-- Access Portals & Cluster Credentials Card -->
+        <div class="card" id="card-credentials-overview">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">Access Portals &amp; Generated Credentials</h2>
+              <p class="card-desc">Portals, administrative accounts, and passwords stored securely in mode 0600 .env.</p>
+            </div>
+            <button class="btn btn-sm btn-secondary" id="btn-open-credentials-modal">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span>View Full Credentials</span>
+            </button>
+          </div>
+          <div class="credentials-overview-grid" id="credentials-overview-grid">
+            <div class="credential-box">
+              <div class="credential-header">
+                <span class="credential-app-name">Kafbat UI Console</span>
+                <a href="https://localhost/" target="_blank" rel="noopener" class="credential-link" id="cred-link-kafbat">Open Console</a>
+              </div>
+              <div class="credential-fields">
+                <div class="cred-row"><span class="cred-label">User:</span> <code id="cred-user-kafbat">admin</code></div>
+                <div class="cred-row"><span class="cred-label">Password:</span> <span class="cred-masked" id="cred-pass-kafbat">••••••••••••••••</span> <button class="btn-cred-copy" data-target="cred-pass-kafbat" title="Copy password">Copy</button></div>
+              </div>
+            </div>
+            <div class="credential-box">
+              <div class="credential-header">
+                <span class="credential-app-name">Grafana Observability</span>
+                <a href="https://localhost/grafana/" target="_blank" rel="noopener" class="credential-link" id="cred-link-grafana">Open Grafana</a>
+              </div>
+              <div class="credential-fields">
+                <div class="cred-row"><span class="cred-label">User:</span> <code id="cred-user-grafana">admin</code></div>
+                <div class="cred-row"><span class="cred-label">Password:</span> <span class="cred-masked" id="cred-pass-grafana">••••••••••••••••</span> <button class="btn-cred-copy" data-target="cred-pass-grafana" title="Copy password">Copy</button></div>
+              </div>
+            </div>
+            <div class="credential-box">
+              <div class="credential-header">
+                <span class="credential-app-name">Perses Dashboards</span>
+                <a href="https://localhost:3443/" target="_blank" rel="noopener" class="credential-link" id="cred-link-perses">Open Perses</a>
+              </div>
+              <div class="credential-fields">
+                <div class="cred-row"><span class="cred-label">User:</span> <code id="cred-user-perses">admin</code></div>
+                <div class="cred-row"><span class="cred-label">Password:</span> <span class="cred-masked" id="cred-pass-perses">••••••••••••••••</span> <button class="btn-cred-copy" data-target="cred-pass-perses" title="Copy password">Copy</button></div>
+              </div>
+            </div>
+            <div class="credential-box">
+              <div class="credential-header">
+                <span class="credential-app-name">Keycloak Identity Realm</span>
+                <span class="badge badge-info" id="cred-badge-keycloak">Realm: krate</span>
+              </div>
+              <div class="credential-fields">
+                <div class="cred-row"><span class="cred-label">Admin:</span> <code id="cred-user-keycloak">admin</code></div>
+                <div class="cred-row"><span class="cred-label">Password:</span> <span class="cred-masked" id="cred-pass-keycloak">••••••••••••••••</span> <button class="btn-cred-copy" data-target="cred-pass-keycloak" title="Copy password">Copy</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Teardown & Maintenance Danger Card -->
+        <div class="card card-maintenance">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title text-danger">Cluster Maintenance &amp; Teardown</h2>
+              <p class="card-desc">Safely clear containers, purge persistent storage volumes, or reclaim offline Docker image disk space.</p>
+            </div>
+          </div>
+          <div class="maintenance-actions-row">
+            <div class="maintenance-item">
+              <div class="maintenance-info">
+                <strong>Clear Containers (krate down)</strong>
+                <p>Stops and removes cluster and monitoring containers and Docker networks. Preserves all partition data and database volumes.</p>
+              </div>
+              <button class="btn btn-secondary" id="btn-setup-down">Clear Containers</button>
+            </div>
+            <div class="maintenance-item">
+              <div class="maintenance-info">
+                <strong>Clear Images (krate clear-images)</strong>
+                <p>Removes all 18 Krate pinned Docker images to reclaim host disk space (Rule #3 compliant; host images are untouched).</p>
+              </div>
+              <button class="btn btn-secondary" id="btn-setup-clear-images">Clear Images</button>
+            </div>
+            <div class="maintenance-item">
+              <div class="maintenance-info">
+                <strong class="text-danger">Purge Cluster &amp; All Data (krate clear-cluster)</strong>
+                <p class="text-danger">Two-stage teardown: downs monitoring stack, unbinds network, then purges cluster containers, networks, and data volumes.</p>
+              </div>
+              <button class="btn btn-danger" id="btn-setup-purge">Clear Cluster...</button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- ========================================== -->
@@ -299,6 +395,14 @@
             <button class="btn btn-primary" id="btn-services-start">
               <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               <span>Start All</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-services-down" title="Remove containers and networks while keeping data volumes intact">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+              <span>Clear Containers</span>
+            </button>
+            <button class="btn btn-danger" id="btn-services-purge" title="Permanently stop cluster, monitoring, and purge all data">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+              <span>Clear Cluster...</span>
             </button>
           </div>
         </div>
@@ -1234,6 +1338,224 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" id="btn-backup-cancel">Cancel</button>
         <button class="btn btn-primary" id="btn-backup-submit">Create Encrypted Backup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 8. CLEAR IMAGES MODAL -->
+  <div class="modal-backdrop" id="modal-clear-images" role="dialog" aria-modal="true" aria-labelledby="modal-clear-images-title">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-icon icon-warning">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-clear-images-title">Clear Offline Docker Images</h3>
+          <p class="modal-subtitle">Reclaim disk space by untagging and removing pinned Krate images.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="info-box mb-3">
+          <p><strong>Rule #3 Safe Isolation:</strong> This action strictly removes only the 18 pinned Krate and monitoring container images from the local Docker daemon. Unrelated host Docker images and caches are untouched.</p>
+          <p class="mt-2 text-sm text-muted">You will need to run <code>krate load-images</code> or build the UI image before starting the cluster again.</p>
+        </div>
+        <p class="text-sm">Are you sure you want to proceed with clearing all offline Krate images?</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-clear-images-cancel">Cancel</button>
+        <button class="btn btn-danger" id="btn-clear-images-submit">Clear Images</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 9. FIRST-TIME CREDENTIALS REVEAL MODAL -->
+  <div class="modal-backdrop" id="modal-credentials-reveal" role="dialog" aria-modal="true" aria-labelledby="modal-cred-reveal-title">
+    <div class="modal-dialog modal-dialog-lg">
+      <div class="modal-header">
+        <div class="modal-icon icon-success">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-cred-reveal-title">Cluster Credentials &amp; Portals</h3>
+          <p class="modal-subtitle">Administrative accounts and cryptographic secrets generated for your server.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="alert-box mb-3">
+          <p>These credentials were auto-generated or loaded from <code>.env</code> and <code>monitoring/.env</code> (file mode <code>0600</code>). Copy them to your password manager or secure vault.</p>
+        </div>
+        <div class="credentials-modal-grid">
+          <div class="credential-card-item">
+            <div class="card-item-title">Kafbat UI Console</div>
+            <div class="card-item-row"><span class="k">Portal URL:</span> <a href="https://localhost/" target="_blank" rel="noopener" id="rev-link-kafbat">https://localhost/</a></div>
+            <div class="card-item-row"><span class="k">Username:</span> <code id="rev-user-kafbat">admin</code></div>
+            <div class="card-item-row"><span class="k">Password:</span> <input type="password" id="rev-pass-kafbat" class="cred-input-read" readonly> <button class="btn btn-xs btn-secondary btn-reveal-toggle" data-input="rev-pass-kafbat">Show</button> <button class="btn btn-xs btn-primary btn-copy-direct" data-target="rev-pass-kafbat">Copy</button></div>
+          </div>
+          <div class="credential-card-item">
+            <div class="card-item-title">Grafana Observability</div>
+            <div class="card-item-row"><span class="k">Portal URL:</span> <a href="https://localhost/grafana/" target="_blank" rel="noopener" id="rev-link-grafana">https://localhost/grafana/</a></div>
+            <div class="card-item-row"><span class="k">Username:</span> <code id="rev-user-grafana">admin</code></div>
+            <div class="card-item-row"><span class="k">Password:</span> <input type="password" id="rev-pass-grafana" class="cred-input-read" readonly> <button class="btn btn-xs btn-secondary btn-reveal-toggle" data-input="rev-pass-grafana">Show</button> <button class="btn btn-xs btn-primary btn-copy-direct" data-target="rev-pass-grafana">Copy</button></div>
+          </div>
+          <div class="credential-card-item">
+            <div class="card-item-title">Perses Dashboards</div>
+            <div class="card-item-row"><span class="k">Portal URL:</span> <a href="https://localhost:3443/" target="_blank" rel="noopener" id="rev-link-perses">https://localhost:3443/</a></div>
+            <div class="card-item-row"><span class="k">Username:</span> <code id="rev-user-perses">admin</code></div>
+            <div class="card-item-row"><span class="k">Password:</span> <input type="password" id="rev-pass-perses" class="cred-input-read" readonly> <button class="btn btn-xs btn-secondary btn-reveal-toggle" data-input="rev-pass-perses">Show</button> <button class="btn btn-xs btn-primary btn-copy-direct" data-target="rev-pass-perses">Copy</button></div>
+          </div>
+          <div class="credential-card-item">
+            <div class="card-item-title">Keycloak Realm Admin</div>
+            <div class="card-item-row"><span class="k">Realm URL:</span> <span id="rev-link-keycloak">https://localhost/identity</span></div>
+            <div class="card-item-row"><span class="k">Admin User:</span> <code id="rev-user-keycloak">admin</code></div>
+            <div class="card-item-row"><span class="k">Password:</span> <input type="password" id="rev-pass-keycloak" class="cred-input-read" readonly> <button class="btn btn-xs btn-secondary btn-reveal-toggle" data-input="rev-pass-keycloak">Show</button> <button class="btn btn-xs btn-primary btn-copy-direct" data-target="rev-pass-keycloak">Copy</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-copy-all-creds">Copy All Credentials</button>
+        <button class="btn btn-primary" id="btn-cred-reveal-done">Done &amp; Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 10. INTERACTIVE SETUP WIZARD MODAL -->
+  <div class="modal-backdrop" id="modal-setup-wizard" role="dialog" aria-modal="true" aria-labelledby="modal-wizard-title">
+    <div class="modal-dialog modal-dialog-lg">
+      <div class="modal-header">
+        <div class="modal-icon icon-info">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" fill="none" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+        </div>
+        <div>
+          <h3 class="modal-title" id="modal-wizard-title">Interactive Cluster Setup Wizard</h3>
+          <p class="modal-subtitle">Configure deployment preset, server domain, credentials, and SSO integration.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="wizard-tabs">
+          <div class="wizard-tab active" data-step="1">1. Architecture Preset</div>
+          <div class="wizard-tab" data-step="2">2. Server &amp; Network</div>
+          <div class="wizard-tab" data-step="3">3. SSO / PingFederate</div>
+          <div class="wizard-tab" data-step="4">4. Review &amp; Apply</div>
+        </div>
+
+        <div class="wizard-step-content active" id="wizard-step-1">
+          <p class="text-sm mb-3">Select the deployment preset matching your operational environment:</p>
+          <div class="preset-cards-grid">
+            <label class="preset-card active">
+              <input type="radio" name="wizard-preset" value="standalone" checked>
+              <div class="preset-card-body">
+                <div class="preset-card-title">1. Standalone Developer</div>
+                <div class="preset-card-desc">4 KRaft brokers, local basic auth on Kafbat UI, minimal RAM usage. Zero Keycloak container overhead.</div>
+                <span class="badge badge-success">Recommended for Dev</span>
+              </div>
+            </label>
+            <label class="preset-card">
+              <input type="radio" name="wizard-preset" value="keycloak_local">
+              <div class="preset-card-body">
+                <div class="preset-card-title">2. Enterprise with Local Keycloak</div>
+                <div class="preset-card-desc">Built-in Keycloak identity provider, local user accounts, KRATE_ADMINS / KRATE_VIEWERS RBAC groups, TOTP MFA.</div>
+                <span class="badge badge-info">Multi-User RBAC</span>
+              </div>
+            </label>
+            <label class="preset-card">
+              <input type="radio" name="wizard-preset" value="ping_federate">
+              <div class="preset-card-body">
+                <div class="preset-card-title">3. Enterprise with PingFederate SSO</div>
+                <div class="preset-card-desc">Corporate SSO brokered via PingFederate OIDC, AD group mapping, automated fail-open fallback (idp-watch), break-glass admin.</div>
+                <span class="badge badge-warning">Corporate Federation</span>
+              </div>
+            </label>
+            <label class="preset-card">
+              <input type="radio" name="wizard-preset" value="epc_production">
+              <div class="preset-card-body">
+                <div class="preset-card-title">4. EPC 2-Node Production Cluster</div>
+                <div class="preset-card-desc">2 combined controller/broker nodes on RHEL 9 with host filesystem storage (/data) and production disk limits.</div>
+                <span class="badge badge-secondary">RHEL 9 / EPC</span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div class="wizard-step-content" id="wizard-step-2" style="display: none;">
+          <div class="detected-host-banner mb-3" id="wizard-host-banner">
+            <span class="host-pill" id="pill-host-os">OS: Detecting...</span>
+            <span class="host-pill" id="pill-host-arch">Arch: Detecting...</span>
+            <span class="host-pill" id="pill-host-ip">IP: Detecting...</span>
+            <span class="host-pill" id="pill-host-fqdn">FQDN: Detecting...</span>
+          </div>
+          <div class="form-group mb-3">
+            <label for="wizard-input-fqdn" class="form-label">Cluster Hostname / FQDN *</label>
+            <input type="text" id="wizard-input-fqdn" class="text-input" placeholder="e.g. krate.corp.internal or server IP">
+            <p class="text-xs text-muted">Used in TLS certificate SANs and Keycloak public URL.</p>
+          </div>
+          <div class="form-row mb-3">
+            <div class="form-group col-6">
+              <label for="wizard-input-https-port" class="form-label">HTTPS Port</label>
+              <input type="number" id="wizard-input-https-port" class="text-input" value="443">
+            </div>
+            <div class="form-group col-6">
+              <label for="wizard-input-http-port" class="form-label">HTTP Port</label>
+              <input type="number" id="wizard-input-http-port" class="text-input" value="80">
+            </div>
+          </div>
+          <div class="form-group mb-3">
+            <label for="wizard-input-ui-pass" class="form-label">Kafbat UI Admin Password (leave blank to auto-generate 24-char secure secret)</label>
+            <input type="password" id="wizard-input-ui-pass" class="text-input" placeholder="Auto-generated if left blank">
+          </div>
+        </div>
+
+        <div class="wizard-step-content" id="wizard-step-3" style="display: none;">
+          <div id="wizard-sso-required-notice" class="info-box mb-3">
+            <p><strong>Corporate SSO Configuration:</strong> Configure your enterprise PingFederate or external OIDC Identity Provider.</p>
+          </div>
+          <div class="form-group mb-3">
+            <label for="wizard-input-idp-issuer" class="form-label">PingFederate / IdP Issuer URL</label>
+            <div class="input-with-button">
+              <input type="text" id="wizard-input-idp-issuer" class="text-input" placeholder="https://ping.example.internal">
+              <button class="btn btn-secondary btn-sm" id="btn-wizard-discover-idp">Test Discovery</button>
+            </div>
+            <p class="text-xs text-muted">Queries <code>/.well-known/openid-configuration</code> server-side without browser CORS restrictions.</p>
+          </div>
+          <div class="form-group mb-3" id="wizard-discovery-status" style="display: none;">
+            <div class="discovery-details-box" id="wizard-discovery-details"></div>
+          </div>
+          <div class="form-row mb-3">
+            <div class="form-group col-6">
+              <label for="wizard-input-idp-client-id" class="form-label">OIDC Client ID</label>
+              <input type="text" id="wizard-input-idp-client-id" class="text-input" placeholder="krate-keycloak">
+            </div>
+            <div class="form-group col-6">
+              <label for="wizard-input-idp-client-secret" class="form-label">PingFederate Client Secret</label>
+              <input type="password" id="wizard-input-idp-client-secret" class="text-input" placeholder="Enter secret issued by PingFederate">
+            </div>
+          </div>
+          <div class="form-row mb-3">
+            <div class="form-group col-6">
+              <label for="wizard-input-idp-admin-group" class="form-label">AD Administrator Group</label>
+              <input type="text" id="wizard-input-idp-admin-group" class="text-input" value="KRATE_ADMINS">
+            </div>
+            <div class="form-group col-6">
+              <label for="wizard-input-idp-viewer-group" class="form-label">AD Viewer Group</label>
+              <input type="text" id="wizard-input-idp-viewer-group" class="text-input" value="KRATE_VIEWERS">
+            </div>
+          </div>
+        </div>
+
+        <div class="wizard-step-content" id="wizard-step-4" style="display: none;">
+          <div class="review-plan-box" id="wizard-review-plan">
+            <h4 class="mb-2">Configuration Summary:</h4>
+            <div id="wizard-plan-summary"></div>
+          </div>
+          <div class="alert-box mt-3">
+            <p>Clicking <strong>Apply Configuration</strong> will write configuration settings to <code>.env</code> using CAS revision locking and prepare the cluster for deployment.</p>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-wizard-prev" style="display: none;">Back</button>
+        <button class="btn btn-secondary" id="btn-wizard-cancel">Cancel</button>
+        <button class="btn btn-primary" id="btn-wizard-next">Next</button>
+        <button class="btn btn-primary" id="btn-wizard-apply" style="display: none;">Apply Configuration</button>
       </div>
     </div>
   </div>
