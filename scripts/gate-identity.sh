@@ -679,7 +679,9 @@ release_lock() { kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; }
 fixture_reset() {
   local n; for n in $(docker ps -aq --filter "label=krate.gate=w4-probe"); do docker rm -f "$n" >/dev/null 2>&1; done  # a W4 probe left by a killed run
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
-  compose down -v --remove-orphans >/dev/null 2>&1 || true
+  compose --profile idp-watch down -v --remove-orphans >/dev/null 2>&1 || true
+  for n in $(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
+  local v; for v in $(docker volume ls -q | grep -E "^${PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   local p
   for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/auth/.operation.lock" "$ED/auth/.config-applied.json" "$ED/auth/.config-draft.json" "$ED/auth/.verify-ledger.json" "$ED/auth/.formal-gate-receipt.json" "$ED/auth/.operation-recovery" "$ED/auth/.revision.key" "$ED/certs" "$MON_DIR/.env"; do
@@ -2972,11 +2974,12 @@ teardown() {
   if $KEEP; then log "--keep: fixture left running (project $PROJECT)"; return; fi
   "$KRATE" monitor down >/dev/null 2>&1 || true
   "$STUB" down --project "$PROJECT" >/dev/null 2>&1 || true  # before compose down: the stand-in is attached to identity-egress
-  compose down -v --remove-orphans >/dev/null 2>&1 || true
-  local v; for v in $(docker volume ls -q | grep -E "^${MON_PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
+  compose --profile idp-watch down -v --remove-orphans >/dev/null 2>&1 || true
+  local n; for n in $(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
+  local v; for v in $(docker volume ls -q | grep -E "^${PROJECT}_|^${MON_PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
   docker volume rm "${MON_PROJECT}_grafana_rendered" >/dev/null 2>&1 || true  # named explicitly (section 5); the prefix loop above is the backstop
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" "${MON_PROJECT}_perses" >/dev/null 2>&1 || true
-  local n; for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-|^${PROJECT}-gate4-"); do docker network rm "$n" >/dev/null 2>&1; done
+  for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-|^${PROJECT}-gate4-"); do docker network rm "$n" >/dev/null 2>&1; done
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done
   # A helper label alone is not ownership: restrict removal to this fixture's
   # Compose project. The name-filtered removal above covers independent helpers.
