@@ -3538,7 +3538,9 @@ cmd_clear_images() {
   # 4. Cleanup any orphan krate-offline tags
   while IFS= read -r img; do
     [[ -n "$img" ]] || continue
-    docker rmi "$img" &>/dev/null && ((removed++)) || true
+    if docker rmi "$img" &>/dev/null; then
+      ((removed++)) || true
+    fi
   done < <(docker images --format '{{.Repository}}:{{.Tag}}' | grep '^krate-offline/' || true)
 
   ok "Image cleanup completed. Removed $removed image reference(s)."
