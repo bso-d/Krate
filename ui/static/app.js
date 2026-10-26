@@ -214,6 +214,27 @@
     btnBackupCancel: document.getElementById("btn-backup-cancel"),
     btnBackupSubmit: document.getElementById("btn-backup-submit"),
 
+    modalClearImages: document.getElementById("modal-clear-images"),
+    btnClearImagesCancel: document.getElementById("btn-clear-images-cancel"),
+    btnClearImagesSubmit: document.getElementById("btn-clear-images-submit"),
+
+    modalCredentialsReveal: document.getElementById("modal-credentials-reveal"),
+    btnCredRevealDone: document.getElementById("btn-cred-reveal-done"),
+    btnCopyAllCreds: document.getElementById("btn-copy-all-creds"),
+
+    modalSetupWizard: document.getElementById("modal-setup-wizard"),
+    btnOpenSetupWizard: document.getElementById("btn-open-setup-wizard"),
+    btnWizardPrev: document.getElementById("btn-wizard-prev"),
+    btnWizardNext: document.getElementById("btn-wizard-next"),
+    btnWizardCancel: document.getElementById("btn-wizard-cancel"),
+    btnWizardApply: document.getElementById("btn-wizard-apply"),
+    btnWizardDiscoverIdp: document.getElementById("btn-wizard-discover-idp"),
+
+    stepDockerChip: document.getElementById("step-docker-chip"),
+    stepCertsChip: document.getElementById("step-certs-chip"),
+    stepImagesChip: document.getElementById("step-images-chip"),
+    stepStartChip: document.getElementById("step-start-chip"),
+
     toastContainer: document.getElementById("toast-container"),
   };
 
@@ -347,7 +368,265 @@
       dom.inputPurgeConfirm.value = "";
       dom.chkPurgeConfirm.checked = false;
       dom.btnPurgeSubmit.disabled = true;
-      triggerJob("uninstall", { purge: true });
+      triggerJob("clear_cluster", { purge: true });
+    });
+
+    document.getElementById("btn-services-purge")?.addEventListener("click", () => openModal(dom.modalPurge));
+    document.getElementById("btn-setup-purge")?.addEventListener("click", () => openModal(dom.modalPurge));
+    document.getElementById("btn-services-down")?.addEventListener("click", () => triggerJob("down"));
+    document.getElementById("btn-setup-down")?.addEventListener("click", () => triggerJob("down"));
+
+    // Clear Images Modal controls
+    document.getElementById("btn-step-clear-images")?.addEventListener("click", () => openModal(dom.modalClearImages));
+    document.getElementById("btn-setup-clear-images")?.addEventListener("click", () => openModal(dom.modalClearImages));
+    dom.btnClearImagesCancel?.addEventListener("click", () => closeModal(dom.modalClearImages));
+    dom.btnClearImagesSubmit?.addEventListener("click", () => {
+      closeModal(dom.modalClearImages);
+      triggerJob("clear_images");
+    });
+
+    // Credentials Modal & Reveal controls
+    document.getElementById("btn-open-credentials-modal")?.addEventListener("click", () => {
+      openModal(dom.modalCredentialsReveal);
+      fetchCredentials();
+    });
+    dom.btnCredRevealDone?.addEventListener("click", () => closeModal(dom.modalCredentialsReveal));
+
+    // Show/hide toggle for masked password inputs in modal
+    document.querySelectorAll(".btn-reveal-toggle").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const inputId = btn.getAttribute("data-input");
+        const inp = document.getElementById(inputId);
+        if (!inp) return;
+        if (inp.type === "password") {
+          inp.type = "text";
+          btn.textContent = "Hide";
+        } else {
+          inp.type = "password";
+          btn.textContent = "Show";
+        }
+      });
+    });
+
+    // Copy direct buttons in credentials modal and overview
+    document.querySelectorAll(".btn-copy-direct").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const inputId = btn.getAttribute("data-target");
+        const inp = document.getElementById(inputId);
+        if (!inp || !inp.value) return;
+        try {
+          await navigator.clipboard.writeText(inp.value);
+          const orig = btn.textContent;
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = orig; }, 2000);
+          showToast("Password copied to clipboard!", "success");
+        } catch (e) {
+          showToast("Failed to copy. Please copy manually.", "warning");
+        }
+      });
+    });
+
+    document.querySelectorAll(".btn-cred-copy").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const targetId = btn.getAttribute("data-target");
+        const el = document.getElementById(targetId);
+        const secret = el ? el.dataset.secret : null;
+        if (!secret) return;
+        try {
+          await navigator.clipboard.writeText(secret);
+          const orig = btn.textContent;
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = orig; }, 2000);
+          showToast("Password copied to clipboard!", "success");
+        } catch (e) {
+          showToast("Failed to copy. Please copy manually.", "warning");
+        }
+      });
+    });
+
+    dom.btnCopyAllCreds?.addEventListener("click", async () => {
+      if (!state.credentials) await fetchCredentials();
+      const creds = state.credentials;
+      if (!creds) return;
+      const text = [
+        "Krate Cluster Credentials",
+        "=========================",
+        `Kafbat UI: ${creds.ui?.kafbat_url || "https://localhost/"}`,
+        `Username: ${creds.ui?.KAFKA_UI_USER || "admin"}`,
+        `Password: ${creds.ui?.KAFKA_UI_PASSWORD || ""}`,
+        "",
+        `Grafana: ${creds.monitoring?.grafana_url || "https://localhost/grafana/"}`,
+        `Username: ${creds.monitoring?.GRAFANA_USER || "admin"}`,
+        `Password: ${creds.monitoring?.GRAFANA_PASSWORD || ""}`,
+        "",
+        `Perses: ${creds.monitoring?.perses_url || "https://localhost:3443/"}`,
+        `Username: ${creds.monitoring?.PERSES_ADMIN_USER || "admin"}`,
+        `Password: ${creds.monitoring?.PERSES_ADMIN_PASSWORD || ""}`,
+        "",
+        `Keycloak Realm: ${creds.identity?.public_url || "https://localhost/identity"}`,
+        `Admin: ${creds.identity?.KEYCLOAK_ADMIN_USER || "admin"}`,
+        `Password: ${creds.identity?.KEYCLOAK_ADMIN_PASSWORD || ""}`,
+      ].join("\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("All credentials copied to clipboard!", "success");
+      } catch (e) {
+        showToast("Could not copy to clipboard.", "warning");
+      }
+    });
+
+    // Setup Wizard Controls
+    let wizardCurrentStep = 1;
+    const maxWizardStep = 4;
+
+    function setWizardStep(s) {
+      wizardCurrentStep = s;
+      document.querySelectorAll(".wizard-tab").forEach(tab => {
+        tab.classList.toggle("active", parseInt(tab.dataset.step, 10) === s);
+      });
+      for (let i = 1; i <= maxWizardStep; i++) {
+        const el = document.getElementById(`wizard-step-${i}`);
+        if (el) el.style.display = (i === s) ? "block" : "none";
+      }
+      if (dom.btnWizardPrev) dom.btnWizardPrev.style.display = (s > 1) ? "inline-flex" : "none";
+      if (dom.btnWizardNext) dom.btnWizardNext.style.display = (s < maxWizardStep) ? "inline-flex" : "none";
+      if (dom.btnWizardApply) dom.btnWizardApply.style.display = (s === maxWizardStep) ? "inline-flex" : "none";
+
+      if (s === 4) {
+        renderWizardPlan();
+      }
+    }
+
+    function renderWizardPlan() {
+      const presetRadio = document.querySelector('input[name="wizard-preset"]:checked');
+      const preset = presetRadio ? presetRadio.value : "standalone";
+      const fqdn = document.getElementById("wizard-input-fqdn")?.value.trim() || "localhost";
+      const httpsPort = document.getElementById("wizard-input-https-port")?.value || "443";
+      const planDiv = document.getElementById("wizard-plan-summary");
+      if (!planDiv) return;
+
+      let html = `
+        <div class="summary-item mb-1"><strong>Selected Architecture:</strong> <code>${preset}</code></div>
+        <div class="summary-item mb-1"><strong>Cluster FQDN / Domain:</strong> <code>${fqdn}</code></div>
+        <div class="summary-item mb-1"><strong>Nginx HTTPS Port:</strong> <code>${httpsPort}</code></div>
+      `;
+      if (preset === "ping_federate") {
+        const issuer = document.getElementById("wizard-input-idp-issuer")?.value.trim() || "(unconfigured)";
+        const clientId = document.getElementById("wizard-input-idp-client-id")?.value.trim() || "krate-keycloak";
+        html += `
+          <div class="summary-item mb-1"><strong>PingFederate Issuer:</strong> <code>${issuer}</code></div>
+          <div class="summary-item mb-1"><strong>OIDC Client ID:</strong> <code>${clientId}</code></div>
+          <div class="summary-item mb-1"><strong>Dual-Run OIDC Watcher:</strong> <code>Enabled (idp-watch)</code></div>
+        `;
+      }
+      planDiv.innerHTML = html;
+    }
+
+    dom.btnOpenSetupWizard?.addEventListener("click", async () => {
+      setWizardStep(1);
+      openModal(dom.modalSetupWizard);
+      try {
+        const host = await apiGet("/api/v1/host");
+        if (host) {
+          if (document.getElementById("pill-host-os")) document.getElementById("pill-host-os").textContent = `OS: ${host.os || "Linux"}`;
+          if (document.getElementById("pill-host-arch")) document.getElementById("pill-host-arch").textContent = `Arch: ${host.arch || "amd64"}`;
+          if (document.getElementById("pill-host-ip")) document.getElementById("pill-host-ip").textContent = `IP: ${host.primary_ip || "127.0.0.1"}`;
+          if (document.getElementById("pill-host-fqdn")) document.getElementById("pill-host-fqdn").textContent = `FQDN: ${host.fqdn || host.hostname}`;
+          if (document.getElementById("wizard-input-fqdn") && !document.getElementById("wizard-input-fqdn").value) {
+            document.getElementById("wizard-input-fqdn").value = host.fqdn || host.primary_ip || "localhost";
+          }
+        }
+      } catch (e) {
+        console.warn("Host info fetch error:", e);
+      }
+    });
+
+    dom.btnWizardPrev?.addEventListener("click", () => {
+      if (wizardCurrentStep > 1) setWizardStep(wizardCurrentStep - 1);
+    });
+    dom.btnWizardNext?.addEventListener("click", () => {
+      if (wizardCurrentStep < maxWizardStep) setWizardStep(wizardCurrentStep + 1);
+    });
+    dom.btnWizardCancel?.addEventListener("click", () => closeModal(dom.modalSetupWizard));
+
+    document.querySelectorAll(".wizard-tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        const stepNum = parseInt(tab.dataset.step, 10);
+        if (stepNum) setWizardStep(stepNum);
+      });
+    });
+
+    dom.btnWizardDiscoverIdp?.addEventListener("click", async (e) => {
+      e.preventDefault();
+      const issuerInput = document.getElementById("wizard-input-idp-issuer");
+      const issuerVal = issuerInput ? issuerInput.value.trim() : "";
+      if (!issuerVal) {
+        showToast("Please enter a PingFederate / IdP Issuer URL first", "warning");
+        return;
+      }
+      const statusBox = document.getElementById("wizard-discovery-status");
+      const detailsBox = document.getElementById("wizard-discovery-details");
+      if (statusBox) statusBox.style.display = "block";
+      if (detailsBox) detailsBox.innerHTML = '<span class="text-muted">Probing /.well-known/openid-configuration server-side...</span>';
+
+      try {
+        const res = await apiPost("/api/v1/auth/discover", { issuer_url: issuerVal });
+        if (res && res.status === "ok") {
+          showToast("OIDC Discovery successful!", "success");
+          if (detailsBox) {
+            detailsBox.innerHTML = `
+              <div class="text-success font-semibold mb-1">✓ Discovered Endpoints:</div>
+              <div class="text-xs"><strong>Auth:</strong> ${res.authorization_endpoint || "N/A"}</div>
+              <div class="text-xs"><strong>Token:</strong> ${res.token_endpoint || "N/A"}</div>
+              <div class="text-xs"><strong>JWKS:</strong> ${res.jwks_uri || "N/A"}</div>
+            `;
+          }
+        } else {
+          showToast(res?.error || "Discovery failed", "error");
+          if (detailsBox) detailsBox.innerHTML = `<span class="text-danger">Discovery Error: ${res?.error || "Endpoint unreachable"}</span>`;
+        }
+      } catch (err) {
+        showToast(`Discovery error: ${err.message}`, "error");
+        if (detailsBox) detailsBox.innerHTML = `<span class="text-danger">Network Error: ${err.message}</span>`;
+      }
+    });
+
+    dom.btnWizardApply?.addEventListener("click", async () => {
+      const presetRadio = document.querySelector('input[name="wizard-preset"]:checked');
+      const presetId = presetRadio ? presetRadio.value : "standalone";
+      const fqdn = document.getElementById("wizard-input-fqdn")?.value.trim() || "";
+      const uiPass = document.getElementById("wizard-input-ui-pass")?.value || "";
+      const overrides = {};
+      if (fqdn) overrides.fqdn = fqdn;
+      if (uiPass) overrides.kafka_ui_password = uiPass;
+
+      if (presetId === "ping_federate") {
+        const secret = document.getElementById("wizard-input-idp-client-secret")?.value;
+        if (secret) overrides.ping_client_secret = secret;
+        const adminGroup = document.getElementById("wizard-input-idp-admin-group")?.value.trim();
+        if (adminGroup) overrides.KEYCLOAK_ADMIN_GROUP = adminGroup;
+        const viewerGroup = document.getElementById("wizard-input-idp-viewer-group")?.value.trim();
+        if (viewerGroup) overrides.KEYCLOAK_VIEWER_GROUP = viewerGroup;
+      }
+
+      try {
+        const payload = {
+          preset_id: presetId,
+          expected_revision: state.clusterStatus?.config_revision,
+          overrides: overrides,
+        };
+        const res = await apiPost("/api/v1/presets/apply", payload);
+        if (res && (res.status === "ok" || res.config_revision)) {
+          closeModal(dom.modalSetupWizard);
+          showToast("Configuration preset applied successfully!", "success");
+          fetchStatus();
+          fetchCredentials();
+        } else {
+          showToast(res?.error || "Failed to apply preset", "error");
+        }
+      } catch (err) {
+        showToast(`Preset apply error: ${err.message}`, "error");
+      }
     });
 
     // Secret Rotate Modal controls
@@ -545,6 +824,14 @@
     }
 
     return data;
+  }
+
+  async function apiGet(endpoint) {
+    return apiFetch(endpoint, { method: "GET" });
+  }
+
+  async function apiPost(endpoint, body = {}) {
+    return apiFetch(endpoint, { method: "POST", body });
   }
 
   // --------------------------------------------------------------------------
@@ -946,6 +1233,137 @@
   // Data Fetching & Rendering Engine
   // --------------------------------------------------------------------------
 
+  function updateStepperChips(statusData, doctorData) {
+    if (!statusData) return;
+
+    // 1. Docker Socket
+    if (dom.stepDockerChip) {
+      const dockerCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("docker"));
+      const isDockerUp = dockerCheck ? dockerCheck.status === "passed" : (statusData.cluster_state !== "unknown");
+      dom.stepDockerChip.textContent = isDockerUp ? "Socket Ready" : "Daemon Down";
+      dom.stepDockerChip.className = `step-status-chip ${isDockerUp ? "badge-success" : "badge-danger"}`;
+    }
+
+    // 2. TLS Certificates
+    if (dom.stepCertsChip) {
+      const certCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("cert"));
+      const certValid = certCheck ? certCheck.status === "passed" : true;
+      dom.stepCertsChip.textContent = certValid ? "Valid SANs" : "Regen Required";
+      dom.stepCertsChip.className = `step-status-chip ${certValid ? "badge-success" : "badge-warning"}`;
+    }
+
+    // 3. Offline Images
+    if (dom.stepImagesChip) {
+      const imgCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("image"));
+      const imgsLoaded = imgCheck ? imgCheck.status === "passed" : true;
+      dom.stepImagesChip.textContent = imgsLoaded ? "Images Loaded" : "Load Required";
+      dom.stepImagesChip.className = `step-status-chip ${imgsLoaded ? "badge-success" : "badge-warning"}`;
+    }
+
+    // 4. Installation
+    if (dom.stepInstallChip) {
+      if (statusData.is_package && !statusData.is_installed) {
+        dom.stepInstallChip.textContent = "Install Required";
+        dom.stepInstallChip.className = "step-status-chip badge-warning";
+      } else if (statusData.is_package && statusData.is_installed) {
+        dom.stepInstallChip.textContent = "Installed";
+        dom.stepInstallChip.className = "step-status-chip badge-success";
+      } else {
+        dom.stepInstallChip.textContent = "Checkout Ready";
+        dom.stepInstallChip.className = "step-status-chip badge-info";
+      }
+    }
+
+    // 5. Start Cluster
+    if (dom.stepStartChip) {
+      const stateVal = (statusData.cluster_state || "stopped").toLowerCase();
+      if (stateVal === "running" || stateVal === "healthy") {
+        dom.stepStartChip.textContent = "Production Live";
+        dom.stepStartChip.className = "step-status-chip badge-success";
+      } else if (stateVal === "degraded" || stateVal === "starting") {
+        dom.stepStartChip.textContent = "Starting...";
+        dom.stepStartChip.className = "step-status-chip badge-warning";
+      } else {
+        dom.stepStartChip.textContent = "Cluster Stopped";
+        dom.stepStartChip.className = "step-status-chip badge-neutral";
+      }
+    }
+  }
+
+  async function fetchCredentials() {
+    try {
+      const res = await apiFetch("/api/v1/credentials");
+      if (!res) return;
+      state.credentials = res;
+
+      const uiUser = res.ui?.KAFKA_UI_USER || "admin";
+      const uiPass = res.ui?.KAFKA_UI_PASSWORD || "(unconfigured)";
+      const grafUser = res.monitoring?.GRAFANA_USER || "admin";
+      const grafPass = res.monitoring?.GRAFANA_PASSWORD || "(unconfigured)";
+      const persesUser = res.monitoring?.PERSES_ADMIN_USER || "admin";
+      const persesPass = res.monitoring?.PERSES_ADMIN_PASSWORD || "(unconfigured)";
+      const kcUser = res.identity?.KEYCLOAK_ADMIN_USER || "admin";
+      const kcPass = res.identity?.KEYCLOAK_ADMIN_PASSWORD || "(unconfigured)";
+
+      // Overview grid elements
+      const elUiU = document.getElementById("cred-user-kafbat");
+      if (elUiU) elUiU.textContent = uiUser;
+      const elUiP = document.getElementById("cred-pass-kafbat");
+      if (elUiP) { elUiP.dataset.secret = uiPass; elUiP.textContent = "••••••••••••••••"; }
+
+      const elGrU = document.getElementById("cred-user-grafana");
+      if (elGrU) elGrU.textContent = grafUser;
+      const elGrP = document.getElementById("cred-pass-grafana");
+      if (elGrP) { elGrP.dataset.secret = grafPass; elGrP.textContent = "••••••••••••••••"; }
+
+      const elPeU = document.getElementById("cred-user-perses");
+      if (elPeU) elPeU.textContent = persesUser;
+      const elPeP = document.getElementById("cred-pass-perses");
+      if (elPeP) { elPeP.dataset.secret = persesPass; elPeP.textContent = "••••••••••••••••"; }
+
+      const elKcU = document.getElementById("cred-user-keycloak");
+      if (elKcU) elKcU.textContent = kcUser;
+      const elKcP = document.getElementById("cred-pass-keycloak");
+      if (elKcP) { elKcP.dataset.secret = kcPass; elKcP.textContent = "••••••••••••••••"; }
+
+      // Modal inputs
+      const mUiU = document.getElementById("rev-user-kafbat");
+      if (mUiU) mUiU.textContent = uiUser;
+      const mUiP = document.getElementById("rev-pass-kafbat");
+      if (mUiP) mUiP.value = uiPass;
+
+      const mGrU = document.getElementById("rev-user-grafana");
+      if (mGrU) mGrU.textContent = grafUser;
+      const mGrP = document.getElementById("rev-pass-grafana");
+      if (mGrP) mGrP.value = grafPass;
+
+      const mPeU = document.getElementById("rev-user-perses");
+      if (mPeU) mPeU.textContent = persesUser;
+      const mPeP = document.getElementById("rev-pass-perses");
+      if (mPeP) mPeP.value = persesPass;
+
+      const mKcU = document.getElementById("rev-user-keycloak");
+      if (mKcU) mKcU.textContent = kcUser;
+      const mKcP = document.getElementById("rev-pass-keycloak");
+      if (mKcP) mKcP.value = kcPass;
+
+      if (res.ui?.kafbat_url && document.getElementById("rev-link-kafbat")) {
+        document.getElementById("rev-link-kafbat").href = res.ui.kafbat_url;
+        document.getElementById("rev-link-kafbat").textContent = res.ui.kafbat_url;
+      }
+      if (res.monitoring?.grafana_url && document.getElementById("rev-link-grafana")) {
+        document.getElementById("rev-link-grafana").href = res.monitoring.grafana_url;
+        document.getElementById("rev-link-grafana").textContent = res.monitoring.grafana_url;
+      }
+      if (res.monitoring?.perses_url && document.getElementById("rev-link-perses")) {
+        document.getElementById("rev-link-perses").href = res.monitoring.perses_url;
+        document.getElementById("rev-link-perses").textContent = res.monitoring.perses_url;
+      }
+    } catch (e) {
+      console.warn("Could not fetch credentials:", e);
+    }
+  }
+
   // Status & Services
   async function fetchStatus() {
     try {
@@ -962,6 +1380,9 @@
 
   function renderStatus(data) {
     if (!data) return;
+
+    // Dynamic Stepper State Synchronization
+    updateStepperChips(data, state.doctorData);
 
     // Edition Tag & Active Workspace Path
     if (data.edition) {
@@ -1290,6 +1711,9 @@
 
   function renderDoctor(data) {
     if (!data) return;
+
+    // Dynamic Stepper State Synchronization
+    updateStepperChips(state.clusterStatus, data);
 
     let passed = 0;
     let warnings = 0;
@@ -2238,6 +2662,7 @@
     await initializeAuth();
     await fetchWorkspaces();
     await fetchStatus();
+    await fetchCredentials();
     await fetchDoctor();
     await fetchGates();
 

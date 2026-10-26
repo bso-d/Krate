@@ -398,6 +398,29 @@ def _norm(info):
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
+    def _configure_ca_bundle():
+        if os.environ.get('SSL_CERT_FILE'):
+            return
+        try:
+            import certifi
+            ca = certifi.where()
+            if os.path.isfile(ca):
+                os.environ['SSL_CERT_FILE'] = ca
+                return
+        except ImportError:
+            certifi = None
+        for ca_path in (
+            '/etc/ssl/cert.pem',
+            '/etc/ssl/certs/ca-certificates.crt',
+            '/etc/pki/tls/certs/ca-bundle.crt',
+            '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem',
+            '/etc/ssl/ca-bundle.pem',
+        ):
+            if os.path.isfile(ca_path):
+                os.environ['SSL_CERT_FILE'] = ca_path
+                return
+
+    _configure_ca_bundle()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--edition', required=True, choices=sorted(TEMPLATES))
     ap.add_argument('--lock', action='append', default=[], help='images.lock.tsv (repeatable)')

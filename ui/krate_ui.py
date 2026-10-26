@@ -25,11 +25,13 @@ import http.server
 import hmac
 import json
 import os
+import platform
 import queue
 import re
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -172,7 +174,7 @@ class OperationContext:
         return os.path.join(self.working_dir, "krate")
 
     def cli_for_action(self, action: str) -> Tuple[str, str]:
-        if self.is_package and action in ("install", "load-images", "docker-install"):
+        if self.is_package and action in ("install", "load-images", "docker-install", "clear-images", "clear_images"):
             return os.path.join(self.source_dir, "krate"), self.source_dir
         return self.krate_bin, self.working_dir
 
@@ -1269,6 +1271,88 @@ class StructuredDataCollector:
             "rule_list": [],
         }
 
+    @staticmethod
+    def get_host_info(context: Optional[OperationContext] = None) -> Dict[str, Any]:
+        target_path = "/"
+        if context and context.effective_dir and os.path.exists(context.effective_dir):
+            target_path = context.effective_dir
+
+        try:
+            du = shutil.disk_usage(target_path)
+            disk_info = {
+                "total_gb": round(du.total / (1024**3), 2),
+                "used_gb": round(du.used / (1024**3), 2),
+                "free_gb": round(du.free / (1024**3), 2),
+                "percent": round((du.used / du.total) * 100, 1) if du.total else 0.0,
+            }
+        except Exception:
+            disk_info = {"total_gb": 0.0, "used_gb": 0.0, "free_gb": 0.0, "percent": 0.0}
+
+        mem_total = 0
+        mem_avail = 0
+        if os.path.exists("/proc/meminfo"):
+            try:
+                with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("MemTotal:"):
+                            mem_total = int(line.split()[1]) * 1024
+                        elif line.startswith("MemAvailable:"):
+                            mem_avail = int(line.split()[1]) * 1024
+            except Exception:
+                pass
+        if mem_total == 0:
+            try:
+                pages = os.sysconf("SC_PHYS_PAGES")
+                page_size = os.sysconf("SC_PAGE_SIZE")
+                mem_total = pages * page_size
+                mem_avail = mem_total // 2
+            except Exception:
+                pass
+
+        mem_used = max(0, mem_total - mem_avail)
+        mem_pct = round((mem_used / mem_total) * 100, 1) if mem_total else 0.0
+
+        primary_ip = "127.0.0.1"
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(0.5)
+                s.connect(("10.255.255.255", 1))
+                primary_ip = s.getsockname()[0]
+        except Exception:
+            try:
+                primary_ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                pass
+
+        hostname = socket.gethostname()
+        fqdn = hostname
+        try:
+            candidate_fqdn = socket.getfqdn()
+            if candidate_fqdn and candidate_fqdn != "localhost" and not candidate_fqdn.endswith(".arpa"):
+                fqdn = candidate_fqdn
+        except Exception:
+            pass
+
+        machine = platform.machine().lower()
+        norm_arch = "arm64" if machine in ("arm64", "aarch64") else ("amd64" if machine in ("x86_64", "amd64") else machine)
+
+        return {
+            "hostname": hostname,
+            "fqdn": fqdn,
+            "primary_ip": primary_ip,
+            "os": platform.system(),
+            "os_release": platform.release(),
+            "arch": norm_arch,
+            "cpu_cores": os.cpu_count() or 1,
+            "memory": {
+                "total_gb": round(mem_total / (1024**3), 2),
+                "available_gb": round(mem_avail / (1024**3), 2),
+                "used_gb": round(mem_used / (1024**3), 2),
+                "percent": mem_pct,
+            },
+            "disk": disk_info,
+        }
+
     def get_status(self, context: Optional[OperationContext] = None) -> dict:
         ctx = context or self.ws_mgr.get_context()
         ws_path = ctx.working_dir
@@ -1419,6 +1503,7 @@ class StructuredDataCollector:
             "monitoring": {"state": monitoring_state},
             "identity": {"enabled": len(kc_containers) > 0, "state": identity_state},
             "disk": disk_info,
+            "host": self.get_host_info(context=ctx),
             "portals": portals,
             "alerts": alerts,
         }
@@ -2491,6 +2576,63 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(200, data)
                 return
 
+            if path == "/api/v1/host":
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_host_info(context=ctx)
+                self._send_json(200, data)
+                return
+
+            if path == "/api/v1/auth/discover":
+                ctx = self.workspace_mgr.get_context()
+                cfg = self.data_collector.get_config(context=ctx)
+                env = cfg.get("env", {})
+                base_url = (env.get("KEYCLOAK_PUBLIC_URL") or "https://localhost").rstrip("/")
+                disc_url = f"{base_url}/realms/krate/.well-known/openid-configuration"
+                self._send_json(200, {
+                    "status": "ok",
+                    "configured_issuer": f"{base_url}/realms/krate",
+                    "discovery_url": disc_url,
+                })
+                return
+
+            if path == "/api/v1/presets":
+                ctx = self.workspace_mgr.get_context()
+                host_info = self.data_collector.get_host_info(context=ctx)
+                presets = [
+                    {
+                        "id": "standalone",
+                        "name": "Standalone Developer",
+                        "description": "Minimal developer / testing cluster. Local form authentication, zero Keycloak container overhead.",
+                        "auth_mode": "local.yml",
+                        "keycloak_enabled": False,
+                    },
+                    {
+                        "id": "keycloak_local",
+                        "name": "Enterprise with Local Keycloak",
+                        "description": "Built-in Keycloak identity provider, local multi-user RBAC groups, TOTP MFA, self-contained.",
+                        "auth_mode": "runtime.yml",
+                        "keycloak_enabled": True,
+                    },
+                    {
+                        "id": "ping_federate",
+                        "name": "Enterprise with PingFederate SSO",
+                        "description": "Corporate Single Sign-On brokered via PingFederate OIDC, AD group mapping, automated fail-open fallback.",
+                        "auth_mode": "runtime.yml",
+                        "keycloak_enabled": True,
+                        "requires_idp": True,
+                    },
+                    {
+                        "id": "epc_production",
+                        "name": "EPC 2-Node Production Cluster",
+                        "description": "2-node combined controller/broker cluster on RHEL 9 with host-bound filesystem storage (/data).",
+                        "auth_mode": "runtime.yml",
+                        "keycloak_enabled": True,
+                        "edition": "epc",
+                    },
+                ]
+                self._send_json(200, {"presets": presets, "host": host_info})
+                return
+
             if path == "/api/v1/lag":
                 ctx = self.workspace_mgr.get_context()
                 data = self.data_collector.get_lag(context=ctx)
@@ -2669,6 +2811,136 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(400, {"error": str(ex)})
             return
 
+        # 5b. Presets Apply: /api/v1/presets/apply
+        if path == "/api/v1/presets/apply":
+            try:
+                body = self._read_json_body() or {}
+                preset_id = body.get("preset_id", "standalone")
+                expected_rev = body.get("expected_revision")
+                raw_overrides = body.get("overrides")
+                overrides: Dict[str, Any] = raw_overrides if isinstance(raw_overrides, dict) else {}
+                op_ctx = self.workspace_mgr.get_context()
+
+                host_info = self.data_collector.get_host_info(context=op_ctx)
+                detected_fqdn = host_info.get("fqdn") or host_info.get("primary_ip") or "localhost"
+
+                # Define standard preset maps
+                entries = {}
+                if preset_id == "standalone":
+                    entries = {
+                        "KAFKA_UI_AUTH_CONFIG": "local.yml",
+                        "KEYCLOAK_ENABLED": "false",
+                        "KAFKA_UI_USER": overrides.get("kafka_ui_user", "admin"),
+                        "KAFKA_UI_PASSWORD": overrides.get("kafka_ui_password") or secrets.token_urlsafe(16),
+                        "KAFKA_UI_FQDN": overrides.get("fqdn") or detected_fqdn,
+                    }
+                elif preset_id in ("keycloak_local", "keycloak-local"):
+                    fqdn_val = overrides.get("fqdn") or detected_fqdn
+                    entries = {
+                        "KAFKA_UI_AUTH_CONFIG": "runtime.yml",
+                        "KEYCLOAK_ENABLED": "true",
+                        "KEYCLOAK_PUBLIC_URL": f"https://{fqdn_val}/identity",
+                        "KAFKA_UI_FQDN": fqdn_val,
+                        "KAFKA_UI_PASSWORD": overrides.get("kafka_ui_password") or secrets.token_urlsafe(16),
+                        "KEYCLOAK_ADMIN_PASSWORD": overrides.get("keycloak_admin_password") or secrets.token_urlsafe(16),
+                        "KEYCLOAK_DB_PASSWORD": overrides.get("keycloak_db_password") or secrets.token_urlsafe(16),
+                        "KEYCLOAK_KAFBAT_CLIENT_SECRET": secrets.token_urlsafe(24),
+                        "KEYCLOAK_CLI_CLIENT_SECRET": secrets.token_urlsafe(24),
+                    }
+                elif preset_id in ("ping_federate", "ping-federate"):
+                    fqdn_val = overrides.get("fqdn") or detected_fqdn
+                    entries = {
+                        "KAFKA_UI_AUTH_CONFIG": "runtime.yml",
+                        "KEYCLOAK_ENABLED": "true",
+                        "KEYCLOAK_PUBLIC_URL": f"https://{fqdn_val}/identity",
+                        "KAFKA_UI_FQDN": fqdn_val,
+                        "IDP_WATCH_ENABLED": "true",
+                        "KAFKA_UI_PASSWORD": overrides.get("kafka_ui_password") or secrets.token_urlsafe(16),
+                        "KEYCLOAK_ADMIN_PASSWORD": overrides.get("keycloak_admin_password") or secrets.token_urlsafe(16),
+                        "KEYCLOAK_DB_PASSWORD": overrides.get("keycloak_db_password") or secrets.token_urlsafe(16),
+                        "KEYCLOAK_KAFBAT_CLIENT_SECRET": secrets.token_urlsafe(24),
+                        "KEYCLOAK_CLI_CLIENT_SECRET": secrets.token_urlsafe(24),
+                    }
+                    if overrides.get("ping_client_secret"):
+                        entries["PING_KEYCLOAK_CLIENT_SECRET"] = overrides["ping_client_secret"]
+                elif preset_id in ("epc_production", "epc"):
+                    fqdn_val = overrides.get("fqdn") or detected_fqdn
+                    entries = {
+                        "KAFKA_DATA_DIR": overrides.get("data_dir", "/data"),
+                        "KAFKA_LOG_RETENTION_HOURS": "168",
+                        "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "false",
+                        "KAFKA_UI_FQDN": fqdn_val,
+                        "KAFKA_UI_PASSWORD": overrides.get("kafka_ui_password") or secrets.token_urlsafe(16),
+                    }
+
+                # Apply any direct overrides provided
+                for k, v in overrides.items():
+                    if k.isupper() and isinstance(v, str):
+                        entries[k] = v
+
+                req_payload = {
+                    "target": ".env",
+                    "expected_revision": expected_rev,
+                    "action": "save",
+                    "mode": "entries",
+                    "entries": entries,
+                }
+                rc, out = self.data_collector.run_config_operation("apply", req_payload, context=op_ctx)
+                status_code = 200 if rc == 0 else (409 if out.get("error_code") == "stale_revision" else 400)
+                self._send_json(status_code, out)
+            except Exception as ex:
+                self._send_json(400, {"error": str(ex)})
+            return
+
+        # 5c. OIDC Discovery Proxy: /api/v1/auth/discover
+        if path == "/api/v1/auth/discover":
+            try:
+                body = self._read_json_body() or {}
+                raw_url = str(body.get("url") or body.get("issuer_url") or body.get("issuer") or "").strip()
+                if not raw_url:
+                    self._send_json(400, {"error": "Missing 'issuer_url' parameter"})
+                    return
+                parts = urllib.parse.urlsplit(raw_url)
+                if parts.scheme not in ("http", "https"):
+                    self._send_json(400, {"error": "URL scheme must be http or https"})
+                    return
+                host = parts.hostname or ""
+                if not host or not re.fullmatch(r"^[a-zA-Z0-9.-]+$", host):
+                    self._send_json(400, {"error": "Invalid or unsafe host name in URL"})
+                    return
+                # Disallow cloud metadata endpoints
+                if host in ("169.254.169.254", "metadata.google.internal") or host.startswith("169.254."):
+                    self._send_json(400, {"error": "Refusing prohibited metadata host"})
+                    return
+                if parts.username or parts.password or parts.query or parts.fragment:
+                    self._send_json(400, {"error": "URL must not contain credentials, query, or fragment"})
+                    return
+
+                port = parts.port
+                netloc = f"{host}:{port}" if port else host
+                disc_url = urllib.parse.urlunsplit((parts.scheme, netloc, "/.well-known/openid-configuration", "", ""))
+
+                req = urllib.request.Request(disc_url, headers={"User-Agent": "KrateStudio/1.0", "Accept": "application/json"})
+                ctx_ssl = ssl.create_default_context()
+                ctx_ssl.check_hostname = False
+                ctx_ssl.verify_mode = ssl.CERT_NONE
+
+                with urllib.request.urlopen(req, context=ctx_ssl, timeout=8.0) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+
+                self._send_json(200, {
+                    "status": "ok",
+                    "issuer": data.get("issuer"),
+                    "authorization_endpoint": data.get("authorization_endpoint"),
+                    "token_endpoint": data.get("token_endpoint"),
+                    "jwks_uri": data.get("jwks_uri"),
+                    "userinfo_endpoint": data.get("userinfo_endpoint"),
+                    "end_session_endpoint": data.get("end_session_endpoint"),
+                })
+            except Exception as e:
+                self._send_json(400, {"status": "error", "error": f"OIDC Discovery failed: {e}"})
+            return
+
         # 6. Job Execution: /api/v1/jobs
         if path == "/api/v1/jobs":
             try:
@@ -2807,7 +3079,14 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                     cmd.append("uninstall")
                     if params.get("purge"):
                         cmd.append("--purge")
+                        cmd.append("--yes")
                         stdin_data = "yes\n"
+
+                elif action in ("clear_cluster", "clear-cluster"):
+                    cmd = [krate_bin, "clear-cluster", "--yes"]
+
+                elif action in ("clear_images", "clear-images"):
+                    cmd = [krate_bin, "clear-images", "--yes"]
 
                 elif action == "gen-cert":
                     cmd.append("gen-cert")

@@ -84,6 +84,29 @@ def fetch_runtime_packages(arch, directory):
 
 
 def main():
+    def _configure_ca_bundle():
+        if os.environ.get('SSL_CERT_FILE'):
+            return
+        try:
+            import certifi
+            ca = certifi.where()
+            if os.path.isfile(ca):
+                os.environ['SSL_CERT_FILE'] = ca
+                return
+        except ImportError:
+            certifi = None
+        for ca_path in (
+            '/etc/ssl/cert.pem',
+            '/etc/ssl/certs/ca-certificates.crt',
+            '/etc/pki/tls/certs/ca-bundle.crt',
+            '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem',
+            '/etc/ssl/ca-bundle.pem',
+        ):
+            if os.path.isfile(ca_path):
+                os.environ['SSL_CERT_FILE'] = ca_path
+                return
+
+    _configure_ca_bundle()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch', choices=['amd64', 'arm64'], required=True)
     parser.add_argument('--source', type=Path, help='Optional existing pinned upstream checkout')
