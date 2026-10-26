@@ -27,7 +27,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh scripts/package-release.sh scripts/gate-identity.sh Krate-UI.command krate-ui.sh
+CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh Krate-UI.command krate-ui.sh
 VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
@@ -280,7 +280,8 @@ bundle: offline-check
 >  if [[ "$$mode" != "zk" ]]; then
 >    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso/logrotate" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
->    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/preflight.py sso/probe.py sso/identity.py sso/idp_watch.py "$$bundle_dir/sso/"
+>    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/operations.sh sso/operations.py sso/preflight.py sso/probe.py sso/identity.py sso/idp_watch.py "$$bundle_dir/sso/"
+>    cp scripts/check-bundle.py scripts/check-offline.py "$$bundle_dir/sso/"
 >    cp -r sso/theme "$$bundle_dir/sso/"
 >    # Rendered by `krate identity logrotate` with the installation's journal path.
 >    cp sso/logrotate/krate-identity.conf "$$bundle_dir/sso/logrotate/"

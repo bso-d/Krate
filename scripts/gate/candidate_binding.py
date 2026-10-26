@@ -51,7 +51,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 EDITIONS = ('epc', 'kraft')
 # Makefile build_one: cp sso/configure.py ... sso/identity.py "$bundle_dir/sso/"
 SSO_FILES = ('configure.py', 'example.json', 'configure-dual.py', 'dual-example.json',
-             'activate.sh', 'preflight.py', 'probe.py', 'identity.py', 'idp_watch.py')
+             'activate.sh', 'operations.sh', 'operations.py', 'preflight.py', 'probe.py', 'identity.py', 'idp_watch.py')
 # Makefile build_one: cp sso/guides/... "$bundle_dir/docs/"
 GUIDES = ('identity-foundation.md', 'dual-login.md', 'pingfederate-sso.md',
           'pingfederate-iam-guide.md', 'sso-flows.md', 'perses-sso.md', 'grafana-sso.md')
@@ -152,6 +152,8 @@ def inventory(repo: str, candidate: str, edition: str) -> Dict[str, str]:
     items['auth/ui/local.yml'] = edition + '/auth/ui/local.yml'
     for name in SSO_FILES:
         items['sso/' + name] = 'sso/' + name
+    items['sso/check-bundle.py'] = 'scripts/check-bundle.py'
+    items['sso/check-offline.py'] = 'scripts/check-offline.py'
     items['sso/logrotate/krate-identity.conf'] = 'sso/logrotate/krate-identity.conf'
     for name in GUIDES:
         items['docs/' + name] = 'sso/guides/' + name

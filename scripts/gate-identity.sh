@@ -381,7 +381,7 @@ else
   PRODUCT_BINDING="not compared (no git and no --candidate)"
 fi
 EDITION_DIGESTS=""
-for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/probe.py" "$SSO/configure-dual.py"; do
+for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/operations.sh" "$SSO/operations.py" "$SSO/probe.py" "$SSO/configure-dual.py"; do
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
 if [[ -n "$REPO_ARG" ]]; then
@@ -679,10 +679,12 @@ release_lock() { kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; }
 fixture_reset() {
   local n; for n in $(docker ps -aq --filter "label=krate.gate=w4-probe"); do docker rm -f "$n" >/dev/null 2>&1; done  # a W4 probe left by a killed run
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
-  compose down -v --remove-orphans >/dev/null 2>&1 || true
+  compose --profile idp-watch down -v --remove-orphans >/dev/null 2>&1 || true
+  for n in $(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
+  local v; for v in $(docker volume ls -q | grep -E "^${PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   local p
-  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"; do
+  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/auth/.operation.lock" "$ED/auth/.config-applied.json" "$ED/auth/.config-draft.json" "$ED/auth/.verify-ledger.json" "$ED/auth/.formal-gate-receipt.json" "$ED/auth/.operation-recovery" "$ED/auth/.revision.key" "$ED/certs" "$MON_DIR/.env"; do
     if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]]; then
       # Root-owned leftovers of an earlier run survive rm -rf (fixture epc 2026-10-23:
       # the docker daemon creates an absent bind-mount source root-owned at container
@@ -739,6 +741,10 @@ gmake_check_in() { ( cd "$1" && gmake check ); }  # env -C is GNU-only
 # checker's own KRATE_CHECK_NGINX_IMAGE override with the running nginx image's tag form when the
 # store has it, so the render never tries to pull.
 s1_render_env() {
+  if [[ -n "${KRATE_CHECK_NGINX_IMAGE:-}" ]] && docker image inspect "$KRATE_CHECK_NGINX_IMAGE" >/dev/null 2>&1; then
+    printf 'KRATE_CHECK_NGINX_IMAGE=%s\n' "$KRATE_CHECK_NGINX_IMAGE"
+    return 0
+  fi
   local tpl_name
   tpl_name="$(awk '/^NGINX_IMAGE=/{v=$0; sub(/^NGINX_IMAGE=/, "", v); print v; exit}' "$ED/.env.template" 2>/dev/null)"
   [[ -n "$tpl_name" ]] || return 0
@@ -771,8 +777,8 @@ run_static() {
   fi
   cap git -C "$TOPLEVEL" diff --check; st=$?; ok_if S2 static S "$st" "git diff --check clean"
   if docker image inspect koalaman/shellcheck:v0.9.0 >/dev/null 2>&1; then
-    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh scripts/gate/phase4_w3.sh scripts/gate/mac/run-vm-gate.sh; st=$?
-    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner, scripts/gate/stub_idp.sh, scripts/gate/phase4_w3.sh and scripts/gate/mac/run-vm-gate.sh"
+    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh sso/operations.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh scripts/gate/phase4_w3.sh scripts/gate/mac/run-vm-gate.sh; st=$?
+    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh sso/operations.sh, this runner, scripts/gate/stub_idp.sh, scripts/gate/phase4_w3.sh and scripts/gate/mac/run-vm-gate.sh"
   else
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
@@ -2972,11 +2978,12 @@ teardown() {
   if $KEEP; then log "--keep: fixture left running (project $PROJECT)"; return; fi
   "$KRATE" monitor down >/dev/null 2>&1 || true
   "$STUB" down --project "$PROJECT" >/dev/null 2>&1 || true  # before compose down: the stand-in is attached to identity-egress
-  compose down -v --remove-orphans >/dev/null 2>&1 || true
-  local v; for v in $(docker volume ls -q | grep -E "^${MON_PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
+  compose --profile idp-watch down -v --remove-orphans >/dev/null 2>&1 || true
+  local n; for n in $(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
+  local v; for v in $(docker volume ls -q | grep -E "^${PROJECT}_|^${MON_PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
   docker volume rm "${MON_PROJECT}_grafana_rendered" >/dev/null 2>&1 || true  # named explicitly (section 5); the prefix loop above is the backstop
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" "${MON_PROJECT}_perses" >/dev/null 2>&1 || true
-  local n; for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-|^${PROJECT}-gate4-"); do docker network rm "$n" >/dev/null 2>&1; done
+  for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-|^${PROJECT}-gate4-"); do docker network rm "$n" >/dev/null 2>&1; done
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done
   # A helper label alone is not ownership: restrict removal to this fixture's
   # Compose project. The name-filtered removal above covers independent helpers.
@@ -2986,7 +2993,7 @@ teardown() {
       --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
   local p
-  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"; do
+  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/auth/.operation.lock" "$ED/auth/.config-applied.json" "$ED/auth/.config-draft.json" "$ED/auth/.verify-ledger.json" "$ED/auth/.formal-gate-receipt.json" "$ED/auth/.operation-recovery" "$ED/auth/.revision.key" "$ED/certs" "$MON_DIR/.env"; do
     if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]] && ! sudo -n rm -rf "$p"; then
       log "WARNING: teardown left $p in place (root-owned leftovers; remove it by hand)"
     fi

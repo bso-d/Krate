@@ -1388,8 +1388,8 @@ class Gate(Phase4Gate):
         for _ in range(10):
             if st_auth not in (302, 303):
                 break
-            loc = h_auth.get('Location', '')
-            if not loc.startswith(self.base):
+            loc = urllib.parse.urljoin(action, h_auth.get('Location', ''))
+            if not (loc.startswith(self.base) or loc.startswith(self.perses_origin or '')):
                 break
             st_auth, h_auth, b_auth = d.req(loc, headers={'Accept': 'text/html'})
             if cb_status == -1 and '/oauth2/callback' in urllib.parse.urlparse(loc).path:
@@ -1716,6 +1716,10 @@ for name in ("krate-viewer-111111111111111111111111", "krate-admin-2222222222222
         rc_p2, st_p2, _ = p2.docker('inspect', '-f', '{{.State.Status}}', p_new) if p_new else (1, '', '')
         rc_o2, st_o2, _ = p2.docker('inspect', '-f', '{{.State.Status}}', o_new) if o_new else (1, '', '')
         running_ok = (rc_up2 == 0 and st_p2.strip() == 'running' and st_o2.strip() == 'running')
+        gw_cid = self.mon_container('perses-gateway')
+        if gw_cid:
+            p2.docker('exec', gw_cid, 'nginx', '-s', 'reload')
+        self.wait_perses_ready('native')
 
         res = self.signin('p4v', 'v16-signin', expect='ok')
         signin_ok = (res.get('kind') == 'OK')

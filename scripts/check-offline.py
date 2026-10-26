@@ -89,11 +89,28 @@ def perses_violations():
 
 def main():
     errors = perses_violations()
-    for variant in POLICIES:
-        profiles = [arg for name in PROFILES.get(variant, ()) for arg in ("--profile", name)]
+    if (ROOT / "kraft" / "docker-compose.yml").is_file():
+        targets = [
+            (variant, ROOT / variant / ".env.template", ROOT / variant / "docker-compose.yml", PROFILES.get(variant, ()))
+            for variant in POLICIES
+        ]
+    elif (ROOT / "docker-compose.yml").is_file():
+        targets = [
+            ("kraft", ROOT / ".env.template", ROOT / "docker-compose.yml", PROFILES["kraft"]),
+        ]
+        if (ROOT / "monitoring" / "docker-compose.yml").is_file():
+            targets.append(
+                ("monitoring", ROOT / "monitoring" / ".env.template", ROOT / "monitoring" / "docker-compose.yml", ())
+            )
+    else:
+        print("Offline policy check failed: no Compose manifests found", file=sys.stderr)
+        return 1
+
+    for variant, env_tpl, compose_path, profs in targets:
+        profiles = [arg for name in profs for arg in ("--profile", name)]
         result = subprocess.run(
-            ["docker", "compose", "--env-file", str(ROOT / variant / ".env.template"),
-             "-f", str(ROOT / variant / "docker-compose.yml"), *profiles, "config", "--format", "json"],
+            ["docker", "compose", "--env-file", str(env_tpl),
+             "-f", str(compose_path), *profiles, "config", "--format", "json"],
             cwd=ROOT, text=True, capture_output=True,
         )
         if result.returncode:

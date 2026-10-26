@@ -19,6 +19,7 @@ Features:
 """
 
 import collections
+import dataclasses
 import http.cookies
 import http.server
 import hmac
@@ -50,6 +51,216 @@ TOKEN_VALIDITY_SECONDS = 86400 * 7  # 7 days
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_STATIC_DIR = os.path.join(SCRIPT_DIR, "static")
+
+_SSO_DIR = os.path.join(REPO_ROOT, "sso")
+if os.path.isdir(_SSO_DIR) and _SSO_DIR not in sys.path:
+    sys.path.insert(0, _SSO_DIR)
+
+try:
+    import operations as _krate_ops  # type: ignore
+except ImportError:
+    _krate_ops = None
+
+_ops_helper = _krate_ops
+
+
+class WorkspaceSwitchConflictError(RuntimeError):
+    """Raised when a workspace switch is attempted while a mutation operation is active."""
+
+
+def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def is_lock_dir_active(lock_dir: str) -> bool:
+    """Checks whether a Krate atomic directory lock (.operation.lock or .identity.lock) is held by a live process."""
+    if not lock_dir or not os.path.isdir(lock_dir):
+        return False
+    pid_file = os.path.join(lock_dir, "pid")
+    try:
+        if os.path.isfile(pid_file):
+            with open(pid_file, "r", encoding="utf-8", errors="replace") as f:
+                raw_pid = f.read().strip()
+            if raw_pid.isdigit():
+                return _is_pid_alive(int(raw_pid))
+        mtime = os.path.getmtime(lock_dir)
+        return (time.time() - mtime) < 60.0
+    except OSError:
+        return False
+
+
+@dataclasses.dataclass(frozen=True)
+class OperationContext:
+    """Immutable resolved workspace and installation context captured per operation."""
+
+    schema_version: int = 1
+    source_dir: str = ""
+    install_dir: str = ""
+    effective_dir: Optional[str] = None
+    installation_id: str = ""
+    edition: str = "kraft"
+    runtime_kind: str = "checkout"
+    is_package: bool = False
+    is_installed: bool = True
+    env_path: Optional[str] = None
+    monitoring_env_path: Optional[str] = None
+    config_revision: Optional[str] = None
+    has_draft: bool = False
+    pending_services: Tuple[Any, ...] = ()
+    recovery_required: bool = False
+    recovery_summary: Optional[dict] = None
+    cluster_project: str = "krate-kraft"
+    monitoring_project: str = "krate-kraft-monitoring"
+    explicit_krate_home: Optional[str] = None
+
+    def __init__(
+        self,
+        schema_version: int = 1,
+        source_dir: str = "",
+        install_dir: str = "",
+        effective_dir: Optional[str] = None,
+        installation_id: str = "",
+        edition: str = "kraft",
+        runtime_kind: str = "checkout",
+        is_package: bool = False,
+        is_installed: bool = True,
+        env_path: Optional[str] = None,
+        monitoring_env_path: Optional[str] = None,
+        config_revision: Optional[str] = None,
+        has_draft: bool = False,
+        pending_services: Tuple[Any, ...] = (),
+        recovery_required: bool = False,
+        recovery_summary: Optional[dict] = None,
+        cluster_project: str = "krate-kraft",
+        monitoring_project: str = "krate-kraft-monitoring",
+        explicit_krate_home: Optional[str] = None,
+    ) -> None:
+        object.__setattr__(self, "schema_version", schema_version)
+        object.__setattr__(self, "source_dir", source_dir)
+        object.__setattr__(self, "install_dir", install_dir)
+        object.__setattr__(self, "effective_dir", effective_dir)
+        object.__setattr__(self, "installation_id", installation_id)
+        object.__setattr__(self, "edition", edition)
+        object.__setattr__(self, "runtime_kind", runtime_kind)
+        object.__setattr__(self, "is_package", is_package)
+        object.__setattr__(self, "is_installed", is_installed)
+        object.__setattr__(self, "env_path", env_path)
+        object.__setattr__(self, "monitoring_env_path", monitoring_env_path)
+        object.__setattr__(self, "config_revision", config_revision)
+        object.__setattr__(self, "has_draft", has_draft)
+        object.__setattr__(self, "pending_services", pending_services)
+        object.__setattr__(self, "recovery_required", recovery_required)
+        object.__setattr__(self, "recovery_summary", recovery_summary)
+        object.__setattr__(self, "cluster_project", cluster_project)
+        object.__setattr__(self, "monitoring_project", monitoring_project)
+        object.__setattr__(self, "explicit_krate_home", explicit_krate_home)
+
+    @property
+    def working_dir(self) -> str:
+        return self.effective_dir or self.source_dir
+
+    @property
+    def krate_bin(self) -> str:
+        return os.path.join(self.working_dir, "krate")
+
+    def cli_for_action(self, action: str) -> Tuple[str, str]:
+        if self.is_package and action in ("install", "load-images", "docker-install"):
+            return os.path.join(self.source_dir, "krate"), self.source_dir
+        return self.krate_bin, self.working_dir
+
+    def subprocess_env(self, extra_env: Optional[dict] = None) -> Dict[str, str]:
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if self.explicit_krate_home:
+            env["KRATE_HOME"] = self.explicit_krate_home
+        elif self.runtime_kind in ("package_uninstalled", "installed") and self.install_dir:
+            env["KRATE_HOME"] = self.install_dir
+        if extra_env:
+            env.update(extra_env)
+        return env
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], explicit_krate_home: Optional[str] = None) -> "OperationContext":
+        projects = data.get("projects") if isinstance(data.get("projects"), dict) else {}
+        edition = str(data.get("edition") or data.get("variant") or "kraft")
+        source_dir = str(data.get("source_dir") or data.get("path") or "")
+        install_dir = str(data.get("install_dir") or data.get("krate_home") or f"/opt/krate/{edition}")
+        effective_dir = data.get("effective_dir")
+        if effective_dir is not None:
+            effective_dir = str(effective_dir)
+        pending = data.get("pending_services")
+        pending_tuple = tuple(pending) if isinstance(pending, (list, tuple)) else ()
+        return cls(
+            schema_version=int(data.get("schema_version", 1)),
+            source_dir=source_dir,
+            install_dir=install_dir,
+            effective_dir=effective_dir,
+            installation_id=str(data.get("installation_id") or f"{edition}:{effective_dir or source_dir}"),
+            edition=edition,
+            runtime_kind=str(data.get("runtime_kind") or "checkout"),
+            is_package=bool(data.get("is_package", False)),
+            is_installed=bool(data.get("is_installed", True)),
+            env_path=str(data["env_path"]) if data.get("env_path") else None,
+            monitoring_env_path=str(data["monitoring_env_path"]) if data.get("monitoring_env_path") else None,
+            config_revision=str(data["config_revision"]) if data.get("config_revision") else None,
+            has_draft=bool(data.get("has_draft", False)),
+            pending_services=pending_tuple,
+            recovery_required=bool(data.get("recovery_required", False)),
+            recovery_summary=dict(data["recovery_summary"]) if isinstance(data.get("recovery_summary"), dict) else None,
+            cluster_project=str(projects.get("cluster") or f"krate-{edition}"),
+            monitoring_project=str(projects.get("monitoring") or f"krate-{edition}-monitoring"),
+            explicit_krate_home=explicit_krate_home,
+        )
+
+    def to_dict(self, active: bool = True) -> Dict[str, Any]:
+        target_dir = self.working_dir
+        krate_bin = os.path.join(target_dir, "krate")
+        has_krate = os.path.isfile(krate_bin) and os.access(krate_bin, os.X_OK)
+        if not has_krate and self.source_dir:
+            src_bin = os.path.join(self.source_dir, "krate")
+            has_krate = os.path.isfile(src_bin) and os.access(src_bin, os.X_OK)
+        compose_file = os.path.join(target_dir, "docker-compose.yml")
+        has_compose = os.path.isfile(compose_file) or os.path.isfile(os.path.join(self.source_dir, "docker-compose.yml"))
+        env_exists = bool(self.env_path and os.path.isfile(self.env_path))
+        return {
+            "schema_version": self.schema_version,
+            "path": target_dir,
+            "source_dir": self.source_dir,
+            "install_dir": self.install_dir,
+            "effective_dir": self.effective_dir,
+            "installation_id": self.installation_id,
+            "edition": self.edition,
+            "variant": self.edition,
+            "runtime_kind": self.runtime_kind,
+            "name": os.path.basename(target_dir) or target_dir,
+            "has_krate": has_krate,
+            "is_package": self.is_package,
+            "is_installed": self.is_installed,
+            "krate_home": self.install_dir,
+            "is_repo": self.runtime_kind == "checkout",
+            "has_compose": has_compose,
+            "env_exists": env_exists,
+            "env_path": self.env_path,
+            "monitoring_env_path": self.monitoring_env_path,
+            "config_revision": self.config_revision,
+            "has_draft": self.has_draft,
+            "pending_services": list(self.pending_services),
+            "recovery_required": self.recovery_required,
+            "recovery_summary": self.recovery_summary,
+            "projects": {
+                "cluster": self.cluster_project,
+                "monitoring": self.monitoring_project,
+            },
+            "active": active,
+        }
 
 
 # --- Session & Security Store ---
@@ -109,9 +320,16 @@ class SessionStore:
 
 # --- Workspace Manager ---
 class WorkspaceManager:
-    def __init__(self, initial_path: Optional[str] = None):
+    def __init__(
+        self,
+        initial_path: Optional[str] = None,
+        job_supervisor: Optional["JobSupervisor"] = None,
+    ):
         self._lock = threading.Lock()
-        self.active_workspace = self._resolve_workspace(initial_path)
+        self.job_supervisor: Optional["JobSupervisor"] = job_supervisor
+        self._selected_source_dir = self._resolve_workspace(initial_path)
+        self._active_context: OperationContext = self._resolve_context_for_path(self._selected_source_dir)
+        self.active_workspace = self._active_context.working_dir
 
     @staticmethod
     def _resolve_workspace(path: Optional[str]) -> str:
@@ -149,70 +367,153 @@ class WorkspaceManager:
 
         return os.path.abspath(cwd)
 
-    def get_info(self, ws_path: Optional[str] = None) -> dict:
-        target = os.path.abspath(ws_path) if ws_path else self.active_workspace
+    @staticmethod
+    def _resolve_context_for_path(
+        ws_path: str,
+        explicit_krate_home: Optional[str] = None,
+    ) -> OperationContext:
+        target = os.path.abspath(ws_path)
         krate_bin = os.path.join(target, "krate")
-        has_krate = os.path.isfile(krate_bin) and os.access(krate_bin, os.X_OK)
+        env_copy = os.environ.copy()
+        env_copy["PYTHONDONTWRITEBYTECODE"] = "1"
+        if explicit_krate_home:
+            env_copy["KRATE_HOME"] = explicit_krate_home
 
-        # Detect variant
-        variant = "kraft"
-        krate_file = os.path.join(target, "krate")
-        if os.path.isfile(krate_file):
+        if os.path.isfile(krate_bin) and os.access(krate_bin, os.X_OK):
             try:
-                with open(krate_file, "r", encoding="utf-8", errors="replace") as f:
-                    for _ in range(50):
-                        line = f.readline()
-                        if not line:
-                            break
-                        m_var = re.match(r'^KRATE_VARIANT=["\']?([a-zA-Z0-9_-]+)["\']?', line.strip())
-                        if m_var:
-                            variant = m_var.group(1)
-                            break
+                res = subprocess.run(
+                    [krate_bin, "workspace", "resolve", "--json"],
+                    cwd=target,
+                    env=env_copy,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    payload = json.loads(res.stdout)
+                    if isinstance(payload, dict):
+                        return OperationContext.from_dict(payload, explicit_krate_home=explicit_krate_home)
             except Exception:
                 pass
-        elif os.path.basename(target) == "epc":
-            variant = "epc"
-        elif os.path.basename(target) == "kraft":
-            variant = "kraft"
 
-        # Detect package vs repo vs install
-        images_dir = os.path.join(target, "images")
-        has_images = os.path.isdir(images_dir)
-        has_makefile = os.path.exists(os.path.join(target, "Makefile")) or os.path.exists(
-            os.path.join(target, "..", "Makefile")
+        if _krate_ops is not None:
+            try:
+                payload = _krate_ops.resolve_workspace(
+                    source_dir=target,
+                    install_dir=explicit_krate_home or os.environ.get("KRATE_HOME"),
+                )
+                return OperationContext.from_dict(payload, explicit_krate_home=explicit_krate_home)
+            except Exception:
+                pass
+
+        # Minimal fallback if neither CLI nor helper module could be invoked
+        variant = "epc" if os.path.basename(target) == "epc" else "kraft"
+        krate_home = os.path.abspath(explicit_krate_home or os.environ.get("KRATE_HOME") or f"/opt/krate/{variant}")
+        has_images = os.path.isdir(os.path.join(target, "images"))
+        has_makefile = os.path.isfile(os.path.join(target, "..", "Makefile")) and os.path.isfile(
+            os.path.join(target, "..", "kafbat-ui", "build.py")
+        )
+        is_pkg = has_images and not has_makefile and (os.path.realpath(target) != os.path.realpath(krate_home))
+        if has_makefile:
+            rt_kind = "checkout"
+            eff_dir: Optional[str] = target
+            is_inst = True
+        elif is_pkg:
+            inst_cli = os.path.join(krate_home, "krate")
+            if os.path.isfile(inst_cli) and os.access(inst_cli, os.X_OK):
+                rt_kind = "installed"
+                eff_dir = krate_home
+                is_inst = True
+            else:
+                rt_kind = "package_uninstalled"
+                eff_dir = None
+                is_inst = False
+        else:
+            rt_kind = "installed"
+            krate_home = target
+            eff_dir = target
+            is_inst = True
+        return OperationContext(
+            schema_version=1,
+            source_dir=target,
+            install_dir=krate_home,
+            effective_dir=eff_dir,
+            installation_id=f"{variant}:{eff_dir or target}",
+            edition=variant,
+            runtime_kind=rt_kind,
+            is_package=is_pkg,
+            is_installed=is_inst,
+            env_path=os.path.join(eff_dir, ".env") if eff_dir else None,
+            monitoring_env_path=os.path.join(eff_dir, "monitoring", ".env") if eff_dir else None,
+            config_revision=None,
+            cluster_project=f"krate-{variant}",
+            monitoring_project=f"krate-{variant}-monitoring",
+            explicit_krate_home=explicit_krate_home,
         )
 
-        krate_home = os.environ.get("KRATE_HOME") or f"/opt/krate/{variant}"
-        abs_krate_home = os.path.abspath(krate_home)
-        is_package = has_images and not has_makefile and target != abs_krate_home
-        is_repo = has_makefile
-        is_installed = (
-            (not is_package)
-            or target == abs_krate_home
-            or os.path.isfile(os.path.join(abs_krate_home, "krate"))
-        )
+    def get_context(self, ws_path: Optional[str] = None) -> OperationContext:
+        if ws_path:
+            return self._resolve_context_for_path(os.path.abspath(ws_path))
+        with self._lock:
+            ctx = self._resolve_context_for_path(
+                self._selected_source_dir,
+                explicit_krate_home=self._active_context.explicit_krate_home,
+            )
+            self._active_context = ctx
+            self.active_workspace = ctx.working_dir
+        return ctx
 
-        # Compose file
-        compose_file = os.path.join(target, "docker-compose.yml")
-        has_compose = os.path.isfile(compose_file)
+    def get_info(self, ws_path: Optional[str] = None) -> dict:
+        if ws_path:
+            abs_target = os.path.abspath(ws_path)
+            ctx = self._resolve_context_for_path(abs_target)
+            with self._lock:
+                is_active = abs_target in (
+                    self.active_workspace,
+                    self._selected_source_dir,
+                    self._active_context.source_dir,
+                    self._active_context.effective_dir,
+                )
+            info = ctx.to_dict(active=is_active)
+            info["path"] = ctx.working_dir if is_active else abs_target
+            return info
+        ctx = self.get_context()
+        return ctx.to_dict(active=True)
 
-        return {
-            "path": target,
-            "name": os.path.basename(target) or target,
-            "variant": variant,
-            "has_krate": has_krate,
-            "is_package": is_package,
-            "is_installed": is_installed,
-            "krate_home": abs_krate_home,
-            "is_repo": is_repo,
-            "has_compose": has_compose,
-            "env_exists": os.path.isfile(os.path.join(target, ".env")),
-            "active": target == self.active_workspace,
-        }
+    def has_active_mutation(self) -> Tuple[bool, Optional[str]]:
+        if self.job_supervisor is not None:
+            active_job_id = self.job_supervisor.get_active_mutation_job_id()
+            if active_job_id:
+                return True, active_job_id
+        with self._lock:
+            ctx = self._active_context
+        for base in (ctx.effective_dir, ctx.source_dir, ctx.install_dir):
+            if not base:
+                continue
+            for lock_name in (".operation.lock", ".identity.lock"):
+                lock_dir = os.path.join(base, "auth", lock_name)
+                if is_lock_dir_active(lock_dir):
+                    return True, lock_name
+        return False, None
+
+    def rebind_after_install(self, context: Optional[OperationContext] = None) -> OperationContext:
+        with self._lock:
+            source_target = context.source_dir if (context and context.source_dir) else self._selected_source_dir
+            explicit_home = context.install_dir if (context and context.install_dir) else None
+            new_ctx = self._resolve_context_for_path(source_target, explicit_krate_home=explicit_home)
+            self._active_context = new_ctx
+            if new_ctx.effective_dir:
+                self.active_workspace = new_ctx.effective_dir
+                self._selected_source_dir = new_ctx.effective_dir
+            else:
+                self.active_workspace = new_ctx.working_dir
+        return new_ctx
 
     def list_workspaces(self) -> List[dict]:
         candidates = set()
-        candidates.add(self.active_workspace)
+        with self._lock:
+            candidates.add(self.active_workspace)
+            candidates.add(self._selected_source_dir)
 
         if os.path.isfile(os.path.join(REPO_ROOT, "krate")):
             candidates.add(os.path.abspath(REPO_ROOT))
@@ -236,14 +537,22 @@ class WorkspaceManager:
             candidates.add(cwd)
 
         results = []
+        seen_paths = set()
         for c in sorted(candidates):
             if os.path.isdir(c):
                 info = self.get_info(c)
                 if info["has_krate"] or info["has_compose"] or c == self.active_workspace:
-                    results.append(info)
+                    if info["path"] not in seen_paths:
+                        seen_paths.add(info["path"])
+                        results.append(info)
         return results
 
     def switch_workspace(self, path: str) -> dict:
+        active_mut, active_id = self.has_active_mutation()
+        if active_mut:
+            raise WorkspaceSwitchConflictError(
+                f"Cannot switch workspace while a mutation operation is active ({active_id})"
+            )
         candidate = path.strip()
         abs_path = os.path.abspath(candidate)
         if not os.path.isdir(abs_path) and candidate in ("kraft", "epc"):
@@ -256,9 +565,11 @@ class WorkspaceManager:
         if not os.path.isdir(abs_path):
             raise ValueError(f"Directory does not exist: {path}")
         with self._lock:
-            self.active_workspace = abs_path
-            os.environ["KRATE_HOME"] = abs_path
-            ws_info = self.get_info(abs_path)
+            self._selected_source_dir = abs_path
+            ctx = self._resolve_context_for_path(abs_path)
+            self._active_context = ctx
+            self.active_workspace = ctx.working_dir
+            ws_info = ctx.to_dict(active=True)
         return ws_info
 
 
@@ -397,10 +708,17 @@ class SudoAskpassContext:
 
 # --- Job Supervisor with Ring Buffer & Secret Extractor ---
 class Job:
-    def __init__(self, job_id: str, action: str, is_mutation: bool = True):
+    def __init__(
+        self,
+        job_id: str,
+        action: str,
+        is_mutation: bool = True,
+        context: Optional[OperationContext] = None,
+    ):
         self.id = job_id
         self.action = action
         self.is_mutation = is_mutation
+        self.context: Optional[OperationContext] = context
         self.status = "running"  # running, succeeded, failed, cancelled
         self.exit_code = None
         self.started_at = time.time()
@@ -485,17 +803,35 @@ class Job:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "is_mutation": self.is_mutation,
+            "context": self.context.to_dict() if self.context else None,
             "ephemeral": self.consume_ephemeral() if consume_ephemeral else {},
             "log_lines_count": len(self.logs),
         }
 
 
 class JobSupervisor:
-    def __init__(self):
+    def __init__(self, workspace_mgr: Optional[WorkspaceManager] = None):
         self._mutation_lock = threading.Lock()
         self._active_mutation_job_id: Optional[str] = None
         self._jobs_lock = threading.Lock()
         self._jobs: Dict[str, Job] = {}
+        self.workspace_mgr: Optional[WorkspaceManager] = workspace_mgr
+        if workspace_mgr is not None:
+            workspace_mgr.job_supervisor = self
+
+    def get_active_mutation_job_id(self) -> Optional[str]:
+        with self._jobs_lock:
+            active_id = self._active_mutation_job_id
+            if active_id:
+                job = self._jobs.get(active_id)
+                if job and job.status == "running":
+                    return active_id
+            for j in self._jobs.values():
+                if j.is_mutation and j.status == "running":
+                    return j.id
+        if self._mutation_lock.locked():
+            return active_id or "active"
+        return None
 
     def register_custom_job(self, job: Job, is_mutation: bool = False) -> None:
         if is_mutation:
@@ -504,7 +840,8 @@ class JobSupervisor:
                 with self._jobs_lock:
                     active_id = self._active_mutation_job_id
                 raise RuntimeError(f"Another mutation job is currently in progress: {active_id}")
-            self._active_mutation_job_id = job.id
+            with self._jobs_lock:
+                self._active_mutation_job_id = job.id
         with self._jobs_lock:
             self._jobs[job.id] = job
 
@@ -512,7 +849,10 @@ class JobSupervisor:
         with self._jobs_lock:
             if self._active_mutation_job_id == job_id:
                 self._active_mutation_job_id = None
-        self._mutation_lock.release()
+        try:
+            self._mutation_lock.release()
+        except RuntimeError:
+            pass
 
     def get_job(self, job_id: str) -> Optional[Job]:
         with self._jobs_lock:
@@ -535,9 +875,12 @@ class JobSupervisor:
         sudo_password: Optional[str] = None,
         is_mutation: bool = True,
         use_sg_docker: bool = False,
+        context: Optional[OperationContext] = None,
     ) -> Job:
+        if context is None and self.workspace_mgr is not None:
+            context = self.workspace_mgr.get_context(cwd if cwd and os.path.isdir(cwd) else None)
         job_id = str(uuid.uuid4())
-        job = Job(job_id, action, is_mutation=is_mutation)
+        job = Job(job_id, action, is_mutation=is_mutation, context=context)
 
         if is_mutation:
             acquired = self._mutation_lock.acquire(blocking=False)
@@ -545,14 +888,16 @@ class JobSupervisor:
                 with self._jobs_lock:
                     active_id = self._active_mutation_job_id
                 raise RuntimeError(f"Another mutation job is currently in progress: {active_id}")
-            self._active_mutation_job_id = job_id
+            with self._jobs_lock:
+                self._active_mutation_job_id = job_id
 
         with self._jobs_lock:
             self._jobs[job_id] = job
 
+        bound_cwd = cwd or (context.working_dir if context else os.getcwd())
         thread = threading.Thread(
             target=self._run_job_process,
-            args=(job, cmd, cwd, env_vars, stdin_data, sudo_password, is_mutation, use_sg_docker),
+            args=(job, cmd, bound_cwd, env_vars, stdin_data, sudo_password, is_mutation, use_sg_docker),
             daemon=True,
         )
         thread.start()
@@ -569,13 +914,15 @@ class JobSupervisor:
         is_mutation: bool,
         use_sg_docker: bool,
     ) -> None:
+        lock_released = False
         try:
-            full_env = os.environ.copy()
-            if env_vars:
-                full_env.update(env_vars)
-
-            # Prevent python bytecode creation in any invoked python scripts
-            full_env["PYTHONDONTWRITEBYTECODE"] = "1"
+            if job.context is not None:
+                full_env = job.context.subprocess_env(env_vars)
+            else:
+                full_env = os.environ.copy()
+                if env_vars:
+                    full_env.update(env_vars)
+                full_env["PYTHONDONTWRITEBYTECODE"] = "1"
 
             with SudoAskpassContext(sudo_password) as askpass_path:
                 if askpass_path:
@@ -694,18 +1041,35 @@ class JobSupervisor:
                 t_out.join()
                 t_err.join()
                 rc = proc.wait()
-                job.finish(rc)
+
+                if rc == 0 and self.workspace_mgr is not None and (
+                    job.action == "install"
+                    or (job.action == "doctor_fix" and isinstance(cmd, list) and "install" in cmd)
+                ):
+                    try:
+                        rebound = self.workspace_mgr.rebind_after_install(job.context)
+                        job.add_log(
+                            "stdout",
+                            f"==> Workspace bound to effective installation: {rebound.effective_dir or rebound.install_dir}",
+                        )
+                    except Exception:
+                        pass
+
                 job.add_log("stdout", f"==> Command exited with status {rc}")
+                if is_mutation:
+                    self.release_mutation_job(job.id)
+                    lock_released = True
+                job.finish(rc)
 
         except Exception as ex:
             job.add_log("stderr", f"[Execution error: {ex}]")
+            if is_mutation and not lock_released:
+                self.release_mutation_job(job.id)
+                lock_released = True
             job.finish(-1)
         finally:
-            if is_mutation:
-                with self._jobs_lock:
-                    if self._active_mutation_job_id == job.id:
-                        self._active_mutation_job_id = None
-                self._mutation_lock.release()
+            if is_mutation and not lock_released:
+                self.release_mutation_job(job.id)
 
 
 # --- Structured Data Collectors ---
@@ -818,21 +1182,44 @@ class StructuredDataCollector:
         self.gate_results: List[dict] = [dict(g) for g in DEFAULT_ACCEPTANCE_GATES]
         self.gates_last_run: Optional[float] = None
 
-    def get_gates(self) -> dict:
+    @staticmethod
+    def _ws_dict_from_context(ctx: OperationContext) -> Dict[str, Any]:
+        return {
+            "source_dir": ctx.source_dir,
+            "install_dir": ctx.install_dir,
+            "effective_dir": ctx.effective_dir,
+            "installation_id": ctx.installation_id,
+            "edition": ctx.edition,
+            "runtime_kind": ctx.runtime_kind,
+            "is_package": ctx.is_package,
+            "is_installed": ctx.is_installed,
+            "env_path": ctx.env_path,
+            "monitoring_env_path": ctx.monitoring_env_path,
+            "config_revision": ctx.config_revision,
+            "has_draft": ctx.has_draft,
+            "pending_services": list(ctx.pending_services),
+            "recovery_required": ctx.recovery_required,
+            "recovery_summary": ctx.recovery_summary,
+            "projects": {
+                "cluster": ctx.cluster_project,
+                "monitoring": ctx.monitoring_project,
+            },
+        }
+
+    def get_gates(self, context: Optional[OperationContext] = None) -> dict:
+        ctx = context or self.ws_mgr.get_context()
+        if _ops_helper is not None:
+            ws_dict = self._ws_dict_from_context(ctx)
+            repo_for_ws = REPO_ROOT if ctx.runtime_kind == "checkout" else ""
+            return _ops_helper.read_verification_state(ws_dict, repo_dir=repo_for_ws)
+
         with self._gates_lock:
             gates_copy = [dict(g) for g in self.gate_results]
             last_run = self.gates_last_run
         passed = sum(1 for g in gates_copy if g["status"] == "passed")
         failed = sum(1 for g in gates_copy if g["status"] == "failed")
         not_run = sum(1 for g in gates_copy if g["status"] not in ("passed", "failed"))
-        if failed > 0:
-            overall = "failed"
-        elif passed == len(gates_copy) and len(gates_copy) > 0:
-            overall = "passed"
-        elif passed > 0:
-            overall = "partial"
-        else:
-            overall = "not_run"
+        overall = "failed" if failed > 0 else ("passed" if passed == len(gates_copy) and gates_copy else "not_run")
         return {
             "status": overall,
             "passed": passed,
@@ -840,6 +1227,8 @@ class StructuredDataCollector:
             "not_run": not_run,
             "last_run": last_run,
             "gates": gates_copy,
+            "checks": gates_copy,
+            "history": [],
         }
 
     def update_gate(self, gate_id: str, status: str, detail: str = "") -> None:
@@ -857,108 +1246,38 @@ class StructuredDataCollector:
             self.gate_results = [dict(g) for g in DEFAULT_ACCEPTANCE_GATES]
             self.gates_last_run = None
 
-    def get_alerts(self, monitoring_state: str = "down", mon_env: Optional[dict] = None) -> dict:
-        default_rules = {
-            "UnderReplicatedPartitions": {"state": "unknown", "label": "Unknown"},
-            "OfflinePartitionsCount": {"state": "unknown", "label": "Unknown"},
-            "BrokerActiveController": {"state": "unknown", "label": "Unknown"},
-            "DiskSpaceLow": {"state": "unknown", "label": "Unknown"},
+    def get_alerts(
+        self,
+        monitoring_state: str = "down",
+        mon_env: Optional[dict] = None,
+        context: Optional[OperationContext] = None,
+    ) -> dict:
+        ctx = context or self.ws_mgr.get_context()
+        if _ops_helper is not None:
+            ws_dict = self._ws_dict_from_context(ctx)
+            return _ops_helper.evaluate_alerts(
+                ws_dict,
+                monitoring_state=monitoring_state,
+                mon_env=mon_env,
+            )
+
+        return {
+            "evaluated": False,
+            "status": "unknown",
+            "summary": "Unknown",
+            "rules": {},
+            "rule_list": [],
         }
-        if monitoring_state != "up":
-            return {
-                "evaluated": False,
-                "status": "unknown",
-                "summary": "Unknown (Monitoring Inactive)",
-                "rules": default_rules,
-            }
 
-        mon = mon_env if mon_env is not None else self.get_config().get("monitoring_env", {})
-        prom_bind = mon.get("PROM_BIND", "127.0.0.1") or "127.0.0.1"
-        if prom_bind == "0.0.0.0":
-            prom_bind = "127.0.0.1"
-        prom_port = mon.get("PROM_PORT", "9090") or "9090"
-        url = f"http://{prom_bind}:{prom_port}/api/v1/rules?type=alert"
-        try:
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            if payload.get("status") != "success":
-                return {
-                    "evaluated": False,
-                    "status": "unknown",
-                    "summary": "Unknown",
-                    "rules": default_rules,
-                }
-            groups = payload.get("data", {}).get("groups", [])
-            rules_out = {k: dict(v) for k, v in default_rules.items()}
-            firing_count = 0
-            pending_count = 0
-            evaluated_any = False
-            for grp in groups:
-                for rule in grp.get("rules", []):
-                    rname = rule.get("name", "")
-                    rstate = (rule.get("state") or "inactive").lower()
-                    health = (rule.get("health") or "").lower()
-                    if health not in ("ok", "good") and not rule.get("lastEvaluation"):
-                        continue
-                    evaluated_any = True
-                    alerts_list = rule.get("alerts") or []
-                    if rstate == "firing":
-                        firing_count += 1
-                        rules_out[rname] = {
-                            "state": "firing",
-                            "label": f"Firing ({len(alerts_list)} active)" if alerts_list else "Firing",
-                        }
-                    elif rstate == "pending":
-                        pending_count += 1
-                        rules_out[rname] = {
-                            "state": "pending",
-                            "label": "Pending",
-                        }
-                    else:
-                        rules_out[rname] = {
-                            "state": "ok",
-                            "label": "OK (Clear)",
-                        }
-            if not evaluated_any:
-                return {
-                    "evaluated": False,
-                    "status": "unknown",
-                    "summary": "Unknown (Awaiting Evaluation)",
-                    "rules": default_rules,
-                }
-            if firing_count > 0:
-                summary = f"{firing_count} Alert(s) Firing"
-                overall = "firing"
-            elif pending_count > 0:
-                summary = f"{pending_count} Alert(s) Pending"
-                overall = "pending"
-            else:
-                summary = "All Alerts Clear"
-                overall = "ok"
-            return {
-                "evaluated": True,
-                "status": overall,
-                "summary": summary,
-                "rules": rules_out,
-            }
-        except Exception:
-            return {
-                "evaluated": False,
-                "status": "unknown",
-                "summary": "Unknown",
-                "rules": default_rules,
-            }
-
-    def get_status(self) -> dict:
-        info = self.ws_mgr.get_info()
-        ws_path = info["path"]
-        variant = info["variant"]
-        cfg = self.get_config()
+    def get_status(self, context: Optional[OperationContext] = None) -> dict:
+        ctx = context or self.ws_mgr.get_context()
+        ws_path = ctx.working_dir
+        variant = ctx.edition
+        cfg = self.get_config(context=ctx)
         env = cfg.get("env", {})
         mon = cfg.get("monitoring_env", {})
-        expected_project = env.get("KRATE_PROJECT") or f"krate-{variant}"
-        expected_mon_project = f"krate-{variant}-monitoring"
+        expected_project = env.get("KRATE_PROJECT") or ctx.cluster_project or f"krate-{variant}"
+        expected_mon_project = ctx.monitoring_project or f"krate-{variant}-monitoring"
 
         containers = []
         cluster_state = "stopped"
@@ -1079,14 +1398,22 @@ class StructuredDataCollector:
             disk_info = {"total_gb": 0, "used_gb": 0, "free_gb": 0, "percent": 0.0}
 
         portals = _build_portal_urls(env, mon)
-        alerts = self.get_alerts(monitoring_state, mon)
+        alerts = self.get_alerts(monitoring_state, mon, context=ctx)
+        mut_active, _ = self.ws_mgr.has_active_mutation()
 
         return {
             "edition": variant,
             "workspace": ws_path,
-            "is_package": info["is_package"],
-            "is_installed": info["is_installed"],
-            "krate_home": info["krate_home"],
+            "source_dir": ctx.source_dir,
+            "install_dir": ctx.install_dir,
+            "effective_dir": ctx.effective_dir,
+            "installation_id": ctx.installation_id,
+            "runtime_kind": ctx.runtime_kind,
+            "is_package": ctx.is_package,
+            "is_installed": ctx.is_installed,
+            "krate_home": ctx.install_dir,
+            "config_revision": ctx.config_revision,
+            "mutation_active": mut_active,
             "cluster_state": cluster_state,
             "containers": containers,
             "monitoring": {"state": monitoring_state},
@@ -1096,9 +1423,9 @@ class StructuredDataCollector:
             "alerts": alerts,
         }
 
-    def get_doctor(self) -> dict:
-        info = self.ws_mgr.get_info()
-        ws_path = info["path"]
+    def get_doctor(self, context: Optional[OperationContext] = None) -> dict:
+        ctx = context or self.ws_mgr.get_context()
+        ws_path = ctx.working_dir
         checks = []
         problems = 0
 
@@ -1242,19 +1569,19 @@ class StructuredDataCollector:
             })
 
         # Check Package Installation status when running from an extracted bundle
-        if info.get("is_package"):
-            if info.get("is_installed"):
+        if ctx.is_package or ctx.runtime_kind == "package_uninstalled":
+            if ctx.is_installed and ctx.effective_dir:
                 checks.append({
                     "name": "Package Installation",
                     "status": "ok",
-                    "message": f"Installed in {info.get('krate_home')}",
+                    "message": f"Installed in {ctx.install_dir}",
                     "fix_action": None,
                 })
             else:
                 checks.append({
                     "name": "Package Installation",
                     "status": "warn",
-                    "message": f"Bundle not installed into {info.get('krate_home')} yet (run krate install before start)",
+                    "message": f"Bundle not installed into {ctx.install_dir} yet (run krate install before start)",
                     "fix_action": "install",
                 })
                 problems += 1
@@ -1263,12 +1590,20 @@ class StructuredDataCollector:
             "ok": problems == 0,
             "problems_count": problems,
             "checks": checks,
+            "effective_dir": ctx.effective_dir,
+            "runtime_kind": ctx.runtime_kind,
         }
 
-    def _resolve_config_file_path(self, target: str = ".env") -> str:
-        info = self.ws_mgr.get_info()
-        ws_path = info["path"]
+    def _resolve_config_file_path(
+        self,
+        target: str = ".env",
+        context: Optional[OperationContext] = None,
+    ) -> str:
+        ctx = context or self.ws_mgr.get_context()
+        ws_path = ctx.working_dir
         if target in ("monitoring/.env", "monitoring"):
+            if ctx.monitoring_env_path:
+                return ctx.monitoring_env_path
             ws_mon_dir = os.path.join(ws_path, "monitoring")
             parent_mon_dir = os.path.join(os.path.dirname(ws_path), "monitoring")
             if os.path.isdir(ws_mon_dir):
@@ -1276,18 +1611,37 @@ class StructuredDataCollector:
             if os.path.isdir(parent_mon_dir):
                 return os.path.join(parent_mon_dir, ".env")
             return os.path.join(ws_mon_dir, ".env")
+        if ctx.env_path:
+            return ctx.env_path
         return os.path.join(ws_path, ".env")
 
-    def get_config(self) -> dict:
-        info = self.ws_mgr.get_info()
-        ws_path = info["path"]
-        env_file = os.path.join(ws_path, ".env")
+    def get_config(self, context: Optional[OperationContext] = None) -> dict:
+        ctx = context or self.ws_mgr.get_context()
+        krate_bin, ws_path = ctx.cli_for_action("config")
+        if os.path.isfile(krate_bin) and os.access(krate_bin, os.X_OK):
+            try:
+                res = subprocess.run(
+                    [krate_bin, "config", "show", "--json"],
+                    cwd=ws_path,
+                    env=ctx.subprocess_env(),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout.strip())
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+
+        env_file = self._resolve_config_file_path(".env", context=ctx)
         if not os.path.isfile(env_file) and os.path.isfile(os.path.join(ws_path, ".env.template")):
             env_source = os.path.join(ws_path, ".env.template")
         else:
             env_source = env_file
 
-        mon_env_file = self._resolve_config_file_path("monitoring/.env")
+        mon_env_file = self._resolve_config_file_path("monitoring/.env", context=ctx)
         if not os.path.isfile(mon_env_file):
             mon_tpl = mon_env_file + ".template"
             mon_source = mon_tpl if os.path.isfile(mon_tpl) else mon_env_file
@@ -1297,7 +1651,7 @@ class StructuredDataCollector:
         def parse_env(path):
             if not os.path.isfile(path):
                 return {}
-            res = {}
+            parsed_env = {}
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
@@ -1305,8 +1659,8 @@ class StructuredDataCollector:
                         continue
                     if "=" in line:
                         k, v = line.split("=", 1)
-                        res[k.strip()] = v.strip().strip("'\"")
-            return res
+                        parsed_env[k.strip()] = v.strip().strip("'\"")
+            return parsed_env
 
         def read_raw(path):
             if not os.path.isfile(path):
@@ -1322,64 +1676,77 @@ class StructuredDataCollector:
             "monitoring_env": parse_env(mon_source),
             "raw_env": read_raw(env_source),
             "raw_monitoring_env": read_raw(mon_source),
+            "config_revision": ctx.config_revision,
+            "effective_dir": ctx.effective_dir,
+            "runtime_kind": ctx.runtime_kind,
+            "has_draft": ctx.has_draft,
+            "pending_services": list(ctx.pending_services),
+            "recovery_required": ctx.recovery_required,
+            "recovery_summary": ctx.recovery_summary,
         }
 
-    def set_config_value(self, key: str, value: str, target: str = ".env") -> bool:
-        file_path = self._resolve_config_file_path(target)
-        parent = os.path.dirname(file_path)
-        if parent and not os.path.isdir(parent):
-            os.makedirs(parent, exist_ok=True)
-
-        lines = []
-        found = False
-        if os.path.isfile(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-        elif os.path.isfile(file_path + ".template"):
-            with open(file_path + ".template", "r", encoding="utf-8") as f:
-                lines = f.readlines()
-
-        new_lines = []
-        for line in lines:
-            if line.strip().startswith(f"{key}=") or line.strip() == key:
-                new_lines.append(f"{key}={value}\n")
-                found = True
-            else:
-                new_lines.append(line)
-
-        if not found:
-            new_lines.append(f"{key}={value}\n")
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+    def run_config_operation(
+        self,
+        subcommand: str,
+        payload: Optional[dict] = None,
+        context: Optional[OperationContext] = None,
+        timeout: int = 180,
+    ) -> Tuple[int, Dict[str, Any]]:
+        """
+        Execute `krate config {plan|apply|draft|recover} [--stdin] --json`
+        bound to the immutable OperationContext. Sensitive values travel over stdin only.
+        """
+        ctx = context or self.ws_mgr.get_context()
+        if not ctx.effective_dir:
+            return 1, {
+                "schema_version": 1,
+                "state": "failed",
+                "error_code": "uninstalled_package",
+                "error": "Package is not installed yet. Run 'krate install' before modifying configuration.",
+                "effective_dir": None,
+            }
+        krate_bin, ws_path = ctx.cli_for_action("config")
+        cmd = [krate_bin, "config", subcommand]
+        if subcommand in ("plan", "apply", "draft"):
+            cmd.append("--stdin")
+        cmd.append("--json")
+        stdin_str = json.dumps(payload or {}) if subcommand in ("plan", "apply", "draft") else None
         try:
-            os.chmod(file_path, 0o600)
-        except OSError:
-            pass
-        return True
+            res = subprocess.run(
+                cmd,
+                cwd=ws_path,
+                env=ctx.subprocess_env(),
+                input=stdin_str,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            out_text = (res.stdout or "").strip()
+            if out_text:
+                try:
+                    parsed = json.loads(out_text)
+                    if isinstance(parsed, dict):
+                        return res.returncode, parsed
+                except ValueError:
+                    pass
+            err_msg = (res.stderr or out_text or f"krate config {subcommand} failed (exit {res.returncode})").strip()
+            return (res.returncode or 1), {
+                "schema_version": 1,
+                "state": "failed",
+                "error": err_msg,
+                "effective_dir": ctx.effective_dir,
+            }
+        except Exception as exc:
+            return 1, {
+                "schema_version": 1,
+                "state": "failed",
+                "error": str(exc),
+                "effective_dir": ctx.effective_dir,
+            }
 
-    def set_config_entries(self, entries: Dict[str, Any], target: str = ".env") -> bool:
-        for k, v in entries.items():
-            if k:
-                self.set_config_value(str(k).strip(), str(v), target)
-        return True
-
-    def set_raw_config(self, raw_content: str, target: str = ".env") -> bool:
-        file_path = self._resolve_config_file_path(target)
-        parent = os.path.dirname(file_path)
-        if parent and not os.path.isdir(parent):
-            os.makedirs(parent, exist_ok=True)
-        text = raw_content if raw_content.endswith("\n") else (raw_content + "\n")
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(text)
-        try:
-            os.chmod(file_path, 0o600)
-        except OSError:
-            pass
-        return True
-
-    def get_credentials(self) -> dict:
-        cfg = self.get_config()
+    def get_credentials(self, context: Optional[OperationContext] = None) -> dict:
+        ctx = context or self.ws_mgr.get_context()
+        cfg = self.get_config(context=ctx)
         env = cfg["env"]
         mon = cfg["monitoring_env"]
         portals = _build_portal_urls(env, mon)
@@ -1445,13 +1812,13 @@ class StructuredDataCollector:
                 endpoints = preferred + others
         return ",".join(endpoints)
 
-    def get_lag(self) -> dict:
+    def get_lag(self, context: Optional[OperationContext] = None) -> dict:
         """Single-JVM batch execution of kafka-consumer-groups.sh --describe --all-groups."""
-        info = self.ws_mgr.get_info()
-        ws_path = info["path"]
-        variant = info["variant"]
-        cfg = self.get_config()
-        expected_project = cfg.get("env", {}).get("KRATE_PROJECT") or f"krate-{variant}"
+        ctx = context or self.ws_mgr.get_context()
+        ws_path = ctx.working_dir
+        variant = ctx.edition
+        cfg = self.get_config(context=ctx)
+        expected_project = cfg.get("env", {}).get("KRATE_PROJECT") or ctx.cluster_project or f"krate-{variant}"
         expected_prefix = "epc-broker-" if variant == "epc" else "krate-broker-"
 
         direct_ok, sg_needed = check_docker_socket_permission()
@@ -1570,11 +1937,11 @@ class StructuredDataCollector:
         except Exception as ex:
             return {"groups": [], "error": str(ex)}
 
-    def get_identity_users(self) -> dict:
-        info = self.ws_mgr.get_info()
-        ws_path = info["path"]
-        krate_bin = os.path.join(ws_path, "krate")
-        cfg = self.get_config().get("env", {})
+    def get_identity_users(self, context: Optional[OperationContext] = None) -> dict:
+        ctx = context or self.ws_mgr.get_context()
+        ws_path = ctx.working_dir
+        krate_bin = ctx.krate_bin
+        cfg = self.get_config(context=ctx).get("env", {})
         admin_group = cfg.get("KEYCLOAK_ADMIN_GROUP") or "KRATE_ADMINS"
         viewer_group = cfg.get("KEYCLOAK_VIEWER_GROUP") or "KRATE_VIEWERS"
 
@@ -1586,10 +1953,12 @@ class StructuredDataCollector:
                 "error": "krate CLI binary not found in workspace",
             }
 
+        sub_env = ctx.subprocess_env()
         try:
             res = subprocess.run(
                 [krate_bin, "identity", "users", "list"],
                 cwd=ws_path,
+                env=sub_env,
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -1620,6 +1989,7 @@ class StructuredDataCollector:
                             gres = subprocess.run(
                                 [krate_bin, "identity", "users", "groups", username],
                                 cwd=ws_path,
+                                env=sub_env,
                                 capture_output=True,
                                 text=True,
                                 timeout=10,
@@ -1632,20 +2002,13 @@ class StructuredDataCollector:
                         except Exception:
                             pass
 
-                    lower_groups = [g.lower() for g in user_groups]
-                    is_admin = (
-                        admin_group in user_groups
-                        or admin_group.lower() in lower_groups
-                        or "krate_admins" in lower_groups
-                        or "admin" in lower_groups
-                    )
-                    is_viewer = not is_admin and (
-                        viewer_group in user_groups
-                        or viewer_group.lower() in lower_groups
-                        or "krate_viewers" in lower_groups
-                        or "viewer" in lower_groups
-                    )
-                    role = "admin" if is_admin else ("viewer" if is_viewer else "none")
+                    if _ops_helper is not None:
+                        is_admin, role = _ops_helper.map_user_role(user_groups, admin_group, viewer_group)
+                    else:
+                        clean_groups = [str(g).strip().lstrip("/") for g in user_groups if str(g).strip()]
+                        is_admin = admin_group.strip().lstrip("/") in clean_groups
+                        is_viewer = not is_admin and (viewer_group.strip().lstrip("/") in clean_groups)
+                        role = "admin" if is_admin else ("viewer" if is_viewer else "none")
                     users.append({
                         "username": username,
                         "enabled": enabled,
@@ -1668,263 +2031,118 @@ class StructuredDataCollector:
             }
 
 
-# --- 5-Stage Grafana/Perses SSO Orchestrator ---
+# --- Authoritative SSO & Fallback Transition Adapter ---
 def run_sso_orchestration(
     supervisor: JobSupervisor,
     workspace_mgr: WorkspaceManager,
-    target: str,  # "grafana" | "perses" | "both"
+    target: str,  # "kafbat" | "grafana" | "perses" | "both" | "all"
     mode: str = "realm",
+    context: Optional[OperationContext] = None,
+    include_kafbat: Optional[bool] = None,
 ) -> Job:
     """
-    Executes the 5-stage Grafana/Perses SSO orchestrator:
-    Stage 1: Preflight Verification
-    Stage 2: Realm Client Provisioning
-    Stage 3: Configuration Update
-    Stage 4: Stack Recreation & Session Revocation
-    Stage 5: Post-Deployment Verification
+    Delegates SSO and emergency local fallback transitions to the authoritative CLI
+    `krate auth transition --stdin --json` handler bound to an immutable OperationContext.
+    Explicitly rejects `master` realm mode.
     """
-    info = workspace_mgr.get_info()
-    ws_path = info["path"]
-    krate_bin = os.path.join(ws_path, "krate")
-    norm_target = (target or "grafana").strip().lower()
+    ctx = context or workspace_mgr.get_context()
+    norm_target = (target or "both").strip().lower()
     norm_mode = (mode or "realm").strip().lower()
-    include_grafana = norm_target in ("grafana", "both")
-    include_perses = norm_target in ("perses", "both")
+    if norm_mode == "master":
+        raise ValueError("Master realm mode is not supported; use 'realm' (Krate Realm) or 'local' mode.")
+    if norm_mode in ("krate", "sso", "oidc"):
+        norm_mode = "realm"
+    if norm_mode not in ("realm", "local"):
+        raise ValueError(f"Unsupported auth transition mode {norm_mode!r}; supported modes are 'realm' and 'local'.")
+    if norm_target not in ("kafbat", "grafana", "perses", "both", "all"):
+        raise ValueError(
+            f"Unsupported auth transition target {norm_target!r}; must be kafbat, grafana, perses, both, or all."
+        )
 
-    job_id = str(uuid.uuid4())
-    job = Job(job_id, f"sso-orchestrate-{norm_target}-{norm_mode}", is_mutation=True)
-    supervisor.register_custom_job(job, is_mutation=True)
+    krate_bin, ws_path = ctx.cli_for_action("auth")
+    payload: Dict[str, Any] = {
+        "target": norm_target,
+        "mode": norm_mode,
+    }
+    if include_kafbat is not None:
+        payload["include_kafbat"] = bool(include_kafbat)
+    elif norm_mode == "local" and norm_target in ("both", "all"):
+        payload["include_kafbat"] = True
 
-    def orchestrator_worker():
-        try:
-            job.add_log("stdout", f"==> Starting 5-Stage SSO Orchestrator for {norm_target} ({norm_mode})...")
-
-            # Stage 1: Preflight Verification
-            job.add_log("stdout", "--- Stage 1/5: Preflight Verification ---")
-            doctor_collector = StructuredDataCollector(workspace_mgr)
-            doc = doctor_collector.get_doctor()
-            if not doc.get("ok"):
-                for c in doc.get("checks", []):
-                    if c["status"] in ("warn", "error"):
-                        job.add_log("stderr", f"  ! Preflight warning: {c['name']} - {c['message']}")
-
-            status_collector = StructuredDataCollector(workspace_mgr)
-            st = status_collector.get_status()
-            if st.get("cluster_state") != "running":
-                job.add_log("stderr", f"  ! Cluster is {st.get('cluster_state')}; cluster must be running first")
-            else:
-                job.add_log("stdout", "  ✓ Cluster health verified")
-
-            # Stage 2: Realm Client Provisioning
-            job.add_log("stdout", "--- Stage 2/5: Realm Client Provisioning ---")
-            if norm_mode == "local":
-                job.add_log("stdout", "  Local fallback mode selected; skipping realm client provisioning.")
-            else:
-                if include_grafana:
-                    job.add_log("stdout", f"  Invoking {krate_bin} monitor realm...")
-                    res = subprocess.run(
-                        [krate_bin, "monitor", "realm"],
-                        cwd=ws_path,
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                    )
-                    for line in res.stdout.splitlines():
-                        job.add_log("stdout", f"  {line}")
-                    if res.returncode != 0:
-                        for err_line in res.stderr.splitlines():
-                            job.add_log("stderr", f"  {err_line}")
-                        job.add_log(
-                            "stderr",
-                            f"  ✗ Failed provisioning Grafana realm client (exit {res.returncode}); aborting transition.",
-                        )
-                        job.finish(res.returncode)
-                        return
-                if include_perses:
-                    job.add_log("stdout", "  Perses realm client reconciliation will execute during monitor up...")
-
-            # Stage 3: Configuration Update
-            job.add_log("stdout", "--- Stage 3/5: Configuration Update ---")
-            if norm_mode == "local":
-                if include_grafana:
-                    job.add_log("stdout", "  Setting GRAFANA_AUTH_CONFIG=local.ini...")
-                    doctor_collector.set_config_value("GRAFANA_AUTH_CONFIG", "local.ini", "monitoring/.env")
-                if include_perses:
-                    job.add_log("stdout", "  Setting PERSES_AUTH_MODE=local and clearing PERSES_IDP...")
-                    doctor_collector.set_config_value("PERSES_AUTH_MODE", "local", "monitoring/.env")
-                    doctor_collector.set_config_value("PERSES_IDP", "", "monitoring/.env")
-            else:
-                if include_grafana:
-                    job.add_log("stdout", "  Setting GRAFANA_AUTH_CONFIG=realm.ini...")
-                    doctor_collector.set_config_value("GRAFANA_AUTH_CONFIG", "realm.ini", "monitoring/.env")
-                if include_perses:
-                    job.add_log("stdout", "  Setting PERSES_AUTH_MODE=native and PERSES_IDP=krate...")
-                    doctor_collector.set_config_value("PERSES_AUTH_MODE", "native", "monitoring/.env")
-                    doctor_collector.set_config_value("PERSES_IDP", "krate", "monitoring/.env")
-            job.add_log("stdout", "  ✓ Configurations persisted")
-
-            # Stage 4: Stack Recreation & Session Revocation
-            job.add_log("stdout", "--- Stage 4/5: Stack Recreation & Session Revocation ---")
-            job.add_log("stdout", f"  Invoking {krate_bin} monitor up...")
-            res = subprocess.run(
-                [krate_bin, "monitor", "up"],
-                cwd=ws_path,
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            for line in res.stdout.splitlines():
-                job.add_log("stdout", f"  {line}")
-            if res.returncode != 0:
-                for err_line in res.stderr.splitlines():
-                    job.add_log("stderr", f"  {err_line}")
-                job.add_log("stderr", f"  ✗ monitor up exited with code {res.returncode}")
-                job.finish(res.returncode)
-                return
-            job.add_log("stdout", "  ✓ Monitoring stack reconciled with SSO profile")
-
-            # Stage 5: Post-Deployment Verification
-            job.add_log("stdout", "--- Stage 5/5: Post-Deployment Verification ---")
-            verify_st = status_collector.get_status()
-            job.add_log("stdout", f"  Monitoring state: {verify_st.get('monitoring', {}).get('state')}")
-            job.add_log("stdout", "==> 5-Stage SSO Orchestration completed successfully! ✓")
-            job.finish(0)
-
-        except Exception as ex:
-            job.add_log("stderr", f"[Orchestration error: {ex}]")
-            job.finish(-1)
-        finally:
-            supervisor.release_mutation_job(job.id)
-
-    t = threading.Thread(target=orchestrator_worker, daemon=True)
-    t.start()
-    return job
+    _, sg_needed = check_docker_socket_permission()
+    return supervisor.start_job(
+        action=f"sso-orchestrate-{norm_target}-{norm_mode}",
+        cmd=[krate_bin, "auth", "transition", "--stdin", "--json"],
+        cwd=ws_path,
+        stdin_data=json.dumps(payload) + "\n",
+        is_mutation=True,
+        use_sg_docker=sg_needed,
+        context=ctx,
+    )
 
 
-# --- Acceptance Gates Runner ---
+# --- Acceptance & Static Verification Runner ---
 def run_gates_verification(
     supervisor: JobSupervisor,
     workspace_mgr: WorkspaceManager,
-    data_collector: StructuredDataCollector,
+    data_collector: Optional[StructuredDataCollector] = None,
+    context: Optional[OperationContext] = None,
 ) -> Job:
     """
-    Executes the 5 formal acceptance gates and records actual pass/fail outcomes in data_collector.
+    Delegates verification to the authoritative CLI `krate verify --json` operation,
+    persisting input-bound results in `<effective_dir>/auth/.verify-ledger.json`.
     """
-    info = workspace_mgr.get_info()
-    ws_path = info["path"]
-    krate_bin = os.path.join(ws_path, "krate")
+    ctx = context or workspace_mgr.get_context()
+    krate_bin, ws_path = ctx.cli_for_action("verify")
+    sub_env = ctx.subprocess_env()
+    if data_collector is not None:
+        data_collector.reset_gates()
 
     job_id = str(uuid.uuid4())
-    job = Job(job_id, "gates", is_mutation=False)
+    job = Job(job_id, "gates", is_mutation=False, context=ctx)
     supervisor.register_custom_job(job, is_mutation=False)
 
     def gates_worker():
-        overall_rc = 0
         try:
-            job.add_log("stdout", f"==> Executing Formal Acceptance Gates in {ws_path}...")
-
-            # GATE-1: CLI & Bash Syntax
-            job.add_log("stdout", "--- [GATE-1] CLI & Bash Syntax Verification ---")
-            scripts_to_check = [krate_bin]
-            for extra in [os.path.join(REPO_ROOT, "kraft", "krate"), os.path.join(REPO_ROOT, "epc", "krate")]:
-                if os.path.isfile(extra) and extra not in scripts_to_check:
-                    scripts_to_check.append(extra)
-            r1 = subprocess.run(["bash", "-n"] + scripts_to_check, cwd=ws_path, capture_output=True, text=True, timeout=30)
-            if r1.returncode == 0:
-                data_collector.update_gate("GATE-1", "passed", "Bash syntax verified")
-                job.add_log("stdout", "  ✓ GATE-1 Passed: Bash syntax valid")
-            else:
-                overall_rc = 1
-                data_collector.update_gate("GATE-1", "failed", r1.stderr.strip() or "Syntax error")
-                job.add_log("stderr", f"  ✗ GATE-1 Failed: {r1.stderr.strip()}")
-
-            # GATE-2: Image Digest Pinning
-            job.add_log("stdout", "--- [GATE-2] Image Digest Pinning Verification ---")
-            digest_script = os.path.join(REPO_ROOT, "scripts", "check-digests.py")
-            if os.path.isfile(digest_script):
-                r2 = subprocess.run([sys.executable, "-B", digest_script], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
-                if r2.returncode == 0:
-                    data_collector.update_gate("GATE-2", "passed", "All image digests pinned")
-                    job.add_log("stdout", "  ✓ GATE-2 Passed: Digest pins verified")
-                else:
-                    overall_rc = 1
-                    data_collector.update_gate("GATE-2", "failed", r2.stderr.strip() or r2.stdout.strip() or "Digest check failed")
-                    job.add_log("stderr", f"  ✗ GATE-2 Failed: {r2.stderr.strip() or r2.stdout.strip()}")
-            else:
-                env_tpl = os.path.join(ws_path, ".env.template")
-                has_sha = False
-                if os.path.isfile(env_tpl):
-                    with open(env_tpl, "r", encoding="utf-8", errors="replace") as f:
-                        has_sha = "@sha256:" in f.read()
-                if has_sha:
-                    data_collector.update_gate("GATE-2", "passed", ".env.template digests present")
-                    job.add_log("stdout", "  ✓ GATE-2 Passed: Image digests present in .env.template")
-                else:
-                    overall_rc = 1
-                    data_collector.update_gate("GATE-2", "failed", "Missing @sha256: pins")
-                    job.add_log("stderr", "  ✗ GATE-2 Failed: Missing @sha256: pins")
-
-            # GATE-3: Compose Configuration
-            job.add_log("stdout", "--- [GATE-3] Compose Configuration Validation ---")
-            compose_file = os.path.join(ws_path, "docker-compose.yml")
-            env_file = os.path.join(ws_path, ".env")
-            if not os.path.isfile(env_file):
-                env_file = os.path.join(ws_path, ".env.template")
-            if os.path.isfile(compose_file) and os.path.isfile(env_file):
-                r3 = subprocess.run(
-                    ["docker", "compose", "--env-file", env_file, "-f", compose_file, "config", "--quiet"],
-                    cwd=ws_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if r3.returncode == 0:
-                    data_collector.update_gate("GATE-3", "passed", "Compose schema valid")
-                    job.add_log("stdout", "  ✓ GATE-3 Passed: docker compose config --quiet succeeded")
-                else:
-                    overall_rc = 1
-                    data_collector.update_gate("GATE-3", "failed", r3.stderr.strip() or "Compose validation failed")
-                    job.add_log("stderr", f"  ✗ GATE-3 Failed: {r3.stderr.strip()}")
-            else:
-                overall_rc = 1
-                data_collector.update_gate("GATE-3", "failed", "Compose or .env file missing")
-                job.add_log("stderr", "  ✗ GATE-3 Failed: Compose or .env file missing")
-
-            # GATE-4: Air-Gapped Offline Policy
-            job.add_log("stdout", "--- [GATE-4] Air-Gapped Offline Policy Verification ---")
-            offline_script = os.path.join(REPO_ROOT, "scripts", "check-offline.py")
-            if os.path.isfile(offline_script):
-                r4 = subprocess.run([sys.executable, "-B", offline_script], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
-                if r4.returncode == 0:
-                    data_collector.update_gate("GATE-4", "passed", "Zero external URLs / offline clean")
-                    job.add_log("stdout", "  ✓ GATE-4 Passed: Air-gap offline policy verified")
-                else:
-                    overall_rc = 1
-                    data_collector.update_gate("GATE-4", "failed", r4.stderr.strip() or r4.stdout.strip() or "Offline check failed")
-                    job.add_log("stderr", f"  ✗ GATE-4 Failed: {r4.stderr.strip() or r4.stdout.strip()}")
-            else:
-                data_collector.update_gate("GATE-4", "passed", "Static assets self-contained")
-                job.add_log("stdout", "  ✓ GATE-4 Passed: Static assets self-contained")
-
-            # GATE-5: Identity & Host Doctor Preflight
-            job.add_log("stdout", "--- [GATE-5] Identity & Host Preflight Verification ---")
-            r5 = subprocess.run([krate_bin, "doctor"], cwd=ws_path, capture_output=True, text=True, timeout=60)
-            for ln in r5.stdout.splitlines():
-                job.add_log("stdout", f"  {ln}")
-            if r5.returncode == 0:
-                data_collector.update_gate("GATE-5", "passed", "Preflight & identity invariants passed")
-                job.add_log("stdout", "  ✓ GATE-5 Passed: Doctor & identity checks succeeded")
-            else:
-                overall_rc = 1
-                for ln in r5.stderr.splitlines():
-                    job.add_log("stderr", f"  {ln}")
-                data_collector.update_gate("GATE-5", "failed", "Doctor preflight reported issues")
-                job.add_log("stderr", f"  ✗ GATE-5 Failed: krate doctor exited with {r5.returncode}")
-
-            job.finish(overall_rc)
-            job.add_log("stdout", f"==> Formal Acceptance Gates finished with exit code {overall_rc}")
+            job.add_log("stdout", f"==> Running authoritative krate verify --json in {ws_path}...")
+            res = subprocess.run(
+                [krate_bin, "verify", "--json"],
+                cwd=ws_path,
+                env=sub_env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            out_str = (res.stdout or "").strip()
+            if out_str:
+                try:
+                    payload = json.loads(out_str)
+                    binding = payload.get("binding", {})
+                    job.add_log(
+                        "stdout",
+                        f"  Binding: {binding.get('installation_id')} | candidate={str(binding.get('candidate'))[:12]} | rev={str(binding.get('config_revision'))[:12]}",
+                    )
+                    for chk in payload.get("checks", []):
+                        st = str(chk.get("status", "not_run")).upper()
+                        line = f"  [{st}] {chk.get('id')} ({chk.get('category')} / {chk.get('tool')}): {chk.get('detail')}"
+                        if data_collector is not None and chk.get("legacy_id"):
+                            data_collector.update_gate(
+                                str(chk["legacy_id"]),
+                                str(chk.get("status", "not_run")),
+                                str(chk.get("detail", "")),
+                            )
+                        if chk.get("status") == "failed":
+                            job.add_log("stderr", line)
+                        else:
+                            job.add_log("stdout", line)
+                except ValueError:
+                    for ln in out_str.splitlines():
+                        job.add_log("stdout", ln)
+            for err_ln in (res.stderr or "").splitlines():
+                job.add_log("stderr", err_ln)
+            job.finish(res.returncode)
         except Exception as ex:
-            job.add_log("stderr", f"[Gates error: {ex}]")
+            job.add_log("stderr", f"[Verification error: {ex}]")
             job.finish(-1)
 
     t = threading.Thread(target=gates_worker, daemon=True)
@@ -2216,24 +2434,37 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
             if path == "/api/v1/workspaces":
                 workspaces = self.workspace_mgr.list_workspaces()
                 active = self.workspace_mgr.get_info()
+                mut_active, active_job_id = self.workspace_mgr.has_active_mutation()
                 self._send_json(200, {
                     "active_workspace": active["path"],
+                    "source_dir": active["source_dir"],
+                    "install_dir": active["install_dir"],
+                    "effective_dir": active["effective_dir"],
+                    "installation_id": active["installation_id"],
+                    "edition": active["edition"],
                     "variant": active["variant"],
+                    "runtime_kind": active["runtime_kind"],
                     "is_package": active["is_package"],
                     "is_installed": active["is_installed"],
                     "krate_home": active["krate_home"],
                     "is_repo": active["is_repo"],
+                    "config_revision": active["config_revision"],
+                    "projects": active["projects"],
+                    "mutation_active": mut_active,
+                    "active_mutation_job_id": active_job_id,
                     "available_workspaces": workspaces,
                 })
                 return
 
             if path == "/api/v1/status":
-                data = self.data_collector.get_status()
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_status(context=ctx)
                 self._send_json(200, data)
                 return
 
             if path == "/api/v1/doctor":
-                data = self.data_collector.get_doctor()
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_doctor(context=ctx)
                 self._send_json(200, data)
                 return
 
@@ -2243,27 +2474,32 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 return
 
             if path == "/api/v1/alerts":
-                st = self.data_collector.get_status()
+                ctx = self.workspace_mgr.get_context()
+                st = self.data_collector.get_status(context=ctx)
                 self._send_json(200, st.get("alerts", {}))
                 return
 
             if path == "/api/v1/config":
-                data = self.data_collector.get_config()
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_config(context=ctx)
                 self._send_json(200, data)
                 return
 
             if path == "/api/v1/credentials":
-                data = self.data_collector.get_credentials()
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_credentials(context=ctx)
                 self._send_json(200, data)
                 return
 
             if path == "/api/v1/lag":
-                data = self.data_collector.get_lag()
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_lag(context=ctx)
                 self._send_json(200, data)
                 return
 
             if path == "/api/v1/identity/users":
-                data = self.data_collector.get_identity_users()
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_identity_users(context=ctx)
                 self._send_json(200, data)
                 return
 
@@ -2342,40 +2578,93 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 if not target_ws:
                     self._send_json(400, {"error": "Missing 'workspace' parameter"})
                     return
+                active_mut, active_id = self.workspace_mgr.has_active_mutation()
+                if active_mut:
+                    self._send_json(
+                        409,
+                        {
+                            "error": f"Cannot switch workspace while a mutation operation is active ({active_id})",
+                            "status": "conflict",
+                            "active_job_id": active_id,
+                        },
+                    )
+                    return
                 res = self.workspace_mgr.switch_workspace(target_ws)
                 self._send_json(200, {"status": "ok", "workspace": res})
+            except WorkspaceSwitchConflictError as ce:
+                self._send_json(409, {"error": str(ce), "status": "conflict"})
             except Exception as ex:
                 self._send_json(400, {"error": str(ex)})
             return
 
-        # 5. Config update
-        if path == "/api/v1/config":
+        # 5. Config plan / apply / draft / recover
+        if path in (
+            "/api/v1/config",
+            "/api/v1/config/plan",
+            "/api/v1/config/apply",
+            "/api/v1/config/draft",
+            "/api/v1/config/recover",
+        ):
             try:
                 body = self._read_json_body()
+                op_ctx = self.workspace_mgr.get_context()
+                if path.endswith("/plan"):
+                    sub_op = "plan"
+                elif path.endswith("/draft"):
+                    sub_op = "draft"
+                elif path.endswith("/recover"):
+                    sub_op = "recover"
+                else:
+                    sub_op = str(body.get("operation") or "apply").strip().lower()
+
+                if sub_op not in ("plan", "apply", "draft", "recover"):
+                    self._send_json(400, {"error": f"Unsupported configuration operation: {sub_op}"})
+                    return
+
+                if sub_op == "recover":
+                    rc, out = self.data_collector.run_config_operation("recover", context=op_ctx)
+                    status_code = 200 if rc == 0 else 409
+                    self._send_json(status_code, out)
+                    return
+
                 target = body.get("target", ".env")
                 if target not in (".env", "monitoring/.env"):
                     self._send_json(400, {"error": f"Unsupported configuration target: {target}"})
                     return
 
+                req_payload: Dict[str, Any] = {
+                    "target": target,
+                    "expected_revision": body.get("expected_revision"),
+                    "action": body.get("action", "save"),
+                }
+                if req_payload["action"] == "discard" and sub_op == "draft":
+                    rc, out = self.data_collector.run_config_operation("draft", req_payload, context=op_ctx)
+                    self._send_json(200 if rc == 0 else 400, out)
+                    return
+
                 if "raw" in body and body.get("raw") is not None:
-                    raw_text = str(body.get("raw"))
-                    self.data_collector.set_raw_config(raw_text, target)
-                    self._send_json(200, {"status": "ok", "target": target, "mode": "raw"})
-                    return
-
-                if isinstance(body.get("entries"), dict):
-                    entries = body["entries"]
-                    self.data_collector.set_config_entries(entries, target)
-                    self._send_json(200, {"status": "ok", "target": target, "updated": entries})
-                    return
-
-                key = body.get("key")
-                val = body.get("value")
-                if not key:
+                    req_payload["mode"] = "raw"
+                    req_payload["raw"] = str(body.get("raw"))
+                elif isinstance(body.get("entries"), dict):
+                    req_payload["mode"] = "entries"
+                    req_payload["entries"] = body["entries"]
+                elif body.get("key"):
+                    req_payload["mode"] = "entries"
+                    req_payload["entries"] = {str(body["key"]): "" if body.get("value") is None else str(body["value"])}
+                else:
                     self._send_json(400, {"error": "Missing 'key', 'entries', or 'raw' parameter"})
                     return
-                self.data_collector.set_config_value(key, str(val), target)
-                self._send_json(200, {"status": "ok", "target": target, "updated": {key: val}})
+
+                rc, out = self.data_collector.run_config_operation(sub_op, req_payload, context=op_ctx)
+                if rc == 0:
+                    out.setdefault("status", "ok")
+                    out.setdefault("target", target)
+                    self._send_json(200, out)
+                else:
+                    err_code = out.get("error_code")
+                    st = out.get("state")
+                    http_code = 409 if (err_code in ("stale_revision", "recovery_required") or st == "recovery_required") else 400
+                    self._send_json(http_code, out)
             except Exception as ex:
                 self._send_json(400, {"error": str(ex)})
             return
@@ -2393,10 +2682,11 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json(400, {"error": "Missing 'action' parameter"})
                     return
 
-                # Build CLI command & IPC arguments
-                ws_info = self.workspace_mgr.get_info()
-                ws_path = ws_info["path"]
-                krate_bin = os.path.join(ws_path, "krate")
+                # Capture immutable OperationContext at operation creation
+                op_ctx = self.workspace_mgr.get_context()
+                ws_info = op_ctx.to_dict()
+                effective_action = params.get("fix") if (action == "doctor_fix" and isinstance(params, dict)) else action
+                krate_bin, ws_path = op_ctx.cli_for_action(str(effective_action or action))
 
                 # Check if sudo password challenge is required before starting job
                 needs_sudo, sudo_msg = check_sudo_challenge_needed(action, params, ws_info, sudo_pwd)
@@ -2413,8 +2703,22 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 if action == "gates":
-                    job = run_gates_verification(self.job_supervisor, self.workspace_mgr, self.data_collector)
-                    self._send_json(202, {"job_id": job.id, "action": action, "status": job.status})
+                    job = run_gates_verification(
+                        self.job_supervisor,
+                        self.workspace_mgr,
+                        self.data_collector,
+                        context=op_ctx,
+                    )
+                    self._send_json(
+                        202,
+                        {
+                            "job_id": job.id,
+                            "action": action,
+                            "status": job.status,
+                            "is_mutation": False,
+                            "context": ws_info,
+                        },
+                    )
                     return
 
                 env_vars = {}
@@ -2432,22 +2736,72 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 elif action in ("auth_fallback", "sso_fallback") or (
                     action == "auth" and ("fallback" in args or params.get("fallback") or params.get("mode") == "local")
                 ):
-                    self.data_collector.set_config_value("KAFKA_UI_AUTH_CONFIG", "local.yml", ".env")
-                    target_mon = params.get("target", "both")
-                    if target_mon in ("grafana", "both"):
-                        self.data_collector.set_config_value("GRAFANA_AUTH_CONFIG", "local.ini", "monitoring/.env")
-                    if target_mon in ("perses", "both"):
-                        self.data_collector.set_config_value("PERSES_AUTH_MODE", "local", "monitoring/.env")
-                        self.data_collector.set_config_value("PERSES_IDP", "", "monitoring/.env")
-                    cmd = [krate_bin, "auth", "apply"]
+                    target_mon = str(params.get("target") or "all").strip().lower()
+                    if target_mon == "both":
+                        target_mon = "all"
+                    cmd = [krate_bin, "auth", "transition", "--stdin", "--json"]
+                    stdin_data = json.dumps({
+                        "target": target_mon,
+                        "mode": "local",
+                        "include_kafbat": True,
+                    }) + "\n"
+
+                elif action in ("auth_transition", "sso_orchestrate"):
+                    target_app = str(params.get("target") or "both").strip().lower()
+                    mode_val = str(params.get("mode") or "realm").strip().lower()
+                    if mode_val == "master":
+                        self._send_json(400, {
+                            "error": "Master realm mode is not supported; use 'realm' (Krate Realm) or 'local' mode.",
+                            "error_code": "unsupported_mode",
+                        })
+                        return
+                    cmd = [krate_bin, "auth", "transition", "--stdin", "--json"]
+                    stdin_data = json.dumps({
+                        "target": target_app,
+                        "mode": mode_val,
+                        "include_kafbat": bool(params.get("include_kafbat", target_app in ("kafbat", "all"))),
+                    }) + "\n"
 
                 elif action == "auth":
                     sub_args = list(args) if args else ["apply"]
-                    if sub_args[0] not in ("configure", "apply"):
+                    if sub_args[0] not in ("configure", "apply", "transition"):
                         self._send_json(400, {"error": f"Unsupported auth subcommand: {sub_args[0]}"})
                         return
                     cmd.append("auth")
                     cmd.extend(sub_args)
+
+                elif action.startswith("service_"):
+                    sub = action.replace("service_", "", 1)
+                    if sub not in ("start", "stop", "restart", "logs"):
+                        self._send_json(400, {"error": f"Unsupported service subcommand: {sub}"})
+                        return
+                    proj_param = str(params.get("project") or "").strip()
+                    svc_param = str(params.get("service") or (args[0] if args else "")).strip()
+                    if not proj_param or not svc_param:
+                        self._send_json(400, {"error": "Both 'project' and 'service' parameters are required"})
+                        return
+                    if _ops_helper is not None:
+                        ws_dict = {
+                            "source_dir": op_ctx.source_dir,
+                            "effective_dir": op_ctx.effective_dir,
+                            "installation_id": op_ctx.installation_id,
+                            "monitoring_env_path": op_ctx.monitoring_env_path,
+                            "projects": {
+                                "cluster": op_ctx.cluster_project,
+                                "monitoring": op_ctx.monitoring_project,
+                            },
+                        }
+                        ok_svc, _, err_detail = _ops_helper.validate_service_operation(ws_dict, proj_param, svc_param)
+                        if not ok_svc:
+                            self._send_json(400, {"error": err_detail, "error_code": "invalid_service_target"})
+                            return
+                    cmd.extend(["service", sub, "--project", proj_param, "--service", svc_param])
+                    if sub == "logs":
+                        is_mutation = False
+                        tail_n = str(params.get("tail") or 100)
+                        cmd.extend(["--tail", tail_n])
+                    else:
+                        cmd.append("--json")
 
                 elif action == "uninstall":
                     cmd.append("uninstall")
@@ -2523,7 +2877,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 elif action.startswith("monitor_"):
                     sub = action.replace("monitor_", "", 1)
                     if sub == "restart":
-                        cmd = ["bash", "-c", '"$1" monitor down && "$1" monitor up', "bash", krate_bin]
+                        cmd.extend(["monitor", "restart"])
                     elif sub in ("up", "down", "status", "logs", "reload", "ui", "realm"):
                         cmd.append("monitor")
                         cmd.append(sub)
@@ -2568,8 +2922,18 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                     sudo_password=sudo_pwd,
                     is_mutation=is_mutation,
                     use_sg_docker=sg_needed,
+                    context=op_ctx,
                 )
-                self._send_json(202, {"job_id": job.id, "action": action, "status": job.status})
+                self._send_json(
+                    202,
+                    {
+                        "job_id": job.id,
+                        "action": action,
+                        "status": job.status,
+                        "is_mutation": is_mutation,
+                        "context": ws_info,
+                    },
+                )
 
             except RuntimeError as re_err:
                 self._send_json(409, {"error": str(re_err)})
@@ -2583,8 +2947,27 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                 body = self._read_json_body()
                 target = body.get("target", "grafana")
                 mode = body.get("mode", "realm")
-                job = run_sso_orchestration(self.job_supervisor, self.workspace_mgr, target, mode)
-                self._send_json(202, {"job_id": job.id, "action": job.action, "status": job.status})
+                op_ctx = self.workspace_mgr.get_context()
+                job = run_sso_orchestration(
+                    self.job_supervisor,
+                    self.workspace_mgr,
+                    target,
+                    mode,
+                    context=op_ctx,
+                    include_kafbat=body.get("include_kafbat"),
+                )
+                self._send_json(
+                    202,
+                    {
+                        "job_id": job.id,
+                        "action": job.action,
+                        "status": job.status,
+                        "is_mutation": True,
+                        "context": op_ctx.to_dict(),
+                    },
+                )
+            except ValueError as val_err:
+                self._send_json(400, {"error": str(val_err), "error_code": "unsupported_mode"})
             except RuntimeError as re_err:
                 self._send_json(409, {"error": str(re_err)})
             except Exception as ex:
@@ -2789,7 +3172,7 @@ class KrateStudioServer:
 
         self.session_store = SessionStore()
         self.workspace_mgr = WorkspaceManager(workspace_path)
-        self.job_supervisor = JobSupervisor()
+        self.job_supervisor = JobSupervisor(self.workspace_mgr)
         self.data_collector = StructuredDataCollector(self.workspace_mgr)
         self.static_dir = static_dir or DEFAULT_STATIC_DIR
 
