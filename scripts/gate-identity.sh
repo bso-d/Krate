@@ -741,6 +741,10 @@ gmake_check_in() { ( cd "$1" && gmake check ); }  # env -C is GNU-only
 # checker's own KRATE_CHECK_NGINX_IMAGE override with the running nginx image's tag form when the
 # store has it, so the render never tries to pull.
 s1_render_env() {
+  if [[ -n "${KRATE_CHECK_NGINX_IMAGE:-}" ]] && docker image inspect "$KRATE_CHECK_NGINX_IMAGE" >/dev/null 2>&1; then
+    printf 'KRATE_CHECK_NGINX_IMAGE=%s\n' "$KRATE_CHECK_NGINX_IMAGE"
+    return 0
+  fi
   local tpl_name
   tpl_name="$(awk '/^NGINX_IMAGE=/{v=$0; sub(/^NGINX_IMAGE=/, "", v); print v; exit}' "$ED/.env.template" 2>/dev/null)"
   [[ -n "$tpl_name" ]] || return 0
