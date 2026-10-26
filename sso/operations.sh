@@ -52,7 +52,7 @@ operation_lock() {
     if identity_lock_live "$pid" "$mtime"; then
       die "Another krate operation is running (pid ${pid:-?}). Wait for it to finish."
     fi
-    warn "Removing the stale operation lock left by process ${pid:-?}"
+    warn "Removing the stale operation lock left by process ${pid:-?}" >&2
     rm -rf "$dir"
     {
       mkdir "$tmp" \
@@ -100,6 +100,12 @@ operation_cleanup() {
   fi
 }
 
+# Ensure any internal call that resets `trap identity_cleanup EXIT` (e.g. `kcadm_login`)
+# still cleans up both `IDENTITY_LOCK` and `OPERATION_LOCK` on exit.
+identity_cleanup() {
+  operation_cleanup
+}
+
 # Hierarchical lock coordination: when an outer operation holds operation_lock,
 # nested calls to identity_lock within the same verified process tree are re-entrant
 # and do not deadlock or prematurely drop the outer EXIT trap.
@@ -130,7 +136,7 @@ identity_lock() {
     if identity_lock_live "$pid" "$mtime"; then
       die "Another krate identity command is running (pid ${pid:-?}). Wait for it to finish."
     fi
-    warn "Removing the stale identity lock left by process ${pid:-?}"
+    warn "Removing the stale identity lock left by process ${pid:-?}" >&2
     rm -rf "$dir"
     { mkdir "$tmp" && echo "$holder_pid" > "$tmp/pid"; } || { rm -rf "$tmp"; die "Cannot create the lock $dir"; }
     identity_lock_rename "$tmp" "$dir" || die "Cannot create the lock $dir"
@@ -541,7 +547,7 @@ print(
   # 2. Kafbat UI transition (when selected)
   if [[ -z "$failed_step" && "$inc_kafbat" == "true" ]]; then
     if [[ "$norm_mode" == "realm" && ! -f "$SCRIPT_DIR/auth/ui/runtime.yml" ]]; then
-      if ! auth_configure "$sso_path" >&2; then
+      if ! ( set -eo pipefail; auth_configure "$sso_path" ) >&2; then
         kafbat_status="failed"
         failed_step="kafbat_configure"
         fail_error="Failed generating auth/ui/runtime.yml"
@@ -549,7 +555,7 @@ print(
     fi
     if [[ -z "$failed_step" ]]; then
       _ops_py auth-transition-helper "${common_args[@]}" --action persist-target --target-app kafbat --mode "$norm_mode" >/dev/null
-      if _orig_cmd_auth apply >&2; then
+      if ( set -eo pipefail; _orig_cmd_auth apply ) >&2; then
         kafbat_status="succeeded"
       else
         kafbat_status="failed"
@@ -564,7 +570,7 @@ print(
     if [[ "$norm_mode" == "realm" ]]; then
       if [[ "$graf_needs_prep" == "true" ]]; then
         grafana_prep_step="monitor_realm_executed"
-        if ! _orig_cmd_monitor realm >&2; then
+        if ! ( set -eo pipefail; _orig_cmd_monitor realm ) >&2; then
           grafana_status="failed"
           failed_step="grafana_realm_prep"
           fail_error="krate monitor realm preparation failed"
@@ -587,7 +593,7 @@ print(
 
   # 5. Monitoring stack reconciliation (`monitor up`) when Grafana or Perses is included
   if [[ -z "$failed_step" && ( "$inc_grafana" == "true" || "$inc_perses" == "true" ) ]]; then
-    if _orig_cmd_monitor up >&2; then
+    if ( set -eo pipefail; _orig_cmd_monitor up ) >&2; then
       [[ "$inc_grafana" == "true" ]] && grafana_status="succeeded"
       [[ "$inc_perses" == "true" ]] && perses_status="succeeded"
     else
@@ -672,11 +678,11 @@ cmd_monitor() {
     operation_lock "monitor-restart"
     local -a common_args=()
     mapfile -t common_args < <(_ops_common_args)
-    info "Restarting observability stack (single-operation down -> up)..."
-    if ! _orig_cmd_monitor down; then
+    info "Restarting observability stack (single-operation down -> up)..." >&2
+    if ! ( set -eo pipefail; _orig_cmd_monitor down ) >&2; then
       die "Monitoring stop step (monitor down) failed during restart"
     fi
-    if ! _orig_cmd_monitor up; then
+    if ! ( set -eo pipefail; _orig_cmd_monitor up ) >&2; then
       printf '%s\n' '{"state":"recovery_required","failed_step":"monitor_up","error":"Monitoring stack stopped cleanly but monitor up failed during restart"}' \
         | _ops_py auth-transition-helper "${common_args[@]}" --action finalize >/dev/null 2>&1 || true
       die "Monitoring start step (monitor up) failed after monitor down; recovery required"
@@ -743,9 +749,9 @@ cmd_service() {
   case "$handler_kind" in
     monitoring)
       case "$action" in
-        start)   monitor_compose up -d --no-deps "$service" ;;
-        stop)    monitor_compose stop "$service" ;;
-        restart) monitor_compose restart "$service" ;;
+        start)   monitor_compose up -d --no-deps "$service" >&2 ;;
+        stop)    monitor_compose stop "$service" >&2 ;;
+        restart) monitor_compose restart "$service" >&2 ;;
         logs)
           if $follow; then
             monitor_compose logs --tail "$tail_lines" -f "$service"
@@ -758,9 +764,9 @@ cmd_service() {
     identity)
       require_compose_file
       case "$action" in
-        start)   identity_compose up -d --pull never --no-build --no-deps "$service" ;;
-        stop)    identity_compose stop "$service" ;;
-        restart) identity_compose restart "$service" ;;
+        start)   identity_compose up -d --pull never --no-build --no-deps "$service" >&2 ;;
+        stop)    identity_compose stop "$service" >&2 ;;
+        restart) identity_compose restart "$service" >&2 ;;
         logs)
           if $follow; then
             identity_compose logs --tail "$tail_lines" -f "$service"
@@ -773,9 +779,9 @@ cmd_service() {
     cluster)
       require_compose_file
       case "$action" in
-        start)   compose_cmd up -d --pull never --no-build --no-deps "$service" ;;
-        stop)    compose_cmd stop "$service" ;;
-        restart) compose_cmd restart "$service" ;;
+        start)   compose_cmd up -d --pull never --no-build --no-deps "$service" >&2 ;;
+        stop)    compose_cmd stop "$service" >&2 ;;
+        restart) compose_cmd restart "$service" >&2 ;;
         logs)
           if $follow; then
             compose_cmd logs --tail "$tail_lines" -f "$service"

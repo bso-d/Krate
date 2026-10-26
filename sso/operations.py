@@ -825,8 +825,11 @@ def build_config_plan(
         new_val = candidate_map.get(key)
         app_val = applied_target_map.get(key, cur_val)
 
+        classification = classify_key(key)
         file_changed = cur_val != new_val
         pending_apply = app_val != new_val
+        if classification == "established_secret" and key != "PING_KEYCLOAK_CLIENT_SECRET" and state_head == "existing":
+            pending_apply = False
 
         if not file_changed and not pending_apply:
             continue
@@ -849,7 +852,6 @@ def build_config_plan(
                 "old_revision": current_rev,
             }
 
-        classification = classify_key(key)
         redacted = is_sensitive_key(key)
 
         if classification == "established_secret" and state_head == "existing":

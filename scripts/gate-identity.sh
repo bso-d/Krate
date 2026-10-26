@@ -381,7 +381,7 @@ else
   PRODUCT_BINDING="not compared (no git and no --candidate)"
 fi
 EDITION_DIGESTS=""
-for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/probe.py" "$SSO/configure-dual.py"; do
+for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/operations.sh" "$SSO/operations.py" "$SSO/probe.py" "$SSO/configure-dual.py"; do
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
 if [[ -n "$REPO_ARG" ]]; then
@@ -771,8 +771,8 @@ run_static() {
   fi
   cap git -C "$TOPLEVEL" diff --check; st=$?; ok_if S2 static S "$st" "git diff --check clean"
   if docker image inspect koalaman/shellcheck:v0.9.0 >/dev/null 2>&1; then
-    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh scripts/gate/phase4_w3.sh scripts/gate/mac/run-vm-gate.sh; st=$?
-    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh, this runner, scripts/gate/stub_idp.sh, scripts/gate/phase4_w3.sh and scripts/gate/mac/run-vm-gate.sh"
+    cap docker run --rm -v "$TOPLEVEL:/mnt:ro" -w /mnt koalaman/shellcheck:v0.9.0 kraft/krate epc/krate sso/activate.sh sso/operations.sh "scripts/$(basename "$RUNNER")" scripts/gate/stub_idp.sh scripts/gate/phase4_w3.sh scripts/gate/mac/run-vm-gate.sh; st=$?
+    ok_if S3 static S "$st" "shellcheck 0.9.0 (CI version) on kraft/krate epc/krate sso/activate.sh sso/operations.sh, this runner, scripts/gate/stub_idp.sh, scripts/gate/phase4_w3.sh and scripts/gate/mac/run-vm-gate.sh"
   else
     record S3 static S NOT_RUN "koalaman/shellcheck:v0.9.0 image not on this host"
   fi
