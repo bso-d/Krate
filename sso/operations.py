@@ -524,14 +524,14 @@ def validate_key_value(
         return f"Image pins come from .env.template; change {key} there, or export it in the shell for one run."
 
     if classification == "auth_mode":
-        if key == "KAFKA_UI_AUTH_CONFIG" and value not in ("local.yml", "runtime.yml"):
-            return f"Unsupported {key}={value!r}; supported modes are local.yml and runtime.yml."
-        if key == "GRAFANA_AUTH_CONFIG" and value not in ("local.ini", "realm.ini"):
-            return f"Unsupported {key}={value!r}; supported modes are local.ini and realm.ini (master realm is unsupported)."
-        if key == "PERSES_AUTH_MODE" and value not in ("local", "native"):
-            return f"Unsupported {key}={value!r}; supported modes are local and native."
-        if key == "PERSES_IDP" and value == "master":
-            return "Master realm mode is not supported; use 'krate' realm or local mode."
+        if value in ("master", "master.ini", "master.yml"):
+            return f"Unsupported {key}={value!r}; master realm mode is not supported."
+        if key == "KAFKA_UI_AUTH_CONFIG" and value not in ("local.yml", "runtime.yml", "sso.yml"):
+            return f"Unsupported {key}={value!r}; supported modes are local.yml, runtime.yml, and sso.yml."
+        if key == "GRAFANA_AUTH_CONFIG" and value not in ("local.ini", "realm.ini", "sso.ini"):
+            return f"Unsupported {key}={value!r}; supported modes are local.ini, realm.ini, and sso.ini (master realm is unsupported)."
+        if key == "PERSES_AUTH_MODE" and value not in ("local", "native", "gateway"):
+            return f"Unsupported {key}={value!r}; supported modes are local, native, and gateway."
 
     if classification == "established_secret" or key in DISTINCT_SETTING_KEYS:
         state_head = (identity_state or "pristine").split()[0]
@@ -645,21 +645,40 @@ def _resolve_target_paths(ws: Dict[str, Any]) -> Tuple[str, str, str, str]:
     return env_path, env_tpl, mon_env_path, mon_tpl
 
 
+def _applied_val_token(effective_dir: str, key: str, value: Optional[str]) -> Optional[str]:
+    if value is None or not is_sensitive_key(key):
+        return value
+    if value.startswith("hmac:"):
+        return value
+    rev_key = _get_or_create_revision_key(effective_dir) or b"krate-fallback-rev-key"
+    digest = hmac.new(rev_key, f"{key}={value}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"hmac:{digest}"
+
+
+def _mask_applied_map(effective_dir: str, env_map: Dict[str, str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k, v in env_map.items():
+        tok = _applied_val_token(effective_dir, k, v)
+        if tok is not None:
+            out[k] = tok
+    return out
+
+
 def _load_applied_state(effective_dir: str, current_env: Dict[str, str], current_mon: Dict[str, str]) -> Dict[str, Any]:
     path = os.path.join(effective_dir, "auth", ".config-applied.json")
     data = _read_json_file(path)
     if data and isinstance(data.get("applied_env"), dict) and isinstance(data.get("applied_monitoring_env"), dict):
         return {
             "schema_version": SCHEMA_VERSION,
-            "applied_env": dict(data["applied_env"]),
-            "applied_monitoring_env": dict(data["applied_monitoring_env"]),
+            "applied_env": _mask_applied_map(effective_dir, dict(data["applied_env"])),
+            "applied_monitoring_env": _mask_applied_map(effective_dir, dict(data["applied_monitoring_env"])),
             "pending_services": list(data.get("pending_services") or []),
             "updated_at": data.get("updated_at"),
         }
     return {
         "schema_version": SCHEMA_VERSION,
-        "applied_env": dict(current_env),
-        "applied_monitoring_env": dict(current_mon),
+        "applied_env": _mask_applied_map(effective_dir, dict(current_env)),
+        "applied_monitoring_env": _mask_applied_map(effective_dir, dict(current_mon)),
         "pending_services": [],
         "updated_at": None,
     }
@@ -668,6 +687,10 @@ def _load_applied_state(effective_dir: str, current_env: Dict[str, str], current
 def _save_applied_state(effective_dir: str, state: Dict[str, Any]) -> None:
     path = os.path.join(effective_dir, "auth", ".config-applied.json")
     state["schema_version"] = SCHEMA_VERSION
+    if isinstance(state.get("applied_env"), dict):
+        state["applied_env"] = _mask_applied_map(effective_dir, state["applied_env"])
+    if isinstance(state.get("applied_monitoring_env"), dict):
+        state["applied_monitoring_env"] = _mask_applied_map(effective_dir, state["applied_monitoring_env"])
     state["updated_at"] = _utc_now_iso()
     _atomic_write_json(path, state, mode=0o600)
 
@@ -823,11 +846,13 @@ def build_config_plan(
     for key in all_keys:
         cur_val = current_target_map.get(key)
         new_val = candidate_map.get(key)
-        app_val = applied_target_map.get(key, cur_val)
+        cur_tok = _applied_val_token(effective_dir, key, cur_val)
+        new_tok = _applied_val_token(effective_dir, key, new_val)
+        app_val = applied_target_map.get(key, cur_tok)
 
         classification = classify_key(key)
         file_changed = cur_val != new_val
-        pending_apply = app_val != new_val
+        pending_apply = app_val != new_tok
         if classification == "established_secret" and key != "PING_KEYCLOAK_CLIENT_SECRET" and state_head == "existing":
             pending_apply = False
 

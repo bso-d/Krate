@@ -682,7 +682,7 @@ fixture_reset() {
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   local p
-  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"; do
+  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/auth/.operation.lock" "$ED/auth/.config-applied.json" "$ED/auth/.config-draft.json" "$ED/auth/.verify-ledger.json" "$ED/auth/.formal-gate-receipt.json" "$ED/auth/.operation-recovery" "$ED/auth/.revision.key" "$ED/certs" "$MON_DIR/.env"; do
     if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]]; then
       # Root-owned leftovers of an earlier run survive rm -rf (fixture epc 2026-10-23:
       # the docker daemon creates an absent bind-mount source root-owned at container
@@ -2986,7 +2986,7 @@ teardown() {
       --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   # scripts/gate/phase4_w3.sh owns its namespace/veth and removes only resources it created.
   local p
-  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/certs" "$MON_DIR/.env"; do
+  for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/auth/.operation.lock" "$ED/auth/.config-applied.json" "$ED/auth/.config-draft.json" "$ED/auth/.verify-ledger.json" "$ED/auth/.formal-gate-receipt.json" "$ED/auth/.operation-recovery" "$ED/auth/.revision.key" "$ED/certs" "$MON_DIR/.env"; do
     if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]] && ! sudo -n rm -rf "$p"; then
       log "WARNING: teardown left $p in place (root-owned leftovers; remove it by hand)"
     fi
