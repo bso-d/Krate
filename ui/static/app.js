@@ -1182,6 +1182,24 @@
       return null;
     }
 
+    const isMutationAction = ![
+      "health",
+      "credentials",
+      "status",
+      "logs",
+      "doctor",
+      "gates",
+      "identity_status",
+      "monitor_status",
+      "monitor_logs",
+      "monitor_ui",
+    ].includes(action);
+    if (state.clusterStatus?.mutation_active && isMutationAction) {
+      const activeHolder = state.clusterStatus.active_mutation_job_id || "lock held";
+      showToast(`Another operation is currently active (${activeHolder}). Wait for it to finish.`, "warning");
+      return null;
+    }
+
     try {
       if (dom.terminalBadgeStatus) {
         dom.terminalBadgeStatus.textContent = "";

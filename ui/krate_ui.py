@@ -885,6 +885,10 @@ class JobSupervisor:
         job = Job(job_id, action, is_mutation=is_mutation, context=context)
 
         if is_mutation:
+            if self.workspace_mgr is not None:
+                has_mut, lock_holder = self.workspace_mgr.has_active_mutation()
+                if has_mut:
+                    raise RuntimeError(f"Another mutation operation is active ({lock_holder}). Wait for it to finish.")
             acquired = self._mutation_lock.acquire(blocking=False)
             if not acquired:
                 with self._jobs_lock:

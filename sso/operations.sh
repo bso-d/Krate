@@ -671,38 +671,52 @@ cmd_auth() {
 
 cmd_monitor() {
   local sub="${1:-}"
-  if [[ "$sub" == "restart" ]]; then
-    shift || true
-    local want_json=false
-    [[ "${1:-}" == "--json" ]] && want_json=true
-    operation_lock "monitor-restart"
-    local -a common_args=()
-    mapfile -t common_args < <(_ops_common_args)
-    info "Restarting observability stack (single-operation down -> up)..." >&2
-    if ! ( set -eo pipefail; _orig_cmd_monitor down ) >&2; then
-      die "Monitoring stop step (monitor down) failed during restart"
-    fi
-    if ! ( set -eo pipefail; _orig_cmd_monitor up ) >&2; then
-      printf '%s\n' '{"state":"recovery_required","failed_step":"monitor_up","error":"Monitoring stack stopped cleanly but monitor up failed during restart"}' \
-        | _ops_py auth-transition-helper "${common_args[@]}" --action finalize >/dev/null 2>&1 || true
-      die "Monitoring start step (monitor up) failed after monitor down; recovery required"
-    fi
-    _ops_py config-clear-pending "${common_args[@]}" --scope monitoring >/dev/null 2>&1 || true
-    if $want_json; then
-      printf '{"schema_version": 1, "state": "succeeded", "operation": "monitor_restart"}\n'
-    else
-      ok "Observability stack restarted and verified"
-    fi
-    return 0
-  fi
-  _orig_cmd_monitor "$@"
-  local rc=$?
-  if [[ $rc -eq 0 && "$sub" == "up" ]]; then
-    local -a common_args=()
-    mapfile -t common_args < <(_ops_common_args)
-    _ops_py config-clear-pending "${common_args[@]}" --scope monitoring >/dev/null 2>&1 || true
-  fi
-  return $rc
+  case "$sub" in
+    restart)
+      shift || true
+      local want_json=false
+      [[ "${1:-}" == "--json" ]] && want_json=true
+      operation_lock "monitor-restart"
+      local -a common_args=()
+      mapfile -t common_args < <(_ops_common_args)
+      info "Restarting observability stack (single-operation down -> up)..." >&2
+      if ! ( set -eo pipefail; _orig_cmd_monitor down ) >&2; then
+        die "Monitoring stop step (monitor down) failed during restart"
+      fi
+      if ! ( set -eo pipefail; _orig_cmd_monitor up ) >&2; then
+        printf '%s\n' '{"state":"recovery_required","failed_step":"monitor_up","error":"Monitoring stack stopped cleanly but monitor up failed during restart"}' \
+          | _ops_py auth-transition-helper "${common_args[@]}" --action finalize >/dev/null 2>&1 || true
+        die "Monitoring start step (monitor up) failed after monitor down; recovery required"
+      fi
+      _ops_py config-clear-pending "${common_args[@]}" --scope monitoring >/dev/null 2>&1 || true
+      if $want_json; then
+        printf '{"schema_version": 1, "state": "succeeded", "operation": "monitor_restart"}\n'
+      else
+        ok "Observability stack restarted and verified"
+      fi
+      return 0
+      ;;
+    up)
+      operation_lock "monitor-up"
+      _orig_cmd_monitor "$@"
+      local rc=$?
+      if [[ $rc -eq 0 ]]; then
+        local -a common_args=()
+        mapfile -t common_args < <(_ops_common_args)
+        _ops_py config-clear-pending "${common_args[@]}" --scope monitoring >/dev/null 2>&1 || true
+      fi
+      return $rc
+      ;;
+    down)
+      operation_lock "monitor-down"
+      _orig_cmd_monitor "$@"
+      return $?
+      ;;
+    *)
+      _orig_cmd_monitor "$@"
+      return $?
+      ;;
+  esac
 }
 
 cmd_service() {
