@@ -133,7 +133,12 @@
     ssoPipelineStatus: document.getElementById("sso-pipeline-status"),
 
     // View 7: Observability
+    btnMonitorUp: document.getElementById("btn-monitor-up"),
     btnMonitorToggle: document.getElementById("btn-monitor-toggle"),
+    btnMonitorDown: document.getElementById("btn-monitor-down"),
+    btnStepStartMonitor: document.getElementById("btn-step-start-monitor"),
+    btnServicesMonitorUp: document.getElementById("btn-services-monitor-up"),
+    btnServicesMonitorDown: document.getElementById("btn-services-monitor-down"),
     linkPortalGrafana: document.getElementById("link-portal-grafana"),
     linkPortalKafbat: document.getElementById("link-portal-kafbat"),
     linkPortalPerses: document.getElementById("link-portal-perses"),
@@ -1177,6 +1182,24 @@
       return null;
     }
 
+    const isMutationAction = ![
+      "health",
+      "credentials",
+      "status",
+      "logs",
+      "doctor",
+      "gates",
+      "identity_status",
+      "monitor_status",
+      "monitor_logs",
+      "monitor_ui",
+    ].includes(action);
+    if (state.clusterStatus?.mutation_active && isMutationAction) {
+      const activeHolder = state.clusterStatus.active_mutation_job_id || "lock held";
+      showToast(`Another operation is currently active (${activeHolder}). Wait for it to finish.`, "warning");
+      return null;
+    }
+
     try {
       if (dom.terminalBadgeStatus) {
         dom.terminalBadgeStatus.textContent = "";
@@ -1598,9 +1621,59 @@
       if (activeFilter === "brokers") return name.includes("broker") || name.includes("kafka-");
       if (activeFilter === "ui-proxy") return name.includes("ui") || name.includes("proxy");
       if (activeFilter === "identity") return name.includes("keycloak") || name.includes("idp");
-      if (activeFilter === "monitoring") return name.includes("prometheus") || name.includes("grafana") || name.includes("perses") || name.includes("loki") || name.includes("exporter");
+      if (activeFilter === "monitoring") return name.includes("prometheus") || name.includes("grafana") || name.includes("perses") || name.includes("loki") || name.includes("exporter") || name.includes("alertmanager") || name.includes("fluent") || name.includes("victoria") || name.includes("discovery");
       return true;
     });
+
+    if (filtered.length === 0) {
+      if (!search && activeFilter === "monitoring") {
+        dom.servicesGrid.innerHTML = `
+          <div class="card" style="grid-column: 1 / -1; padding: 32px; text-align: center;">
+            <div class="modal-icon icon-info" style="margin: 0 auto 16px auto;">
+              <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" fill="none" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+            </div>
+            <h3 style="font-size: 1.125rem; font-weight: 600; margin-bottom: 6px;">Observability &amp; Monitoring Stack is Stopped</h3>
+            <p class="text-sm text-muted" style="max-width: 540px; margin: 0 auto 18px auto;">
+              Grafana, Perses, Prometheus, Loki, and VictoriaLogs run in an independent Compose stack (<code>monitoring/</code>) to conserve host resources when telemetry is not needed.
+            </p>
+            <div style="display: flex; gap: 12px; justify-content: center;">
+              <button class="btn btn-primary" id="btn-empty-start-monitoring">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>Launch Monitoring Stack</span>
+              </button>
+            </div>
+          </div>
+        `;
+        document.getElementById("btn-empty-start-monitoring")?.addEventListener("click", () => triggerJob("monitor_up"));
+        return;
+      }
+      if (!search && activeFilter === "identity") {
+        dom.servicesGrid.innerHTML = `
+          <div class="card" style="grid-column: 1 / -1; padding: 32px; text-align: center;">
+            <div class="modal-icon icon-info" style="margin: 0 auto 16px auto;">
+              <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" fill="none" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            </div>
+            <h3 style="font-size: 1.125rem; font-weight: 600; margin-bottom: 6px;">Keycloak Identity Services are Inactive</h3>
+            <p class="text-sm text-muted" style="max-width: 540px; margin: 0 auto 18px auto;">
+              Keycloak and PostgreSQL run under the SSO Compose profile. Start them via the SSO tab or with <code>./krate identity up</code>.
+            </p>
+            <div style="display: flex; gap: 12px; justify-content: center;">
+              <button class="btn btn-primary" id="btn-empty-start-identity">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>Start Identity Stack</span>
+              </button>
+            </div>
+          </div>
+        `;
+        document.getElementById("btn-empty-start-identity")?.addEventListener("click", () => triggerJob("identity_up"));
+        return;
+      }
+      dom.servicesGrid.innerHTML = `
+        <div class="card card-loading" style="grid-column: 1 / -1; text-align: center; padding: 24px;">
+          <span>No matching containers found for filter "${escapeHtml(activeFilter)}".</span>
+        </div>`;
+      return;
+    }
 
     dom.servicesGrid.innerHTML = filtered
       .map((c) => {
@@ -2588,10 +2661,14 @@
       triggerJob("auth_fallback", { target, mode: "local" });
     });
 
-    // Observability actions: single backend monitoring-restart job
-    dom.btnMonitorToggle?.addEventListener("click", async () => {
-      await triggerJob("monitor_restart");
-    });
+    // Observability & Monitoring actions
+    dom.btnMonitorUp?.addEventListener("click", () => triggerJob("monitor_up"));
+    dom.btnMonitorToggle?.addEventListener("click", () => triggerJob("monitor_restart"));
+    dom.btnMonitorDown?.addEventListener("click", () => triggerJob("monitor_down"));
+
+    dom.btnStepStartMonitor?.addEventListener("click", () => triggerJob("monitor_up"));
+    dom.btnServicesMonitorUp?.addEventListener("click", () => triggerJob("monitor_up"));
+    dom.btnServicesMonitorDown?.addEventListener("click", () => triggerJob("monitor_down"));
 
     // Release & Gates actions
     dom.btnRunGates?.addEventListener("click", async () => {
