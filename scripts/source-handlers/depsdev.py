@@ -7,13 +7,14 @@ from __future__ import annotations
 import json
 import urllib.request
 
-from common import USER_AGENT, log
+from common import USER_AGENT, configure_ca_bundle, log
 
 API = 'https://api.deps.dev/v3alpha/versionbatch'
 
 
 def licences(cache, system, keys):
     """keys: iterable of (name, version). Returns {(name, version): [spdx, ...] | None}."""
+    configure_ca_bundle()
     keys = sorted(set(keys))
     out, todo = {}, []
     for k in keys:

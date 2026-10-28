@@ -54,17 +54,52 @@ def run(*cmd, capture=True, check=True, env=None, input=None, cwd=None):
     return proc.stdout.strip() if capture else ''
 
 
-def _open(url, timeout=120, headers=None):
+def configure_ca_bundle():
+    if os.environ.get('SSL_CERT_FILE'):
+        return
+    try:
+        import certifi
+    except ImportError:
+        certifi = None
+    if certifi is not None:
+        ca = certifi.where()
+        if os.path.isfile(ca):
+            os.environ['SSL_CERT_FILE'] = ca
+            return
+    for ca_path in (
+        '/etc/ssl/cert.pem',
+        '/etc/ssl/certs/ca-certificates.crt',
+        '/etc/pki/tls/certs/ca-bundle.crt',
+        '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem',
+        '/etc/ssl/ca-bundle.pem',
+    ):
+        if os.path.isfile(ca_path):
+            os.environ['SSL_CERT_FILE'] = ca_path
+            return
+
+
+configure_ca_bundle()
+
+
+def _open(url, timeout: float = 120, headers=None):
+    if not os.environ.get('SSL_CERT_FILE'):
+        configure_ca_bundle()
     req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT, **(headers or {})})
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def http_get(url, *, retries=4, timeout=120, headers=None, allow_404=False):
+def http_get(url, *, retries=4, timeout: float = 120, headers=None, allow_404=False, deadline=None):
     """GET a small document into memory. Returns None on 404 when allow_404."""
     delay = 2
     for attempt in range(retries):
+        req_timeout = timeout
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise TimeoutError(f'deadline exceeded before fetching {url}')
+            req_timeout = max(0.1, min(float(timeout), rem))
         try:
-            with _open(url, timeout, headers) as resp:
+            with _open(url, req_timeout, headers) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
             if exc.code in (404, 410) and allow_404:
@@ -74,7 +109,13 @@ def http_get(url, *, retries=4, timeout=120, headers=None, allow_404=False):
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
             if attempt == retries - 1:
                 raise
-        time.sleep(delay)
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise TimeoutError(f'deadline exceeded retrying {url}')
+            time.sleep(min(delay, rem))
+        else:
+            time.sleep(delay)
         delay *= 2
     raise RuntimeError('unreachable')
 
@@ -110,19 +151,24 @@ class Cache:
         safe = hashlib.sha256(key.encode()).hexdigest()
         return self.root / 'meta' / safe
 
-    def cached_get(self, url, *, max_age=None, allow_404=False, timeout=120):
+    def cached_get(self, url, *, max_age=None, allow_404=False, timeout: float = 120, retries=None,
+                   headers=None, deadline=None):
         """Fetch a metadata document, cached on disk by URL (not a release input)."""
         path = self.meta_path(url)
         with self._lock('meta:' + url):
-            cached = self._cached_get(url, path, max_age, allow_404, timeout)
+            cached = self._cached_get(url, path, max_age, allow_404, timeout,
+                                      retries=retries, headers=headers, deadline=deadline)
         return cached
 
-    def _cached_get(self, url, path, max_age, allow_404, timeout=120):
+    def _cached_get(self, url, path, max_age, allow_404, timeout: float = 120, *, retries=None,
+                    headers=None, deadline=None):
         _ = self.root
         if path.exists() and (max_age is None or time.time() - path.stat().st_mtime < max_age):
             data = path.read_bytes()
             return None if data == b'\0__404__' else data
-        data = http_get(url, allow_404=allow_404, timeout=timeout, retries=3 if timeout < 60 else 4)
+        eff_retries = retries if retries is not None else (3 if timeout < 60 else 4)
+        data = http_get(url, allow_404=allow_404, timeout=timeout, retries=eff_retries,
+                        headers=headers, deadline=deadline)
         tmp = path.with_name(path.name + '.' + uuid.uuid4().hex)
         tmp.write_bytes(b'\0__404__' if data is None else data)
         os.replace(tmp, path)

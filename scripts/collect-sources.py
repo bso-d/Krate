@@ -403,12 +403,13 @@ def main(argv=None):
             return
         try:
             import certifi
+        except ImportError:
+            certifi = None
+        if certifi is not None:
             ca = certifi.where()
             if os.path.isfile(ca):
                 os.environ['SSL_CERT_FILE'] = ca
                 return
-        except ImportError:
-            certifi = None
         for ca_path in (
             '/etc/ssl/cert.pem',
             '/etc/ssl/certs/ca-certificates.crt',
@@ -531,7 +532,9 @@ def main(argv=None):
     for c in need:
         if c.category == 'unknown' and c.ecosystem not in ('image', 'inventory'):
             c.notes.append('licence could not be classified; source collected conservatively')
-    alpine.prepare([c for c in need if c.ecosystem == 'alpine'], cache, workroot)
+    alpine_need = [c for c in need if c.ecosystem == 'alpine']
+    log(f'classified licences: {len(need)}/{len(comps)} components require source ({len(alpine_need)} Alpine)')
+    alpine.prepare(alpine_need, cache, workroot)
     log(f'fetching sources for {len(need)} components ({len(comps)} inventoried)')
     run_fetches(need, cache, out_dir, workroot, args.jobs)
 

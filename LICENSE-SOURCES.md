@@ -59,7 +59,7 @@ as copyleft.
 | Found in the image | Source shipped | Verified against |
 | --- | --- | --- |
 | Debian packages (`/var/lib/dpkg/status`, distroless `status.d`), including `Built-Using` | `.dsc`, orig and Debian tarballs of the exact source version | SHA-1 file ids on snapshot.debian.org and the `.dsc` `Checksums-Sha256` |
-| Alpine packages (`/lib/apk/db/installed`) | the `aports` directory at the package's recorded build commit, plus every distfile | git blob ids of that commit (GitLab), APKBUILD `sha512sums` |
+| Alpine packages (`/lib/apk/db/installed`) | the `aports` directory at the package's recorded build commit, plus every distfile | git blob ids of that commit (GitLab or `alpinelinux/aports` mirror), APKBUILD `sha512sums` |
 | RPM packages (Red Hat UBI images: Keycloak, Confluent) | the exact `.src.rpm`, from Red Hat's public UBI source repositories or, for builds those repositories no longer carry, from Red Hat's UBI source container images (`<ubi>:<tag>-source`) | SHA-256 in the repository's `primary.xml`; or the source-container layer digest from the registry manifest plus the SRPM's content-addressed blob name |
 | Java libraries (JAR files, including Spring Boot nested JARs) | `-sources.jar` and POM of the exact version | the repository's published checksum; the shipped JAR is compared with the published binary |
 | Go binaries (`go version -m`) | module zips of copyleft modules (for example the MPL-2.0 HashiCorp modules) | `go mod download` against sum.golang.org, and the `h1:` hash in the binary |

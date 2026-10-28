@@ -23,6 +23,7 @@ from common import (Component, Unresolved, VerificationError, classify_texts, lo
 import gitsrc
 
 LICENCE_FILE = re.compile(r'(^|/)(LICEN[CS]E|COPYING|UNLICENSE)[^/]*$', re.I)
+GO_DOWNLOAD_TIMEOUT = 300
 
 
 def module_of(dep):
@@ -119,27 +120,49 @@ def _go_env(cache):
     return env
 
 
-def go_download(cache, mods, workdir: Path):
+def go_download(cache, mods, workdir: Path, *, timeout=GO_DOWNLOAD_TIMEOUT):
     """`go mod download -json` for module@version strings; returns {mod@ver: json}."""
     out = {}
     workdir.mkdir(parents=True, exist_ok=True)
     for i in range(0, len(mods), 50):
         chunk = mods[i:i + 50]
-        proc = subprocess.run(['go', 'mod', 'download', '-json', *chunk], capture_output=True, text=True,
-                              env=_go_env(cache), cwd=workdir)
-        dec, text, pos = json.JSONDecoder(), proc.stdout, 0
+        log(f'go mod download: fetching {len(chunk)} module(s) ({i + 1}..{i + len(chunk)} of {len(mods)})')
+        try:
+            proc = subprocess.run(['go', 'mod', 'download', '-json', *chunk], capture_output=True, text=True,
+                                  env=_go_env(cache), cwd=workdir, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            err = f'go mod download timed out after {timeout}s'
+            log(f'{err} for {len(chunk)} module(s): {", ".join(chunk[:3])}')
+            for m in chunk:
+                p, _, v = m.partition('@')
+                out[m] = {'Path': p, 'Version': v, 'Error': err}
+            continue
+        dec, text, pos = json.JSONDecoder(), proc.stdout or '', 0
         while True:
             while pos < len(text) and text[pos].isspace():
                 pos += 1
             if pos >= len(text):
                 break
-            obj, pos = dec.raw_decode(text, pos)
+            try:
+                obj, pos = dec.raw_decode(text, pos)
+            except json.JSONDecodeError:
+                break
             out[f'{obj.get("Path")}@{obj.get("Version")}'] = obj
+        if proc.returncode:
+            stderr_tail = (proc.stderr or '').strip()[-240:]
+            log(f'go mod download exited {proc.returncode} for chunk ({stderr_tail or "no stderr"})')
+        for m in chunk:
+            if m not in out:
+                p, _, v = m.partition('@')
+                err = (proc.stderr or f'exit {proc.returncode}').strip()[-240:] or 'no result'
+                out[m] = {'Path': p, 'Version': v, 'Error': err}
     return out
 
 
 def classify(comps, cache, workroot):
     deps = [c for c in comps if c.ecosystem == 'go' and not c.licence]
+    if deps:
+        log(f'classifying {len(deps)} Go module dependencies via deps.dev')
     found = depsdev.licences(cache, 'GO', [(c.name, c.version) for c in deps])
     fallback = []
     for c in deps:
@@ -175,9 +198,11 @@ def classify(comps, cache, workroot):
             c.licence = 'licence files in module zip' if texts else 'no licence file'
             c.category, c.families = cls['category'], cls['families']
             c.notes.append('licence classified from licence files in the sumdb-verified module zip')
-    for c in comps:
-        if c.ecosystem != 'git' or c.licence or not c.key.startswith('gomain:'):
-            continue
+        log(f'classified {len(fallback)} Go modules from their verified module zips')
+    gomains = [c for c in comps if c.ecosystem == 'git' and not c.licence and c.key.startswith('gomain:')]
+    if gomains:
+        log(f'classifying {len(gomains)} Go main module repository licence(s)')
+    for c in gomains:
         repo, rev = c.fetch.get('repo'), c.fetch.get('rev')
         if not repo or not rev:
             c.licence, c.category = 'unknown (no repository/revision evidence)', 'unknown'
@@ -205,6 +230,8 @@ def classify(comps, cache, workroot):
             c.notes.append('application is not copyleft itself, but statically links LGPL glibc: '
                            'its complete source is shipped so users can relink (LGPL-2.1 section 6)')
             c.families = sorted(set(c.families) | {'LGPL-relink'})
+    if gomains:
+        log(f'classified {len(gomains)} Go main module repository licence(s)')
 
 
 def fetch(comp, cache, _out_dir, rel_root, workroot):
