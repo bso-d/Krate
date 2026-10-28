@@ -219,6 +219,9 @@ bundle: offline-check
 >    epc)   images=($(EPC_IMAGES) $(MONITOR_IMAGES)) ;;
 >    *)     images=($(KRAFT_IMAGES) $(MONITOR_IMAGES)) ;;
 >  esac
+>  # The edition and monitoring templates can pin the same image (nginx). Save it
+>  # once: a second docker save rewrites the archive and its first lock row's checksum.
+>  images=($$(printf '%s\n' "$${images[@]}" | awk '!seen[$$0]++'))
 >
 >  for image in "$${images[@]}"; do
 >    [[ "$$image" =~ @sha256:[a-f0-9]{64}$$ ]] || { echo "Bundle image must be digest-pinned: $$image" >&2; exit 1; }
