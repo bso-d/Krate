@@ -147,6 +147,7 @@ def inventory(repo: str, candidate: str, edition: str) -> Dict[str, str]:
     if edition == 'epc':
         items['kafbat.yml'] = 'epc/kafbat.yml'
     items['nginx.conf'] = edition + '/nginx.conf'
+    items['nginx-stream.conf'] = edition + '/nginx-stream.conf'
     items['LICENSE'] = 'LICENSE'
     items['LICENSE-SOURCES.md'] = 'LICENSE-SOURCES.md'
     items['auth/ui/local.yml'] = edition + '/auth/ui/local.yml'

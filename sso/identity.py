@@ -1980,14 +1980,13 @@ def cmd_kafka_auth(args):
         return 0
 
     if action == 'ui-client':
-        with_secret = getattr(args, 'with_secret', False)
-        planned = kafka_ui_broker_client(with_secret)
         if getattr(args, 'differs', False):
             current = json.load(sys.stdin)
-            client_verdict(planned, current)
+            client_verdict(kafka_ui_broker_client(getattr(args, 'with_secret', False)), current)
         else:
-            # codeql[py/clear-text-logging-sensitive-data]
-            sys.stdout.write(render(planned))  # codeql[py/clear-text-logging-sensitive-data]
+            if getattr(args, 'with_secret', False):
+                raise ValueError('ui-client --with-secret is valid only with --differs; create secret-free client JSON and set secret via kcadm update')
+            sys.stdout.write(render(kafka_ui_broker_client(False)))
         return 0
 
     if action == 'managed-client':

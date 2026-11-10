@@ -3882,16 +3882,22 @@ alertmanager_revision() {
   } | cksum | cut -d' ' -f1
 }
 
-# The docker network the brokers are attached to, read from the running
-# broker container (container_name is fixed per edition). Only a broker is
-# asked: the proxy and Kafbat also sit on the identity network, which sorts
-# first in a container's network list and must not be handed to the exporter.
+# The docker network the brokers serve traffic on, read from the running
+# broker container (container_name is fixed per edition). Brokers also attach
+# to kafka-auth (which sorts before kafka-network), and the proxy and Kafbat
+# attach to identity, neither of which may be handed to monitoring.
 monitor_network() {
-  local state
+  local state nets preferred
   state="$(docker inspect -f '{{.State.Status}}' "$BROKER_CONTAINER" 2>/dev/null)" || return 1
   [[ "$state" == running ]] || return 1
-  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$BROKER_CONTAINER" 2>/dev/null \
-    | tr ' ' '\n' | grep -v '^$' | head -1
+  nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$BROKER_CONTAINER" 2>/dev/null \
+    | tr ' ' '\n' | grep -v '^$')" || return 1
+  preferred="$(printf '%s\n' "$nets" | grep -E '(^|[_-])kafka-network$' | head -1 || true)"
+  if [[ -n "$preferred" ]]; then
+    printf '%s\n' "$preferred"
+    return 0
+  fi
+  printf '%s\n' "$nets" | grep -vE '(^|[_-])(kafka-auth|identity)$' | head -1
 }
 
 # One --kafka.server= flag per broker, taken from the internal bootstrap list so

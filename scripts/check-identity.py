@@ -393,21 +393,48 @@ def check_kafka_auth_plan(checks):
     e(identity.SERVICE_ACCOUNT_SCOPE in ui_client.get('defaultClientScopes', []), 'ui-client defaultClientScopes must include service_account')
     e(identity.KAFKA_CLIENT_ATTR not in ui_client.get('attributes', {}), 'ui-client must NOT have krate.managed.kafka.client attribute')
 
-    # Test ui-client --with-secret
-    test_env = dict(os.environ, KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET='test-kafbat-kafka-secret')
-    p_ui_sec = subprocess.run(
-        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--with-secret'],
-        capture_output=True, check=True, env=test_env
+    # Test ui-client rendering and rotation detection
+    # ui-client (without --with-secret) renders secret-free JSON
+    p_ui_plain = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client'],
+        capture_output=True, check=True
     )
-    ui_sec_data = json.loads(p_ui_sec.stdout.decode())
-    e(ui_sec_data.get('secret') == 'test-kafbat-kafka-secret', 'ui-client --with-secret must substitute secret')
+    ui_plain_data = json.loads(p_ui_plain.stdout.decode())
+    e('secret' not in ui_plain_data, 'ui-client without --with-secret must render secret-free JSON')
+    e(ui_plain_data.get('clientId') == 'krate-ui-kafka', 'ui-client clientId must be krate-ui-kafka')
 
-    # Test ui-client --differs
+    # ui-client --with-secret WITHOUT --differs exits non-zero without emitting the secret
+    test_env = dict(os.environ, KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET='test-kafbat-kafka-secret')
+    p_ui_sec_err = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--with-secret'],
+        capture_output=True, env=test_env
+    )
+    e(p_ui_sec_err.returncode != 0, 'ui-client --with-secret without --differs must exit non-zero')
+    e('test-kafbat-kafka-secret' not in p_ui_sec_err.stdout.decode() and 'test-kafbat-kafka-secret' not in p_ui_sec_err.stderr.decode(),
+      'ui-client --with-secret without --differs must not emit secret')
+    e('valid only with --differs' in p_ui_sec_err.stderr.decode(), 'ui-client error message must mention valid only with --differs')
+
+    # Test ui-client --differs without --with-secret
     p_ui_diff = subprocess.run(
         [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs'],
         input=json.dumps(ui_client).encode('utf-8'), capture_output=True, check=True
     )
     e(p_ui_diff.stdout.decode().strip() == 'same', f'ui-client --differs on planned client must be same; got {p_ui_diff.stdout.decode()!r}')
+
+    # Test ui-client --differs --with-secret detects secret rotation (same vs differs)
+    current_ui_with_matching_sec = dict(ui_client, secret='test-kafbat-kafka-secret')
+    p_ui_sec_same = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs', '--with-secret'],
+        input=json.dumps(current_ui_with_matching_sec).encode('utf-8'), capture_output=True, check=True, env=test_env
+    )
+    e(p_ui_sec_same.stdout.decode().strip() == 'same', f'ui-client --differs --with-secret on matching secret must be same; got {p_ui_sec_same.stdout.decode()!r}')
+
+    current_ui_with_old_sec = dict(ui_client, secret='old-secret')
+    p_ui_sec_diff = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs', '--with-secret'],
+        input=json.dumps(current_ui_with_old_sec).encode('utf-8'), capture_output=True, check=True, env=test_env
+    )
+    e('differs' in p_ui_sec_diff.stdout.decode().splitlines(), f'ui-client --differs --with-secret on rotated secret must be differs; got {p_ui_sec_diff.stdout.decode()!r}')
 
     mutated_ui = json.loads(json.dumps(ui_client))
     mutated_ui['enabled'] = False
@@ -797,6 +824,28 @@ def check_logrotate(checks):
             e(needle in cli, f'{edition}/krate: missing {needle.splitlines()[0]!r}')
         e('compose_cmd ps -q 2>/dev/null | head -1' not in cli,
           f'{edition}/krate: monitor_network must read the broker container, not the first container of the project')
+
+        fn_text = cli[cli.index('monitor_network() {'):cli.index('\nmonitor_targets()')]
+        with tempfile.TemporaryDirectory() as td:
+            docker_stub = Path(td) / 'docker'
+            docker_stub.write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = "inspect" ] && [ "$2" = "-f" ] && [ "$3" = "{{.State.Status}}" ]; then\n'
+                '    echo "running"\n'
+                '    exit 0\n'
+                'fi\n'
+                'if [ "$1" = "inspect" ] && [ "$2" = "-f" ]; then\n'
+                '    echo "krate_kafka-auth krate_kafka-network "\n'
+                '    exit 0\n'
+                'fi\n'
+                'exit 1\n'
+            )
+            docker_stub.chmod(0o755)
+            env_stub = dict(os.environ, PATH=td + ':' + os.environ.get('PATH', ''))
+            script = f'BROKER_CONTAINER="stub-broker"\n{fn_text}\nmonitor_network\n'
+            proc_net = subprocess.run(['bash', '-c', script], capture_output=True, text=True, env=env_stub)
+            e(proc_net.returncode == 0 and proc_net.stdout.strip() == 'krate_kafka-network',
+              f'{edition}/krate: monitor_network must select krate_kafka-network over krate_kafka-auth; got {proc_net.stdout.strip()!r}')
 
 
 
@@ -9959,6 +10008,14 @@ def check_airgap_rows(checks):
     events, markers, bad = m.parse_stream(stream)
     e(len(events) == 1 and len(markers) == 1 and bad == 0, 're-attached streams are de-duplicated and the supervisor markers are kept apart')
     e(m.GETENT_SECONDS <= 6 and m.CONTAINER_PROBE_SECONDS <= 15 and m.DNS_SECONDS <= 6 and m.RING_LIMIT == 256, 'probe bounds and the ring limit')
+    e('nginx-stream.conf' in m.PRODUCT_FILES, 'PRODUCT_FILES must include nginx-stream.conf')
+    spec_cb = importlib.util.spec_from_file_location('candidate_binding', ROOT / 'scripts/gate/candidate_binding.py')
+    assert spec_cb is not None and spec_cb.loader is not None
+    cb = importlib.util.module_from_spec(spec_cb)
+    spec_cb.loader.exec_module(cb)
+    for ed in ('kraft', 'epc'):
+        e(cb.inventory(str(ROOT), 'HEAD', ed).get('nginx-stream.conf') == f'{ed}/nginx-stream.conf',
+          f'candidate_binding inventory for {ed} must map nginx-stream.conf to {ed}/nginx-stream.conf')
     fixture_root = ROOT / 'harness' / 'phase4' / 'path-contract'
     fixture_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=fixture_root) as tmp:

@@ -358,7 +358,7 @@ recheck_product_binding() {
 # SF-2: a git checkout only when the edition's own files are tracked there; a bundle extracted
 # inside some other work tree is a bundle install and binds through --repo like any other.
 if git -C "$ED" rev-parse HEAD >/dev/null 2>&1 &&
-   git -C "$ED" ls-files --error-unmatch -- krate docker-compose.yml .env.template nginx.conf >/dev/null 2>&1; then
+   git -C "$ED" ls-files --error-unmatch -- krate docker-compose.yml .env.template nginx.conf nginx-stream.conf >/dev/null 2>&1; then
   CANDIDATE="$(git -C "$ED" rev-parse HEAD)"
   CANDIDATE_GIT_HEAD="$CANDIDATE"
   TOPLEVEL="$(git -C "$ED" rev-parse --show-toplevel)"
@@ -381,7 +381,7 @@ else
   PRODUCT_BINDING="not compared (no git and no --candidate)"
 fi
 EDITION_DIGESTS=""
-for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/operations.sh" "$SSO/operations.py" "$SSO/probe.py" "$SSO/configure-dual.py"; do
+for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$ED/nginx-stream.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/operations.sh" "$SSO/operations.py" "$SSO/probe.py" "$SSO/configure-dual.py"; do
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
 if [[ -n "$REPO_ARG" ]]; then

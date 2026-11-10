@@ -120,7 +120,7 @@ RING_LIMIT = 256  # daemon/events/events.go eventsLimit
 DNS_SECONDS = 6   # inside the container probe
 GETENT_SECONDS = 6
 CONTAINER_PROBE_SECONDS = 15
-PRODUCT_FILES = ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'kafbat.yml', 'images.lock.tsv')
+PRODUCT_FILES = ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'nginx-stream.conf', 'kafbat.yml', 'images.lock.tsv')
 RECORD_FORMAT = 1
 ROWS_BEFORE = ('AG1', 'AG4')
 ROWS_AFTER = ('AG2', 'AG3', 'AG5')
@@ -464,7 +464,7 @@ def pick_image(ctx):
 
 def product_digests(edition_dir):
     """{file: sha256} of the product files of the installed edition that the bundle ships (Makefile bundle target): the
-    CLI, the compose file, the env template, nginx.conf, kafbat.yml (epc) and the image lock."""
+    CLI, the compose file, the env template, nginx.conf, nginx-stream.conf, kafbat.yml (epc) and the image lock."""
     digests = {}
     for name in PRODUCT_FILES:
         digest = sha256_file(os.path.join(edition_dir, name))
