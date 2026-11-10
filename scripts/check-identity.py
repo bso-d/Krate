@@ -386,7 +386,7 @@ def check_kafka_auth_plan(checks):
         e(dcr_check2.stdout.decode().strip() == 'same', f'merge-dcr-scopes --check after merge must be same; got {dcr_check2.stdout.decode()!r}')
 
     # 4. Test ui-client
-    ui_client = identity.kafka_ui_broker_client(with_secret=False)
+    ui_client = identity.kafka_ui_broker_client()
     e(ui_client.get('clientId') == 'krate-ui-kafka', 'ui-client clientId must be krate-ui-kafka')
     e(ui_client.get('serviceAccountsEnabled') is True, 'ui-client serviceAccountsEnabled must be True')
     e('kafka' in ui_client.get('defaultClientScopes', []), 'ui-client defaultClientScopes must include kafka')

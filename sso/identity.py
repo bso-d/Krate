@@ -1558,9 +1558,9 @@ def kafka_secret_rotation_policy():
     }
 
 
-def kafka_ui_broker_client(with_secret=False):
-    """Confidential service-account client krate-ui-kafka for Kafbat UI to access Kafka brokers."""
-    client = {
+def kafka_ui_broker_client():
+    """Public metadata for confidential service-account client krate-ui-kafka (never carries secret)."""
+    return {
         'clientId': KAFKA_UI_BROKER_CLIENT,
         'name': KAFKA_UI_BROKER_CLIENT_NAME,
         'enabled': True,
@@ -1576,8 +1576,12 @@ def kafka_ui_broker_client(with_secret=False):
         'optionalClientScopes': [],
         'attributes': {},
     }
-    if with_secret:
-        client['secret'] = env_secret(KAFKA_UI_BROKER_SECRET_KEY)
+
+
+def _kafka_ui_broker_client_with_secret():
+    """Planned krate-ui-kafka representation including secret, used only by in-memory client_verdict."""
+    client = kafka_ui_broker_client()
+    client['secret'] = env_secret(KAFKA_UI_BROKER_SECRET_KEY)
     return client
 
 
@@ -1982,11 +1986,12 @@ def cmd_kafka_auth(args):
     if action == 'ui-client':
         if getattr(args, 'differs', False):
             current = json.load(sys.stdin)
-            client_verdict(kafka_ui_broker_client(getattr(args, 'with_secret', False)), current)
+            planned = _kafka_ui_broker_client_with_secret() if getattr(args, 'with_secret', False) else kafka_ui_broker_client()
+            client_verdict(planned, current)
         else:
             if getattr(args, 'with_secret', False):
                 raise ValueError('ui-client --with-secret is valid only with --differs; create secret-free client JSON and set secret via kcadm update')
-            sys.stdout.write(render(kafka_ui_broker_client(False)))
+            sys.stdout.write(render(kafka_ui_broker_client()))
         return 0
 
     if action == 'managed-client':
