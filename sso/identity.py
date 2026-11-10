@@ -8,6 +8,7 @@ their container environment.
 import socket
 import ipaddress
 import argparse
+import base64
 from typing import Any
 import datetime
 import hashlib
@@ -51,6 +52,26 @@ SERVICE_ACCOUNT_SCOPE = 'service_account'
 UI_REGISTRATION = 'keycloak'
 UI_OIDC_SCOPES = ['openid', 'profile', 'email']
 UI_CLIENT_NAME = 'Keycloak'
+
+KAFKA_SCOPE = 'kafka'
+KAFKA_AUDIENCE = 'kafka'
+KAFKA_PRINCIPAL_CLAIM = 'kafka_principal'
+KAFKA_CLIENT_ATTR = 'krate.managed.kafka.client'
+KAFKA_CLIENT_AUTH_MODE_ATTR = 'krate.kafka.auth.mode'
+KAFKA_ROTATION_PROFILE = 'krate-kafka-secret-rotation'
+KAFKA_ROTATION_POLICY = 'krate-kafka-secret-rotation-policy'
+KAFKA_UI_BROKER_CLIENT = 'krate-ui-kafka'
+KAFKA_UI_BROKER_CLIENT_NAME = 'Kafbat UI Kafka Broker Client'
+KAFKA_UI_BROKER_SECRET_KEY = 'KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET'
+KAFKA_RESERVED_CLIENT_IDS = (
+    'krate-cli',
+    'krate-ui',
+    'krate-idp-watch',
+    'krate-ui-kafka',
+    'krate-grafana',
+    'krate-perses',
+    'krate-perses-sync',
+)
 # Kafbat talks to Keycloak over the identity network; browsers use the public URL.
 UI_INTERNAL_URL = 'http://keycloak:8080/identity'
 # Spring Security's back-channel logout endpoint ({baseUrl}/logout/connect/back-channel/{registrationId}),
@@ -178,6 +199,9 @@ DEFAULTS = {
     'KEYCLOAK_ACCESS_TOKEN_MINUTES': '5',
     'KEYCLOAK_SESSION_IDLE_MINUTES': '15',
     'KEYCLOAK_SESSION_MAX_HOURS': '8',
+    'KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS': '604800',
+    'KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS': '172800',
+    'KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS': '172800',
 }
 PLACEHOLDERS = ('', 'REPLACE_ME')
 SECRET_KEY = re.compile(r'(_PASSWORD|_SECRET)$')
@@ -346,6 +370,13 @@ def admin_user(env):
 def settings(env):
     """Non-secret realm inputs taken from a parsed .env mapping."""
     viewer_group, admin_group = group_names(env)
+    kafka_secret_expiration_seconds = _positive(env, 'KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS')
+    kafka_secret_rotated_expiration_seconds = _positive(env, 'KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS')
+    kafka_secret_remaining_rotation_seconds = _positive(env, 'KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS')
+    if kafka_secret_rotated_expiration_seconds >= kafka_secret_expiration_seconds:
+        raise ValueError('KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS must be smaller than KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS')
+    if kafka_secret_remaining_rotation_seconds >= kafka_secret_expiration_seconds:
+        raise ValueError('KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS must be smaller than KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS')
     return {
         'public_origin': public_origin(env.get('KEYCLOAK_PUBLIC_URL')),
         'viewer_group': viewer_group,
@@ -353,6 +384,9 @@ def settings(env):
         'access_token_minutes': _positive(env, 'KEYCLOAK_ACCESS_TOKEN_MINUTES'),
         'session_idle_minutes': _positive(env, 'KEYCLOAK_SESSION_IDLE_MINUTES'),
         'session_max_hours': _positive(env, 'KEYCLOAK_SESSION_MAX_HOURS'),
+        'kafka_secret_expiration_seconds': kafka_secret_expiration_seconds,
+        'kafka_secret_rotated_expiration_seconds': kafka_secret_rotated_expiration_seconds,
+        'kafka_secret_remaining_rotation_seconds': kafka_secret_remaining_rotation_seconds,
     }
 
 
@@ -407,6 +441,45 @@ def ui_client_attributes(origin):
         'backchannel.logout.url': UI_BACKCHANNEL_LOGOUT_URL,
         'backchannel.logout.session.required': 'true',
         'backchannel.logout.revoke.offline.tokens': 'false',
+    }
+
+
+def kafka_client_scope():
+    """Kafka client scope planned for the realm: audience and principal claim mappers."""
+    return {
+        'name': KAFKA_SCOPE,
+        'protocol': 'openid-connect',
+        'attributes': {
+            'include.in.token.scope': 'true',
+            'display.on.consent.screen': 'false',
+        },
+        'protocolMappers': [
+            {
+                'name': 'kafka-audience',
+                'protocol': 'openid-connect',
+                'protocolMapper': 'oidc-audience-mapper',
+                'consentRequired': False,
+                'config': {
+                    'included.custom.audience': KAFKA_AUDIENCE,
+                    'id.token.claim': 'false',
+                    'access.token.claim': 'true',
+                },
+            },
+            {
+                'name': 'kafka-principal',
+                'protocol': 'openid-connect',
+                'protocolMapper': 'oidc-usermodel-attribute-mapper',
+                'consentRequired': False,
+                'config': {
+                    'user.attribute': KAFKA_PRINCIPAL_CLAIM,
+                    'claim.name': KAFKA_PRINCIPAL_CLAIM,
+                    'jsonType.label': 'String',
+                    'id.token.claim': 'false',
+                    'access.token.claim': 'true',
+                    'userinfo.token.claim': 'false',
+                },
+            },
+        ],
     }
 
 
@@ -489,6 +562,7 @@ def realm(values):
              'enabled': True, 'defaultAction': False, 'priority': 30},
         ],
         'groups': [{'name': values['viewer_group']}, {'name': values['admin_group']}],
+        'clientScopes': [kafka_client_scope()],
         'clients': [cli_client, ui_client, idp_watch_client],
         'users': [{'username': SERVICE_ACCOUNT, 'enabled': True,
                    'serviceAccountClientId': CLI_CLIENT,
@@ -1452,6 +1526,162 @@ def perses_rep(name, origin, port, with_secret=False):
     raise ValueError('client must be ' + PERSES_CLIENT + ' or ' + PERSES_SYNC_CLIENT)
 
 
+def kafka_secret_rotation_profile(values):
+    """Dual-secret overlap rotation profile for Krate-managed Kafka OAuth clients."""
+    return {
+        'name': KAFKA_ROTATION_PROFILE,
+        'description': 'Dual-secret overlap rotation for Krate-managed Kafka OAuth clients',
+        'executors': [{
+            'executor': 'secret-rotation',
+            'configuration': {
+                'expiration-period': values['kafka_secret_expiration_seconds'],
+                'rotated-expiration-period': values['kafka_secret_rotated_expiration_seconds'],
+                'remaining-rotation-period': values['kafka_secret_remaining_rotation_seconds'],
+            },
+        }],
+    }
+
+
+def kafka_secret_rotation_policy():
+    """Client policy binding the secret-rotation profile to Krate-managed Kafka OAuth clients."""
+    return {
+        'name': KAFKA_ROTATION_POLICY,
+        'description': 'Apply secret rotation only to Krate-managed Kafka OAuth clients',
+        'enabled': True,
+        'conditions': [{
+            'condition': 'client-attributes',
+            'configuration': {
+                'attributes': json.dumps([{'key': KAFKA_CLIENT_ATTR, 'value': 'true'}], separators=(',', ':')),
+            },
+        }],
+        'profiles': [KAFKA_ROTATION_PROFILE],
+    }
+
+
+def kafka_ui_broker_client(with_secret=False):
+    """Confidential service-account client krate-ui-kafka for Kafbat UI to access Kafka brokers."""
+    client = {
+        'clientId': KAFKA_UI_BROKER_CLIENT,
+        'name': KAFKA_UI_BROKER_CLIENT_NAME,
+        'enabled': True,
+        'protocol': 'openid-connect',
+        'publicClient': False,
+        'clientAuthenticatorType': 'client-secret',
+        'standardFlowEnabled': False,
+        'implicitFlowEnabled': False,
+        'directAccessGrantsEnabled': False,
+        'serviceAccountsEnabled': True,
+        'frontchannelLogout': False,
+        'defaultClientScopes': list(DEFAULT_SCOPES) + [SERVICE_ACCOUNT_SCOPE, KAFKA_SCOPE],
+        'optionalClientScopes': [],
+        'attributes': {},
+    }
+    if with_secret:
+        client['secret'] = env_secret(KAFKA_UI_BROKER_SECRET_KEY)
+    return client
+
+
+def rsa_public_pem_to_jwks(pem_text, kid=None):
+    """Convert an RSA SubjectPublicKeyInfo PEM into a JWKS JSON string with RFC 7638 SHA-256 thumbprint kid."""
+    pem_bytes = pem_text.encode('utf-8') if isinstance(pem_text, str) else pem_text
+    proc_mod = subprocess.run(
+        ['openssl', 'rsa', '-pubin', '-inform', 'PEM', '-modulus', '-noout'],
+        input=pem_bytes, capture_output=True, check=True,
+    )
+    mod_out = proc_mod.stdout.decode('ascii', errors='replace').strip()
+    match_mod = re.search(r'Modulus=([0-9A-Fa-f]+)', mod_out)
+    if not match_mod:
+        raise ValueError('Could not extract Modulus from RSA PEM')
+    mod_hex = match_mod.group(1)
+    mod_bytes = bytes.fromhex(mod_hex)
+    if len(mod_bytes) * 8 < 2048:
+        raise ValueError(f'RSA key size must be at least 2048 bits (got {len(mod_bytes) * 8} bits)')
+
+    proc_txt = subprocess.run(
+        ['openssl', 'rsa', '-pubin', '-inform', 'PEM', '-text', '-noout'],
+        input=pem_bytes, capture_output=True, check=True,
+    )
+    txt_out = proc_txt.stdout.decode('ascii', errors='replace')
+    match_exp = re.search(r'Exponent:\s*(\d+)', txt_out)
+    if not match_exp:
+        raise ValueError('Could not extract Exponent from RSA PEM')
+    exp_int = int(match_exp.group(1))
+    exp_bytes = exp_int.to_bytes((exp_int.bit_length() + 7) // 8, byteorder='big')
+
+    n_b64 = base64.urlsafe_b64encode(mod_bytes).rstrip(b'=').decode('ascii')
+    e_b64 = base64.urlsafe_b64encode(exp_bytes).rstrip(b'=').decode('ascii')
+
+    if kid is None:
+        thumbprint_dict = {'e': e_b64, 'kty': 'RSA', 'n': n_b64}
+        canonical_json = json.dumps(thumbprint_dict, separators=(',', ':'), sort_keys=True)
+        digest = hashlib.sha256(canonical_json.encode('utf-8')).digest()
+        computed_kid = base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii')
+    else:
+        computed_kid = kid
+
+    jwk = {
+        'kty': 'RSA',
+        'use': 'sig',
+        'alg': 'RS256',
+        'kid': computed_kid,
+        'n': n_b64,
+        'e': e_b64,
+    }
+    return json.dumps({'keys': [jwk]}, separators=(',', ':'))
+
+
+def kafka_managed_client(client_id, auth_mode='secret-dcr', jwks_url='', public_key_pem=''):
+    """Build client representation for Krate-managed Kafka client."""
+    if not isinstance(client_id, str) or not GROUP_NAME.fullmatch(client_id):
+        raise ValueError('client_id must be 1-64 characters from letters, digits, . _ -')
+    for reserved in KAFKA_RESERVED_CLIENT_IDS:
+        if client_id == reserved or client_id.startswith(reserved + '-') or client_id.startswith(reserved + '_'):
+            raise ValueError(f'client_id {client_id!r} conflicts with reserved internal identifier {reserved!r}')
+    if client_id.startswith('krate-'):
+        raise ValueError(f'client_id {client_id!r} must not start with reserved prefix "krate-"')
+
+    client = {
+        'clientId': client_id,
+        'enabled': True,
+        'protocol': 'openid-connect',
+        'publicClient': False,
+        'standardFlowEnabled': False,
+        'implicitFlowEnabled': False,
+        'directAccessGrantsEnabled': False,
+        'serviceAccountsEnabled': True,
+        'defaultClientScopes': list(DEFAULT_SCOPES) + [SERVICE_ACCOUNT_SCOPE, KAFKA_SCOPE],
+        'optionalClientScopes': [],
+    }
+
+    if auth_mode == 'secret-dcr':
+        client['clientAuthenticatorType'] = 'client-secret'
+        client['attributes'] = {
+            KAFKA_CLIENT_ATTR: 'true',
+            KAFKA_CLIENT_AUTH_MODE_ATTR: 'secret-dcr',
+        }
+    elif auth_mode == 'private-key-jwt':
+        client['clientAuthenticatorType'] = 'client-jwt'
+        attrs = {
+            KAFKA_CLIENT_AUTH_MODE_ATTR: 'private-key-jwt',
+        }
+        if bool(jwks_url) == bool(public_key_pem):
+            raise ValueError('private-key-jwt requires exactly one of jwks_url or public_key_pem')
+        if jwks_url:
+            parts = urlsplit(jwks_url)
+            if parts.scheme != 'https' or not parts.netloc:
+                raise ValueError(f'jwks_url must be an https:// URL: {jwks_url!r}')
+            attrs['use.jwks.url'] = 'true'
+            attrs['jwks.url'] = jwks_url
+        else:
+            attrs['use.jwks.string'] = 'true'
+            attrs['jwks.string'] = rsa_public_pem_to_jwks(public_key_pem)
+        client['attributes'] = attrs
+    else:
+        raise ValueError(f'auth_mode must be "secret-dcr" or "private-key-jwt", got {auth_mode!r}')
+
+    return client
+
+
 def _mappers_differ(wanted, current):
     """Planned mappers matched by name; Keycloak's own additions (the mapper id) are ignored, and
     so is a mapper Keycloak carries beyond the plan — differs()'s subset discipline, because the
@@ -1603,6 +1833,177 @@ def cmd_perses_clients(args):
         # codeql[py/clear-text-logging-sensitive-data]
         sys.stdout.write(render(perses_clients(origin, port, args.with_secret)))  # codeql[py/clear-text-logging-sensitive-data]
     return 0
+
+
+def cmd_kafka_auth(args):
+    """Subcommand dispatcher for kafka-auth actions."""
+    action = args.action
+    if action == 'scope':
+        sys.stdout.write(render(kafka_client_scope()))
+        return 0
+
+    if action == 'scope-differs':
+        current = json.load(sys.stdin)
+        wanted = kafka_client_scope()
+        if not isinstance(current, dict):
+            sys.stdout.write('differs\n')
+            return 0
+        if current.get('protocol') != wanted['protocol']:
+            sys.stdout.write('differs\n')
+            return 0
+        attrs_current = current.get('attributes') or {}
+        attrs_wanted = wanted['attributes']
+        for k in ('include.in.token.scope', 'display.on.consent.screen'):
+            if attrs_current.get(k) != attrs_wanted.get(k):
+                sys.stdout.write('differs\n')
+                return 0
+        if _mappers_differ(wanted['protocolMappers'], current.get('protocolMappers')):
+            sys.stdout.write('differs\n')
+            return 0
+        sys.stdout.write('same\n')
+        return 0
+
+    if action == 'merge-profiles':
+        doc = json.load(sys.stdin)
+        if not isinstance(doc, dict) or 'profiles' not in doc:
+            raise ValueError('Input JSON must be an object with a "profiles" list')
+        env = read_env(args.env_file)
+        planned = kafka_secret_rotation_profile(settings(env))
+        profiles = list(doc.get('profiles') or [])
+        found_idx = -1
+        for idx, p in enumerate(profiles):
+            if isinstance(p, dict) and p.get('name') == KAFKA_ROTATION_PROFILE:
+                found_idx = idx
+                break
+        if found_idx >= 0:
+            existing = profiles[found_idx]
+            is_same = not differs(planned, existing)
+            profiles[found_idx] = planned
+        else:
+            is_same = False
+            profiles.append(planned)
+
+        if getattr(args, 'check', False):
+            sys.stdout.write('same\n' if is_same else 'differs\n')
+        else:
+            out_doc = dict(doc, profiles=profiles)
+            sys.stdout.write(render(out_doc))
+        return 0
+
+    if action == 'merge-policies':
+        doc = json.load(sys.stdin)
+        if not isinstance(doc, dict) or 'policies' not in doc:
+            raise ValueError('Input JSON must be an object with a "policies" list')
+        planned = kafka_secret_rotation_policy()
+        policies = list(doc.get('policies') or [])
+        found_idx = -1
+        for idx, pol in enumerate(policies):
+            if isinstance(pol, dict) and pol.get('name') == KAFKA_ROTATION_POLICY:
+                found_idx = idx
+                break
+
+        def _policy_differs(wanted_pol, have_pol):
+            if not isinstance(have_pol, dict):
+                return True
+            for k in ('name', 'description', 'enabled', 'profiles'):
+                if differs(wanted_pol.get(k), have_pol.get(k)):
+                    return True
+            w_conds = wanted_pol.get('conditions') or []
+            h_conds = have_pol.get('conditions') or []
+            if len(w_conds) != len(h_conds):
+                return True
+            for wc, hc in zip(w_conds, h_conds):
+                if wc.get('condition') != hc.get('condition'):
+                    return True
+                wc_cfg = wc.get('configuration') or {}
+                hc_cfg = hc.get('configuration') or {}
+                if 'attributes' in wc_cfg:
+                    try:
+                        wc_attrs = json.loads(wc_cfg['attributes'])
+                        hc_attrs = json.loads(hc_cfg.get('attributes', '[]'))
+                        if wc_attrs != hc_attrs:
+                            return True
+                    except (ValueError, TypeError):
+                        if wc_cfg != hc_cfg:
+                            return True
+                elif wc_cfg != hc_cfg:
+                    return True
+            return False
+
+        if found_idx >= 0:
+            existing = policies[found_idx]
+            is_same = not _policy_differs(planned, existing)
+            policies[found_idx] = planned
+        else:
+            is_same = False
+            policies.append(planned)
+
+        if getattr(args, 'check', False):
+            sys.stdout.write('same\n' if is_same else 'differs\n')
+        else:
+            out_doc = dict(doc, policies=policies)
+            sys.stdout.write(render(out_doc))
+        return 0
+
+    if action == 'merge-dcr-scopes':
+        comps = json.load(sys.stdin)
+        if not isinstance(comps, list):
+            raise ValueError('Input JSON must be a list of ClientRegistrationPolicy components')
+        target_comp = None
+        for c in comps:
+            if isinstance(c, dict) and c.get('providerId') == 'allowed-client-templates' and c.get('subType') == 'authenticated':
+                target_comp = c
+                break
+        if target_comp is None:
+            raise ValueError('ClientRegistrationPolicy component with providerId "allowed-client-templates" and subType "authenticated" not found')
+
+        cfg = target_comp.get('config')
+        if not isinstance(cfg, dict):
+            cfg = {}
+            target_comp['config'] = cfg
+        scopes = cfg.get('allowed-client-scopes')
+        if isinstance(scopes, list):
+            scopes_list = list(scopes)
+        elif isinstance(scopes, str):
+            scopes_list = [s for s in scopes.split('##') if s]
+        else:
+            scopes_list = []
+
+        is_present = KAFKA_SCOPE in scopes_list
+        if getattr(args, 'check', False):
+            sys.stdout.write('same\n' if is_present else 'differs\n')
+        else:
+            if not is_present:
+                scopes_list.append(KAFKA_SCOPE)
+            cfg['allowed-client-scopes'] = scopes_list
+            sys.stdout.write(render(target_comp))
+        return 0
+
+    if action == 'ui-client':
+        with_secret = getattr(args, 'with_secret', False)
+        planned = kafka_ui_broker_client(with_secret)
+        if getattr(args, 'differs', False):
+            current = json.load(sys.stdin)
+            client_verdict(planned, current)
+        else:
+            # codeql[py/clear-text-logging-sensitive-data]
+            sys.stdout.write(render(planned))  # codeql[py/clear-text-logging-sensitive-data]
+        return 0
+
+    if action == 'managed-client':
+        public_pem = ''
+        if getattr(args, 'public_key_file', None):
+            public_pem = Path(args.public_key_file).read_text(encoding='utf-8')
+        client = kafka_managed_client(
+            client_id=args.client_id,
+            auth_mode=args.auth_mode,
+            jwks_url=args.jwks_url or '',
+            public_key_pem=public_pem,
+        )
+        sys.stdout.write(render(client))
+        return 0
+
+    raise ValueError(f'Unknown kafka-auth action: {action}')
 
 
 def cmd_db_tls(args):
@@ -1814,6 +2215,17 @@ def main():
     digest = commands.add_parser('truststore-digest', help='digest of the PEM files Keycloak loads from a truststores directory')
     digest.add_argument('--directory', type=Path, required=True)
     digest.set_defaults(func=cmd_truststore_digest)
+    kauth = commands.add_parser('kafka-auth', help='Kafka OAuth client scope, rotation policies, DCR scope, Kafbat UI client and managed clients')
+    kauth.add_argument('--env-file', type=Path, default=None, help='path to .env file for rotation profile settings')
+    kauth.add_argument('action', choices=['scope', 'scope-differs', 'merge-profiles', 'merge-policies', 'merge-dcr-scopes', 'ui-client', 'managed-client'])
+    kauth.add_argument('--check', action='store_true', help='for merge actions: output same/differs instead of merged JSON')
+    kauth.add_argument('--with-secret', action='store_true', help='substitute client secret from environment')
+    kauth.add_argument('--differs', action='store_true', help='for ui-client: compare stdin against planned client')
+    kauth.add_argument('--client-id', default=None, help='for managed-client: client ID')
+    kauth.add_argument('--auth-mode', choices=['secret-dcr', 'private-key-jwt'], default='secret-dcr', help='for managed-client: auth mode')
+    kauth.add_argument('--jwks-url', default=None, help='for managed-client with private-key-jwt: jwks.url')
+    kauth.add_argument('--public-key-file', type=Path, default=None, help='for managed-client with private-key-jwt: path to RSA PEM public key')
+    kauth.set_defaults(func=cmd_kafka_auth)
     args = parser.parse_args()
     try:
         return args.func(args)

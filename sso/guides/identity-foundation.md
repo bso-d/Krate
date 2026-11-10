@@ -679,6 +679,54 @@ Check the file with `sudo logrotate -d /etc/logrotate.d/krate-identity-<edition>
 The installation path must not contain whitespace, quotes or backslashes
 (logrotate's file syntax); `--install` refuses otherwise.
 
+### `./krate identity rotate-signing-key [--prune-passive]`
+
+Rotates the realm's RS256 signing key by creating a new active key and demoting
+previous keys to passive (keeping them in the JWKS so that tokens signed before
+rotation remain valid in Kafka brokers until expiry). Requires Keycloak to be
+running. By default, it:
+
+1. Finds the highest priority among existing `rsa-generated` RS256 keys (default 100).
+2. Creates a new active `rsa-generated` RS256 key with `priority = max_prio + 10`
+   and `keySize: 2048`, marking it enabled and active.
+3. Demotes all previously active keys to passive (`active: false`, `enabled: true`),
+   so their tokens remain valid until expiration while only the new key signs new
+   tokens.
+4. Publishes both the new active key and all passive keys in the realm's JWKS
+   endpoint.
+
+With `--prune-passive`, the command instead deletes all passive `rsa-generated`
+RS256 keys if at least one active key remains. Use this to clean up old keys
+after all tokens signed by them have expired.
+
+Keycloak reads the signing keys at runtime; no restart is needed. The command
+writes the journal line `rotate-signing-key ok "new active RS256 key priority=...;
+demoted ... key(s) to passive"` or `rotate-signing-key pruned "removed ... passive
+RS256 key(s)"`.
+
+### Kafka OAuth reconciliation
+
+`./krate identity up` and `./krate identity restore` reconcile the `kafka` client
+scope (with `kafka-audience` and `kafka-principal` protocol mappers), the
+`krate-kafka-secret-rotation` client policy (which enforces Kafka client secret
+lifetime rules using `KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS`,
+`KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS`, and
+`KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS` from `.env`), the client policies
+that apply the secret-rotation policy, and the DCR `allowed-client-templates`
+component to permit the `kafka` scope in authenticated DCR registration.
+
+These are created when absent and updated when they differ from the plan generated
+by `sso/identity.py`. The reconciliation ensures that Kafka clients registered
+in Keycloak can obtain OAuth2 tokens with the `kafka` scope and audience claim,
+and that client secret expiration policies are enforced.
+
+The optional `KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET` in `.env` holds the secret for
+the Kafbat Kafka broker client (when the UI itself connects to Kafka with OAuth
+credentials). It can be rotated with `./krate identity rotate
+KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET`. When the secret is set and
+`KAFKA_UI_AUTH_CONFIG=runtime.yml` is active, rotating the secret recreates
+`kafka-ui` so it can acquire a new token with the new credentials.
+
 ### Relationship with `auth apply` (Phase 2)
 
 `./krate auth configure` (no settings file) plans Kafbat's Keycloak login,

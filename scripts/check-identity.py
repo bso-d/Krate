@@ -227,10 +227,259 @@ def check_realm_contract(checks):
       and sorted(watch_account.get('clientRoles', {}).get('realm-management', [])) == sorted(identity.IDP_WATCH_ROLES),
       'realm plan: krate-idp-watch service account must have realm-management view/manage-identity-providers roles')
     e(realm.get('loginTheme') == 'krate', f"realm plan: loginTheme must be 'krate'; got {realm.get('loginTheme')!r}")
+    e(realm.get('clientScopes') == [identity.kafka_client_scope()],
+      f'realm plan: clientScopes must be [kafka_client_scope()]; got {realm.get("clientScopes")!r}')
     placeholders = set(re.findall(r'\$\{[A-Z0-9_]+\}', text))
     e(placeholders == {'${KEYCLOAK_CLI_CLIENT_SECRET}', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}', '${KEYCLOAK_IDP_WATCH_CLIENT_SECRET}'},
       f'realm plan: placeholders must be exactly the three client secrets; got {sorted(placeholders)}')
     e(not any(secret in text for secret in SYNTHETIC_SECRETS), 'realm plan: a configured secret value leaked into the plan')
+
+
+def check_kafka_auth_plan(checks):
+    """Kafka OAuth client scope, dual-secret rotation policy/profile, DCR allowed scopes, UI client, and managed clients."""
+    e = checks.expect
+
+    # 1. Test settings() defaults (604800, 172800, 172800) and refusal when rotated >= expiration or remaining >= expiration
+    base_env = dict(SYNTHETIC)
+    s = identity.settings(base_env)
+    e(s.get('kafka_secret_expiration_seconds') == 604800, 'kafka_secret_expiration_seconds must default to 604800')
+    e(s.get('kafka_secret_rotated_expiration_seconds') == 172800, 'kafka_secret_rotated_expiration_seconds must default to 172800')
+    e(s.get('kafka_secret_remaining_rotation_seconds') == 172800, 'kafka_secret_remaining_rotation_seconds must default to 172800')
+
+    bad_rotated = dict(base_env, KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS='1000', KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS='1000')
+    try:
+        identity.settings(bad_rotated)
+        e(False, 'settings() must refuse KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS >= KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS')
+    except ValueError as exc:
+        e('KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS must be smaller than KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS' in str(exc),
+          f'settings() wrong exception message: {exc}')
+
+    bad_remaining = dict(base_env, KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS='200000', KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS='100000', KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS='250000')
+    try:
+        identity.settings(bad_remaining)
+        e(False, 'settings() must refuse KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS >= KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS')
+    except ValueError as exc:
+        e('KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS must be smaller than KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS' in str(exc),
+          f'settings() wrong exception message: {exc}')
+
+    # 2. Test scope and scope-differs
+    scope = identity.kafka_client_scope()
+    e(scope.get('name') == 'kafka', 'kafka_client_scope name must be kafka')
+    e(scope.get('protocol') == 'openid-connect', 'kafka_client_scope protocol must be openid-connect')
+    e(scope.get('attributes', {}).get('include.in.token.scope') == 'true', 'include.in.token.scope must be true')
+    e(scope.get('attributes', {}).get('display.on.consent.screen') == 'false', 'display.on.consent.screen must be false')
+    mappers = {m['name']: m for m in scope.get('protocolMappers', [])}
+    e(set(mappers) == {'kafka-audience', 'kafka-principal'}, f'scope protocolMappers must be audience and principal; got {sorted(mappers)}')
+    e(mappers['kafka-audience']['config'].get('included.custom.audience') == 'kafka', 'audience mapper config audience must be kafka')
+    e(mappers['kafka-principal']['config'].get('claim.name') == 'kafka_principal', 'principal mapper claim name must be kafka_principal')
+
+    # scope-differs with extra server fields (id, etc.) -> same
+    server_scope = json.loads(json.dumps(scope))
+    server_scope['id'] = 'scope-uuid-12345'
+    server_scope['protocolMappers'][0]['id'] = 'mapper-uuid-1'
+    server_scope['protocolMappers'][1]['id'] = 'mapper-uuid-2'
+    server_scope['attributes']['extra.server.attr'] = 'something'
+
+    proc_same = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'scope-differs'],
+        input=json.dumps(server_scope).encode('utf-8'),
+        capture_output=True, check=True
+    )
+    e(proc_same.stdout.decode().strip() == 'same', f'scope-differs with server ids must be same; got {proc_same.stdout.decode()!r}')
+
+    # scope-differs mutated audience -> differs
+    server_scope_mut_aud = json.loads(json.dumps(server_scope))
+    server_scope_mut_aud['protocolMappers'][0]['config']['included.custom.audience'] = 'mutated'
+    proc_diff_aud = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'scope-differs'],
+        input=json.dumps(server_scope_mut_aud).encode('utf-8'),
+        capture_output=True, check=True
+    )
+    e(proc_diff_aud.stdout.decode().strip() == 'differs', f'scope-differs with mutated audience must be differs; got {proc_diff_aud.stdout.decode()!r}')
+
+    # scope-differs mutated principal claim -> differs
+    server_scope_mut_prin = json.loads(json.dumps(server_scope))
+    server_scope_mut_prin['protocolMappers'][1]['config']['claim.name'] = 'mutated_claim'
+    proc_diff_prin = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'scope-differs'],
+        input=json.dumps(server_scope_mut_prin).encode('utf-8'),
+        capture_output=True, check=True
+    )
+    e(proc_diff_prin.stdout.decode().strip() == 'differs', f'scope-differs with mutated principal claim must be differs; got {proc_diff_prin.stdout.decode()!r}')
+
+    # 3. Test merge-profiles, merge-policies, merge-dcr-scopes via subprocess/CLI
+    with tempfile.NamedTemporaryFile('w+', suffix='.env') as env_f:
+        for k, v in base_env.items():
+            env_f.write(f'{k}={v}\n')
+        env_f.flush()
+
+        # merge-profiles: doc with unrelated profile -> check gives differs -> merge -> check gives same
+        doc_profiles = {'profiles': [{'name': 'unrelated-profile', 'description': 'keep me', 'executors': []}]}
+        p_check1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-profiles', '--check'],
+            input=json.dumps(doc_profiles).encode('utf-8'), capture_output=True, check=True
+        )
+        e(p_check1.stdout.decode().strip() == 'differs', f'merge-profiles --check must be differs; got {p_check1.stdout.decode()!r}')
+
+        p_merge1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-profiles'],
+            input=json.dumps(doc_profiles).encode('utf-8'), capture_output=True, check=True
+        )
+        merged_profiles_doc = json.loads(p_merge1.stdout.decode())
+        p_names = [p['name'] for p in merged_profiles_doc['profiles']]
+        e(p_names == ['unrelated-profile', 'krate-kafka-secret-rotation'], f'merged profiles must preserve order; got {p_names}')
+
+        p_check2 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-profiles', '--check'],
+            input=json.dumps(merged_profiles_doc).encode('utf-8'), capture_output=True, check=True
+        )
+        e(p_check2.stdout.decode().strip() == 'same', f'merge-profiles --check after merge must be same; got {p_check2.stdout.decode()!r}')
+
+        # merge-policies: doc with unrelated policy -> check gives differs -> merge -> check gives same
+        doc_policies = {'policies': [{'name': 'unrelated-policy', 'description': 'keep me', 'enabled': True, 'conditions': [], 'profiles': []}]}
+        pol_check1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-policies', '--check'],
+            input=json.dumps(doc_policies).encode('utf-8'), capture_output=True, check=True
+        )
+        e(pol_check1.stdout.decode().strip() == 'differs', f'merge-policies --check must be differs; got {pol_check1.stdout.decode()!r}')
+
+        pol_merge1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-policies'],
+            input=json.dumps(doc_policies).encode('utf-8'), capture_output=True, check=True
+        )
+        merged_policies_doc = json.loads(pol_merge1.stdout.decode())
+        pol_names = [p['name'] for p in merged_policies_doc['policies']]
+        e(pol_names == ['unrelated-policy', 'krate-kafka-secret-rotation-policy'], f'merged policies must preserve order; got {pol_names}')
+
+        pol_check2 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-policies', '--check'],
+            input=json.dumps(merged_policies_doc).encode('utf-8'), capture_output=True, check=True
+        )
+        e(pol_check2.stdout.decode().strip() == 'same', f'merge-policies --check after merge must be same; got {pol_check2.stdout.decode()!r}')
+
+        # merge-dcr-scopes: components list -> check gives differs -> merge -> check gives same
+        dcr_comps = [
+            {'id': 'other-comp', 'providerId': 'other', 'subType': 'anonymous'},
+            {'id': 'dcr-policy-1', 'providerId': 'allowed-client-templates', 'subType': 'authenticated',
+             'config': {'allow-default-scopes': ['true'], 'allowed-client-scopes': ['profile', 'email']}},
+        ]
+        dcr_check1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'merge-dcr-scopes', '--check'],
+            input=json.dumps(dcr_comps).encode('utf-8'), capture_output=True, check=True
+        )
+        e(dcr_check1.stdout.decode().strip() == 'differs', f'merge-dcr-scopes --check must be differs; got {dcr_check1.stdout.decode()!r}')
+
+        dcr_merge1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'merge-dcr-scopes'],
+            input=json.dumps(dcr_comps).encode('utf-8'), capture_output=True, check=True
+        )
+        updated_comp = json.loads(dcr_merge1.stdout.decode())
+        e('kafka' in updated_comp.get('config', {}).get('allowed-client-scopes', []), 'updated comp must contain kafka scope')
+        e(updated_comp.get('config', {}).get('allow-default-scopes') == ['true'], 'allow-default-scopes must be preserved')
+
+        # update components list and recheck
+        dcr_comps[1] = updated_comp
+        dcr_check2 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'merge-dcr-scopes', '--check'],
+            input=json.dumps(dcr_comps).encode('utf-8'), capture_output=True, check=True
+        )
+        e(dcr_check2.stdout.decode().strip() == 'same', f'merge-dcr-scopes --check after merge must be same; got {dcr_check2.stdout.decode()!r}')
+
+    # 4. Test ui-client
+    ui_client = identity.kafka_ui_broker_client(with_secret=False)
+    e(ui_client.get('clientId') == 'krate-ui-kafka', 'ui-client clientId must be krate-ui-kafka')
+    e(ui_client.get('serviceAccountsEnabled') is True, 'ui-client serviceAccountsEnabled must be True')
+    e('kafka' in ui_client.get('defaultClientScopes', []), 'ui-client defaultClientScopes must include kafka')
+    e(identity.SERVICE_ACCOUNT_SCOPE in ui_client.get('defaultClientScopes', []), 'ui-client defaultClientScopes must include service_account')
+    e(identity.KAFKA_CLIENT_ATTR not in ui_client.get('attributes', {}), 'ui-client must NOT have krate.managed.kafka.client attribute')
+
+    # Test ui-client --with-secret
+    test_env = dict(os.environ, KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET='test-kafbat-kafka-secret')
+    p_ui_sec = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--with-secret'],
+        capture_output=True, check=True, env=test_env
+    )
+    ui_sec_data = json.loads(p_ui_sec.stdout.decode())
+    e(ui_sec_data.get('secret') == 'test-kafbat-kafka-secret', 'ui-client --with-secret must substitute secret')
+
+    # Test ui-client --differs
+    p_ui_diff = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs'],
+        input=json.dumps(ui_client).encode('utf-8'), capture_output=True, check=True
+    )
+    e(p_ui_diff.stdout.decode().strip() == 'same', f'ui-client --differs on planned client must be same; got {p_ui_diff.stdout.decode()!r}')
+
+    mutated_ui = json.loads(json.dumps(ui_client))
+    mutated_ui['enabled'] = False
+    p_ui_diff2 = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs'],
+        input=json.dumps(mutated_ui).encode('utf-8'), capture_output=True, check=True
+    )
+    e('differs' in p_ui_diff2.stdout.decode().splitlines(), f'ui-client --differs on mutated client must contain differs; got {p_ui_diff2.stdout.decode()!r}')
+
+    # 5. Test managed-client (secret-dcr & private-key-jwt)
+    # 5a. secret-dcr
+    mc_secret = identity.kafka_managed_client('payments-service', auth_mode='secret-dcr')
+    e(mc_secret.get('clientId') == 'payments-service', 'managed client id must be payments-service')
+    e(mc_secret.get('clientAuthenticatorType') == 'client-secret', 'managed client authenticator must be client-secret')
+    e(mc_secret.get('attributes', {}).get(identity.KAFKA_CLIENT_ATTR) == 'true', 'managed client must have krate.managed.kafka.client="true"')
+    e(mc_secret.get('attributes', {}).get(identity.KAFKA_CLIENT_AUTH_MODE_ATTR) == 'secret-dcr', 'auth mode attr must be secret-dcr')
+    e('kafka' in mc_secret.get('defaultClientScopes', []), 'managed client scopes must include kafka')
+
+    # reserved ID refusal
+    for reserved in ('krate-cli', 'krate-ui', 'krate-idp-watch', 'krate-ui-kafka', 'krate-custom'):
+        try:
+            identity.kafka_managed_client(reserved, auth_mode='secret-dcr')
+            e(False, f'managed client must refuse reserved client id {reserved!r}')
+        except ValueError:
+            pass
+
+    # 5b. private-key-jwt with jwks_url
+    mc_jwt_url = identity.kafka_managed_client('analytics-service', auth_mode='private-key-jwt', jwks_url='https://example.test/jwks.json')
+    e(mc_jwt_url.get('clientAuthenticatorType') == 'client-jwt', 'authenticator type must be client-jwt')
+    e(mc_jwt_url.get('attributes', {}).get('use.jwks.url') == 'true', 'use.jwks.url must be true')
+    e(mc_jwt_url.get('attributes', {}).get('jwks.url') == 'https://example.test/jwks.json', 'jwks.url must match')
+
+    # 5c. private-key-jwt with RSA public key PEM (generate 2048-bit key via openssl)
+    with tempfile.NamedTemporaryFile('w+', suffix='.key') as k2048_f, tempfile.NamedTemporaryFile('w+', suffix='.pem') as p2048_f:
+        subprocess.run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', k2048_f.name], check=True, capture_output=True)
+        subprocess.run(['openssl', 'pkey', '-in', k2048_f.name, '-pubout', '-out', p2048_f.name], check=True, capture_output=True)
+        p2048_pem = p2048_f.read()
+
+        mc_jwt_pem = identity.kafka_managed_client('orders-service', auth_mode='private-key-jwt', public_key_pem=p2048_pem)
+        e(mc_jwt_pem.get('attributes', {}).get('use.jwks.string') == 'true', 'use.jwks.string must be true')
+        jwks_str = mc_jwt_pem.get('attributes', {}).get('jwks.string')
+        e(bool(jwks_str), 'jwks.string must be populated')
+        jwks = json.loads(jwks_str)
+        e('keys' in jwks and len(jwks['keys']) == 1, 'jwks must contain exactly one key')
+        key_entry = jwks['keys'][0]
+        e(key_entry.get('kty') == 'RSA', 'JWK kty must be RSA')
+        e(key_entry.get('use') == 'sig', 'JWK use must be sig')
+        e(key_entry.get('alg') == 'RS256', 'JWK alg must be RS256')
+        e(bool(key_entry.get('kid')), 'JWK kid must be non-empty')
+        e(bool(key_entry.get('n')), 'JWK n must be non-empty')
+        e(bool(key_entry.get('e')), 'JWK e must be non-empty')
+
+        # Test CLI managed-client with --public-key-file
+        p_mc_cli = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'managed-client',
+             '--client-id', 'cli-service', '--auth-mode', 'private-key-jwt', '--public-key-file', p2048_f.name],
+            capture_output=True, check=True
+        )
+        cli_mc_data = json.loads(p_mc_cli.stdout.decode())
+        e(cli_mc_data.get('clientId') == 'cli-service', 'CLI managed-client clientId must match')
+        e(cli_mc_data.get('attributes', {}).get('use.jwks.string') == 'true', 'CLI managed-client use.jwks.string must be true')
+
+    # 5d. Test refusal of 1024-bit RSA key
+    with tempfile.NamedTemporaryFile('w+', suffix='.key') as k1024_f, tempfile.NamedTemporaryFile('w+', suffix='.pem') as p1024_f:
+        subprocess.run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:1024', '-out', k1024_f.name], check=True, capture_output=True)
+        subprocess.run(['openssl', 'pkey', '-in', k1024_f.name, '-pubout', '-out', p1024_f.name], check=True, capture_output=True)
+        p1024_pem = p1024_f.read()
+        try:
+            identity.rsa_public_pem_to_jwks(p1024_pem)
+            e(False, 'rsa_public_pem_to_jwks must refuse 1024-bit RSA key')
+        except ValueError as exc:
+            e('at least 2048 bits' in str(exc), f'wrong refusal error message for 1024-bit key: {exc}')
 
 
 
@@ -11670,7 +11919,8 @@ def main():
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
                   check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip, check_public_cert_permissions,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
-                  check_broker_apply, check_truststore_env, check_broker_docs, check_mfa_choice, check_mfa_reconcile, check_rotate_stance, check_mfa_docs, check_p18_logic):
+                  check_broker_apply, check_truststore_env, check_broker_docs, check_mfa_choice, check_mfa_reconcile, check_rotate_stance, check_mfa_docs, check_p18_logic,
+                  check_kafka_auth_plan):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others
@@ -11684,7 +11934,8 @@ def main():
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
           'PingFederate broker plan/apply/removal, the MFA stance (site keys, plan, claim-filter reconcile, P18 logic against stubs), truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
           'Prometheus lifecycle off and the SIGHUP reload result, the read-only Loki gateway, '
-          'the Grafana realm switch (compose, proxy front, CLI, realm.ini and clients).')
+          'the Grafana realm switch (compose, proxy front, CLI, realm.ini and clients), '
+          'and the Kafka Keycloak OAuth plan (client scope, dual-secret rotation policy/profile, DCR allowed scopes, Kafbat UI broker client, and managed clients).')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
         print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0
