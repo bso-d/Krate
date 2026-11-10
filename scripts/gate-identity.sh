@@ -682,7 +682,7 @@ fixture_reset() {
   compose --profile idp-watch down -v --remove-orphans >/dev/null 2>&1 || true
   for n in $(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   local v; for v in $(docker volume ls -q | grep -E "^${PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
-  docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
+  docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-auth" "${PROJECT}_kafka-network" "$CLASH_NET" >/dev/null 2>&1 || true
   local p
   for p in "$ENVF" "$ED/auth/keycloak" "$ED/auth/ui/runtime.yml" "$JOURNAL" "$ED/auth/.identity.lock" "$ED/auth/.operation.lock" "$ED/auth/.config-applied.json" "$ED/auth/.config-draft.json" "$ED/auth/.verify-ledger.json" "$ED/auth/.formal-gate-receipt.json" "$ED/auth/.operation-recovery" "$ED/auth/.revision.key" "$ED/certs" "$MON_DIR/.env"; do
     if ! rm -rf "$p" 2>/dev/null && [[ -e "$p" ]]; then
@@ -849,8 +849,8 @@ run_phase1() {
   done
   ok_if G2 1 G $codes "proxy paths sent as-is (realm discovery and account 200; admin, master realm, metrics, health, bare /identity 404; a dot segment onto the master realm 404; a dot segment onto an allowed path 400; a path parameter 400):$ev"
   # networks
-  ev="db=[$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$dbid")] kc=[$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$kcid")] identity.internal=$(docker network inspect "${PROJECT}_identity" -f '{{.Internal}}') subnet=$(docker network inspect "${PROJECT}_identity" -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}') range=$(docker network inspect "${PROJECT}_identity" -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}') proxy=$(docker inspect -f "{{(index .NetworkSettings.Networks \"${PROJECT}_identity\").IPAddress}}" "$(cid proxy)") trusted=$(docker exec "$kcid" printenv KC_PROXY_TRUSTED_ADDRESSES)"
-  [[ "$ev" == "db=[${PROJECT}_identity ] kc=[${PROJECT}_identity ${PROJECT}_identity-egress ] identity.internal=true subnet=$SUBNET range=$IP_RANGE proxy=$PROXY_IP trusted=$PROXY_IP" ]]; st=$?; ok_if G3 1 G "$st" "$ev"
+  ev="db=[$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$dbid")] kc=[$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$kcid")] identity.internal=$(docker network inspect "${PROJECT}_identity" -f '{{.Internal}}') kafka_auth.internal=$(docker network inspect "${PROJECT}_kafka-auth" -f '{{.Internal}}') subnet=$(docker network inspect "${PROJECT}_identity" -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}') range=$(docker network inspect "${PROJECT}_identity" -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}') proxy=$(docker inspect -f "{{(index .NetworkSettings.Networks \"${PROJECT}_identity\").IPAddress}}" "$(cid proxy)") trusted=$(docker exec "$kcid" printenv KC_PROXY_TRUSTED_ADDRESSES)"
+  [[ "$ev" == "db=[${PROJECT}_identity ] kc=[${PROJECT}_identity ${PROJECT}_identity-egress ${PROJECT}_kafka-auth ] identity.internal=true kafka_auth.internal=true subnet=$SUBNET range=$IP_RANGE proxy=$PROXY_IP trusted=$PROXY_IP" ]]; st=$?; ok_if G3 1 G "$st" "$ev"
   # a dynamically addressed container lands in the pool, never on the proxy address
   ip="$(probe "$PG_IMAGE" sh -c 'hostname -i' | tr -d '[:space:]')"
   python3 -I -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) and sys.argv[1]!=sys.argv[3] else 1)' "$ip" "$IP_RANGE" "$PROXY_IP"; st=$?; ok_if G4 1 G "$st" "probe container address $ip is inside $IP_RANGE and not $PROXY_IP"
@@ -2982,7 +2982,7 @@ teardown() {
   local n; for n in $(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT"); do docker rm -f "$n" >/dev/null 2>&1; done
   local v; for v in $(docker volume ls -q | grep -E "^${PROJECT}_|^${MON_PROJECT}_"); do docker volume rm "$v" >/dev/null 2>&1; done
   docker volume rm "${MON_PROJECT}_grafana_rendered" >/dev/null 2>&1 || true  # named explicitly (section 5); the prefix loop above is the backstop
-  docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" "${MON_PROJECT}_perses" >/dev/null 2>&1 || true
+  docker network rm "${PROJECT}_identity" "${PROJECT}_identity-egress" "${PROJECT}_kafka-auth" "${PROJECT}_kafka-network" "$CLASH_NET" "${MON_PROJECT}_monitoring" "${MON_PROJECT}_perses" >/dev/null 2>&1 || true
   for n in $(docker network ls --format '{{.Name}}' | grep -E "^${PROJECT}-gate2-|^${PROJECT}-gate4-"); do docker network rm "$n" >/dev/null 2>&1; done
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate2-" --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done
   # A helper label alone is not ownership: restrict removal to this fixture's

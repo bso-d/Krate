@@ -21,10 +21,6 @@ services:
       options:
         max-size: "100m"
         max-file: "3"
-    ports:
-      # Host-facing broker port. EPC clients connect here directly — there is no
-      # separate 190xx range in this variant.
-      - "${KAFKA_BROKER_92_PORT:-9092}:9092"
     environment:
       CLUSTER_ID: "${CLUSTER_ID}"
       KAFKA_PROCESS_ROLES: broker,controller
@@ -64,6 +60,7 @@ services:
       - ${KAFKA_DATA_DIR:-/data}/krate/broker-92:/var/lib/kafka/data:Z
     networks:
       - kafka-network
+      - kafka-auth
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 9092 || exit 1"]
       interval: 10s
@@ -81,10 +78,6 @@ services:
       options:
         max-size: "100m"
         max-file: "3"
-    ports:
-      # Host-facing broker port. EPC clients connect here directly — there is no
-      # separate 190xx range in this variant.
-      - "${KAFKA_BROKER_93_PORT:-9093}:9093"
     environment:
       CLUSTER_ID: "${CLUSTER_ID}"
       KAFKA_PROCESS_ROLES: broker,controller
@@ -124,6 +117,7 @@ services:
       - ${KAFKA_DATA_DIR:-/data}/krate/broker-93:/var/lib/kafka/data:Z
     networks:
       - kafka-network
+      - kafka-auth
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 9093 || exit 1"]
       interval: 10s
@@ -193,6 +187,8 @@ services:
     ports:
       - "${KAFKA_UI_HTTP_PORT:-80}:80"
       - "${KAFKA_UI_HTTPS_PORT:-443}:443"
+      - "${KAFKA_BROKER_92_PORT:-9092}:9092"
+      - "${KAFKA_BROKER_93_PORT:-9093}:9093"
     environment:
       # nginx.conf is mounted as a template that the image renders into conf.d at
       # start; only the KRATE_PROXY_* variables are substituted, never nginx's own.
@@ -206,6 +202,7 @@ services:
       # ':z' = shared SELinux label; both files are read-only config. The certs dir
       # is a bind with create_host_path: false (only gen-cert creates it).
       - ./nginx.conf:/etc/nginx/templates/default.conf.template:ro,z
+      - ./nginx-stream.conf:/etc/nginx/templates/kafka.conf.stream-template:ro,z
       - type: bind
         source: ./certs
         target: /etc/nginx/certs
@@ -375,7 +372,7 @@ services:
     # identity: the database, the proxy and Kafbat. identity-egress: Keycloak's
     # own route out of the host for the Phase 3 identity provider (an internal
     # network has no such route); nothing else joins it. Not on kafka-network.
-    networks: [identity, identity-egress]
+    networks: [identity, identity-egress, kafka-auth]
 
   idp-watch:
     profiles: [idp-watch]
@@ -449,6 +446,11 @@ networks:
   # Keycloak's egress for the Phase 3 identity provider; no other service.
   identity-egress:
     driver: bridge
+  # Private bridge between brokers and Keycloak for JWKS retrieval; internal: true
+  # gives no external route and keeps keycloak-db isolated on the identity network.
+  kafka-auth:
+    driver: bridge
+    internal: true
 
 volumes:
   keycloak_db_data:

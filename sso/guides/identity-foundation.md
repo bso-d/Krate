@@ -141,12 +141,12 @@ Read from `kraft/docker-compose.yml`, `epc/docker-compose.yml` and
 
 | Service | Container name | Profile | Published ports | Notes |
 | --- | --- | --- | --- | --- |
-| `kafka-92`..`kafka-95` (KRaft) | `krate-broker-9x` | default | `9092`-`9095`, `19092`-`19095` | PLAINTEXT listeners |
-| `kafka-92`, `kafka-93` (EPC) | `epc-broker-9x` | default | `KAFKA_BROKER_92_PORT` (9092), `KAFKA_BROKER_93_PORT` (9093) | PLAINTEXT listeners |
+| `kafka-92`..`kafka-95` (KRaft) | `krate-broker-9x` | default | none | PLAINTEXT container ports 9092–9095; external clients reach them through `proxy` (19092–19095 via Nginx TCP passthrough) |
+| `kafka-92`, `kafka-93` (EPC) | `epc-broker-9x` | default | none | PLAINTEXT container ports 9092–9093; external clients reach them through `proxy` (9092–9093 via Nginx TCP passthrough) |
 | `kafka-ui` | `krate-kafbat` / `epc-kafbat` | default | none | Reached only through the proxy. Does not depend on `keycloak`. Networks `kafka-network` and `identity` |
-| `proxy` | `krate-proxy` / `epc-proxy` | default | `KAFKA_UI_HTTP_PORT` (80), `KAFKA_UI_HTTPS_PORT` (443) | TLS from `certs/`; forwards only `/identity/realms/krate/` and `/identity/resources/` to Keycloak. Networks `kafka-network` and `identity`, with the fixed address `KRATE_IDENTITY_PROXY_IP` (172.29.250.10) on `identity` |
+| `proxy` | `krate-proxy` / `epc-proxy` | default | `KAFKA_UI_HTTP_PORT` (80), `KAFKA_UI_HTTPS_PORT` (443), plus Kafka broker ports (KRaft: 19092–19095; EPC: 9092–9093) | TLS from `certs/` for HTTPS; Nginx `stream {}` TCP passthrough for Kafka external ports. Forwards HTTP `/identity/realms/krate/` and `/identity/resources/` to Keycloak. Networks `kafka-network` and `identity`, with the fixed address `KRATE_IDENTITY_PROXY_IP` (172.29.250.10) on `identity` |
 | `keycloak-db` | Compose default (`<project>-keycloak-db-1`) | `sso` | none | PostgreSQL 17, TLS on, `pg_hba.conf` from `auth/keycloak/db-tls/`. Network `identity` only |
-| `keycloak` | Compose default (`<project>-keycloak-1`) | `sso` | none | HTTP 8080 and management 9000 stay inside the network. Networks `identity` and `identity-egress`; not on `kafka-network`. `KC_PROXY_TRUSTED_ADDRESSES` = the proxy address |
+| `keycloak` | Compose default (`<project>-keycloak-1`) | `sso` | none | HTTP 8080 and management 9000 stay inside the network. Networks `identity`, `identity-egress`, and `kafka-auth`; not on `kafka-network`. `KC_PROXY_TRUSTED_ADDRESSES` = the proxy address |
 | `idp-watch` | Compose default (`<project>-idp-watch-1`) | `sso` | none | Reachability watcher for enterprise IdP. Networks `identity` and `identity-egress`; read_only: true. Manages provider enabled state during outages |
 
 ### Services and published host ports: monitoring
@@ -183,6 +183,7 @@ Phase 4; Perses (3443) uses the cluster certificate.
 | `<project>_kafka-network` | bridge | brokers, `kafka-ui`, `proxy`; `kafka-exporter` from the monitoring project joins it as an external network. `keycloak` and `keycloak-db` are no longer on it |
 | `<project>_identity` | bridge, `internal: true`, subnet `KRATE_IDENTITY_SUBNET` (172.29.250.0/24), dynamic pool `KRATE_IDENTITY_IP_RANGE` (172.29.250.128/25) | `keycloak-db`, `keycloak`, `proxy` (fixed address `KRATE_IDENTITY_PROXY_IP`, 172.29.250.10, outside the dynamic pool so no other container can take it), `kafka-ui`, and `idp-watch`. Exactly these five (the preflight checks membership). No route to the host or outside; nothing from the monitoring project |
 | `<project>_identity-egress` | bridge | `keycloak` and `idp-watch`: their route out of the host for the Phase 3 enterprise identity provider and reachability health probes (an internal network has none) |
+| `<project>_kafka-auth` | bridge, `internal: true` | `keycloak` and all brokers (`kafka-\d+`). Connects brokers and Keycloak without exposing `keycloak-db` or crossing `kafka-network` (which is not internal). No route to the host or outside |
 | `<monitoring project>_monitoring` | bridge | exporters, Prometheus, Loki, Fluent Bit, Grafana, VictoriaLogs, Alertmanager |
 | `<monitoring project>_perses` | bridge | Prometheus, VictoriaLogs, Perses, its gateway, seed and SSO helpers |
 

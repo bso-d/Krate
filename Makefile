@@ -277,6 +277,9 @@ bundle: offline-check
 >    cp "$$src_dir/kafbat.yml" "$$bundle_dir/kafbat.yml"
 >  fi
 >  cp "$$src_dir/nginx.conf" "$$bundle_dir/nginx.conf"
+>  if [[ "$$mode" != "zk" ]]; then
+>    cp "$$src_dir/nginx-stream.conf" "$$bundle_dir/nginx-stream.conf"
+>  fi
 >  # Krate's AGPL licence, and where the image components' corresponding source is
 >  # published, including the components it could not be obtained for.
 >  cp LICENSE LICENSE-SOURCES.md "$$bundle_dir/"

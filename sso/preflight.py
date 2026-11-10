@@ -26,6 +26,7 @@ RUNTIME_FILE = 'auth/ui/runtime.yml'
 UI_AUTH_DIR = '/etc/krate/auth'
 IDENTITY_NETWORK = 'identity'
 CLUSTER_NETWORK = 'kafka-network'
+KAFKA_AUTH_NETWORK = 'kafka-auth'
 # Warn this long before the database server certificate expires (seconds); refuse within one day.
 RENEW_WARNING = 30 * 86400
 
@@ -319,6 +320,15 @@ def validate_networks(config):
         raise Preflight('KRATE_IDENTITY_PROXY_IP must lie outside KRATE_IDENTITY_IP_RANGE, or another container can take the trusted address')
     if str(proxy_ip) == gateway:
         raise Preflight('KRATE_IDENTITY_PROXY_IP must not be the network gateway address')
+    kafka_auth_network = networks.get(KAFKA_AUTH_NETWORK)
+    if not isinstance(kafka_auth_network, dict):
+        raise Preflight(f'the Compose file must define the {KAFKA_AUTH_NETWORK} network')
+    if kafka_auth_network.get('internal') is not True:
+        raise Preflight(f'network {KAFKA_AUTH_NETWORK} must be internal: true')
+    kafka_auth_members = {name for name, service in services.items() if KAFKA_AUTH_NETWORK in service_networks(service)}
+    expected_kafka_auth = {'keycloak'} | {name for name in services if re.fullmatch(r'kafka-\d+', name)}
+    if kafka_auth_members != expected_kafka_auth:
+        raise Preflight(f'the {KAFKA_AUTH_NETWORK} network must carry exactly {sorted(expected_kafka_auth)}; rendered: {sorted(kafka_auth_members)}')
 
 
 

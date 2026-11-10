@@ -59,6 +59,9 @@ def main():
     for name in ('LICENSE', 'LICENSE-SOURCES.md'):
         if not (root / name).is_file():
             raise SystemExit('Missing licence file: ' + name)
+    for name in ('nginx.conf', 'nginx-stream.conf'):
+        if not (root / name).is_file():
+            raise SystemExit('Missing proxy configuration file: ' + name)
     for name in ('sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh', 'sso/operations.sh', 'sso/operations.py',
                  'sso/check-bundle.py', 'sso/check-offline.py',
                  'sso/preflight.py', 'sso/probe.py', 'sso/identity.py', 'sso/idp_watch.py', 'sso/logrotate/krate-identity.conf',

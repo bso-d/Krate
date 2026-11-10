@@ -435,6 +435,30 @@ def check_compose(checks):
         ui_dependencies = services.get('kafka-ui', {}).get('depends_on', {})
         e('keycloak' not in ui_dependencies and 'keycloak-db' not in ui_dependencies,
           f'{edition}/kafka-ui: must not depend_on keycloak services')
+        for name, service in services.items():
+            if re.fullmatch(r'kafka-\d+', name):
+                e(not service.get('ports'), f'{edition}/{name}: brokers must not publish host ports')
+        proxy_service = services.get('proxy', {})
+        proxy_depends_on = proxy_service.get('depends_on', {})
+        e('kafka-ui' not in proxy_depends_on, f'{edition}/proxy: must not depend_on kafka-ui')
+        proxy_volumes = proxy_service.get('volumes', [])
+        nginx_stream_mounted = False
+        for volume in proxy_volumes:
+            if isinstance(volume, dict):
+                if volume.get('source', '').endswith('nginx-stream.conf') and volume.get('target') == '/etc/nginx/templates/kafka.conf.stream-template' and volume.get('read_only'):
+                    nginx_stream_mounted = True
+        e(nginx_stream_mounted, f'{edition}/proxy: must mount nginx-stream.conf read-only at /etc/nginx/templates/kafka.conf.stream-template')
+        proxy_ports = proxy_service.get('ports', [])
+        if edition == 'kraft':
+            expected_ports = [('19092', 19092), ('19093', 19093), ('19094', 19094), ('19095', 19095)]
+        else:
+            expected_ports = [('9092', 9092), ('9093', 9093)]
+        published_pairs = {
+            (str(p.get('published')), int(p.get('target')))
+            for p in proxy_ports if isinstance(p, dict) and p.get('target') is not None
+        }
+        e(all(pair in published_pairs for pair in expected_ports),
+          f'{edition}/proxy: must publish Kafka broker ports {expected_ports}; got {sorted(published_pairs)}')
         check_networks(checks, edition, json.loads(rendered))
 
 
@@ -456,8 +480,10 @@ def check_networks(checks, edition, config):
     e(subnets == [IDENTITY_SUBNET], f'{edition}: network identity must have the one ipam subnet {IDENTITY_SUBNET}; got {subnets}')
     e('identity-egress' in networks and not networks['identity-egress'].get('internal'),
       f'{edition}: network identity-egress must exist and not be internal')
+    e('kafka-auth' in networks and networks['kafka-auth'].get('internal') is True,
+      f'{edition}: network kafka-auth must exist and be internal: true')
     services = config['services']
-    expected = {'keycloak-db': {'identity'}, 'keycloak': {'identity', 'identity-egress'},
+    expected = {'keycloak-db': {'identity'}, 'keycloak': {'identity', 'identity-egress', 'kafka-auth'},
                 'proxy': {'kafka-network', 'identity'}, 'kafka-ui': {'kafka-network', 'identity'}}
     if 'idp-watch' in services:
         expected['idp-watch'] = {'identity', 'identity-egress'}
@@ -466,7 +492,10 @@ def check_networks(checks, edition, config):
         e(attached == wanted, f'{edition}/{name}: must be attached to {sorted(wanted)}; got {sorted(attached)}')
     for name, service in services.items():
         if re.fullmatch(r'kafka-\d+', name):
-            e(set(networks_of(service)) == {'kafka-network'}, f'{edition}/{name}: brokers stay on kafka-network only')
+            e(set(networks_of(service)) == {'kafka-network', 'kafka-auth'}, f'{edition}/{name}: brokers must be attached to kafka-network and kafka-auth only')
+    kafka_auth_members = {name for name, service in services.items() if 'kafka-auth' in networks_of(service)}
+    expected_kafka_auth = {'keycloak'} | {name for name in services if re.fullmatch(r'kafka-\d+', name)}
+    e(kafka_auth_members == expected_kafka_auth, f'{edition}: kafka-auth network must carry exactly {sorted(expected_kafka_auth)}; got {sorted(kafka_auth_members)}')
     proxy_ip = networks_of(services.get('proxy', {})).get('identity', {}).get('ipv4_address')
     e(proxy_ip == IDENTITY_PROXY_IP, f'{edition}/proxy: ipv4_address on identity must be {IDENTITY_PROXY_IP}; got {proxy_ip!r}')
     trusted = services.get('keycloak', {}).get('environment', {}).get('KC_PROXY_TRUSTED_ADDRESSES')
@@ -4160,7 +4189,7 @@ def network_mutations(rendered):
         mutate('identity network not internal', lambda c: c['networks']['identity'].pop('internal')),
         mutate('identity network without subnet', lambda c: c['networks']['identity'].pop('ipam')),
         mutate('keycloak-db also on kafka-network', lambda c: set_networks(c, 'keycloak-db', {'identity': None, 'kafka-network': None})),
-        mutate('keycloak on kafka-network', lambda c: set_networks(c, 'keycloak', {'identity': None, 'kafka-network': None})),
+        mutate('keycloak on kafka-network', lambda c: set_networks(c, 'keycloak', {'identity': None, 'kafka-network': None, 'kafka-auth': None})),
         mutate('proxy without a fixed address', lambda c: set_networks(c, 'proxy', {'identity': None, 'kafka-network': None})),
         mutate('trusted address differs from the proxy address',
                lambda c: c['services']['keycloak']['environment'].__setitem__('KC_PROXY_TRUSTED_ADDRESSES', '172.29.250.11')),
@@ -4173,6 +4202,9 @@ def network_mutations(rendered):
         mutate('keycloak-db on identity-egress', lambda c: set_networks(c, 'keycloak-db', {'identity': None, 'identity-egress': None})),
         mutate('kafka-exporter-like service on the identity network',
                lambda c: c['services'].__setitem__('probe', {'image': 'x', 'networks': {'identity': None}})),
+        mutate('kafka-auth network not internal', lambda c: c['networks']['kafka-auth'].pop('internal')),
+        mutate('keycloak-db on kafka-auth', lambda c: set_networks(c, 'keycloak-db', {'identity': None, 'kafka-auth': None})),
+        mutate('proxy on kafka-auth', lambda c: set_networks(c, 'proxy', {**c['services']['proxy']['networks'], 'kafka-auth': None})),
     ]
 
 
@@ -4180,7 +4212,7 @@ def check_network_refusals(checks, edition, site, auth_mode, rendered):
     """preflight must refuse a rendered configuration whose identity network deviates from the design."""
     for label, mutated in network_mutations(rendered):
         result = preflight(site, auth_mode, mutated)
-        checks.expect(result.returncode == 1 and ('identity' in result.stderr or 'PROXY' in result.stderr),
+        checks.expect(result.returncode == 1 and ('identity' in result.stderr or 'PROXY' in result.stderr or 'kafka-auth' in result.stderr),
                       f'{edition}: preflight --mode {auth_mode} must refuse: {label}; got exit {result.returncode}: {result.stderr.strip()}')
 
 
@@ -5711,6 +5743,7 @@ grep -E '^KRATE_PROXY_' "$ENV_FILE"
         site = Path(tmp)
         (site / 'certs').mkdir()
         (site / 'nginx.conf').write_text((ROOT / 'kraft/nginx.conf').read_text())
+        (site / 'nginx-stream.conf').write_text((ROOT / 'kraft/nginx-stream.conf').read_text())
         (site / 'certs/server.crt').write_text('certificate one\n')
         (site / 'certs/server.key').write_text('key one\n')
 
@@ -5730,9 +5763,10 @@ grep -E '^KRATE_PROXY_' "$ENV_FILE"
         before = (site / '.env').read_bytes()
         sync()
         e((site / '.env').read_bytes() == before, 'sync_proxy_env: unchanged inputs leave .env byte-identical (no recreate)')
-        e(sorted(path.name for path in site.iterdir()) == ['.env', 'certs', 'nginx.conf'], 'sync_proxy_env: no temporary file remains')
+        e(sorted(path.name for path in site.iterdir()) == ['.env', 'certs', 'nginx-stream.conf', 'nginx.conf'], 'sync_proxy_env: no temporary file remains')
         digests = {sha}
         for path, text in (('nginx.conf', (ROOT / 'kraft/nginx.conf').read_text() + '# changed\n'),
+                           ('nginx-stream.conf', (ROOT / 'kraft/nginx-stream.conf').read_text() + '# changed\n'),
                            ('certs/server.crt', 'certificate two\n'), ('certs/server.key', 'key two\n')):
             (site / path).write_text(text)
             _, changed, _ = sync()
@@ -5842,6 +5876,7 @@ def check_nginx_render(checks):
         for edition in EDITIONS:
             for public_host in ('', 'kafka.example.test:8443'):
                 result = subprocess.run(['docker', 'run', '--rm', '-v', f'{ROOT / edition / "nginx.conf"}:/etc/nginx/templates/default.conf.template:ro',
+                                         '-v', f'{ROOT / edition / "nginx-stream.conf"}:/etc/nginx/templates/kafka.conf.stream-template:ro',
                                          '-v', f'{certs}:/etc/nginx/certs:ro', '-e', 'NGINX_ENVSUBST_FILTER=^KRATE_PROXY_',
                                          '-e', f'KRATE_PROXY_PUBLIC_HOST={public_host}', '-e', 'KRATE_PROXY_CONF_SHA=check', image, 'nginx', '-T'],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)  # a cold image pull is included
@@ -5850,6 +5885,8 @@ def check_nginx_render(checks):
                      f'{label}: nginx -t must pass; exit {result.returncode}: {result.stderr.strip()[-300:]}'):
                     e(f'map "$http_host {public_host}" $krate_foreign_host' in result.stdout and f'map "{public_host}" $krate_redirect_authority' in result.stdout,
                       f'{label}: the rendered maps must carry the public host literally')
+                    e('# configuration file /etc/nginx/stream-conf.d/kafka.conf:' in result.stdout and 'proxy_pass $krate_kafka_upstream;' in result.stdout,
+                      f'{label}: the rendered stream configuration must include kafka stream directive')
                     e('${KRATE_PROXY_' not in result.stdout, f'{label}: no template variable may survive the render')
 
 
@@ -5971,7 +6008,7 @@ deploy_release ""
     with tempfile.TemporaryDirectory() as tmp:
         package, home = Path(tmp) / 'krate-kraft-v9', Path(tmp) / 'home'
         files = {'krate': 0o700, 'docker-compose.yml': 0o600, '.env.template': 0o600, 'nginx.conf': 0o600,
-                 'auth/ui/local.yml': 0o600, 'monitoring/docker-compose.yml': 0o600, 'monitoring/.env.template': 0o600,
+                 'nginx-stream.conf': 0o600, 'auth/ui/local.yml': 0o600, 'monitoring/docker-compose.yml': 0o600, 'monitoring/.env.template': 0o600,
                  'sso/identity.py': 0o600,
                  # operator leftovers in the package directory: never part of the release
                  '.env.Pk12Lm': 0o600, 'monitoring/.env.Rt34Uv': 0o600, '.identity-backup.Xy12Ab': 0o600,
@@ -5991,7 +6028,7 @@ deploy_release ""
             (home / name).chmod(0o600)
         result = run_bash(script, package, home)
         e(result.returncode == 0, f'the extraction must succeed; got {result.returncode}: {result.stderr.strip()[:200]}')
-        for name in ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'monitoring/docker-compose.yml', 'monitoring/.env.template', 'sso/identity.py'):
+        for name in ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'nginx-stream.conf', 'monitoring/docker-compose.yml', 'monitoring/.env.template', 'sso/identity.py'):
             e((home / name).is_file() and mode(home / name) & 0o044 == 0o044, f'release file {name} must be group/world-readable after a umask-077 install')
         for name in ('auth', 'auth/ui', 'auth/keycloak', 'auth/keycloak/truststores'):
             e((home / name).is_dir() and mode(home / name) & 0o055 == 0o055, f'{name} must be traversable by the container users after a umask-077 install; got {mode(home / name):o}')

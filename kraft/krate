@@ -2988,13 +2988,13 @@ public_url_origin() {
 }
 
 # The proxy's Compose environment follows its inputs, so `up` recreates it exactly when
-# one changed. KRATE_PROXY_CONF_SHA digests nginx.conf and certs/server.{crt,key}: a new
-# release replaces nginx.conf (a new inode the running proxy, bound to the old one, never
-# sees) and nginx reads the certificate only at start, while Compose recreates a container
-# only when its configuration or image changes. KRATE_PROXY_PUBLIC_HOST is the one Host
-# header value the proxy serves in Keycloak sign-in mode (runtime.yml): the authority of
-# KEYCLOAK_PUBLIC_URL (host, plus :port unless 443), the only one Keycloak accepts redirects
-# for. Empty in local.yml mode: every name is served.
+# one changed. KRATE_PROXY_CONF_SHA digests nginx.conf, nginx-stream.conf, certs/server.crt
+# and certs/server.key: a new release replaces nginx.conf or nginx-stream.conf (a new inode
+# the running proxy, bound to the old one, never sees) and nginx reads the certificate only
+# at start, while Compose recreates a container only when its configuration or image changes.
+# KRATE_PROXY_PUBLIC_HOST is the one Host header value the proxy serves in Keycloak sign-in
+# mode (runtime.yml): the authority of KEYCLOAK_PUBLIC_URL (host, plus :port unless 443),
+# the only one Keycloak accepts redirects for. Empty in local.yml mode: every name is served.
 # $1: the authentication mode to plan for (empty: KAFKA_UI_AUTH_CONFIG in .env).
 sync_proxy_env() {
   local mode="${1:-}" sha host=""
@@ -3005,8 +3005,8 @@ digest = hashlib.sha256()
 for name in sys.argv[1:]:
     data = open(name, "rb").read()
     digest.update(b"%d\n" % len(data) + data)
-print(digest.hexdigest()[:32])' "$SCRIPT_DIR/nginx.conf" "$CERT_CRT" "$CERT_KEY")" \
-    || die "Cannot read nginx.conf, certs/server.crt and certs/server.key for the proxy digest"
+print(digest.hexdigest()[:32])' "$SCRIPT_DIR/nginx.conf" "$SCRIPT_DIR/nginx-stream.conf" "$CERT_CRT" "$CERT_KEY")" \
+    || die "Cannot read nginx.conf, nginx-stream.conf, certs/server.crt and certs/server.key for the proxy digest"
   [[ "$mode" != runtime.yml ]] || host="$(public_url_authority)"
   [[ "$(env_value KRATE_PROXY_CONF_SHA)" == "$sha" ]] || set_env_file_value "$ENV_FILE" KRATE_PROXY_CONF_SHA "$sha"
   [[ "$(env_value KRATE_PROXY_PUBLIC_HOST)" == "$host" ]] || set_env_file_value "$ENV_FILE" KRATE_PROXY_PUBLIC_HOST "$host"
