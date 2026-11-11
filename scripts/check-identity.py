@@ -7126,6 +7126,17 @@ def check_broker_apply(checks):
           and ui_reconcile.count('| KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m') == 1
           and ui_reconcile.count('kafka_set_ui_broker_client_secret "$id"') == 2 and '--with-secret' not in ui_reconcile.split('verdict=')[0],
           f'{edition}/krate: krate-ui-kafka is created and updated secret-free on kcadm stdin, and the secret is set afterwards on both paths')
+        # The brokers' sasl.oauthbearer.sub.claim.name is kafka_principal, a service-account user
+        # attribute: the reconcile pins krate-ui-kafka's to the super.users entry (live: without it the
+        # broker refuses Kafbat with invalid_token at ClaimValidationUtils.validateSubject).
+        principal = function_body(cli, 'kafka_set_ui_broker_principal')
+        e('"clients/$1/service-account-user"' in principal and '["kafka_principal"] = ["service-account-krate-ui-kafka"]' in principal
+          and '| KCADM_STDIN=1 kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -f - >/dev/null' in principal and ' -f - -m' not in principal,
+          f'{edition}/krate: kafka_set_ui_broker_principal sets the service-account attribute through a full user representation on kcadm stdin (no -m: attributes would be replaced)')
+        e(ui_reconcile.count('kafka_set_ui_broker_principal "$id"') == 3,
+          f'{edition}/krate: the create, the same and the differs paths all pin the krate-ui-kafka principal')
+        e('User:service-account-krate-ui-kafka' in (ROOT / 'sso/kafka_broker_auth.py').read_text(),
+          'sso/kafka_broker_auth.py: super.users must name the principal the CLI pins (service-account-krate-ui-kafka)')
         ui_secret = function_body(cli, 'kafka_set_ui_broker_client_secret')
         e('os.environ["KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET"]' in ui_secret and '| KCADM_STDIN=1 kcadm -- update "clients/$1"' in ui_secret
           and 'printf' not in ui_secret,

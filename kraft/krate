@@ -5468,6 +5468,7 @@ kafka_reconcile_ui_broker_client() {
     id="$(kcadm_client_id "$IDENTITY_REALM" krate-ui-kafka)" || die "Keycloak query failed"
     [[ -n "$id" ]] || die "The krate-ui-kafka client was not found after its creation"
     kafka_set_ui_broker_client_secret "$id"
+    kafka_set_ui_broker_principal "$id" || true
     identity_journal kafka-auth created "krate-ui-kafka client"
     ok "Created the krate-ui-kafka client in realm $IDENTITY_REALM"
     kcadm_logout
@@ -5482,7 +5483,13 @@ kafka_reconcile_ui_broker_client() {
     *scopes-differ*) warn "krate-ui-kafka: its scopes differ from the plan, and a client update never changes scopes — set them in Keycloak" ;;
   esac
   case "$verdict" in
-    same*) ok "krate-ui-kafka client unchanged" ;;
+    same*)
+      if kafka_set_ui_broker_principal "$id"; then
+        identity_journal kafka-auth reconciled "krate-ui-kafka principal"
+        ok "krate-ui-kafka client unchanged; its Kafka principal was set"
+      else
+        ok "krate-ui-kafka client unchanged"
+      fi ;;
     differs*)
       err="$(mktemp)" || die "Cannot create a temporary file"
       python3 "$sso/identity.py" kafka-auth --env-file "$ENV_FILE" ui-client \
@@ -5491,11 +5498,32 @@ kafka_reconcile_ui_broker_client() {
              die "Cannot update the krate-ui-kafka client: either its representation did not render or Keycloak refused it"; }
       rm -f "$err"
       kafka_set_ui_broker_client_secret "$id"
+      kafka_set_ui_broker_principal "$id" || true
       identity_journal kafka-auth reconciled "krate-ui-kafka client"
       ok "krate-ui-kafka client updated from the plan" ;;
     *) die "Unexpected comparison result for the krate-ui-kafka client: $verdict" ;;
   esac
   kcadm_logout
+}
+
+# The brokers take a client's principal from the kafka_principal claim
+# (sasl.oauthbearer.sub.claim.name in the rendered server.properties), which the
+# kafka scope's user-attribute mapper reads from the client's service-account user.
+# Pin krate-ui-kafka's to the super.users entry the broker configuration carries.
+# $1 = client uuid; returns 0 when the attribute was set, 1 when it already matched.
+kafka_set_ui_broker_principal() {
+  local uid current
+  uid="$(kcadm -- get "clients/$1/service-account-user" -r "$IDENTITY_REALM" --fields id --format csv --noquotes)" \
+    || die "Keycloak query failed for the krate-ui-kafka service account"
+  [[ -n "$uid" ]] || die "The krate-ui-kafka client has no service-account user"
+  current="$(kcadm -- get "users/$uid" -r "$IDENTITY_REALM" \
+    | python3 -c 'import json, sys; print(",".join(json.load(sys.stdin).get("attributes", {}).get("kafka_principal", [])))')" \
+    || die "Keycloak query failed for the krate-ui-kafka service account"
+  [[ "$current" != "service-account-krate-ui-kafka" ]] || return 1
+  kcadm -- get "users/$uid" -r "$IDENTITY_REALM" \
+    | python3 -c 'import json, sys; u = json.load(sys.stdin); u.setdefault("attributes", {})["kafka_principal"] = ["service-account-krate-ui-kafka"]; print(json.dumps(u))' \
+    | KCADM_STDIN=1 kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -f - >/dev/null \
+    || die "Keycloak refused to set kafka_principal on the krate-ui-kafka service account"
 }
 
 # Set the krate-ui-kafka client secret from .env through kcadm's stdin ($1 = client uuid).
