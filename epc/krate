@@ -6156,9 +6156,11 @@ cmd_kafka_auth_disable() {
   set_env_file_value "$ENV_FILE" KAFKA_UI_SASL_MECHANISM PLAIN
 
   # Restart brokers if running
+  local broker
   local -a broker_services
-  # A running broker of THIS cluster project (compose service lookup), never a name match.
-  if find_broker >/dev/null 2>&1; then
+  # A running broker of THIS cluster project (compose service lookup), never a name match;
+  # the command substitution keeps find_broker's die inside a subshell when nothing runs.
+  if broker="$(find_broker 2>/dev/null)"; then
     info "Restarting brokers..."
     if [[ "$KRATE_VARIANT" == "kraft" ]]; then
       broker_services=(kafka-92 kafka-93 kafka-94 kafka-95)
