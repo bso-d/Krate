@@ -7135,6 +7135,9 @@ def check_broker_apply(checks):
           f'{edition}/krate: kafka_set_ui_broker_principal sets the service-account attribute through a full user representation on kcadm stdin (no -m: attributes would be replaced)')
         e(ui_reconcile.count('kafka_set_ui_broker_principal "$id"') == 3,
           f'{edition}/krate: the create, the same and the differs paths all pin the krate-ui-kafka principal')
+        mon = (ROOT / 'monitoring/docker-compose.yml').read_text()
+        e('"--sasl.mechanism=scram-sha512"' in mon and 'mechanism=sha512"' not in mon and 'exec /bin/kafka_exporter "@/tmp/krate-exporter.flags" "$$@"' in mon,
+          'monitoring/docker-compose.yml: kafka_exporter takes scram-sha512 (1.8.0 refuses sha512) from the response file and quotes its own arguments')
         e('User:service-account-krate-ui-kafka' in (ROOT / 'sso/kafka_broker_auth.py').read_text(),
           'sso/kafka_broker_auth.py: super.users must name the principal the CLI pins (service-account-krate-ui-kafka)')
         ui_secret = function_body(cli, 'kafka_set_ui_broker_client_secret')

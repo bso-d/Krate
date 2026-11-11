@@ -57,7 +57,7 @@ services:
         chmod 600 /tmp/krate-exporter.flags
         if [ "$${KAFKA_EXPORTER_SASL_ENABLED}" = "true" ]; then
           [ -n "$${KAFKA_EXPORTER_SASL_PASSWORD}" ] || { echo 'KAFKA_EXPORTER_SASL_PASSWORD must be set when KAFKA_EXPORTER_SASL_ENABLED=true' >&2; exit 1; }
-          printf '%s\n' "--sasl.enabled" "--sasl.mechanism=sha512" "--sasl.username=$${KAFKA_EXPORTER_SASL_USER}" "--sasl.password=$${KAFKA_EXPORTER_SASL_PASSWORD}" > /tmp/krate-exporter.flags
+          printf '%s\n' "--sasl.enabled" "--sasl.mechanism=scram-sha512" "--sasl.username=$${KAFKA_EXPORTER_SASL_USER}" "--sasl.password=$${KAFKA_EXPORTER_SASL_PASSWORD}" > /tmp/krate-exporter.flags
         fi
         exec /bin/kafka_exporter "@/tmp/krate-exporter.flags" "$$@"
       - kafka-exporter
