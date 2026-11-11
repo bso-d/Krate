@@ -452,7 +452,7 @@ Then start **Release offline install packages** from `main` in GitHub Actions wi
 ## Limits to understand
 
 - **One host is one point of failure.** Multiple brokers on the same VM do not protect against losing that VM. EPC also needs both of its coordination nodes available; losing either prevents its two-node group from reaching agreement.
-- **Remote application connections need configuration.** KRaft and ZooKeeper advertise `localhost` on ports `19092–19095` by default. Change their Compose listener settings for clients on other machines. EPC uses `KAFKA_ADVERTISED_HOST` and host ports `9092/9093`.
+- **Remote application connections need configuration.** KRaft brokers publish external Kafka ports `19092–19095` via `proxy` using Nginx TCP passthrough; they advertise `localhost` by default. EPC brokers publish external ports `9092/9093` the same way. Change broker Compose listener settings and proxy port mappings for clients on other machines. Modify `KAFKA_ADVERTISED_HOST` (EPC) or the corresponding listener advertising for your client network.
 - **HTTPS protects the UI only.** The Kafka listeners use plaintext, without client authentication. The monitoring web endpoints use HTTP. Restrict access or add the protection your deployment needs.
 - **Disk use grows with messages and topics.** EPC limits how much data each part of a topic can keep and requires topics to be created explicitly by default.
 - **Host checks still matter.** A valid package and healthy containers do not verify your network, remote clients, storage capacity, or email delivery. Follow the relevant runbook on the target VM.

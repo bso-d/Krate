@@ -5,6 +5,12 @@ kafka:
     - name: "${KAFKA_UI_CLUSTER_NAME:cluster-epc}"
       bootstrapServers: kafka-92:19092,kafka-93:19093
       readOnly: "${KAFKA_UI_READONLY:false}"
+      properties:
+        security.protocol: "${KAFKA_UI_SECURITY_PROTOCOL:PLAINTEXT}"
+        sasl.mechanism: "${KAFKA_UI_SASL_MECHANISM:PLAIN}"
+        sasl.jaas.config: 'org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required clientId="krate-ui-kafka" clientSecret="${KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET:}" scope="kafka";'
+        sasl.login.callback.handler.class: org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler
+        sasl.oauthbearer.token.endpoint.url: "${KAFKA_UI_OAUTH_TOKEN_URL:http://keycloak:8080/identity/realms/krate/protocol/openid-connect/token}"
 
     # Uncomment and replace the example domain with the real broker FQDN.
     # Both ports must be reachable from this Kafbat container. These are Kafka

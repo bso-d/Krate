@@ -227,10 +227,288 @@ def check_realm_contract(checks):
       and sorted(watch_account.get('clientRoles', {}).get('realm-management', [])) == sorted(identity.IDP_WATCH_ROLES),
       'realm plan: krate-idp-watch service account must have realm-management view/manage-identity-providers roles')
     e(realm.get('loginTheme') == 'krate', f"realm plan: loginTheme must be 'krate'; got {realm.get('loginTheme')!r}")
+    # A clientScopes key in the import suppresses Keycloak's built-in scopes (RealmManager.importRealm):
+    # krate-ui/krate-cli would be created with no scope at all. The kafka scope is reconciled instead.
+    e('clientScopes' not in realm,
+      f'realm plan: must not carry clientScopes (Keycloak then skips its built-in scopes); got {realm.get("clientScopes")!r}')
     placeholders = set(re.findall(r'\$\{[A-Z0-9_]+\}', text))
     e(placeholders == {'${KEYCLOAK_CLI_CLIENT_SECRET}', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}', '${KEYCLOAK_IDP_WATCH_CLIENT_SECRET}'},
       f'realm plan: placeholders must be exactly the three client secrets; got {sorted(placeholders)}')
     e(not any(secret in text for secret in SYNTHETIC_SECRETS), 'realm plan: a configured secret value leaked into the plan')
+
+
+def check_kafka_auth_plan(checks):
+    """Kafka OAuth client scope, dual-secret rotation policy/profile, DCR allowed scopes, UI client, and managed clients."""
+    e = checks.expect
+
+    # 1. Test settings() defaults (604800, 172800, 172800) and refusal when rotated >= expiration or remaining >= expiration
+    base_env = dict(SYNTHETIC)
+    s = identity.settings(base_env)
+    e(s.get('kafka_secret_expiration_seconds') == 604800, 'kafka_secret_expiration_seconds must default to 604800')
+    e(s.get('kafka_secret_rotated_expiration_seconds') == 172800, 'kafka_secret_rotated_expiration_seconds must default to 172800')
+    e(s.get('kafka_secret_remaining_rotation_seconds') == 172800, 'kafka_secret_remaining_rotation_seconds must default to 172800')
+
+    bad_rotated = dict(base_env, KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS='1000', KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS='1000')
+    try:
+        identity.settings(bad_rotated)
+        e(False, 'settings() must refuse KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS >= KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS')
+    except ValueError as exc:
+        e('KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS must be smaller than KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS' in str(exc),
+          f'settings() wrong exception message: {exc}')
+
+    bad_remaining = dict(base_env, KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS='200000', KAFKA_CLIENT_SECRET_ROTATED_EXPIRATION_SECONDS='100000', KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS='250000')
+    try:
+        identity.settings(bad_remaining)
+        e(False, 'settings() must refuse KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS >= KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS')
+    except ValueError as exc:
+        e('KAFKA_CLIENT_SECRET_REMAINING_ROTATION_SECONDS must be smaller than KAFKA_CLIENT_SECRET_EXPIRATION_SECONDS' in str(exc),
+          f'settings() wrong exception message: {exc}')
+
+    # 2. Test scope and scope-differs
+    scope = identity.kafka_client_scope()
+    e(scope.get('name') == 'kafka', 'kafka_client_scope name must be kafka')
+    e(scope.get('protocol') == 'openid-connect', 'kafka_client_scope protocol must be openid-connect')
+    e(scope.get('attributes', {}).get('include.in.token.scope') == 'true', 'include.in.token.scope must be true')
+    e(scope.get('attributes', {}).get('display.on.consent.screen') == 'false', 'display.on.consent.screen must be false')
+    mappers = {m['name']: m for m in scope.get('protocolMappers', [])}
+    e(set(mappers) == {'kafka-audience', 'kafka-principal'}, f'scope protocolMappers must be audience and principal; got {sorted(mappers)}')
+    e(mappers['kafka-audience']['config'].get('included.custom.audience') == 'kafka', 'audience mapper config audience must be kafka')
+    e(mappers['kafka-principal']['config'].get('claim.name') == 'kafka_principal', 'principal mapper claim name must be kafka_principal')
+
+    # scope-differs with extra server fields (id, etc.) -> same
+    server_scope = json.loads(json.dumps(scope))
+    server_scope['id'] = 'scope-uuid-12345'
+    server_scope['protocolMappers'][0]['id'] = 'mapper-uuid-1'
+    server_scope['protocolMappers'][1]['id'] = 'mapper-uuid-2'
+    server_scope['attributes']['extra.server.attr'] = 'something'
+
+    proc_same = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'scope-differs'],
+        input=json.dumps(server_scope).encode('utf-8'),
+        capture_output=True, check=True
+    )
+    e(proc_same.stdout.decode().strip() == 'same', f'scope-differs with server ids must be same; got {proc_same.stdout.decode()!r}')
+
+    # scope-differs mutated audience -> differs
+    server_scope_mut_aud = json.loads(json.dumps(server_scope))
+    server_scope_mut_aud['protocolMappers'][0]['config']['included.custom.audience'] = 'mutated'
+    proc_diff_aud = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'scope-differs'],
+        input=json.dumps(server_scope_mut_aud).encode('utf-8'),
+        capture_output=True, check=True
+    )
+    e(proc_diff_aud.stdout.decode().strip() == 'differs', f'scope-differs with mutated audience must be differs; got {proc_diff_aud.stdout.decode()!r}')
+
+    # scope-differs mutated principal claim -> differs
+    server_scope_mut_prin = json.loads(json.dumps(server_scope))
+    server_scope_mut_prin['protocolMappers'][1]['config']['claim.name'] = 'mutated_claim'
+    proc_diff_prin = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'scope-differs'],
+        input=json.dumps(server_scope_mut_prin).encode('utf-8'),
+        capture_output=True, check=True
+    )
+    e(proc_diff_prin.stdout.decode().strip() == 'differs', f'scope-differs with mutated principal claim must be differs; got {proc_diff_prin.stdout.decode()!r}')
+
+    # 3. Test merge-profiles, merge-policies, merge-dcr-scopes via subprocess/CLI
+    with tempfile.NamedTemporaryFile('w+', suffix='.env') as env_f:
+        for k, v in base_env.items():
+            env_f.write(f'{k}={v}\n')
+        env_f.flush()
+
+        # merge-profiles: doc with unrelated profile -> check gives differs -> merge -> check gives same
+        doc_profiles = {'profiles': [{'name': 'unrelated-profile', 'description': 'keep me', 'executors': []}]}
+        p_check1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-profiles', '--check'],
+            input=json.dumps(doc_profiles).encode('utf-8'), capture_output=True, check=True
+        )
+        e(p_check1.stdout.decode().strip() == 'differs', f'merge-profiles --check must be differs; got {p_check1.stdout.decode()!r}')
+
+        p_merge1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-profiles'],
+            input=json.dumps(doc_profiles).encode('utf-8'), capture_output=True, check=True
+        )
+        merged_profiles_doc = json.loads(p_merge1.stdout.decode())
+        p_names = [p['name'] for p in merged_profiles_doc['profiles']]
+        e(p_names == ['unrelated-profile', 'krate-kafka-secret-rotation'], f'merged profiles must preserve order; got {p_names}')
+
+        p_check2 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-profiles', '--check'],
+            input=json.dumps(merged_profiles_doc).encode('utf-8'), capture_output=True, check=True
+        )
+        e(p_check2.stdout.decode().strip() == 'same', f'merge-profiles --check after merge must be same; got {p_check2.stdout.decode()!r}')
+
+        # merge-policies: doc with unrelated policy -> check gives differs -> merge -> check gives same
+        doc_policies = {'policies': [{'name': 'unrelated-policy', 'description': 'keep me', 'enabled': True, 'conditions': [], 'profiles': []}]}
+        pol_check1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-policies', '--check'],
+            input=json.dumps(doc_policies).encode('utf-8'), capture_output=True, check=True
+        )
+        e(pol_check1.stdout.decode().strip() == 'differs', f'merge-policies --check must be differs; got {pol_check1.stdout.decode()!r}')
+
+        pol_merge1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-policies'],
+            input=json.dumps(doc_policies).encode('utf-8'), capture_output=True, check=True
+        )
+        merged_policies_doc = json.loads(pol_merge1.stdout.decode())
+        pol_names = [p['name'] for p in merged_policies_doc['policies']]
+        e(pol_names == ['unrelated-policy', 'krate-kafka-secret-rotation-policy'], f'merged policies must preserve order; got {pol_names}')
+
+        pol_check2 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', '--env-file', env_f.name, 'merge-policies', '--check'],
+            input=json.dumps(merged_policies_doc).encode('utf-8'), capture_output=True, check=True
+        )
+        e(pol_check2.stdout.decode().strip() == 'same', f'merge-policies --check after merge must be same; got {pol_check2.stdout.decode()!r}')
+
+        # merge-dcr-scopes: components list -> check gives differs -> merge -> check gives same
+        dcr_comps = [
+            {'id': 'other-comp', 'providerId': 'other', 'subType': 'anonymous'},
+            {'id': 'dcr-policy-1', 'providerId': 'allowed-client-templates', 'subType': 'authenticated',
+             'config': {'allow-default-scopes': ['true'], 'allowed-client-scopes': ['profile', 'email']}},
+        ]
+        dcr_check1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'merge-dcr-scopes', '--check'],
+            input=json.dumps(dcr_comps).encode('utf-8'), capture_output=True, check=True
+        )
+        e(dcr_check1.stdout.decode().strip() == 'differs', f'merge-dcr-scopes --check must be differs; got {dcr_check1.stdout.decode()!r}')
+
+        dcr_merge1 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'merge-dcr-scopes'],
+            input=json.dumps(dcr_comps).encode('utf-8'), capture_output=True, check=True
+        )
+        updated_comp = json.loads(dcr_merge1.stdout.decode())
+        e('kafka' in updated_comp.get('config', {}).get('allowed-client-scopes', []), 'updated comp must contain kafka scope')
+        e(updated_comp.get('config', {}).get('allow-default-scopes') == ['true'], 'allow-default-scopes must be preserved')
+
+        # update components list and recheck
+        dcr_comps[1] = updated_comp
+        dcr_check2 = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'merge-dcr-scopes', '--check'],
+            input=json.dumps(dcr_comps).encode('utf-8'), capture_output=True, check=True
+        )
+        e(dcr_check2.stdout.decode().strip() == 'same', f'merge-dcr-scopes --check after merge must be same; got {dcr_check2.stdout.decode()!r}')
+
+    # 4. Test ui-client
+    ui_client = identity.kafka_ui_broker_client()
+    e(ui_client.get('clientId') == 'krate-ui-kafka', 'ui-client clientId must be krate-ui-kafka')
+    e(ui_client.get('serviceAccountsEnabled') is True, 'ui-client serviceAccountsEnabled must be True')
+    e('kafka' in ui_client.get('defaultClientScopes', []), 'ui-client defaultClientScopes must include kafka')
+    e(identity.SERVICE_ACCOUNT_SCOPE in ui_client.get('defaultClientScopes', []), 'ui-client defaultClientScopes must include service_account')
+    e(identity.KAFKA_CLIENT_ATTR not in ui_client.get('attributes', {}), 'ui-client must NOT have krate.managed.kafka.client attribute')
+
+    # Test ui-client rendering and rotation detection
+    # ui-client (without --with-secret) renders secret-free JSON
+    p_ui_plain = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client'],
+        capture_output=True, check=True
+    )
+    ui_plain_data = json.loads(p_ui_plain.stdout.decode())
+    e('secret' not in ui_plain_data, 'ui-client without --with-secret must render secret-free JSON')
+    e(ui_plain_data.get('clientId') == 'krate-ui-kafka', 'ui-client clientId must be krate-ui-kafka')
+
+    # ui-client --with-secret WITHOUT --differs exits non-zero without emitting the secret
+    test_env = dict(os.environ, KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET='test-kafbat-kafka-secret')
+    p_ui_sec_err = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--with-secret'],
+        capture_output=True, env=test_env
+    )
+    e(p_ui_sec_err.returncode != 0, 'ui-client --with-secret without --differs must exit non-zero')
+    e('test-kafbat-kafka-secret' not in p_ui_sec_err.stdout.decode() and 'test-kafbat-kafka-secret' not in p_ui_sec_err.stderr.decode(),
+      'ui-client --with-secret without --differs must not emit secret')
+    e('valid only with --differs' in p_ui_sec_err.stderr.decode(), 'ui-client error message must mention valid only with --differs')
+
+    # Test ui-client --differs without --with-secret
+    p_ui_diff = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs'],
+        input=json.dumps(ui_client).encode('utf-8'), capture_output=True, check=True
+    )
+    e(p_ui_diff.stdout.decode().strip() == 'same', f'ui-client --differs on planned client must be same; got {p_ui_diff.stdout.decode()!r}')
+
+    # Test ui-client --differs --with-secret detects secret rotation (same vs differs)
+    current_ui_with_matching_sec = dict(ui_client, secret='test-kafbat-kafka-secret')
+    p_ui_sec_same = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs', '--with-secret'],
+        input=json.dumps(current_ui_with_matching_sec).encode('utf-8'), capture_output=True, check=True, env=test_env
+    )
+    e(p_ui_sec_same.stdout.decode().strip() == 'same', f'ui-client --differs --with-secret on matching secret must be same; got {p_ui_sec_same.stdout.decode()!r}')
+
+    current_ui_with_old_sec = dict(ui_client, secret='old-secret')
+    p_ui_sec_diff = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs', '--with-secret'],
+        input=json.dumps(current_ui_with_old_sec).encode('utf-8'), capture_output=True, check=True, env=test_env
+    )
+    e('differs' in p_ui_sec_diff.stdout.decode().splitlines(), f'ui-client --differs --with-secret on rotated secret must be differs; got {p_ui_sec_diff.stdout.decode()!r}')
+
+    mutated_ui = json.loads(json.dumps(ui_client))
+    mutated_ui['enabled'] = False
+    p_ui_diff2 = subprocess.run(
+        [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'ui-client', '--differs'],
+        input=json.dumps(mutated_ui).encode('utf-8'), capture_output=True, check=True
+    )
+    e('differs' in p_ui_diff2.stdout.decode().splitlines(), f'ui-client --differs on mutated client must contain differs; got {p_ui_diff2.stdout.decode()!r}')
+
+    # 5. Test managed-client (secret-dcr & private-key-jwt)
+    # 5a. secret-dcr
+    mc_secret = identity.kafka_managed_client('payments-service', auth_mode='secret-dcr')
+    e(mc_secret.get('clientId') == 'payments-service', 'managed client id must be payments-service')
+    e(mc_secret.get('clientAuthenticatorType') == 'client-secret', 'managed client authenticator must be client-secret')
+    e(mc_secret.get('attributes', {}).get(identity.KAFKA_CLIENT_ATTR) == 'true', 'managed client must have krate.managed.kafka.client="true"')
+    e(mc_secret.get('attributes', {}).get(identity.KAFKA_CLIENT_AUTH_MODE_ATTR) == 'secret-dcr', 'auth mode attr must be secret-dcr')
+    e('kafka' in mc_secret.get('defaultClientScopes', []), 'managed client scopes must include kafka')
+
+    # reserved ID refusal
+    for reserved in ('krate-cli', 'krate-ui', 'krate-idp-watch', 'krate-ui-kafka', 'krate-custom'):
+        try:
+            identity.kafka_managed_client(reserved, auth_mode='secret-dcr')
+            e(False, f'managed client must refuse reserved client id {reserved!r}')
+        except ValueError:
+            pass
+
+    # 5b. private-key-jwt with jwks_url
+    mc_jwt_url = identity.kafka_managed_client('analytics-service', auth_mode='private-key-jwt', jwks_url='https://example.test/jwks.json')
+    e(mc_jwt_url.get('clientAuthenticatorType') == 'client-jwt', 'authenticator type must be client-jwt')
+    e(mc_jwt_url.get('attributes', {}).get('use.jwks.url') == 'true', 'use.jwks.url must be true')
+    e(mc_jwt_url.get('attributes', {}).get('jwks.url') == 'https://example.test/jwks.json', 'jwks.url must match')
+
+    # 5c. private-key-jwt with RSA public key PEM (generate 2048-bit key via openssl)
+    with tempfile.NamedTemporaryFile('w+', suffix='.key') as k2048_f, tempfile.NamedTemporaryFile('w+', suffix='.pem') as p2048_f:
+        subprocess.run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', k2048_f.name], check=True, capture_output=True)
+        subprocess.run(['openssl', 'pkey', '-in', k2048_f.name, '-pubout', '-out', p2048_f.name], check=True, capture_output=True)
+        p2048_pem = p2048_f.read()
+
+        mc_jwt_pem = identity.kafka_managed_client('orders-service', auth_mode='private-key-jwt', public_key_pem=p2048_pem)
+        e(mc_jwt_pem.get('attributes', {}).get('use.jwks.string') == 'true', 'use.jwks.string must be true')
+        jwks_str = mc_jwt_pem.get('attributes', {}).get('jwks.string')
+        e(bool(jwks_str), 'jwks.string must be populated')
+        jwks = json.loads(jwks_str)
+        e('keys' in jwks and len(jwks['keys']) == 1, 'jwks must contain exactly one key')
+        key_entry = jwks['keys'][0]
+        e(key_entry.get('kty') == 'RSA', 'JWK kty must be RSA')
+        e(key_entry.get('use') == 'sig', 'JWK use must be sig')
+        e(key_entry.get('alg') == 'RS256', 'JWK alg must be RS256')
+        e(bool(key_entry.get('kid')), 'JWK kid must be non-empty')
+        e(bool(key_entry.get('n')), 'JWK n must be non-empty')
+        e(bool(key_entry.get('e')), 'JWK e must be non-empty')
+
+        # Test CLI managed-client with --public-key-file
+        p_mc_cli = subprocess.run(
+            [sys.executable, str(ROOT / 'sso/identity.py'), 'kafka-auth', 'managed-client',
+             '--client-id', 'cli-service', '--auth-mode', 'private-key-jwt', '--public-key-file', p2048_f.name],
+            capture_output=True, check=True
+        )
+        cli_mc_data = json.loads(p_mc_cli.stdout.decode())
+        e(cli_mc_data.get('clientId') == 'cli-service', 'CLI managed-client clientId must match')
+        e(cli_mc_data.get('attributes', {}).get('use.jwks.string') == 'true', 'CLI managed-client use.jwks.string must be true')
+
+    # 5d. Test refusal of 1024-bit RSA key
+    with tempfile.NamedTemporaryFile('w+', suffix='.key') as k1024_f, tempfile.NamedTemporaryFile('w+', suffix='.pem') as p1024_f:
+        subprocess.run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:1024', '-out', k1024_f.name], check=True, capture_output=True)
+        subprocess.run(['openssl', 'pkey', '-in', k1024_f.name, '-pubout', '-out', p1024_f.name], check=True, capture_output=True)
+        p1024_pem = p1024_f.read()
+        try:
+            identity.rsa_public_pem_to_jwks(p1024_pem)
+            e(False, 'rsa_public_pem_to_jwks must refuse 1024-bit RSA key')
+        except ValueError as exc:
+            e('at least 2048 bits' in str(exc), f'wrong refusal error message for 1024-bit key: {exc}')
 
 
 
@@ -435,6 +713,30 @@ def check_compose(checks):
         ui_dependencies = services.get('kafka-ui', {}).get('depends_on', {})
         e('keycloak' not in ui_dependencies and 'keycloak-db' not in ui_dependencies,
           f'{edition}/kafka-ui: must not depend_on keycloak services')
+        for name, service in services.items():
+            if re.fullmatch(r'kafka-\d+', name):
+                e(not service.get('ports'), f'{edition}/{name}: brokers must not publish host ports')
+        proxy_service = services.get('proxy', {})
+        proxy_depends_on = proxy_service.get('depends_on', {})
+        e('kafka-ui' not in proxy_depends_on, f'{edition}/proxy: must not depend_on kafka-ui')
+        proxy_volumes = proxy_service.get('volumes', [])
+        nginx_stream_mounted = False
+        for volume in proxy_volumes:
+            if isinstance(volume, dict):
+                if volume.get('source', '').endswith('nginx-stream.conf') and volume.get('target') == '/etc/nginx/templates/kafka.conf.stream-template' and volume.get('read_only'):
+                    nginx_stream_mounted = True
+        e(nginx_stream_mounted, f'{edition}/proxy: must mount nginx-stream.conf read-only at /etc/nginx/templates/kafka.conf.stream-template')
+        proxy_ports = proxy_service.get('ports', [])
+        if edition == 'kraft':
+            expected_ports = [('19092', 19092), ('19093', 19093), ('19094', 19094), ('19095', 19095)]
+        else:
+            expected_ports = [('9092', 9092), ('9093', 9093)]
+        published_pairs = {
+            (str(p.get('published')), int(p.get('target')))
+            for p in proxy_ports if isinstance(p, dict) and p.get('target') is not None
+        }
+        e(all(pair in published_pairs for pair in expected_ports),
+          f'{edition}/proxy: must publish Kafka broker ports {expected_ports}; got {sorted(published_pairs)}')
         check_networks(checks, edition, json.loads(rendered))
 
 
@@ -456,8 +758,10 @@ def check_networks(checks, edition, config):
     e(subnets == [IDENTITY_SUBNET], f'{edition}: network identity must have the one ipam subnet {IDENTITY_SUBNET}; got {subnets}')
     e('identity-egress' in networks and not networks['identity-egress'].get('internal'),
       f'{edition}: network identity-egress must exist and not be internal')
+    e('kafka-auth' in networks and networks['kafka-auth'].get('internal') is True,
+      f'{edition}: network kafka-auth must exist and be internal: true')
     services = config['services']
-    expected = {'keycloak-db': {'identity'}, 'keycloak': {'identity', 'identity-egress'},
+    expected = {'keycloak-db': {'identity'}, 'keycloak': {'identity', 'identity-egress', 'kafka-auth'},
                 'proxy': {'kafka-network', 'identity'}, 'kafka-ui': {'kafka-network', 'identity'}}
     if 'idp-watch' in services:
         expected['idp-watch'] = {'identity', 'identity-egress'}
@@ -466,7 +770,10 @@ def check_networks(checks, edition, config):
         e(attached == wanted, f'{edition}/{name}: must be attached to {sorted(wanted)}; got {sorted(attached)}')
     for name, service in services.items():
         if re.fullmatch(r'kafka-\d+', name):
-            e(set(networks_of(service)) == {'kafka-network'}, f'{edition}/{name}: brokers stay on kafka-network only')
+            e(set(networks_of(service)) == {'kafka-network', 'kafka-auth'}, f'{edition}/{name}: brokers must be attached to kafka-network and kafka-auth only')
+    kafka_auth_members = {name for name, service in services.items() if 'kafka-auth' in networks_of(service)}
+    expected_kafka_auth = {'keycloak'} | {name for name in services if re.fullmatch(r'kafka-\d+', name)}
+    e(kafka_auth_members == expected_kafka_auth, f'{edition}: kafka-auth network must carry exactly {sorted(expected_kafka_auth)}; got {sorted(kafka_auth_members)}')
     proxy_ip = networks_of(services.get('proxy', {})).get('identity', {}).get('ipv4_address')
     e(proxy_ip == IDENTITY_PROXY_IP, f'{edition}/proxy: ipv4_address on identity must be {IDENTITY_PROXY_IP}; got {proxy_ip!r}')
     trusted = services.get('keycloak', {}).get('environment', {}).get('KC_PROXY_TRUSTED_ADDRESSES')
@@ -519,6 +826,28 @@ def check_logrotate(checks):
             e(needle in cli, f'{edition}/krate: missing {needle.splitlines()[0]!r}')
         e('compose_cmd ps -q 2>/dev/null | head -1' not in cli,
           f'{edition}/krate: monitor_network must read the broker container, not the first container of the project')
+
+        fn_text = cli[cli.index('monitor_network() {'):cli.index('\nmonitor_targets()')]
+        with tempfile.TemporaryDirectory() as td:
+            docker_stub = Path(td) / 'docker'
+            docker_stub.write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = "inspect" ] && [ "$2" = "-f" ] && [ "$3" = "{{.State.Status}}" ]; then\n'
+                '    echo "running"\n'
+                '    exit 0\n'
+                'fi\n'
+                'if [ "$1" = "inspect" ] && [ "$2" = "-f" ]; then\n'
+                '    echo "krate_kafka-auth krate_kafka-network "\n'
+                '    exit 0\n'
+                'fi\n'
+                'exit 1\n'
+            )
+            docker_stub.chmod(0o755)
+            env_stub = dict(os.environ, PATH=td + ':' + os.environ.get('PATH', ''))
+            script = f'BROKER_CONTAINER="stub-broker"\n{fn_text}\nmonitor_network\n'
+            proc_net = subprocess.run(['bash', '-c', script], capture_output=True, text=True, env=env_stub)
+            e(proc_net.returncode == 0 and proc_net.stdout.strip() == 'krate_kafka-network',
+              f'{edition}/krate: monitor_network must select krate_kafka-network over krate_kafka-auth; got {proc_net.stdout.strip()!r}')
 
 
 
@@ -863,6 +1192,22 @@ def check_gate_scripts(checks):
                 '| W6 | runner (Mac vantage only; J7 pattern) | the client address',
                 '| W7 | runner (Mac vantage only; J7 pattern) | the firewall state'):
         e(row in guide, f'the guide carries the W-row ({row[2:20]}...); its text must match the code')
+    # Phase 5 (Kafka authentication): the inventory, its rows in the guide, the localhost contract, and the slice's shape.
+    p5_ids = ('KA0', 'KA1', 'KA2', 'KA3', 'KA4', 'KA15', 'KA5', 'KA6', 'KA7', 'KA8', 'KA9', 'KA10', 'KA11', 'KA12', 'KA13', 'KA14', 'Z5')
+    e('REQUIRED_P5=(' + ' '.join(p5_ids) + ')' in runner_text,
+      'the runner declares REQUIRED_P5 with KA0-KA15 and the leak row Z5')
+    e(runner_text.count('"$ED/auth/kafka/oauth_ssl" "$ED/auth/kafka/ca" "$MON_DIR/.env"; do') == 2,
+      'the runner wipes the generated Kafka auth material (auth/kafka/oauth_ssl, auth/kafka/ca) with the fixture state, in fixture_reset and in teardown')
+    e('5) run_phase1; leak_scan Z1 1; run_phase5; leak_scan Z5 5 ;;' in runner_text,
+      'the Phase 5 slice runs REQUIRED_P1 with its Z1 scan, then its own rows and the Z5 scan')
+    e('### KA: Phase 5, "Kafka authentication in oauth_ssl mode"' in guide,
+      'the guide carries the Phase 5 Kafka authentication section')
+    for rid in p5_ids:
+        e(f'| {rid} | runner' in guide, f'the guide documents the Phase 5 row {rid}')
+    e('Phase 5 is a localhost run (no `--public-host`' in guide and '--public-host is refused with --phase $PHASE: the Phase 5 inventory' in runner_text,
+      'Phase 5 is a localhost run: the guide says so and the runner refuses --public-host for it')
+    e('--network "container:$P5_PROXY"' in runner_text and 'p5_cleanup' in runner_text and 'collect_secrets' in function_body(runner_text, 'run_phase5'),
+      'the Phase 5 client rows run in the proxy network namespace, the slice removes its client configurations, and the enable-generated secrets join the scan set')
     e('docker-forwarding` policy' in guide and '--add-port=443/tcp' in guide,
       "the guide carries the F10 firewall sentences (Docker's rules, the IPv6 zone clause, DOCKER-USER/bind address)")
     # ── review round (TOPOFIX-IMPL-REVIEW §4): the four defects the 48 mutants could not reach ──
@@ -4160,7 +4505,7 @@ def network_mutations(rendered):
         mutate('identity network not internal', lambda c: c['networks']['identity'].pop('internal')),
         mutate('identity network without subnet', lambda c: c['networks']['identity'].pop('ipam')),
         mutate('keycloak-db also on kafka-network', lambda c: set_networks(c, 'keycloak-db', {'identity': None, 'kafka-network': None})),
-        mutate('keycloak on kafka-network', lambda c: set_networks(c, 'keycloak', {'identity': None, 'kafka-network': None})),
+        mutate('keycloak on kafka-network', lambda c: set_networks(c, 'keycloak', {'identity': None, 'kafka-network': None, 'kafka-auth': None})),
         mutate('proxy without a fixed address', lambda c: set_networks(c, 'proxy', {'identity': None, 'kafka-network': None})),
         mutate('trusted address differs from the proxy address',
                lambda c: c['services']['keycloak']['environment'].__setitem__('KC_PROXY_TRUSTED_ADDRESSES', '172.29.250.11')),
@@ -4173,6 +4518,9 @@ def network_mutations(rendered):
         mutate('keycloak-db on identity-egress', lambda c: set_networks(c, 'keycloak-db', {'identity': None, 'identity-egress': None})),
         mutate('kafka-exporter-like service on the identity network',
                lambda c: c['services'].__setitem__('probe', {'image': 'x', 'networks': {'identity': None}})),
+        mutate('kafka-auth network not internal', lambda c: c['networks']['kafka-auth'].pop('internal')),
+        mutate('keycloak-db on kafka-auth', lambda c: set_networks(c, 'keycloak-db', {'identity': None, 'kafka-auth': None})),
+        mutate('proxy on kafka-auth', lambda c: set_networks(c, 'proxy', {**c['services']['proxy']['networks'], 'kafka-auth': None})),
     ]
 
 
@@ -4180,7 +4528,7 @@ def check_network_refusals(checks, edition, site, auth_mode, rendered):
     """preflight must refuse a rendered configuration whose identity network deviates from the design."""
     for label, mutated in network_mutations(rendered):
         result = preflight(site, auth_mode, mutated)
-        checks.expect(result.returncode == 1 and ('identity' in result.stderr or 'PROXY' in result.stderr),
+        checks.expect(result.returncode == 1 and ('identity' in result.stderr or 'PROXY' in result.stderr or 'kafka-auth' in result.stderr),
                       f'{edition}: preflight --mode {auth_mode} must refuse: {label}; got exit {result.returncode}: {result.stderr.strip()}')
 
 
@@ -5711,6 +6059,7 @@ grep -E '^KRATE_PROXY_' "$ENV_FILE"
         site = Path(tmp)
         (site / 'certs').mkdir()
         (site / 'nginx.conf').write_text((ROOT / 'kraft/nginx.conf').read_text())
+        (site / 'nginx-stream.conf').write_text((ROOT / 'kraft/nginx-stream.conf').read_text())
         (site / 'certs/server.crt').write_text('certificate one\n')
         (site / 'certs/server.key').write_text('key one\n')
 
@@ -5730,9 +6079,10 @@ grep -E '^KRATE_PROXY_' "$ENV_FILE"
         before = (site / '.env').read_bytes()
         sync()
         e((site / '.env').read_bytes() == before, 'sync_proxy_env: unchanged inputs leave .env byte-identical (no recreate)')
-        e(sorted(path.name for path in site.iterdir()) == ['.env', 'certs', 'nginx.conf'], 'sync_proxy_env: no temporary file remains')
+        e(sorted(path.name for path in site.iterdir()) == ['.env', 'certs', 'nginx-stream.conf', 'nginx.conf'], 'sync_proxy_env: no temporary file remains')
         digests = {sha}
         for path, text in (('nginx.conf', (ROOT / 'kraft/nginx.conf').read_text() + '# changed\n'),
+                           ('nginx-stream.conf', (ROOT / 'kraft/nginx-stream.conf').read_text() + '# changed\n'),
                            ('certs/server.crt', 'certificate two\n'), ('certs/server.key', 'key two\n')):
             (site / path).write_text(text)
             _, changed, _ = sync()
@@ -5842,6 +6192,7 @@ def check_nginx_render(checks):
         for edition in EDITIONS:
             for public_host in ('', 'kafka.example.test:8443'):
                 result = subprocess.run(['docker', 'run', '--rm', '-v', f'{ROOT / edition / "nginx.conf"}:/etc/nginx/templates/default.conf.template:ro',
+                                         '-v', f'{ROOT / edition / "nginx-stream.conf"}:/etc/nginx/templates/kafka.conf.stream-template:ro',
                                          '-v', f'{certs}:/etc/nginx/certs:ro', '-e', 'NGINX_ENVSUBST_FILTER=^KRATE_PROXY_',
                                          '-e', f'KRATE_PROXY_PUBLIC_HOST={public_host}', '-e', 'KRATE_PROXY_CONF_SHA=check', image, 'nginx', '-T'],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)  # a cold image pull is included
@@ -5850,6 +6201,8 @@ def check_nginx_render(checks):
                      f'{label}: nginx -t must pass; exit {result.returncode}: {result.stderr.strip()[-300:]}'):
                     e(f'map "$http_host {public_host}" $krate_foreign_host' in result.stdout and f'map "{public_host}" $krate_redirect_authority' in result.stdout,
                       f'{label}: the rendered maps must carry the public host literally')
+                    e('# configuration file /etc/nginx/stream-conf.d/kafka.conf:' in result.stdout and 'proxy_pass $krate_kafka_upstream;' in result.stdout,
+                      f'{label}: the rendered stream configuration must include kafka stream directive')
                     e('${KRATE_PROXY_' not in result.stdout, f'{label}: no template variable may survive the render')
 
 
@@ -5971,7 +6324,7 @@ deploy_release ""
     with tempfile.TemporaryDirectory() as tmp:
         package, home = Path(tmp) / 'krate-kraft-v9', Path(tmp) / 'home'
         files = {'krate': 0o700, 'docker-compose.yml': 0o600, '.env.template': 0o600, 'nginx.conf': 0o600,
-                 'auth/ui/local.yml': 0o600, 'monitoring/docker-compose.yml': 0o600, 'monitoring/.env.template': 0o600,
+                 'nginx-stream.conf': 0o600, 'auth/ui/local.yml': 0o600, 'monitoring/docker-compose.yml': 0o600, 'monitoring/.env.template': 0o600,
                  'sso/identity.py': 0o600,
                  # operator leftovers in the package directory: never part of the release
                  '.env.Pk12Lm': 0o600, 'monitoring/.env.Rt34Uv': 0o600, '.identity-backup.Xy12Ab': 0o600,
@@ -5991,7 +6344,7 @@ deploy_release ""
             (home / name).chmod(0o600)
         result = run_bash(script, package, home)
         e(result.returncode == 0, f'the extraction must succeed; got {result.returncode}: {result.stderr.strip()[:200]}')
-        for name in ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'monitoring/docker-compose.yml', 'monitoring/.env.template', 'sso/identity.py'):
+        for name in ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'nginx-stream.conf', 'monitoring/docker-compose.yml', 'monitoring/.env.template', 'sso/identity.py'):
             e((home / name).is_file() and mode(home / name) & 0o044 == 0o044, f'release file {name} must be group/world-readable after a umask-077 install')
         for name in ('auth', 'auth/ui', 'auth/keycloak', 'auth/keycloak/truststores'):
             e((home / name).is_dir() and mode(home / name) & 0o055 == 0o055, f'{name} must be traversable by the container users after a umask-077 install; got {mode(home / name):o}')
@@ -6770,12 +7123,90 @@ def check_broker_apply(checks):
               f'{edition}/krate: the {verdict} verdict must be captured with || die')
             e(f'identity.py" broker --plan "$plan" {verdict}' in cli and f'== differs' not in cli.split(verdict)[1].split('\n')[0],
               f'{edition}/krate: {verdict} must not be compared inside [[ ]]')
-        # Five verdict consumers: the broker provider, its mappers, its redirector config,
-        # krate-grafana client and (Phase 4) krate-perses client.
+        # Six verdict consumers: the broker provider, its mappers, its redirector config,
+        # krate-grafana client, (Phase 4) krate-perses client and (Phase 5) the krate-ui-kafka
+        # broker client of `krate kafka auth enable`.
         unexpected = cli.count('*) die "Unexpected comparison result')  # hoisted: Python 3.9 (RHEL 9) rejects a backslash inside an f-string expression
-        e(unexpected == 5, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
+        e(unexpected == 6, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
         e('PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3' in cli,
           f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
+        # Phase 5 (Kafka OAuth): the krate-ui-kafka client follows the krate-grafana pattern —
+        # the verdict carries the .env secret (a rotated KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET is
+        # converged, never reported "unchanged"), the secret enters identity.py through the
+        # environment of that process, and every representation reaches kcadm on stdin.
+        ui_reconcile = function_body(cli, 'kafka_reconcile_ui_broker_client')
+        e(re.search(r'verdict="\$\(kcadm -- get "clients/\$id"[^\n]*\\\n(?:[^\n]*\\\n)*[^\n]*ui-client --differs --with-secret\)"( \\\n\s*)?\s*\|\| die', ui_reconcile) is not None
+          and 'KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET="$(env_value KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET)"' in ui_reconcile,
+          f'{edition}/krate: the krate-ui-kafka verdict must be computed with the .env secret (environment assignment) and captured with || die')
+        e(ui_reconcile.count('| KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f -') == 1
+          and ui_reconcile.count('| KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m') == 1
+          and ui_reconcile.count('kafka_set_ui_broker_client_secret "$id"') == 2 and '--with-secret' not in ui_reconcile.split('verdict=')[0],
+          f'{edition}/krate: krate-ui-kafka is created and updated secret-free on kcadm stdin, and the secret is set afterwards on both paths')
+        # The brokers' sasl.oauthbearer.sub.claim.name is kafka_principal, a service-account user
+        # attribute: the reconcile pins krate-ui-kafka's to the super.users entry (live: without it the
+        # broker refuses Kafbat with invalid_token at ClaimValidationUtils.validateSubject).
+        principal = function_body(cli, 'kafka_set_ui_broker_principal')
+        e('"clients/$1/service-account-user"' in principal and '["kafka_principal"] = ["service-account-krate-ui-kafka"]' in principal
+          and '| KCADM_STDIN=1 kcadm -- update "users/$uid" -r "$IDENTITY_REALM" -f - >/dev/null' in principal and ' -f - -m' not in principal,
+          f'{edition}/krate: kafka_set_ui_broker_principal sets the service-account attribute through a full user representation on kcadm stdin (no -m: attributes would be replaced)')
+        e(ui_reconcile.count('kafka_set_ui_broker_principal "$id"') == 3,
+          f'{edition}/krate: the create, the same and the differs paths all pin the krate-ui-kafka principal')
+        mon = (ROOT / 'monitoring/docker-compose.yml').read_text()
+        e('"--sasl.mechanism=scram-sha512"' in mon and 'mechanism=sha512"' not in mon and 'exec /bin/kafka_exporter "@/tmp/krate-exporter.flags" "$$@"' in mon,
+          'monitoring/docker-compose.yml: kafka_exporter takes scram-sha512 (1.8.0 refuses sha512) from the response file and quotes its own arguments')
+        e('User:service-account-krate-ui-kafka' in (ROOT / 'sso/kafka_broker_auth.py').read_text(),
+          'sso/kafka_broker_auth.py: super.users must name the principal the CLI pins (service-account-krate-ui-kafka)')
+        ui_secret = function_body(cli, 'kafka_set_ui_broker_client_secret')
+        e('os.environ["KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET"]' in ui_secret and '| KCADM_STDIN=1 kcadm -- update "clients/$1"' in ui_secret
+          and 'printf' not in ui_secret,
+          f'{edition}/krate: the krate-ui-kafka secret is JSON-encoded from the environment and piped to kcadm, never built with printf from an argument')
+        enable = function_body(cli, 'cmd_kafka_auth_enable')
+        # Hosted review 2026-11-11: the admin login must go through the kcadm helper (KC_CLI_PASSWORD in
+        # the exec environment), never `kcadm.sh config credentials --password` on a docker exec argv.
+        e('identity_verify_admin kafka-auth' in enable and 'config credentials' not in enable and '--password' not in enable,
+          f'{edition}/krate: kafka auth enable verifies the admin login through identity_verify_admin, never with a password argument')
+        e('render_broker_auth(' in (ROOT / 'sso/identity.py').read_text() and 'render_oauth_ssl' not in (ROOT / 'sso/identity.py').read_text(),
+          'sso/identity.py: the broker material renderer is called render_broker_auth (a callee named *oauth* is a CodeQL password source, alert #29)')
+        e(enable.index('identity_reconcile_kafka_auth kafka-auth') < enable.index('kafka_reconcile_ui_broker_client') < enable.index('kafka-broker render'),
+          f'{edition}/krate: kafka auth enable reconciles the realm (scope, policy, DCR, krate-ui-kafka) before it renders the broker material')
+        e('--add-config-file /mnt/shared/config/exporter-scram.properties' in enable and 'SCRAM-SHA-512=[' not in enable,
+          f'{edition}/krate: the krate-exporter SCRAM credential is provisioned from the rendered file, never as an --add-config argument')
+        e('docker logs --tail 40 "$cid" 2>&1' in enable and 'is $state; its last log lines:' in enable,
+          f'{edition}/krate: a broker that does not come up in oauth_ssl mode is named with its state and last log lines (Compose names only the service)')
+        e('--add-config-file /mnt/shared/config/exporter-scram.properties >/dev/null 2>"$err"; then' in enable
+          and "sed -E 's/password=[^],[:space:]]*/password=[redacted]/g; s/^/  /' \"$err\" >&2" in enable,
+          f'{edition}/krate: a rejected SCRAM property is shown with its credential redacted (kafka-configs echoes it on stderr)')
+        e('not keystore_opens(broker_p12, keystore_pw)' in (ROOT / 'sso/kafka_broker_auth.py').read_text()
+          and "'-passin', 'env:KRATE_PKCS12_PASSWORD'" in (ROOT / 'sso/kafka_broker_auth.py').read_text(),
+          'sso/kafka_broker_auth.py: a kept broker keystore is re-issued unless it opens with the current KAFKA_TLS_KEYSTORE_PASSWORD (password via the environment)')
+        e("SCRAM-SHA-512=password={exporter_pw}" in (ROOT / 'sso/kafka_broker_auth.py').read_text()
+          and '[password=' not in (ROOT / 'sso/kafka_broker_auth.py').read_text(),
+          'sso/kafka_broker_auth.py: exporter-scram.properties carries the bracket-less value (--add-config-file loads it verbatim; brackets are stripped only from --add-config)')
+        e(enable.count('--allow-principal User:krate-exporter') == 2
+          and re.search(r"--operation Describe \\\n\s*--operation DescribeConfigs \\\n\s*--topic '\*' \\\n\s*--cluster", enable) is not None
+          and re.search(r"--operation Describe \\\n\s*--group '\*'", enable) is not None and "DescribeConfigs \\\n    --group" not in enable,
+          f'{edition}/krate: the exporter ACLs are two grants (Describe+DescribeConfigs on topics/cluster; Describe only on groups — GROUP refuses DescribeConfigs)')
+        # Live 2026-11-11: a `docker ps | grep -q kafka-92` guard never matched the container name
+        # krate-broker-92, so renew-tls skipped the keystore reload and disable skipped the restart.
+        for name in ('cmd_kafka_auth_disable', 'cmd_kafka_renew_tls'):
+            e('grep -q kafka-92' not in function_body(cli, name) and 'if broker="$(find_broker 2>/dev/null)"; then' in function_body(cli, name)
+              and 'if find_broker' not in function_body(cli, name),
+              f'{edition}/krate: {name} must detect a running broker with find_broker in a command substitution (its die stays in the subshell when nothing runs), never a name match')
+        e('--add-config listener.name.external.ssl.keystore.location=/mnt/shared/config/certs/broker.p12' in function_body(cli, 'cmd_kafka_renew_tls'),
+          f'{edition}/krate: renew-tls reloads the keystore through the dynamic listener config (same path; Kafka reloads a modified file)')
+        for name in ('cmd_kafka_auth_enable', 'cmd_kafka_auth_disable', 'kafka_refresh_exporter'):
+            e('grep -q kafka-exporter' not in function_body(cli, name),
+              f'{edition}/krate: {name} must not detect the exporter by a bare name match (another cluster project\'s monitoring would be touched)')
+        refresh = function_body(cli, 'kafka_refresh_exporter')
+        e('label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring' in refresh and 'net="$(monitor_network)" || return 0' in refresh
+          and 'monitor_compose up -d --pull never --no-deps kafka-exporter' in refresh,
+          f'{edition}/krate: kafka_refresh_exporter recreates the exporter only when the monitoring project is attached to this cluster\'s network')
+        # In oauth_ssl mode the INTERNAL listener authenticates, so every Kafka tool the CLI runs
+        # inside a broker carries the rendered admin credentials (review B3-R1 finding B1).
+        lag = function_body(cli, 'cmd_lag')
+        e(lag.count('/opt/kafka/bin/kafka-consumer-groups.sh') == 3 and lag.count('${KAFKA_ADMIN_ARGS[@]+"${KAFKA_ADMIN_ARGS[@]}"}') == 3
+          and '\n  kafka_admin_args\n' in lag,
+          f'{edition}/krate: every Kafka tool call in cmd_lag must carry KAFKA_ADMIN_ARGS (set once by kafka_admin_args)')
     if bash_binary() is None:
         return
     plan = load_configure_dual().configs(example_site(), SYNTHETIC)['keycloak/pingfederate-idp.json']
@@ -9673,6 +10104,14 @@ def check_airgap_rows(checks):
     events, markers, bad = m.parse_stream(stream)
     e(len(events) == 1 and len(markers) == 1 and bad == 0, 're-attached streams are de-duplicated and the supervisor markers are kept apart')
     e(m.GETENT_SECONDS <= 6 and m.CONTAINER_PROBE_SECONDS <= 15 and m.DNS_SECONDS <= 6 and m.RING_LIMIT == 256, 'probe bounds and the ring limit')
+    e('nginx-stream.conf' in m.PRODUCT_FILES, 'PRODUCT_FILES must include nginx-stream.conf')
+    spec_cb = importlib.util.spec_from_file_location('candidate_binding', ROOT / 'scripts/gate/candidate_binding.py')
+    assert spec_cb is not None and spec_cb.loader is not None
+    cb = importlib.util.module_from_spec(spec_cb)
+    spec_cb.loader.exec_module(cb)
+    for ed in ('kraft', 'epc'):
+        e(cb.inventory(str(ROOT), 'HEAD', ed).get('nginx-stream.conf') == f'{ed}/nginx-stream.conf',
+          f'candidate_binding inventory for {ed} must map nginx-stream.conf to {ed}/nginx-stream.conf')
     fixture_root = ROOT / 'harness' / 'phase4' / 'path-contract'
     fixture_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=fixture_root) as tmp:
@@ -11633,7 +12072,8 @@ def main():
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,
                   check_install_home_dir, check_deploy_release, check_rpm_install, check_gen_cert_ip, check_public_cert_permissions,
                   check_renew_db_tls_order, check_summaries, check_realm_reconcile, check_health, check_install_lock,
-                  check_broker_apply, check_truststore_env, check_broker_docs, check_mfa_choice, check_mfa_reconcile, check_rotate_stance, check_mfa_docs, check_p18_logic):
+                  check_broker_apply, check_truststore_env, check_broker_docs, check_mfa_choice, check_mfa_reconcile, check_rotate_stance, check_mfa_docs, check_p18_logic,
+                  check_kafka_auth_plan):
         try:
             check(checks)
         except Exception as exc:  # one failing check must not hide the others
@@ -11647,7 +12087,8 @@ def main():
           'resolution, IP certificates, renew-db-tls order, credential-free summaries, realm policy reconcile, health, install lock, '
           'PingFederate broker plan/apply/removal, the MFA stance (site keys, plan, claim-filter reconcile, P18 logic against stubs), truststore digest, Phase 3 docs, identity users logout/set-email and the realm-UI e-mail rule, '
           'Prometheus lifecycle off and the SIGHUP reload result, the read-only Loki gateway, '
-          'the Grafana realm switch (compose, proxy front, CLI, realm.ini and clients).')
+          'the Grafana realm switch (compose, proxy front, CLI, realm.ini and clients), '
+          'and the Kafka Keycloak OAuth plan (client scope, dual-secret rotation policy/profile, DCR allowed scopes, Kafbat UI broker client, and managed clients).')
     if RENDER_IMAGE_NOTE:  # its own last line: the gate records the last line as the S4 evidence
         print('[' + '; '.join(RENDER_IMAGE_NOTE) + ']')
     return 0
