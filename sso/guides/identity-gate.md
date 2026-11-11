@@ -31,6 +31,7 @@ scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --pha
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test   # Phase 1 + the Grafana slice
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test --session-max-hours 1   # companion run: REQUIRED_P1 + U27 + K37
 scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1   # companion run: REQUIRED_P1 + U27 + V23
+scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 5                               # Phase 1 + the Kafka authentication slice (KA0-KA15, Z5; localhost, no --public-host)
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --no-static --no-screenshots --candidate <sha>   # on the RHEL/Rocky VM, from the bundle: smoke run, unbound
 scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo             # the same with the full inventory (see below)
 # on a vzNAT VM fixture, the Mac vantage (drives the guest runner through the rendezvous;
@@ -590,6 +591,41 @@ vzNAT fixture, 2026-10-17; the row evidence carries the same):
    address; the packages offer no setting for it (searched: only `PROM_BIND`
    and `LOKI_BIND` exist, covering Prometheus and Loki, not the UI or broker
    ports).
+
+### KA: Phase 5, "Kafka authentication in oauth_ssl mode"
+
+`--phase 5` runs REQUIRED_P1 (with its Z1 scan) and then this inventory. Phase 5 is a localhost run (no `--public-host`;
+the runner refuses it as for Phases 1–3): the brokers' expected issuer is the fixture's `KEYCLOAK_PUBLIC_URL`, and the
+client rows run the pinned `apache/kafka` image's own tools inside the proxy container's network namespace
+(`docker run --network container:<proxy>`), where `localhost:<port>` is the nginx stream listener and
+`https://localhost/identity` the public token endpoint — the advertised metadata (`localhost:<published port>`)
+resolves exactly as for an off-box user, on the Mac and in a Linux guest alike, without a JVM on the host. The
+broker ids and ports come from the fixture `.env` (`KAFKA_BROKER_<id>_PORT`: 92–95 on KRaft, 92–93 on EPC); the
+replication factor is the broker count capped at 3. Every row was encoded from the recorded live run
+`harness/kafka-keycloak-oauth/live-mac-run-6e856e6/` (owner rule 11): the log named per row is the observation
+the assertion quotes. The slice ends with the fixture back in `local` mode and the monitoring stack down; the
+client configurations (they carry the `krate-ui-kafka` secret) and the `ps` pattern files are removed before the
+receipt is closed.
+
+| id | owner | test |
+|---|---|---|
+| KA0 | runner | REQUIRED_P1 leaves the brokers down (F1): `krate start` then `krate health` — PASS when health prints `All services healthy` (12-start.log, 13-health.log) |
+| KA1 | runner | `krate kafka auth enable` exit 0 printing `Created the krate-ui-kafka client in realm krate`, `Brokers are ready` and `Kafka OAuth/TLS enabled successfully`; `.env` then carries `KAFKA_AUTH_MODE=oauth_ssl` and `KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_SSL,CONTROLLER:SASL_PLAINTEXT`; the generated broker secrets join the redaction set and the Z5 scan (21-kafka-auth-enable-3.log) |
+| KA2 | runner | a second `krate kafka auth enable` exit 0 printing `krate-ui-kafka client unchanged` and `Kafka OAuth/TLS enabled successfully` (29-kafka-auth-enable-4.log) |
+| KA3 | runner | `krate kafka auth status` exit 0 printing `Kafka Authentication Mode: oauth_ssl`, the leaf `"subject": "CN=kafka-broker"` with SANs `DNS:kafka-<first broker>`, `DNS:proxy`, `DNS:localhost`, `Broker is authenticated and responsive` and `krate-exporter user is configured` (17-kafka-auth-status.log) |
+| KA4 | runner | `openssl s_client -connect 127.0.0.1:<port> -servername localhost -CAfile certs/kafka/ca.crt` on every published broker port: `Verify return code: 0 (ok)`, `subject=CN=kafka-broker`, `issuer=CN=Krate Kafka CA`; the first port's serial is kept for KA11 (32-external-tls-s_client.txt) |
+| KA15 | runner | Kafbat UI, whose broker connection is OAUTHBEARER as `krate-ui-kafka`: the local sign-in form (password through a 0600 file, `--data-urlencode`), then `/api/clusters` polled up to 2 minutes while Kafbat reconnects after the broker recreation — PASS when the cluster is `ONLINE` with the edition's broker count; NOT_RUN when Kafbat is not on its local sign-in (28-/31-kafbat-api-clusters*.txt) |
+| KA5 | runner (proxy namespace) | `kafka-broker-api-versions.sh` with TLS and no SASL on the first published port: exit ≠ 0 and `disconnected` or `Request METADATA failed` — the listener is SASL_SSL (33-host-client-auth-matrix.txt) |
+| KA6 | runner (proxy namespace) | the same with OAUTHBEARER and a wrong client secret: exit ≠ 0 and `HTTP response code: 401` from the token endpoint — no SASL exchange happens (34-host-client-auth-matrix-2.txt) |
+| KA7 | runner (proxy namespace) | the same with the realm's `krate-ui-kafka` client (client_credentials, scope `kafka`, the Krate Kafka CA and the proxy certificate as PEM truststores in the ssl.* properties and the JAAS options): exit 0 listing every broker (`localhost:<port> (id: 9x rack: null)`), no `SaslAuthenticationException`; up to 3 attempts, because a broker that has not seen the token's `kid` refreshes its JWKS and refuses that first connection (36-host-client-retry.txt) |
+| KA8 | runner (proxy namespace) | `kafka-topics.sh --create gate5-orders` (3 partitions, replication = brokers capped at 3), `kafka-console-producer.sh` with three records on stdin, `kafka-console-consumer.sh --group gate5-payments --from-beginning --max-messages 3`: all exit 0 and `Processed a total of 3 messages` (37-host-client-produce-consume.txt) |
+| KA9 | runner | `krate lag` exit 0 listing `gate5-payments` as `caught up`; `krate lag gate5-payments` exit 0 with `Total lag: 0` — the CLI carries the admin command-config in oauth_ssl mode (38-krate-lag.log) |
+| KA10 | runner | `krate monitor up` exit 0; the kafka-exporter's PID 1 argv carries `@/tmp/krate-exporter.flags` and no `--sasl.password`; the 0600 response file carries `--sasl.mechanism=scram-sha512` and `--sasl.username=krate-exporter`; Prometheus (`PROM_PORT` of the fixture) shows the kafka-exporter target `up` within 90 s, `kafka_brokers` equal to the broker count and three `kafka_consumergroup_lag{consumergroup="gate5-payments"}` rows; the exporter password has 0 hits in `ps -eo args=` on the host (41-/43-kafka-exporter-scram*.txt) |
+| KA11 | runner | `krate kafka renew-tls` exit 0 printing `Keystores reloaded on all brokers` and `TLS certificates renewed successfully`; the on-disk serial differs from KA4's and every published port presents it; every broker's `StartedAt` is unchanged (a live keystore reload, no restart); a KA7-style client call still succeeds (45-renew-tls-2.txt) |
+| KA12 | runner | `krate kafka auth disable` exit 0 printing `Kafka OAuth/TLS disabled`; `.env` back to `KAFKA_AUTH_MODE=local` and the PLAINTEXT map; `krate health` all healthy; a consumer with no configuration at all reads the same three records (`gate5-plain`) — the data survives both flips (46-auth-disable.txt) |
+| KA13 | runner | `krate stop`, then `krate kafka auth disable` with no broker running exit 0 (`Kafka OAuth/TLS disabled`: only `.env` is rewritten), then `krate start` and `krate health` all healthy (47-auth-disable-no-broker.txt) |
+| KA14 | runner | a third `krate kafka auth enable` while `ps -eo args=` is sampled every 0.25 s for the master admin password and the Kafbat client secret: exit 0, at least one sample, 0 hits (the kcadm helper passes the password in the exec environment); then the final `krate kafka auth disable` exit 0 leaves `KAFKA_AUTH_MODE=local` (49-admin-password-argv-scan.txt, 50-auth-disable-final.txt) |
+| Z5 | runner | the leak scan after the slice: none of the secrets collected from `.env` and `monitoring/.env` — now including the broker passwords `KAFKA_INTERBROKER_PASSWORD`, `KAFKA_ADMIN_PASSWORD`, `KAFKA_EXPORTER_SCRAM_PASSWORD`, `KAFKA_TLS_KEYSTORE_PASSWORD` and `KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET` — in the raw log, the journal, the receipt, the keycloak, keycloak-db, kafka-ui and proxy logs and the monitoring logs copied before `monitor down` (prometheus, grafana, loki, kafka-exporter); the same refusals as Z2/Z3 when an input cannot be read |
 
 ### AG: the air gap of a bundle host, "Installation/start in the offline test must not fetch missing components"
 

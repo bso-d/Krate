@@ -77,8 +77,9 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
           [--candidate SHA [--repo DIR]] [--stub-port N] [--public-host NAME] [--session-max-hours N]
           [--wipe] [--keep] [--no-screenshots] [--no-static]
   --edition-dir    kraft or epc checkout or fixture installation (default: $REPO/kraft)
-  --phase          1, 2, 3, all (= 1-3, the default), or the Phase 4 slices 4a (Grafana),
-                   4b (Perses), 4c (backing services); a slice runs REQUIRED_P1 plus its own inventory
+  --phase          1, 2, 3, 5, all (= 1-3, the default), or the Phase 4 slices 4a (Grafana),
+                   4b (Perses), 4c (backing services); a slice runs REQUIRED_P1 plus its own inventory;
+                   5 is Kafka authentication (oauth_ssl mode, localhost only)
   --public-host NAME
                    the non-loopback public host of the fixture (required for 4a/4b/4c, refused
                    for 1-3: the Phase 1-3 inventory and receipts are localhost runs — X1's
@@ -147,8 +148,8 @@ done
 # ── argument validation: every refusal below happens before anything is started (the
 # only Docker calls before host_conflicts are the read-only `docker info` and
 # `docker image inspect` of the product byte binding), so a refused run leaves nothing behind. ──
-[[ "$PHASE" == 1 || "$PHASE" == 2 || "$PHASE" == 3 || "$PHASE" == 4a || "$PHASE" == 4b || "$PHASE" == 4c || "$PHASE" == all ]] \
-  || { echo "--phase must be 1, 2, 3, 4a, 4b, 4c or all" >&2; exit 2; }
+[[ "$PHASE" == 1 || "$PHASE" == 2 || "$PHASE" == 3 || "$PHASE" == 5 || "$PHASE" == 4a || "$PHASE" == 4b || "$PHASE" == 4c || "$PHASE" == all ]] \
+  || { echo "--phase must be 1, 2, 3, 4a, 4b, 4c, 5 or all" >&2; exit 2; }
 [[ "$STUB_PORT" =~ ^[0-9]+$ ]] || { echo "--stub-port must be a number" >&2; exit 2; }
 if [[ -n "$PUBLIC_HOST" ]]; then
   [[ "$PUBLIC_HOST" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
@@ -161,6 +162,9 @@ case "$PHASE" in
   4a|4b|4c)
     [[ -n "$PUBLIC_HOST" ]] \
       || { echo "--phase $PHASE requires --public-host NAME: the realm-mode monitoring UIs refuse a loopback KEYCLOAK_PUBLIC_URL (refuse_loopback_public_url)" >&2; exit 2; } ;;
+  5)
+    [[ -z "$PUBLIC_HOST" ]] \
+      || { echo "--public-host is refused with --phase $PHASE: the Phase 5 inventory and receipts are localhost runs" >&2; exit 2; } ;;
   *)
     [[ -z "$PUBLIC_HOST" ]] \
       || { echo "--public-host is refused with --phase $PHASE: the Phase 1-3 inventory and receipts are localhost runs (X1's browser story maps the name 'localhost' in Chromium, and K33 probes plain HTTP with 'Host: localhost' against \$BASE)" >&2; exit 2; } ;;
@@ -255,7 +259,7 @@ case "$BROWSER_MODE" in
   agent)
     [[ -n "$RENDEZVOUS" && -n "$REND_NONCE" ]] || { echo "--browser agent requires --rendezvous DIR and --rendezvous-nonce TOKEN (scripts/gate/mac/run-vm-gate.sh generates both)" >&2; exit 2; }
     case "$PHASE" in
-      4a|4b|4c) ;;
+     4a|4b|4c) ;;
       *) echo "--browser agent is refused with --phase $PHASE: X1's story maps the name localhost, which no user points at a remote machine, so X1 stays a Mac-fixture row and the agent drives 4a/4b/4c only (TOPOFIX-REVIEW F9)" >&2; exit 2 ;;
     esac
     agent_preflight
@@ -471,6 +475,7 @@ REQUIRED_X=(X1)
 REQUIRED_P4A=(U1 U2 U3 U4 U5 U6 U7 U8 U9 U10 U11 U12 U13 U14 U15 U16 U17 U18 U19 U20 U21a U21b U22 U23 U24 U25 U26 U28 U29 X3 Z4a)
 REQUIRED_P4B=(V1 V2 V3 V4 V5 V6 V7 V8 V9 V10 V11 V12 V13 V14 V15 V16 V17 V18 V19 V20 V21 V22 V24 X4 Z4b)
 REQUIRED_P4C=(W1 W2 W3 W4 W5 W6 W7)
+REQUIRED_P5=(KA0 KA1 KA2 KA3 KA4 KA15 KA5 KA6 KA7 KA8 KA9 KA10 KA11 KA12 KA13 KA14 Z5)
 SESSION_P4A=(U27 K37)
 SESSION_P4B=(U27 V23)
 phase4_session_ids() { case "$1" in 4a) printf '%s\n' "${SESSION_P4A[@]}" ;; 4b) printf '%s\n' "${SESSION_P4B[@]}" ;; esac; }
@@ -527,8 +532,9 @@ required_ids() { # the inventory that decides the verdict, given the flags
           echo "$id"
         done
       fi ;;
+    5) for id in "${REQUIRED_P5[@]}"; do echo "$id"; done ;;
   esac
-  if $SCREENSHOTS && [[ "$PHASE" != 4* ]]; then for id in "${REQUIRED_X[@]}"; do echo "$id"; done; fi
+  if $SCREENSHOTS && [[ "$PHASE" != 4* && "$PHASE" != 5 ]]; then for id in "${REQUIRED_X[@]}"; do echo "$id"; done; fi
 }
 
 log() { if [[ -n "${RAW_CLOSED:-}" ]]; then printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; else printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$RAW" >&2; fi; }
@@ -2831,6 +2837,321 @@ run_phase4() { # slice: 4a|4b|4c
   fi
 }
 
+
+# ═══════════════════════════ Phase 5: Kafka authentication (KA0-KA15, Z5) ═══════════════════════════
+# Every row encodes what the recorded live run showed (harness/kafka-keycloak-oauth/live-mac-run-6e856e6/,
+# owner rule 11), never how a command "should" behave. The client rows run the pinned apache/kafka image's
+# own tools inside the proxy container's network namespace: there localhost:<port> is the nginx stream
+# listener and https://localhost/identity the public token endpoint, so the metadata the brokers advertise
+# (localhost:<published port>) resolves exactly as it does for an off-box user — on the Mac and in a Linux
+# guest alike, without a JVM on the host. The published ports are the template defaults (the fixture .env
+# comes from .env.template), which are also the nginx listen ports inside the proxy.
+P5_IDS=(); P5_PORTS=(); P5_IMG=""; P5_PROXY=""; P5_DIR=""; P5_SCAN_PID=""
+p5_brokers() { # the edition's broker ids and published ports (.env KAFKA_BROKER_<id>_PORT; 92-95 on KRaft, 92-93 on EPC)
+  local b p
+  P5_IDS=(); P5_PORTS=()
+  for b in 92 93 94 95; do
+    p="$(envv "KAFKA_BROKER_${b}_PORT")"
+    [[ -n "$p" ]] || continue
+    P5_IDS+=("$b"); P5_PORTS+=("$p")
+  done
+}
+p5_cap() { # like cap, with stdin closed: s_client and the Kafka console tools would otherwise read the runner's stdin
+  local rc
+  CAP="$("$@" 2>&1 </dev/null)"; rc=$?
+  printf -- '--- %s (exit %s)\n%s\n' "$*" "$rc" "$CAP" >> "$RAW"
+  return $rc
+}
+p5_tool() { # TOOL args...: /opt/kafka/bin/TOOL of the pinned image in the proxy's network namespace, capped at 90 s by the image's own timeout
+  p5_cap docker run --rm --network "container:$P5_PROXY" -v "$P5_DIR:/gate:ro" "$P5_IMG" timeout 90 "/opt/kafka/bin/$1" "${@:2}"
+}
+p5_produce() { # BOOTSTRAP TOPIC: the three records of the state dir through the console producer's stdin, same vantage
+  local rc
+  CAP="$(docker run -i --rm --network "container:$P5_PROXY" -v "$P5_DIR:/gate:ro" "$P5_IMG" timeout 90 /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$1" --producer.config /gate/client-ui.properties --topic "$2" < "$P5_DIR/records.txt" 2>&1)"; rc=$?
+  printf -- '--- kafka-console-producer.sh --topic %s (exit %s)\n%s\n' "$2" "$rc" "$CAP" >> "$RAW"
+  return $rc
+}
+p5_client_properties() { # SECRET → the OAUTHBEARER client configuration on stdout (the caller writes it into a 0600 file;
+  # printf is a builtin, so the secret is on no process argv). The token endpoint's TLS is configured in the JAAS
+  # options (kafka-clients 3.9.1 JaasOptionsUtils), the broker connection's in the ssl.* properties.
+  printf '%s\n' 'security.protocol=SASL_SSL' 'ssl.truststore.type=PEM' 'ssl.truststore.location=/gate/trust.pem' 'sasl.mechanism=OAUTHBEARER' \
+    'sasl.login.callback.handler.class=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler' \
+    'sasl.oauthbearer.token.endpoint.url=https://localhost/identity/realms/krate/protocol/openid-connect/token'
+  printf 'sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required clientId="krate-ui-kafka" clientSecret="%s" scope="kafka" ssl.truststore.type="PEM" ssl.truststore.location="/gate/trust.pem";\n' "$1"
+}
+p5_serial() { # PORT: the serial of the certificate presented on 127.0.0.1:PORT (the published port, from the host)
+  echo | openssl s_client -connect "127.0.0.1:$1" -servername localhost -CAfile "$ED/certs/kafka/ca.crt" 2>/dev/null | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2
+}
+p5_started() { # the brokers' StartedAt stamps on one line (a restart changes them)
+  local b
+  for b in "${P5_IDS[@]}"; do docker inspect -f '{{.State.StartedAt}}' "$(cid "kafka-$b")" 2>/dev/null; done | tr '\n' ' '
+}
+p5_scan_start() { # PATTERN_FILE HITS_FILE: sample `ps -eo args=` every 0.25 s for the patterns until p5_scan_stop
+  # shellcheck disable=SC2009  # the argument vectors are the subject (pgrep matches names)
+  ( while kill -0 "$$" 2>/dev/null; do ps -eo args= 2>/dev/null | grep -c -F -f "$1" >> "$2" || true; sleep 0.25; done ) & P5_SCAN_PID=$!
+}
+p5_scan_stop() { # HITS_FILE → the summed hit count (0 when nothing was sampled)
+  if [[ -n "$P5_SCAN_PID" ]]; then kill "$P5_SCAN_PID" 2>/dev/null || true; wait "$P5_SCAN_PID" 2>/dev/null || true; fi
+  P5_SCAN_PID=""
+  awk '{s+=$1} END{print s+0}' "$1" 2>/dev/null || echo 0
+}
+p5_cleanup() { # the client configurations carry a client secret, the pattern files a password: never left in the receipt
+  rm -rf "$P5_DIR" "$STATE/p5-"*
+}
+p5_not_run() { # FROM_ID REASON: every slice row after FROM_ID (Z5 is the leak scan's, recorded by the dispatcher)
+  local id skip=true
+  for id in "${REQUIRED_P5[@]}"; do
+    [[ "$id" != "$1" ]] || { skip=false; continue; }
+    $skip && continue
+    [[ "$id" == Z5 ]] || record "$id" 5 KA NOT_RUN "$2"
+  done
+}
+run_phase5() { # Phase 5: Kafka authentication in oauth_ssl mode (a localhost run, after REQUIRED_P1)
+  local id rc st ev b p w n rf boot serial0 serial1 started0 started1 attempt hits norm jar body
+  section "Phase 5: Kafka authentication (KA0-KA15): enable, the client matrix through the published ports, renew-tls, disable"
+  p5_brokers; n=${#P5_IDS[@]}
+  if [[ $n -eq 0 ]]; then
+    for id in "${REQUIRED_P5[@]}"; do [[ "$id" == Z5 ]] || record "$id" 5 KA NOT_RUN "no KAFKA_BROKER_<id>_PORT in the fixture .env: the edition publishes no Kafka port"; done
+    return
+  fi
+  boot="localhost:${P5_PORTS[0]}"; rf=$n; (( rf > 3 )) && rf=3
+  P5_IMG="$(envv KAFKA_IMAGE)"; P5_DIR="$STATE/kafka-clients"
+
+  # KA0: REQUIRED_P1 leaves the brokers down (F1: identity without brokers); the slice starts the cluster (12-start.log, 13-health.log).
+  cap "$KRATE" start; rc=$?
+  cap "$KRATE" health; st=$?
+  [[ $rc -eq 0 && $st -eq 0 && "$CAP" == *"All services healthy"* ]]; st=$?
+  ok_if KA0 5 KA "$st" "krate start exit=$rc; health: $(printf '%s' "$CAP" | grep -c healthy) healthy lines, $(printf '%s' "$CAP" | grep -o 'All services healthy' | head -1)"
+  [[ $st -eq 0 ]] || { p5_not_run KA0 "the cluster did not start (KA0)"; return; }
+
+  # KA1: enable reconciles the realm (krate-ui-kafka), renders the broker material, recreates the brokers and provisions the
+  # exporter (21-kafka-auth-enable-3.log); the secrets it generated join the redaction set and the leak scan from here on.
+  cap "$KRATE" kafka auth enable; rc=$?; collect_secrets
+  ev="enable exit=$rc: $(printf '%s' "$CAP" | grep -o -E 'Created the krate-ui-kafka client in realm krate|Brokers are ready|Kafka OAuth/TLS enabled successfully' | tr '\n' ';')"
+  [[ $rc -eq 0 && "$CAP" == *"Created the krate-ui-kafka client in realm krate"* && "$CAP" == *"Brokers are ready"* && "$CAP" == *"Kafka OAuth/TLS enabled successfully"* \
+    && "$(envv KAFKA_AUTH_MODE)" == oauth_ssl && "$(envv KAFKA_LISTENER_SECURITY_PROTOCOL_MAP)" == "INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_SSL,CONTROLLER:SASL_PLAINTEXT" ]]; st=$?
+  ok_if KA1 5 KA "$st" "$ev KAFKA_AUTH_MODE=$(envv KAFKA_AUTH_MODE) map=$(envv KAFKA_LISTENER_SECURITY_PROTOCOL_MAP)"
+  if [[ $st -ne 0 ]]; then
+    p5_not_run KA1 "kafka auth enable did not succeed (KA1)"
+    cap "$KRATE" kafka auth disable || true  # leave the fixture in local mode for the teardown
+    p5_cleanup; return
+  fi
+
+  # KA2: a second enable converges and changes nothing (29-kafka-auth-enable-4.log).
+  cap "$KRATE" kafka auth enable; rc=$?
+  [[ $rc -eq 0 && "$CAP" == *"krate-ui-kafka client unchanged"* && "$CAP" == *"Kafka OAuth/TLS enabled successfully"* ]]; st=$?
+  ok_if KA2 5 KA "$st" "second enable exit=$rc: $(printf '%s' "$CAP" | grep -o -E 'krate-ui-kafka client unchanged|Kafka OAuth/TLS enabled successfully' | tr '\n' ';')"
+
+  # KA3: status names the mode, the certificate (subject, SANs incl. the proxy) and probes the brokers with the admin credentials (17-kafka-auth-status.log).
+  cap "$KRATE" kafka auth status; rc=$?
+  ev="$(printf '%s' "$CAP" | grep -o -E 'Kafka Authentication Mode: [a-z_]+|"subject": "[^"]+"|DNS:[a-z0-9-]+|Broker is authenticated and responsive|krate-exporter user is configured' | tr '\n' ' ')"
+  [[ $rc -eq 0 && "$CAP" == *"Kafka Authentication Mode: oauth_ssl"* && "$CAP" == *'"subject": "CN=kafka-broker"'* && "$CAP" == *"DNS:kafka-${P5_IDS[0]}"* && "$CAP" == *"DNS:proxy"* \
+    && "$CAP" == *"DNS:localhost"* && "$CAP" == *"Broker is authenticated and responsive"* && "$CAP" == *"krate-exporter user is configured"* ]]; st=$?
+  ok_if KA3 5 KA "$st" "status exit=$rc: $ev"
+
+  # KA4: every published port presents the broker certificate, verifiable with the trust file the CLI printed (32-external-tls-s_client.txt).
+  ev=""; st=0
+  for p in "${P5_PORTS[@]}"; do
+    p5_cap openssl s_client -connect "127.0.0.1:$p" -servername localhost -CAfile "$ED/certs/kafka/ca.crt"
+    norm="${CAP// = /=}"  # OpenSSL 1.1 prints 'CN = x', 3.x 'CN=x'
+    [[ "$norm" == *"Verify return code: 0 (ok)"* && "$norm" == *"subject=CN=kafka-broker"* && "$norm" == *"issuer=CN=Krate Kafka CA"* ]] || st=1
+    ev="$ev $p:$(printf '%s' "$norm" | grep -o -E 'Verify return code: [^(]+\([a-z]+\)' | head -1)"
+  done
+  serial0="$(p5_serial "${P5_PORTS[0]}")"; [[ -n "$serial0" ]] || st=1
+  ok_if KA4 5 KA "$st" "broker certificate CN=kafka-broker issued by CN=Krate Kafka CA, verified with certs/kafka/ca.crt on${ev}; serial ${serial0:-none}"
+
+  # KA15: Kafbat UI (its broker connection is OAUTHBEARER as krate-ui-kafka) reports the cluster online with every broker
+  # (28-/31-kafbat-api-clusters*.txt): local sign-in form, then /api/clusters, polled while Kafbat reconnects after the broker recreation.
+  if [[ "$(envv KAFKA_UI_AUTH_CONFIG)" == local.yml ]]; then
+    jar="$STATE/p5-kafbat.cookies"; body="$STATE/p5-kafbat.body"
+    (umask 077; : > "$jar"; printf '%s' "$(envv KAFKA_UI_PASSWORD)" > "$body")
+    ev=""; st=1; attempt=0
+    while [[ $attempt -lt 24 ]]; do
+      attempt=$((attempt+1))
+      rc="$(curl -sk -c "$jar" -o /dev/null -w '%{http_code}' --max-time 20 --data-urlencode "username=$(envv KAFKA_UI_USER)" --data-urlencode "password@$body" "$BASE/login")"
+      ev="$(curl -sk -b "$jar" --max-time 20 "$BASE/api/clusters" | python3 -c 'import json, sys
+try:
+    rows = json.load(sys.stdin)
+    print(" ".join("%s:%s:%s" % (c.get("name"), c.get("status"), c.get("brokerCount")) for c in rows))
+except Exception as exc:  # not JSON yet (login page, 5xx): keep polling
+    print("unparsed:%s" % type(exc).__name__)' 2>/dev/null)"
+      [[ "$ev" == *":ONLINE:$n"* ]] && { st=0; break; }
+      sleep 5
+    done
+    rm -f "$jar" "$body"
+    ok_if KA15 5 KA "$st" "Kafbat local sign-in HTTP $rc; /api/clusters after $attempt poll(s): ${ev:-no answer} (name:status:brokerCount; $n brokers expected)"
+  else
+    record KA15 5 KA NOT_RUN "Kafbat is not on its local sign-in (KAFKA_UI_AUTH_CONFIG=$(envv KAFKA_UI_AUTH_CONFIG)); the /api/clusters probe needs the form login"
+  fi
+
+  # KA5-KA8: the client matrix and a produce/consume round trip from the off-box vantage (33-/34-/36-/37- host-client logs).
+  P5_PROXY="$(cid proxy)"
+  (umask 077
+   mkdir -p "$P5_DIR"
+   cat "$ED/certs/kafka/ca.crt" "$ED/certs/server.crt" > "$P5_DIR/trust.pem"
+   printf '%s\n' 'security.protocol=SSL' 'ssl.truststore.type=PEM' 'ssl.truststore.location=/gate/trust.pem' > "$P5_DIR/client-ssl-only.properties"
+   p5_client_properties 'definitely-wrong-secret-0000000000' > "$P5_DIR/client-wrong-secret.properties"
+   p5_client_properties "$(envv KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET)" > "$P5_DIR/client-ui.properties"
+   printf 'order-1\norder-2\norder-3\n' > "$P5_DIR/records.txt")
+  if [[ -z "$P5_PROXY" || -z "$P5_IMG" ]]; then
+    p5_not_run KA15 "no proxy container ($P5_PROXY) or KAFKA_IMAGE ($P5_IMG) for the client vantage"
+    cap "$KRATE" kafka auth disable || true; p5_cleanup; return
+  fi
+  # KA5: TLS without SASL is refused by the broker (the listener is SASL_SSL).
+  p5_tool kafka-broker-api-versions.sh --bootstrap-server "$boot" --command-config /gate/client-ssl-only.properties; rc=$?
+  [[ $rc -ne 0 && ( "$CAP" == *"disconnected"* || "$CAP" == *"Request METADATA failed"* ) ]]; st=$?
+  ok_if KA5 5 KA "$st" "SSL without SASL on $boot: exit=$rc; $(printf '%s' "$CAP" | grep -o -E 'Bootstrap broker [^ ]+ \(id: -1 rack: null\) disconnected|Request METADATA failed on brokers' | head -1)"
+  # KA6: a wrong client secret is refused by the token endpoint (Keycloak 401), so no SASL exchange happens.
+  p5_tool kafka-broker-api-versions.sh --bootstrap-server "$boot" --command-config /gate/client-wrong-secret.properties; rc=$?
+  [[ $rc -ne 0 && "$CAP" == *"HTTP response code: 401"* ]]; st=$?
+  ok_if KA6 5 KA "$st" "wrong client secret on $boot: exit=$rc; $(printf '%s' "$CAP" | grep -o -E 'HTTP response code: 401 for URL: [^ ]+' | head -1)"
+  # KA7: the realm's krate-ui-kafka client (client_credentials, scope kafka) reaches every broker. A broker that has not seen the
+  # token's kid refreshes its JWKS and refuses that first connection (36-host-client-retry.txt), so up to 3 attempts count.
+  st=1; attempt=0
+  while [[ $attempt -lt 3 ]]; do
+    attempt=$((attempt+1))
+    p5_tool kafka-broker-api-versions.sh --bootstrap-server "$boot" --command-config /gate/client-ui.properties; rc=$?
+    w="$(printf '%s' "$CAP" | grep -c -E '^localhost:[0-9]+ \(id: 9[0-9] rack')"
+    if [[ $rc -eq 0 && "$w" -eq "$n" && "$CAP" != *"SaslAuthenticationException"* ]]; then st=0; break; fi
+    sleep 5
+  done
+  ok_if KA7 5 KA "$st" "krate-ui-kafka client_credentials on $boot: exit=$rc, $w of $n brokers listed, attempt $attempt of 3"
+  # KA8: a topic, three records produced, three consumed in a group — through the published port with the realm identity.
+  p5_tool kafka-topics.sh --bootstrap-server "$boot" --command-config /gate/client-ui.properties --create --if-not-exists --topic gate5-orders --partitions 3 --replication-factor "$rf"; rc=$?
+  ev="topic create exit=$rc (rf $rf)"; st=$rc
+  if [[ $st -eq 0 ]]; then
+    p5_produce "$boot" gate5-orders; rc=$?; ev="$ev; produce exit=$rc"; [[ $rc -eq 0 ]] || st=1
+  fi
+  if [[ $st -eq 0 ]]; then
+    p5_tool kafka-console-consumer.sh --bootstrap-server "$boot" --consumer.config /gate/client-ui.properties --topic gate5-orders --group gate5-payments --from-beginning --max-messages 3 --timeout-ms 30000; rc=$?
+    ev="$ev; consume exit=$rc: $(printf '%s' "$CAP" | grep -o 'Processed a total of [0-9]* messages' | head -1)"
+    [[ $rc -eq 0 && "$CAP" == *"Processed a total of 3 messages"* ]] || st=1
+  fi
+  ok_if KA8 5 KA "$st" "$ev"
+
+  # KA9: the CLI's lag view carries the admin command-config in oauth_ssl mode (38-krate-lag.log).
+  cap "$KRATE" lag; rc=$?
+  ev="lag exit=$rc: $(printf '%s' "$CAP" | grep -E 'gate5-payments' | head -1 | tr -s ' ')"
+  [[ $rc -eq 0 && "$CAP" == *"gate5-payments"* && "$CAP" == *"caught up"* ]]; st=$?
+  if [[ $st -eq 0 ]]; then
+    cap "$KRATE" lag gate5-payments; rc=$?; ev="$ev; lag gate5-payments exit=$rc: $(printf '%s' "$CAP" | grep -o 'Total lag: [0-9]*' | head -1)"
+    [[ $rc -eq 0 && "$CAP" == *"Total lag: 0"* ]] || st=1
+  fi
+  ok_if KA9 5 KA "$st" "$ev"
+
+  # KA10: the monitoring stack's kafka-exporter authenticates with SCRAM-SHA-512 from a response file (its password on no argv), and
+  # Prometheus scrapes it: broker count and the group's lag (41-/43-kafka-exporter-scram*.txt).
+  cap "$KRATE" monitor up; rc=$?; collect_secrets
+  ev="monitor up exit=$rc"; st=$rc
+  if [[ $st -eq 0 ]]; then
+    id="$(mon_cid kafka-exporter)"
+    if [[ -z "$id" ]]; then st=1; ev="$ev; no kafka-exporter container"
+    else
+      p5_cap docker exec "$id" sh -c 'tr "\0" " " < /proc/1/cmdline'
+      [[ "$CAP" == *"@/tmp/krate-exporter.flags"* && "$CAP" != *"--sasl.password"* ]] || st=1
+      ev="$ev; exporter argv: $(printf '%s' "$CAP" | grep -o -E '@/tmp/krate-exporter.flags|--sasl\.password' | head -1 || echo none)"
+      p5_cap docker exec "$id" sh -c 'sed -E "s/(password=).+/\1<redacted>/" /tmp/krate-exporter.flags'
+      [[ "$CAP" == *"--sasl.mechanism=scram-sha512"* && "$CAP" == *"--sasl.username=krate-exporter"* ]] || st=1
+      ev="$ev; flags: $(printf '%s' "$CAP" | grep -o -E '\-\-sasl\.(mechanism|username)=[a-z0-9-]+' | tr '\n' ' ')"
+    fi
+  fi
+  if [[ $st -eq 0 ]]; then
+    attempt=0; w=""
+    while [[ $attempt -lt 30 ]]; do
+      attempt=$((attempt+1))
+      w="$(curl -s --max-time 10 "http://127.0.0.1:$PROM_GATE_PORT/api/v1/targets?state=active" | python3 -c 'import json, sys
+try:
+    t = [x for x in json.load(sys.stdin)["data"]["activeTargets"] if "kafka-exporter" in x.get("scrapeUrl", "")]
+    print(t[0]["health"] if t else "absent")
+except Exception:
+    print("unparsed")' 2>/dev/null)"
+      [[ "$w" == up ]] && break
+      sleep 3
+    done
+    ev="$ev; prometheus kafka-exporter target $w after $attempt poll(s)"
+    [[ "$w" == up ]] || st=1
+  fi
+  if [[ $st -eq 0 ]]; then
+    w="$(curl -s -G --max-time 10 "http://127.0.0.1:$PROM_GATE_PORT/api/v1/query" --data-urlencode 'query=kafka_brokers' | python3 -c 'import json, sys
+r = json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "none")' 2>/dev/null)"
+    ev="$ev; kafka_brokers=$w"; [[ "$w" == "$n" ]] || st=1
+    w="$(curl -s -G --max-time 10 "http://127.0.0.1:$PROM_GATE_PORT/api/v1/query" --data-urlencode 'query=kafka_consumergroup_lag{consumergroup="gate5-payments"}' | python3 -c 'import json, sys
+r = json.load(sys.stdin)["data"]["result"]; print(len(r))' 2>/dev/null)"
+    ev="$ev; kafka_consumergroup_lag{gate5-payments} rows=$w"; [[ "$w" == 3 ]] || st=1
+  fi
+  if [[ $st -eq 0 ]]; then
+    (umask 077; printf '%s\n' "$(envv KAFKA_EXPORTER_SCRAM_PASSWORD)" > "$STATE/p5-exporter.pattern")
+    # shellcheck disable=SC2009  # the argument vectors are the subject
+    hits="$(ps -eo args= 2>/dev/null | grep -c -F -f "$STATE/p5-exporter.pattern" || true)"; rm -f "$STATE/p5-exporter.pattern"
+    ev="$ev; host argv hits for the exporter password: ${hits:-0}"; [[ "${hits:-0}" == 0 ]] || st=1
+  fi
+  ok_if KA10 5 KA "$st" "$ev"
+
+  # KA11: renew-tls issues a new leaf and every broker reloads it live: new serial on every published port, StartedAt unchanged,
+  # the client still connects (45-renew-tls-2.txt).
+  started0="$(p5_started)"
+  cap "$KRATE" kafka renew-tls; rc=$?
+  started1="$(p5_started)"
+  serial1="$(openssl x509 -in "$ED/auth/kafka/oauth_ssl/certs/broker.crt" -noout -serial 2>/dev/null | cut -d= -f2)"
+  ev="renew-tls exit=$rc: $(printf '%s' "$CAP" | grep -o -E 'Keystores reloaded on all brokers|TLS certificates renewed successfully' | tr '\n' ';') on-disk serial ${serial1:-none} (was ${serial0:-none}); wire:"
+  st=0
+  [[ $rc -eq 0 && "$CAP" == *"Keystores reloaded on all brokers"* && "$CAP" == *"TLS certificates renewed successfully"* && -n "$serial1" && "$serial1" != "$serial0" && -n "$started0" && "$started0" == "$started1" ]] || st=1
+  for p in "${P5_PORTS[@]}"; do w="$(p5_serial "$p")"; ev="$ev $p=${w:-none}"; [[ "$w" == "$serial1" ]] || st=1; done
+  attempt=0; rc=1
+  while [[ $attempt -lt 2 && $rc -ne 0 ]]; do attempt=$((attempt+1)); p5_tool kafka-broker-api-versions.sh --bootstrap-server "$boot" --command-config /gate/client-ui.properties; rc=$?; done
+  [[ $rc -eq 0 ]] || st=1
+  ok_if KA11 5 KA "$st" "$ev; brokers StartedAt unchanged: $([[ -n "$started0" && "$started0" == "$started1" ]] && echo yes || echo no); client after renewal exit=$rc"
+
+  # KA12: disable returns to local (PLAINTEXT), the brokers come back healthy, a client without any configuration reads the same records (46-auth-disable.txt).
+  cap "$KRATE" kafka auth disable; rc=$?
+  ev="disable exit=$rc: $(printf '%s' "$CAP" | grep -o 'Kafka OAuth/TLS disabled' | head -1); KAFKA_AUTH_MODE=$(envv KAFKA_AUTH_MODE) map=$(envv KAFKA_LISTENER_SECURITY_PROTOCOL_MAP)"
+  [[ $rc -eq 0 && "$CAP" == *"Kafka OAuth/TLS disabled"* && "$(envv KAFKA_AUTH_MODE)" == local && "$(envv KAFKA_LISTENER_SECURITY_PROTOCOL_MAP)" == "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT" ]]; st=$?
+  if [[ $st -eq 0 ]]; then
+    cap "$KRATE" health; rc=$?; ev="$ev; health exit=$rc"; [[ $rc -eq 0 && "$CAP" == *"All services healthy"* ]] || st=1
+  fi
+  if [[ $st -eq 0 ]]; then
+    p5_tool kafka-console-consumer.sh --bootstrap-server "$boot" --topic gate5-orders --group gate5-plain --from-beginning --max-messages 3 --timeout-ms 30000; rc=$?
+    ev="$ev; plain consumer exit=$rc: $(printf '%s' "$CAP" | grep -o 'Processed a total of [0-9]* messages' | head -1)"
+    [[ $rc -eq 0 && "$CAP" == *"Processed a total of 3 messages"* ]] || st=1
+  fi
+  ok_if KA12 5 KA "$st" "$ev"
+
+  # KA13: disable with the brokers stopped only rewrites .env (47-auth-disable-no-broker.txt); start brings everything back.
+  cap "$KRATE" stop; rc=$?; ev="stop exit=$rc"; st=$rc
+  if [[ $st -eq 0 ]]; then
+    cap "$KRATE" kafka auth disable; rc=$?; ev="$ev; disable with no broker exit=$rc: $(printf '%s' "$CAP" | grep -o 'Kafka OAuth/TLS disabled' | head -1)"
+    [[ $rc -eq 0 && "$CAP" == *"Kafka OAuth/TLS disabled"* ]] || st=1
+  fi
+  if [[ $st -eq 0 ]]; then
+    cap "$KRATE" start; rc=$?; ev="$ev; start exit=$rc"; [[ $rc -eq 0 ]] || st=1
+    cap "$KRATE" health; rc=$?; ev="$ev; health exit=$rc"; [[ $rc -eq 0 && "$CAP" == *"All services healthy"* ]] || st=1
+  fi
+  ok_if KA13 5 KA "$st" "$ev"
+
+  # KA14: during an enable the master admin password and the Kafbat client secret appear on no process argument on the host
+  # (`ps -eo args=` every 0.25 s; 49-admin-password-argv-scan.txt); the slice ends in local mode (50-auth-disable-final.txt).
+  (umask 077; { envv KEYCLOAK_ADMIN_PASSWORD; echo; envv KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET; echo; } | grep -v '^$' > "$STATE/p5-admin.pattern"; : > "$STATE/p5-admin.hits")
+  p5_scan_start "$STATE/p5-admin.pattern" "$STATE/p5-admin.hits"
+  cap "$KRATE" kafka auth enable; rc=$?
+  hits="$(p5_scan_stop "$STATE/p5-admin.hits")"; w="$(wc -l < "$STATE/p5-admin.hits" | tr -d ' ')"
+  rm -f "$STATE/p5-admin.pattern" "$STATE/p5-admin.hits"
+  ev="enable exit=$rc; $w ps samples, $hits argv hits for the admin password / client secret"
+  [[ $rc -eq 0 && "$CAP" == *"Kafka OAuth/TLS enabled successfully"* && "$w" -gt 0 && "$hits" == 0 ]]; st=$?
+  cap "$KRATE" kafka auth disable; rc=$?
+  ev="$ev; final disable exit=$rc, KAFKA_AUTH_MODE=$(envv KAFKA_AUTH_MODE)"
+  [[ $rc -eq 0 && "$(envv KAFKA_AUTH_MODE)" == local ]] || st=1
+  ok_if KA14 5 KA "$st" "$ev"
+
+  # The monitoring logs join the Z5 scan (copied before monitor down, as run_phase2 does); the client configurations go.
+  for id in prometheus grafana loki kafka-exporter; do
+    w="$(mon_cid "$id")"
+    if [[ -z "$w" ]]; then echo "mon-$id.log (no container)" >> "$STATE/logs-not-captured.txt"
+    else docker logs "$w" > "$STATE/mon-$id.log" 2>&1 || echo "mon-$id.log (docker logs failed)" >> "$STATE/logs-not-captured.txt"; fi
+  done
+  cap "$KRATE" monitor down; log "monitor down exit=$?"
+  p5_cleanup
+}
+
 # ═══════════════════════════ air gap (AG1-AG5) ═══════════════════════════
 # A receipt on a bundle host proves the offline condition it claims (owner programme: "Installation/start in the
 # offline test must not fetch missing components"; plan R2b). scripts/gate/phase4_airgap.py runs the probes and
@@ -2898,7 +3219,7 @@ leak_scan() {
     docker logs "$id" > "$STATE/$svc.log" 2>&1 || unread+=("$svc (docker logs failed)")
     places+=("$STATE/$svc.log")
   done
-  for svc in prometheus grafana loki; do  # captured by run_phase2 before monitor down
+  for svc in prometheus grafana loki kafka-exporter; do  # captured by run_phase2 (and run_phase5, with the exporter) before monitor down
     [[ -f "$STATE/mon-$svc.log" ]] && places+=("$STATE/mon-$svc.log")
   done
   [[ -f "$STATE/pingstub.log" ]] && places+=("$STATE/pingstub.log")  # captured by run_phase3 before the stand-in goes down
@@ -3305,6 +3626,8 @@ case "$PHASE" in
   # the Phase 4 stories are X3/X4 under --public-host); the slice's own leak rows
   # are Z4a/Z4b.
   4a|4b|4c) run_phase1; leak_scan Z1 1; run_phase4 "$PHASE" ;;
+  # Phase 5: the Kafka authentication slice runs REQUIRED_P1 (with its Z1 scan), then KA0-KA15 and its own leak row Z5.
+  5) run_phase1; leak_scan Z1 1; run_phase5; leak_scan Z5 5 ;;
 esac
 airgap_after_rows
 FINISHED=true

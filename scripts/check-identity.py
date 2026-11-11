@@ -1192,6 +1192,20 @@ def check_gate_scripts(checks):
                 '| W6 | runner (Mac vantage only; J7 pattern) | the client address',
                 '| W7 | runner (Mac vantage only; J7 pattern) | the firewall state'):
         e(row in guide, f'the guide carries the W-row ({row[2:20]}...); its text must match the code')
+    # Phase 5 (Kafka authentication): the inventory, its rows in the guide, the localhost contract, and the slice's shape.
+    p5_ids = ('KA0', 'KA1', 'KA2', 'KA3', 'KA4', 'KA15', 'KA5', 'KA6', 'KA7', 'KA8', 'KA9', 'KA10', 'KA11', 'KA12', 'KA13', 'KA14', 'Z5')
+    e('REQUIRED_P5=(' + ' '.join(p5_ids) + ')' in runner_text,
+      'the runner declares REQUIRED_P5 with KA0-KA15 and the leak row Z5')
+    e('5) run_phase1; leak_scan Z1 1; run_phase5; leak_scan Z5 5 ;;' in runner_text,
+      'the Phase 5 slice runs REQUIRED_P1 with its Z1 scan, then its own rows and the Z5 scan')
+    e('### KA: Phase 5, "Kafka authentication in oauth_ssl mode"' in guide,
+      'the guide carries the Phase 5 Kafka authentication section')
+    for rid in p5_ids:
+        e(f'| {rid} | runner' in guide, f'the guide documents the Phase 5 row {rid}')
+    e('Phase 5 is a localhost run (no `--public-host`' in guide and '--public-host is refused with --phase $PHASE: the Phase 5 inventory' in runner_text,
+      'Phase 5 is a localhost run: the guide says so and the runner refuses --public-host for it')
+    e('--network "container:$P5_PROXY"' in runner_text and 'p5_cleanup' in runner_text and 'collect_secrets' in function_body(runner_text, 'run_phase5'),
+      'the Phase 5 client rows run in the proxy network namespace, the slice removes its client configurations, and the enable-generated secrets join the scan set')
     e('docker-forwarding` policy' in guide and '--add-port=443/tcp' in guide,
       "the guide carries the F10 firewall sentences (Docker's rules, the IPv6 zone clause, DOCKER-USER/bind address)")
     # ── review round (TOPOFIX-IMPL-REVIEW §4): the four defects the 48 mutants could not reach ──
