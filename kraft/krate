@@ -5625,13 +5625,20 @@ cmd_kafka_auth_enable() {
   done
 
   info "Provisioning krate-exporter SCRAM user..."
-  docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
+  local err
+  err="$(mktemp)" || die "Cannot create a temporary file"
+  if ! docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
     --bootstrap-server "$BOOTSTRAP" \
     --command-config /mnt/shared/config/admin.properties \
     --entity-type users \
     --entity-name krate-exporter \
     --alter \
-    --add-config-file /mnt/shared/config/exporter-scram.properties >/dev/null || die "Failed to provision exporter user"
+    --add-config-file /mnt/shared/config/exporter-scram.properties >/dev/null 2>"$err"; then
+    # kafka-configs echoes a rejected property with its credential: redact it before it reaches a terminal or log.
+    sed -E 's/password=[^],[:space:]]*/password=[redacted]/g; s/^/  /' "$err" >&2; rm -f "$err"
+    die "Failed to provision the krate-exporter SCRAM user"
+  fi
+  rm -f "$err"
 
   info "Granting krate-exporter ACLs..."
   docker exec "$broker" /opt/kafka/bin/kafka-acls.sh \

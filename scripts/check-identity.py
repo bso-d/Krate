@@ -7133,6 +7133,12 @@ def check_broker_apply(checks):
           f'{edition}/krate: kafka auth enable reconciles the realm (scope, policy, DCR, krate-ui-kafka) before it renders the broker material')
         e('--add-config-file /mnt/shared/config/exporter-scram.properties' in enable and 'SCRAM-SHA-512=[' not in enable,
           f'{edition}/krate: the krate-exporter SCRAM credential is provisioned from the rendered file, never as an --add-config argument')
+        e('--add-config-file /mnt/shared/config/exporter-scram.properties >/dev/null 2>"$err"; then' in enable
+          and "sed -E 's/password=[^],[:space:]]*/password=[redacted]/g; s/^/  /' \"$err\" >&2" in enable,
+          f'{edition}/krate: a rejected SCRAM property is shown with its credential redacted (kafka-configs echoes it on stderr)')
+        e("SCRAM-SHA-512=password={exporter_pw}" in (ROOT / 'sso/kafka_broker_auth.py').read_text()
+          and '[password=' not in (ROOT / 'sso/kafka_broker_auth.py').read_text(),
+          'sso/kafka_broker_auth.py: exporter-scram.properties carries the bracket-less value (--add-config-file loads it verbatim; brackets are stripped only from --add-config)')
         e(enable.count('--allow-principal User:krate-exporter') == 2
           and re.search(r"--operation Describe \\\n\s*--operation DescribeConfigs \\\n\s*--topic '\*' \\\n\s*--cluster", enable) is not None
           and re.search(r"--operation Describe \\\n\s*--group '\*'", enable) is not None and "DescribeConfigs \\\n    --group" not in enable,

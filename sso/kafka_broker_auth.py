@@ -413,7 +413,7 @@ sasl.mechanism=SCRAM-SHA-512
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="krate-exporter" password="{exporter_pw}";
 '''
 
-    exporter_scram_props = f'''SCRAM-SHA-512=[password={exporter_pw}]
+    exporter_scram_props = f'''SCRAM-SHA-512=password={exporter_pw}
 '''
 
     # Write config files atomically
