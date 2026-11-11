@@ -1196,6 +1196,8 @@ def check_gate_scripts(checks):
     p5_ids = ('KA0', 'KA1', 'KA2', 'KA3', 'KA4', 'KA15', 'KA5', 'KA6', 'KA7', 'KA8', 'KA9', 'KA10', 'KA11', 'KA12', 'KA13', 'KA14', 'Z5')
     e('REQUIRED_P5=(' + ' '.join(p5_ids) + ')' in runner_text,
       'the runner declares REQUIRED_P5 with KA0-KA15 and the leak row Z5')
+    e(runner_text.count('"$ED/auth/kafka/oauth_ssl" "$ED/auth/kafka/ca" "$MON_DIR/.env"; do') == 2,
+      'the runner wipes the generated Kafka auth material (auth/kafka/oauth_ssl, auth/kafka/ca) with the fixture state, in fixture_reset and in teardown')
     e('5) run_phase1; leak_scan Z1 1; run_phase5; leak_scan Z5 5 ;;' in runner_text,
       'the Phase 5 slice runs REQUIRED_P1 with its Z1 scan, then its own rows and the Z5 scan')
     e('### KA: Phase 5, "Kafka authentication in oauth_ssl mode"' in guide,
@@ -7174,6 +7176,9 @@ def check_broker_apply(checks):
         e('--add-config-file /mnt/shared/config/exporter-scram.properties >/dev/null 2>"$err"; then' in enable
           and "sed -E 's/password=[^],[:space:]]*/password=[redacted]/g; s/^/  /' \"$err\" >&2" in enable,
           f'{edition}/krate: a rejected SCRAM property is shown with its credential redacted (kafka-configs echoes it on stderr)')
+        e('not keystore_opens(broker_p12, keystore_pw)' in (ROOT / 'sso/kafka_broker_auth.py').read_text()
+          and "'-passin', 'env:KRATE_PKCS12_PASSWORD'" in (ROOT / 'sso/kafka_broker_auth.py').read_text(),
+          'sso/kafka_broker_auth.py: a kept broker keystore is re-issued unless it opens with the current KAFKA_TLS_KEYSTORE_PASSWORD (password via the environment)')
         e("SCRAM-SHA-512=password={exporter_pw}" in (ROOT / 'sso/kafka_broker_auth.py').read_text()
           and '[password=' not in (ROOT / 'sso/kafka_broker_auth.py').read_text(),
           'sso/kafka_broker_auth.py: exporter-scram.properties carries the bracket-less value (--add-config-file loads it verbatim; brackets are stripped only from --add-config)')

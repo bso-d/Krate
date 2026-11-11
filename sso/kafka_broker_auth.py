@@ -261,6 +261,16 @@ def _issue_leaf_keystore(ca_dir, certs_dir, edition, advertised_host, keystore_p
             tmp.unlink()
 
 
+def keystore_opens(p12_path, password):
+    """True when the PKCS12 keystore opens with `password` (the password goes through the environment, never argv)."""
+    try:
+        _openssl(['pkcs12', '-in', str(p12_path), '-nokeys', '-passin', 'env:KRATE_PKCS12_PASSWORD'],
+                 cwd=Path(p12_path).parent, env={'KRATE_PKCS12_PASSWORD': password})
+    except subprocess.SubprocessError:
+        return False
+    return True
+
+
 def inspect_cert(cert_path):
     """Inspect a certificate and return dict with serial, subject, not_after, sans.
 
@@ -356,12 +366,16 @@ def render_broker_auth(env_file, edition, output_dir, ca_dir, trust_dir):
     if not broker_p12.exists() or not broker_crt.exists():
         need_issue = True
     else:
-        # Check if SANs match
+        # A kept leaf must still match the plan: the SANs of the advertised host and edition, and the
+        # keystore password of the current .env. A keystore written under an earlier .env (a wiped
+        # fixture, a restored backup, a rotated KAFKA_TLS_KEYSTORE_PASSWORD) cannot be opened by the
+        # broker ("keystore password was incorrect", a fatal startup error on every broker); it is
+        # re-issued instead of kept.
         try:
             cert_info = inspect_cert(broker_crt)
             existing_sans = set(cert_info.get('sans', []))
             expected_sans = set(san_entries(edition, advertised_host))
-            if existing_sans != expected_sans:
+            if existing_sans != expected_sans or not keystore_opens(broker_p12, keystore_pw):
                 need_issue = True
         except Exception:
             need_issue = True
