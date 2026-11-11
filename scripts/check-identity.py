@@ -7105,12 +7105,51 @@ def check_broker_apply(checks):
               f'{edition}/krate: the {verdict} verdict must be captured with || die')
             e(f'identity.py" broker --plan "$plan" {verdict}' in cli and f'== differs' not in cli.split(verdict)[1].split('\n')[0],
               f'{edition}/krate: {verdict} must not be compared inside [[ ]]')
-        # Five verdict consumers: the broker provider, its mappers, its redirector config,
-        # krate-grafana client and (Phase 4) krate-perses client.
+        # Six verdict consumers: the broker provider, its mappers, its redirector config,
+        # krate-grafana client, (Phase 4) krate-perses client and (Phase 5) the krate-ui-kafka
+        # broker client of `krate kafka auth enable`.
         unexpected = cli.count('*) die "Unexpected comparison result')  # hoisted: Python 3.9 (RHEL 9) rejects a backslash inside an f-string expression
-        e(unexpected == 5, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
+        e(unexpected == 6, f'{edition}/krate: each verdict case must refuse an unexpected result; got {unexpected}')
         e('PING_KEYCLOAK_CLIENT_SECRET="$(env_value PING_KEYCLOAK_CLIENT_SECRET)" python3' in cli,
           f'{edition}/krate: the secret enters identity.py broker through the environment of that process only')
+        # Phase 5 (Kafka OAuth): the krate-ui-kafka client follows the krate-grafana pattern —
+        # the verdict carries the .env secret (a rotated KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET is
+        # converged, never reported "unchanged"), the secret enters identity.py through the
+        # environment of that process, and every representation reaches kcadm on stdin.
+        ui_reconcile = function_body(cli, 'kafka_reconcile_ui_broker_client')
+        e(re.search(r'verdict="\$\(kcadm -- get "clients/\$id"[^\n]*\\\n(?:[^\n]*\\\n)*[^\n]*ui-client --differs --with-secret\)"( \\\n\s*)?\s*\|\| die', ui_reconcile) is not None
+          and 'KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET="$(env_value KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET)"' in ui_reconcile,
+          f'{edition}/krate: the krate-ui-kafka verdict must be computed with the .env secret (environment assignment) and captured with || die')
+        e(ui_reconcile.count('| KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f -') == 1
+          and ui_reconcile.count('| KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m') == 1
+          and ui_reconcile.count('kafka_set_ui_broker_client_secret "$id"') == 2 and '--with-secret' not in ui_reconcile.split('verdict=')[0],
+          f'{edition}/krate: krate-ui-kafka is created and updated secret-free on kcadm stdin, and the secret is set afterwards on both paths')
+        ui_secret = function_body(cli, 'kafka_set_ui_broker_client_secret')
+        e('os.environ["KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET"]' in ui_secret and '| KCADM_STDIN=1 kcadm -- update "clients/$1"' in ui_secret
+          and 'printf' not in ui_secret,
+          f'{edition}/krate: the krate-ui-kafka secret is JSON-encoded from the environment and piped to kcadm, never built with printf from an argument')
+        enable = function_body(cli, 'cmd_kafka_auth_enable')
+        e(enable.index('identity_reconcile_kafka_auth kafka-auth') < enable.index('kafka_reconcile_ui_broker_client') < enable.index('kafka-broker render'),
+          f'{edition}/krate: kafka auth enable reconciles the realm (scope, policy, DCR, krate-ui-kafka) before it renders the broker material')
+        e('--add-config-file /mnt/shared/config/exporter-scram.properties' in enable and 'SCRAM-SHA-512=[' not in enable,
+          f'{edition}/krate: the krate-exporter SCRAM credential is provisioned from the rendered file, never as an --add-config argument')
+        e(enable.count('--allow-principal User:krate-exporter') == 2
+          and re.search(r"--operation Describe \\\n\s*--operation DescribeConfigs \\\n\s*--topic '\*' \\\n\s*--cluster", enable) is not None
+          and re.search(r"--operation Describe \\\n\s*--group '\*'", enable) is not None and "DescribeConfigs \\\n    --group" not in enable,
+          f'{edition}/krate: the exporter ACLs are two grants (Describe+DescribeConfigs on topics/cluster; Describe only on groups — GROUP refuses DescribeConfigs)')
+        for name in ('cmd_kafka_auth_enable', 'cmd_kafka_auth_disable', 'kafka_refresh_exporter'):
+            e('grep -q kafka-exporter' not in function_body(cli, name),
+              f'{edition}/krate: {name} must not detect the exporter by a bare name match (another cluster project\'s monitoring would be touched)')
+        refresh = function_body(cli, 'kafka_refresh_exporter')
+        e('label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring' in refresh and 'net="$(monitor_network)" || return 0' in refresh
+          and 'monitor_compose up -d --pull never --no-deps kafka-exporter' in refresh,
+          f'{edition}/krate: kafka_refresh_exporter recreates the exporter only when the monitoring project is attached to this cluster\'s network')
+        # In oauth_ssl mode the INTERNAL listener authenticates, so every Kafka tool the CLI runs
+        # inside a broker carries the rendered admin credentials (review B3-R1 finding B1).
+        lag = function_body(cli, 'cmd_lag')
+        e(lag.count('/opt/kafka/bin/kafka-consumer-groups.sh') == 3 and lag.count('${KAFKA_ADMIN_ARGS[@]+"${KAFKA_ADMIN_ARGS[@]}"}') == 3
+          and '\n  kafka_admin_args\n' in lag,
+          f'{edition}/krate: every Kafka tool call in cmd_lag must carry KAFKA_ADMIN_ARGS (set once by kafka_admin_args)')
     if bash_binary() is None:
         return
     plan = load_configure_dual().configs(example_site(), SYNTHETIC)['keycloak/pingfederate-idp.json']

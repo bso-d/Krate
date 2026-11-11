@@ -381,7 +381,7 @@ else
   PRODUCT_BINDING="not compared (no git and no --candidate)"
 fi
 EDITION_DIGESTS=""
-for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$ED/nginx-stream.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/operations.sh" "$SSO/operations.py" "$SSO/probe.py" "$SSO/configure-dual.py"; do
+for f in "$ED/krate" "$ED/docker-compose.yml" "$ED/.env.template" "$ED/nginx.conf" "$ED/nginx-stream.conf" "$SSO/identity.py" "$SSO/preflight.py" "$SSO/activate.sh" "$SSO/operations.sh" "$SSO/operations.py" "$SSO/probe.py" "$SSO/configure-dual.py" "$SSO/kafka_broker_auth.py"; do
   [[ -f "$f" ]] && EDITION_DIGESTS="$EDITION_DIGESTS ${f#"$TOPLEVEL"/}=$(sha256file "$f")"
 done
 if [[ -n "$REPO_ARG" ]]; then

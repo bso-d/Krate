@@ -25,6 +25,12 @@ import tempfile
 from urllib.parse import quote, urlsplit
 
 
+# Ensure sso directory is in sys.path for imports (especially for direct script execution)
+_sso_dir = Path(__file__).parent
+if str(_sso_dir) not in sys.path:
+    sys.path.insert(0, str(_sso_dir))
+
+
 REALM = 'krate'
 UI_CLIENT = 'krate-ui'
 CLI_CLIENT = 'krate-cli'
@@ -2151,6 +2157,41 @@ def cmd_backup_open(args):
     return 0
 
 
+def cmd_kafka_broker(args):
+    """Manage Kafka broker OAuth2 + TLS configuration."""
+    import kafka_broker_auth  # sso/ is on sys.path (top of this module)
+
+    # Validate required arguments based on action
+    if args.action in ('render', 'renew-tls'):
+        if not args.env_file or not args.edition or not args.ca_dir or not args.trust_dir:
+            raise ValueError(f'{args.action} requires --env-file, --edition, --ca-dir, and --trust-dir')
+
+    if args.action == 'render':
+        result = kafka_broker_auth.render_oauth_ssl(
+            args.env_file, args.edition, args.output_dir, args.ca_dir, args.trust_dir
+        )
+        sys.stdout.write(json.dumps(result) + '\n')
+        return 0
+    elif args.action == 'renew-tls':
+        result = kafka_broker_auth.renew_kafka_tls(
+            args.env_file, args.edition, args.output_dir, args.ca_dir, args.trust_dir
+        )
+        sys.stdout.write(json.dumps(result) + '\n')
+        return 0
+    elif args.action == 'rollback-tls':
+        kafka_broker_auth.rollback_kafka_tls(args.output_dir)
+        sys.stdout.write(json.dumps({'status': 'rolled back'}) + '\n')
+        return 0
+    elif args.action == 'discard-previous-tls':
+        kafka_broker_auth.discard_previous_kafka_tls(args.output_dir)
+        sys.stdout.write(json.dumps({'status': 'previous discarded'}) + '\n')
+        return 0
+    elif args.action == 'inspect-tls':
+        result = kafka_broker_auth.inspect_kafka_tls(args.output_dir)
+        sys.stdout.write(json.dumps(result) + '\n')
+        return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=(__doc__ or '').splitlines()[0])
     commands = parser.add_subparsers(dest='command', required=True)
@@ -2219,6 +2260,14 @@ def main():
     digest = commands.add_parser('truststore-digest', help='digest of the PEM files Keycloak loads from a truststores directory')
     digest.add_argument('--directory', type=Path, required=True)
     digest.set_defaults(func=cmd_truststore_digest)
+    kbroker = commands.add_parser("kafka-broker", help="Kafka broker OAuth2 + TLS configuration (CA, certificates, SASL config)")
+    kbroker.add_argument("action", choices=["render", "renew-tls", "rollback-tls", "discard-previous-tls", "inspect-tls"], help="action to perform")
+    kbroker.add_argument("--env-file", type=Path, required=False, help=".env file with secrets")
+    kbroker.add_argument("--edition", required=False, choices=["kraft", "epc"], help="edition: kraft or epc")
+    kbroker.add_argument("--output-dir", type=Path, required=True, help="output directory for config files")
+    kbroker.add_argument("--ca-dir", type=Path, required=False, help="directory for CA key and cert")
+    kbroker.add_argument("--trust-dir", type=Path, required=False, help="directory for public CA cert")
+    kbroker.set_defaults(func=cmd_kafka_broker)
     kauth = commands.add_parser('kafka-auth', help='Kafka OAuth client scope, rotation policies, DCR scope, Kafbat UI client and managed clients')
     kauth.add_argument('--env-file', type=Path, default=None, help='path to .env file for rotation profile settings')
     kauth.add_argument('action', choices=['scope', 'scope-differs', 'merge-profiles', 'merge-policies', 'merge-dcr-scopes', 'ui-client', 'managed-client'])

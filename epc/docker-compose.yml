@@ -31,9 +31,10 @@ services:
       # it only works for clients on this VM — set KAFKA_ADVERTISED_HOST in .env
       # to this host's FQDN or IP before any off-box client connects.
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-92:19092,EXTERNAL://${KAFKA_ADVERTISED_HOST:-localhost}:${KAFKA_BROKER_92_PORT:-9092}
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: ${KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:-INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT}
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KRATE_KAFKA_AUTH_SHA: ${KRATE_KAFKA_AUTH_SHA:-}
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
       # 2-broker cluster: RF=2 with min ISR 1, so a single broker outage does not
@@ -58,6 +59,13 @@ services:
       # RHEL, ignored where SELinux is not enforcing. The directory must exist
       # and be owned by the image's uid before start; './kafka' handles that.
       - ${KAFKA_DATA_DIR:-/data}/krate/broker-92:/var/lib/kafka/data:Z
+      - type: bind
+        source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
+        target: /mnt/shared/config
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
     networks:
       - kafka-network
       - kafka-auth
@@ -88,9 +96,10 @@ services:
       # it only works for clients on this VM — set KAFKA_ADVERTISED_HOST in .env
       # to this host's FQDN or IP before any off-box client connects.
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-93:19093,EXTERNAL://${KAFKA_ADVERTISED_HOST:-localhost}:${KAFKA_BROKER_93_PORT:-9093}
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: ${KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:-INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT}
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KRATE_KAFKA_AUTH_SHA: ${KRATE_KAFKA_AUTH_SHA:-}
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
       # 2-broker cluster: RF=2 with min ISR 1, so a single broker outage does not
@@ -115,6 +124,13 @@ services:
       # RHEL, ignored where SELinux is not enforcing. The directory must exist
       # and be owned by the image's uid before start; './kafka' handles that.
       - ${KAFKA_DATA_DIR:-/data}/krate/broker-93:/var/lib/kafka/data:Z
+      - type: bind
+        source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
+        target: /mnt/shared/config
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
     networks:
       - kafka-network
       - kafka-auth
@@ -150,6 +166,10 @@ services:
       SPRING_SECURITY_USER_NAME: ${KAFKA_UI_USER}
       SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD}
       KEYCLOAK_KAFBAT_CLIENT_SECRET: ${KEYCLOAK_KAFBAT_CLIENT_SECRET}
+      KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET: ${KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET:-}
+      KAFKA_UI_SECURITY_PROTOCOL: ${KAFKA_UI_SECURITY_PROTOCOL:-PLAINTEXT}
+      KAFKA_UI_SASL_MECHANISM: ${KAFKA_UI_SASL_MECHANISM:-PLAIN}
+      KAFKA_UI_OAUTH_TOKEN_URL: ${KAFKA_UI_OAUTH_TOKEN_URL:-http://keycloak:8080/identity/realms/krate/protocol/openid-connect/token}
       SPRING_CONFIG_ADDITIONAL_LOCATION: file:/etc/kafbat/kafbat.yml,file:/etc/krate/auth/${KAFKA_UI_AUTH_CONFIG:-local.yml}
       # Digest of the applied auth file (krate auth apply): a changed file changes
       # this value, and only then does Compose recreate the container.

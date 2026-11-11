@@ -339,10 +339,14 @@ deploy_release() {
       && chmod 644 "$KRATE_HOME/monitoring/.env.template"; }; then
     die "Could not copy the .env templates to $KRATE_HOME"
   fi
-  mkdir -p "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak/truststores"
-  chmod go+rx "$KRATE_HOME/auth" "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak" "$KRATE_HOME/auth/keycloak/truststores"
+  mkdir -p "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak/truststores" "$KRATE_HOME/auth/kafka" "$KRATE_HOME/auth/kafka/local"
+  chmod go+rx "$KRATE_HOME/auth" "$KRATE_HOME/auth/ui" "$KRATE_HOME/auth/keycloak" "$KRATE_HOME/auth/keycloak/truststores" "$KRATE_HOME/auth/kafka" "$KRATE_HOME/auth/kafka/local"
   cp "$SCRIPT_DIR/auth/ui/local.yml" "$KRATE_HOME/auth/ui/local.yml"
   chmod 644 "$KRATE_HOME/auth/ui/local.yml"
+  if [[ -f "$SCRIPT_DIR/auth/kafka/local/server.properties" ]]; then
+    cp "$SCRIPT_DIR/auth/kafka/local/server.properties" "$KRATE_HOME/auth/kafka/local/server.properties"
+    chmod 644 "$KRATE_HOME/auth/kafka/local/server.properties"
+  fi
   if [[ -f "$SCRIPT_DIR/monitoring/auth/local.ini" ]]; then
     mkdir -p "$KRATE_HOME/monitoring/auth"
     chmod go+rx "$KRATE_HOME/monitoring" "$KRATE_HOME/monitoring/auth"
@@ -1226,7 +1230,8 @@ ensure_identity_dirs() {
   # (fixture epc 2026-10-23), and then no later install -d or rm by this user
   # can touch it — every subsequent identity command would fail there.
   local auth_dirs=("$SCRIPT_DIR/auth" "$SCRIPT_DIR/auth/ui" "$SCRIPT_DIR/auth/keycloak"
-                   "$SCRIPT_DIR/auth/keycloak/truststores" "$SCRIPT_DIR/auth/keycloak/db-tls")
+                   "$SCRIPT_DIR/auth/keycloak/truststores" "$SCRIPT_DIR/auth/keycloak/db-tls"
+                   "$SCRIPT_DIR/auth/kafka" "$SCRIPT_DIR/auth/kafka/local")
   if ! install -d -m 755 "${auth_dirs[@]}"; then
     # Take the krate-owned tree back with the same sudo path the install flow
     # itself uses; without sudo, name the exact recovery command.
@@ -2496,7 +2501,7 @@ cmd_identity_rotate() {
       fi
       kcadm_logout
       set_env_file_value "$ENV_FILE" "$key" "$value"
-      if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml || "$(env_value KAFKA_SECURITY_CONFIG)" == oauth_ssl ]]; then
+      if [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml || "$(env_value KAFKA_AUTH_MODE)" == oauth_ssl ]]; then
         info "Recreating Kafbat UI with the new Kafka client secret..."
         compose_cmd up -d --pull never --no-build --no-deps --force-recreate --wait --wait-timeout "$IDENTITY_TIMEOUT" kafka-ui
       fi
@@ -4119,6 +4124,16 @@ This bundle was built without the observability stack."
                       env_value_file "$env_file" GRAFANA_OAUTH_CLIENT_SECRET; } | cksum | cut -d' ' -f1)"
   fi
 
+  # Configure kafka-exporter SASL support
+  local exporter_sasl_enabled="false" exporter_sasl_user="krate-exporter" exporter_sasl_password=""
+  if [[ "$(env_value KAFKA_AUTH_MODE)" == "oauth_ssl" ]]; then
+    exporter_sasl_enabled="true"
+    exporter_sasl_password="$(env_value KAFKA_EXPORTER_SCRAM_PASSWORD)"
+    if [[ "$1" == "up" && -z "$exporter_sasl_password" ]]; then
+      die "KAFKA_EXPORTER_SCRAM_PASSWORD is empty in $ENV_FILE while KAFKA_AUTH_MODE=oauth_ssl; run: krate kafka auth enable"
+    fi
+  fi
+
   KRATE_RENDER_REVISION="$revision" \
   KRATE_ALERTMANAGER_REVISION="$alert_revision" \
   KRATE_PERSES_REVISION="$perses_rev" \
@@ -4127,6 +4142,9 @@ This bundle was built without the observability stack."
   KAFKA_EXPECTED_BROKERS="${expected:-1}" \
   KAFKA_NETWORK="$net" \
   KAFKA_EXPORTER_TARGETS="$(monitor_targets)" \
+  KAFKA_EXPORTER_SASL_ENABLED="$exporter_sasl_enabled" \
+  KAFKA_EXPORTER_SASL_USER="$exporter_sasl_user" \
+  KAFKA_EXPORTER_SASL_PASSWORD="$exporter_sasl_password" \
   CLUSTER_LABEL="$KRATE_VARIANT" \
   GRAFANA_BIND="$grafana_bind" \
   KRATE_IDP_HOST="$idp_host" \
@@ -5621,8 +5639,19 @@ $(printf '  %s\n' "${matches[@]}")"
 }
 
 # ─── lag ──────────────────────────────────────────────────────────────────────
+# --command-config for the Kafka tools run inside a broker: the rendered admin
+# credentials in oauth_ssl mode (the INTERNAL listener authenticates), nothing in
+# local mode. Sets KAFKA_ADMIN_ARGS; expand it with the Bash 3.2 empty-array idiom.
+kafka_admin_args() {
+  KAFKA_ADMIN_ARGS=()
+  if [[ "$(env_value KAFKA_AUTH_MODE)" == oauth_ssl ]]; then
+    KAFKA_ADMIN_ARGS=(--command-config /mnt/shared/config/admin.properties)
+  fi
+}
+
 cmd_lag() {
   require_compose; require_compose_file
+  kafka_admin_args
 
   local group=""
   local topic=""
@@ -5649,6 +5678,7 @@ cmd_lag() {
 
     local raw
     raw=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+      ${KAFKA_ADMIN_ARGS[@]+"${KAFKA_ADMIN_ARGS[@]}"} \
       --bootstrap-server "$BOOTSTRAP" \
       --describe --group "$group") || die "Failed to describe group '$group'"
 
@@ -5716,6 +5746,7 @@ cmd_lag() {
 
     local groups
     groups=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+      ${KAFKA_ADMIN_ARGS[@]+"${KAFKA_ADMIN_ARGS[@]}"} \
       --bootstrap-server "$BOOTSTRAP" \
       --list 2>/dev/null | grep -v "^$" | sort) || die "Failed to list consumer groups"
 
@@ -5734,6 +5765,7 @@ cmd_lag() {
 
       local raw_desc
       raw_desc=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+        ${KAFKA_ADMIN_ARGS[@]+"${KAFKA_ADMIN_ARGS[@]}"} \
         --bootstrap-server "$BOOTSTRAP" \
         --describe --group "$grp" 2>/dev/null || true)
 
@@ -5776,6 +5808,414 @@ cmd_lag() {
 }
 
 # ─── help ─────────────────────────────────────────────────────────────────────
+# ─── Kafka OAuth/TLS Management ───────────────────────────────────────────
+
+# Helper to ensure a secret is not empty/placeholder and generate if needed
+ensure_kafka_secret() {
+  local key="$1"
+  local current_val
+  current_val="$(env_value "$key")"
+  if [[ -z "$current_val" || "$current_val" == "REPLACE_ME" || "$current_val" == "changeme" ]]; then
+    local new_secret
+    new_secret="$(random_secret 32)"
+    set_env_file_value "$ENV_FILE" "$key" "$new_secret"
+  fi
+}
+
+# Fix permissions on Kafka OAuth/TLS directories and files for broker access
+fix_kafka_oauth_permissions() {
+  # Ensure directories are traversable
+  chmod 755 "$SCRIPT_DIR/auth/kafka" "$SCRIPT_DIR/auth/kafka/oauth_ssl" "$SCRIPT_DIR/auth/kafka/oauth_ssl/certs" "$SCRIPT_DIR/certs/kafka" 2>/dev/null || true
+
+  local kafka_uid=1000
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    # On Linux, Kafka runs as uid=1000 (or KAFKA_UID if set in EPC)
+    kafka_uid="${KAFKA_UID:-1000}"
+
+    # If we're not root, use sudo to chown
+    local sudo_cmd=()
+    if [[ "$(id -u)" -ne 0 ]]; then
+      sudo_cmd=(sudo)
+    fi
+
+    # Make files readable by appuser (uid 1000) without world-readable
+    ${sudo_cmd[@]+"${sudo_cmd[@]}"} chown "${kafka_uid}:$(id -g)" "$SCRIPT_DIR/auth/kafka/oauth_ssl"/*.properties "$SCRIPT_DIR/auth/kafka/oauth_ssl/certs/broker.p12" 2>/dev/null || true
+    ${sudo_cmd[@]+"${sudo_cmd[@]}"} chmod 640 "$SCRIPT_DIR/auth/kafka/oauth_ssl"/*.properties "$SCRIPT_DIR/auth/kafka/oauth_ssl/certs/broker.p12" 2>/dev/null || true
+  fi
+}
+
+# Reconcile the krate-ui-kafka client (Kafbat UI's OAUTHBEARER identity on the
+# brokers) with KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET from .env: created when absent,
+# updated when its representation or secret differs. The secret reaches kcadm on
+# stdin only (never argv), the same path as the krate-grafana client.
+kafka_reconcile_ui_broker_client() {
+  local sso id verdict err
+  sso="$(sso_dir)"
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" \
+    || die "Keycloak refused the master admin login. Check: krate identity status"
+  id="$(kcadm_client_id "$IDENTITY_REALM" krate-ui-kafka)" || die "Keycloak query failed"
+  if [[ -z "$id" ]]; then
+    err="$(mktemp)" || die "Cannot create a temporary file"
+    python3 "$sso/identity.py" kafka-auth --env-file "$ENV_FILE" ui-client \
+      | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null 2>"$err" \
+      || { sed 's/^/  /' "$err" >&2; rm -f "$err"
+           die "Cannot create the krate-ui-kafka client: either its representation did not render or Keycloak refused it"; }
+    rm -f "$err"
+    id="$(kcadm_client_id "$IDENTITY_REALM" krate-ui-kafka)" || die "Keycloak query failed"
+    [[ -n "$id" ]] || die "The krate-ui-kafka client was not found after its creation"
+    kafka_set_ui_broker_client_secret "$id"
+    identity_journal kafka-auth created "krate-ui-kafka client"
+    ok "Created the krate-ui-kafka client in realm $IDENTITY_REALM"
+    kcadm_logout
+    return 0
+  fi
+  # With the secret, so a rotated KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET is detected and converged.
+  verdict="$(kcadm -- get "clients/$id" -r "$IDENTITY_REALM" \
+    | KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET="$(env_value KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET)" \
+      python3 "$sso/identity.py" kafka-auth --env-file "$ENV_FILE" ui-client --differs --with-secret)" \
+    || die "Cannot compare the krate-ui-kafka client with the plan"
+  case "$verdict" in
+    *scopes-differ*) warn "krate-ui-kafka: its scopes differ from the plan, and a client update never changes scopes — set them in Keycloak" ;;
+  esac
+  case "$verdict" in
+    same*) ok "krate-ui-kafka client unchanged" ;;
+    differs*)
+      err="$(mktemp)" || die "Cannot create a temporary file"
+      python3 "$sso/identity.py" kafka-auth --env-file "$ENV_FILE" ui-client \
+        | KCADM_STDIN=1 kcadm -- update "clients/$id" -r "$IDENTITY_REALM" -f - -m >/dev/null 2>"$err" \
+        || { sed 's/^/  /' "$err" >&2; rm -f "$err"
+             die "Cannot update the krate-ui-kafka client: either its representation did not render or Keycloak refused it"; }
+      rm -f "$err"
+      kafka_set_ui_broker_client_secret "$id"
+      identity_journal kafka-auth reconciled "krate-ui-kafka client"
+      ok "krate-ui-kafka client updated from the plan" ;;
+    *) die "Unexpected comparison result for the krate-ui-kafka client: $verdict" ;;
+  esac
+  kcadm_logout
+}
+
+# Set the krate-ui-kafka client secret from .env through kcadm's stdin ($1 = client uuid).
+kafka_set_ui_broker_client_secret() {
+  KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET="$(env_value KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET)" \
+    python3 -c 'import json, os; print(json.dumps({"secret": os.environ["KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET"]}))' \
+    | KCADM_STDIN=1 kcadm -- update "clients/$1" -r "$IDENTITY_REALM" -f - -m >/dev/null \
+    || die "Keycloak refused to set the krate-ui-kafka client secret"
+}
+
+# Recreate kafka-exporter with this edition's current SASL settings when the
+# monitoring stack is attached to this cluster's network; a monitoring stack
+# that belongs to another cluster project on the same host is left alone.
+kafka_refresh_exporter() {
+  local id net
+  id="$(docker ps -q --filter "label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring" \
+    --filter "label=com.docker.compose.service=kafka-exporter" | head -1)"
+  [[ -n "$id" ]] || return 0
+  net="$(monitor_network)" || return 0
+  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' "$id" 2>/dev/null \
+    | grep -qx "$net" || return 0
+  info "Refreshing kafka-exporter with the current SASL settings..."
+  monitor_compose up -d --pull never --no-deps kafka-exporter || warn "kafka-exporter was not refreshed; run: krate monitor up"
+}
+
+cmd_kafka() {
+  local action="${1:-}" sso_dir
+  sso_dir="$(sso_dir)"
+  shift || true
+
+  case "$action" in
+    auth)
+      local subaction="${1:-}"
+      shift || true
+      case "$subaction" in
+        enable)  cmd_kafka_auth_enable "$sso_dir" "$@" ;;
+        status)  cmd_kafka_auth_status "$@" ;;
+        disable) cmd_kafka_auth_disable "$@" ;;
+        *)       die "Usage: krate kafka auth {enable|status|disable}" ;;
+      esac
+      ;;
+    renew-tls) cmd_kafka_renew_tls "$sso_dir" "$@" ;;
+    *)         die "Usage: krate kafka {auth {enable|status|disable}|renew-tls}" ;;
+  esac
+}
+
+cmd_kafka_auth_enable() {
+  local sso_dir="$1"
+
+  require_docker
+  require_compose
+  require_compose_file
+
+  [[ -f "$ENV_FILE" ]] || die "No .env found; run: krate setup"
+
+  # Verify Keycloak is running and healthy
+  info "Checking Keycloak health..."
+  local keycloak_id
+  keycloak_id="$(docker ps -q --filter "label=com.docker.compose.service=keycloak" 2>/dev/null | head -1)"
+  if [[ -z "$keycloak_id" ]]; then
+    die "Keycloak must be running before enabling Kafka OAuth; run: krate identity up"
+  fi
+
+  # Verify admin login works
+  if ! docker exec "$keycloak_id" /opt/keycloak/bin/kcadm.sh config credentials \
+    --server http://localhost:8080/identity \
+    --realm master \
+    --user "$(env_value KEYCLOAK_ADMIN_USER)" \
+    --password "$(env_value KEYCLOAK_ADMIN_PASSWORD)" >/dev/null 2>&1; then
+    die "Cannot authenticate to Keycloak; verify KEYCLOAK_ADMIN_USER and KEYCLOAK_ADMIN_PASSWORD in .env"
+  fi
+
+  info "Populating broker secrets in .env..."
+  ensure_kafka_secret KAFKA_INTERBROKER_PASSWORD
+  ensure_kafka_secret KAFKA_ADMIN_PASSWORD
+  ensure_kafka_secret KAFKA_EXPORTER_SCRAM_PASSWORD
+  ensure_kafka_secret KAFKA_TLS_KEYSTORE_PASSWORD
+  ensure_kafka_secret KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET
+
+  info "Reconciling Keycloak Kafka OAuth configuration..."
+  identity_reconcile_kafka_auth kafka-auth
+  kafka_reconcile_ui_broker_client
+
+  info "Generating Kafka broker TLS certificates and SASL configuration..."
+  local config_sha
+  config_sha="$(python3 "$sso_dir/identity.py" kafka-broker render \
+    --env-file "$ENV_FILE" \
+    --edition "$KRATE_VARIANT" \
+    --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" \
+    --ca-dir "$SCRIPT_DIR/auth/kafka/ca" \
+    --trust-dir "$SCRIPT_DIR/certs/kafka" \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["config_sha"])')" \
+    || die "Failed to render the Kafka broker OAuth/TLS configuration"
+
+  fix_kafka_oauth_permissions
+
+  info "Updating .env configuration..."
+  set_env_file_value "$ENV_FILE" KAFKA_AUTH_MODE oauth_ssl
+  set_env_file_value "$ENV_FILE" KAFKA_LISTENER_SECURITY_PROTOCOL_MAP "INTERNAL:SASL_PLAINTEXT,EXTERNAL:SASL_SSL,CONTROLLER:SASL_PLAINTEXT"
+  set_env_file_value "$ENV_FILE" KRATE_KAFKA_AUTH_SHA "$config_sha"
+  set_env_file_value "$ENV_FILE" KAFKA_UI_SECURITY_PROTOCOL SASL_PLAINTEXT
+  set_env_file_value "$ENV_FILE" KAFKA_UI_SASL_MECHANISM OAUTHBEARER
+  set_env_file_value "$ENV_FILE" KAFKA_UI_OAUTH_TOKEN_URL "http://keycloak:8080/identity/realms/krate/protocol/openid-connect/token"
+
+  info "Restarting Kafka brokers..."
+  local -a broker_services
+  if [[ "$KRATE_VARIANT" == "kraft" ]]; then
+    broker_services=(kafka-92 kafka-93 kafka-94 kafka-95)
+  else
+    broker_services=(kafka-92 kafka-93)
+  fi
+
+  compose_cmd up -d --pull never "${broker_services[@]}" kafka-ui || die "Failed to restart brokers and UI"
+
+  info "Waiting for brokers to accept authenticated connections (max 90s)..."
+  local broker start_time
+  broker=$(find_broker)
+  start_time="$(date +%s)"
+  while (( $(date +%s) - start_time < 90 )); do
+    if docker exec "$broker" /opt/kafka/bin/kafka-broker-api-versions.sh \
+      --bootstrap-server "$BOOTSTRAP" \
+      --command-config /mnt/shared/config/admin.properties >/dev/null 2>&1; then
+      ok "Brokers are ready"
+      break
+    fi
+    sleep 2
+  done
+
+  info "Provisioning krate-exporter SCRAM user..."
+  docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
+    --bootstrap-server "$BOOTSTRAP" \
+    --command-config /mnt/shared/config/admin.properties \
+    --entity-type users \
+    --entity-name krate-exporter \
+    --alter \
+    --add-config-file /mnt/shared/config/exporter-scram.properties >/dev/null || die "Failed to provision exporter user"
+
+  info "Granting krate-exporter ACLs..."
+  docker exec "$broker" /opt/kafka/bin/kafka-acls.sh \
+    --bootstrap-server "$BOOTSTRAP" \
+    --command-config /mnt/shared/config/admin.properties \
+    --add \
+    --allow-principal User:krate-exporter \
+    --operation Describe \
+    --operation DescribeConfigs \
+    --topic '*' \
+    --cluster >/dev/null || die "Failed to grant topic ACLs"
+
+  docker exec "$broker" /opt/kafka/bin/kafka-acls.sh \
+    --bootstrap-server "$BOOTSTRAP" \
+    --command-config /mnt/shared/config/admin.properties \
+    --add \
+    --allow-principal User:krate-exporter \
+    --operation Describe \
+    --group '*' >/dev/null || die "Failed to grant group ACLs"
+
+  kafka_refresh_exporter
+
+  ok "Kafka OAuth/TLS enabled successfully"
+  echo ""
+  echo "CA certificate: $SCRIPT_DIR/certs/kafka/ca.crt"
+  echo "Config SHA: $config_sha"
+}
+
+cmd_kafka_auth_status() {
+  require_compose_file
+  [[ -f "$ENV_FILE" ]] || die "No .env found"
+
+  local auth_mode broker status_code=0
+  auth_mode="$(env_value KAFKA_AUTH_MODE)"
+
+  echo ""
+  echo "Kafka Authentication Mode: ${auth_mode:-local}"
+  echo "Listener Security Protocol Map: $(env_value KAFKA_LISTENER_SECURITY_PROTOCOL_MAP)"
+
+  if [[ "$auth_mode" == "oauth_ssl" ]]; then
+    echo ""
+    info "Checking TLS certificate..."
+    python3 "$(sso_dir)/identity.py" kafka-broker inspect-tls \
+      --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" || status_code=1
+
+    # Check if brokers are running and can authenticate
+    broker="$(find_broker 2>/dev/null || true)"
+    if [[ -n "$broker" ]]; then
+      echo ""
+      info "Verifying authenticated broker connectivity..."
+      if docker exec "$broker" /opt/kafka/bin/kafka-broker-api-versions.sh \
+        --bootstrap-server "$BOOTSTRAP" \
+        --command-config /mnt/shared/config/admin.properties >/dev/null 2>&1; then
+        ok "Broker is authenticated and responsive"
+      else
+        err "Broker is not responding to authenticated queries"
+        status_code=1
+      fi
+
+      echo ""
+      info "Checking krate-exporter SCRAM user..."
+      if docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
+        --bootstrap-server "$BOOTSTRAP" \
+        --command-config /mnt/shared/config/admin.properties \
+        --entity-type users \
+        --entity-name krate-exporter \
+        --describe 2>/dev/null | grep -q "krate-exporter"; then
+        ok "krate-exporter user is configured"
+      else
+        warn "krate-exporter user not found"
+        status_code=1
+      fi
+    fi
+  fi
+
+  echo ""
+  return $status_code
+}
+
+cmd_kafka_auth_disable() {
+  require_compose
+  require_compose_file
+  [[ -f "$ENV_FILE" ]] || return 0
+
+  info "Disabling Kafka OAuth/TLS..."
+
+  set_env_file_value "$ENV_FILE" KAFKA_AUTH_MODE local
+  set_env_file_value "$ENV_FILE" KAFKA_LISTENER_SECURITY_PROTOCOL_MAP "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+  set_env_file_value "$ENV_FILE" KRATE_KAFKA_AUTH_SHA ""
+  set_env_file_value "$ENV_FILE" KAFKA_UI_SECURITY_PROTOCOL PLAINTEXT
+  set_env_file_value "$ENV_FILE" KAFKA_UI_SASL_MECHANISM PLAIN
+
+  # Restart brokers if running
+  local -a broker_services
+  if docker ps --format '{{.Names}}' | grep -q kafka-92; then
+    info "Restarting brokers..."
+    if [[ "$KRATE_VARIANT" == "kraft" ]]; then
+      broker_services=(kafka-92 kafka-93 kafka-94 kafka-95)
+    else
+      broker_services=(kafka-92 kafka-93)
+    fi
+    compose_cmd up -d --pull never "${broker_services[@]}" kafka-ui || warn "Failed to restart brokers"
+  fi
+
+  kafka_refresh_exporter
+
+  ok "Kafka OAuth/TLS disabled"
+}
+
+cmd_kafka_renew_tls() {
+  local sso_dir="$1"
+
+  require_docker
+  require_compose_file
+  [[ -f "$ENV_FILE" ]] || die "No .env found"
+
+  [[ "$(env_value KAFKA_AUTH_MODE)" == "oauth_ssl" ]] || die "Kafka OAuth/TLS is not enabled (KAFKA_AUTH_MODE != oauth_ssl)"
+
+  info "Renewing Kafka broker TLS certificates..."
+  local serial config_sha renewal_output
+
+  renewal_output="$(python3 "$sso_dir/identity.py" kafka-broker renew-tls \
+    --env-file "$ENV_FILE" \
+    --edition "$KRATE_VARIANT" \
+    --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" \
+    --ca-dir "$SCRIPT_DIR/auth/kafka/ca" \
+    --trust-dir "$SCRIPT_DIR/certs/kafka" 2>&1 || die "Failed to renew TLS")"
+
+  serial="$(echo "$renewal_output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["serial"])')"
+  config_sha="$(echo "$renewal_output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["config_sha"])')"
+
+  fix_kafka_oauth_permissions
+
+  info "Updating .env configuration..."
+  set_env_file_value "$ENV_FILE" KRATE_KAFKA_AUTH_SHA "$config_sha"
+
+  # Reload keystore on brokers if running
+  local broker brokers
+  if docker ps --format '{{.Names}}' | grep -q kafka-92; then
+    info "Reloading TLS keystores on brokers..."
+
+    if [[ "$KRATE_VARIANT" == "kraft" ]]; then
+      brokers=(92 93 94 95)
+    else
+      brokers=(92 93)
+    fi
+
+    broker="$(find_broker)"
+    for node_id in "${brokers[@]}"; do
+      echo "  Reloading kafka-$node_id..."
+      if ! docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
+        --bootstrap-server "$BOOTSTRAP" \
+        --command-config /mnt/shared/config/admin.properties \
+        --entity-type brokers \
+        --entity-name "$node_id" \
+        --alter \
+        --add-config listener.name.external.ssl.keystore.location=/mnt/shared/config/certs/broker.p12 >/dev/null 2>&1; then
+
+        err "Failed to reload keystore on kafka-$node_id; rolling back..."
+        python3 "$sso_dir/identity.py" kafka-broker rollback-tls \
+          --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" || true
+
+        # Reload previous keystore
+        for bid in "${brokers[@]}"; do
+          docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
+            --bootstrap-server "$BOOTSTRAP" \
+            --command-config /mnt/shared/config/admin.properties \
+            --entity-type brokers \
+            --entity-name "$bid" \
+            --alter \
+            --add-config listener.name.external.ssl.keystore.location=/mnt/shared/config/certs/.previous.broker.p12 >/dev/null 2>&1 || true
+        done
+
+        die "TLS renewal failed and was rolled back"
+      fi
+    done
+
+    ok "Keystores reloaded on all brokers"
+  fi
+
+  # Discard previous TLS files
+  python3 "$sso_dir/identity.py" kafka-broker discard-previous-tls \
+    --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" || true
+
+  ok "TLS certificates renewed successfully"
+  echo "Serial: $serial"
+}
+
 cmd_help() {
   echo ""
   echo -e "${BOLD}krate${RESET} — Kafka cluster management CLI"
@@ -5804,6 +6244,10 @@ cmd_help() {
   printf "  %-30s %s\n" "auth configure [FILE]" "Write auth/ui/runtime.yml (Keycloak login); FILE adds the PingFederate identity-provider plan"
   printf "  %-30s %s\n" "  [--force] [--[no-]viewer-messages]" "Replace a differing runtime.yml; let viewers read message payloads (or stop)"
   printf "  %-30s %s\n" "auth apply"           "Validate and activate Kafbat authentication (runtime.yml needs: krate identity up)"
+  printf "  %-30s %s\n" "kafka auth enable"    "Enable Kafka OAuth/TLS (requires Keycloak running)"
+  printf "  %-30s %s\n" "kafka auth status"    "Show Kafka auth mode and TLS certificate status"
+  printf "  %-30s %s\n" "kafka auth disable"   "Disable Kafka OAuth/TLS and revert to local mode"
+  printf "  %-30s %s\n" "kafka renew-tls"      "Renew Kafka broker TLS certificates (requires oauth_ssl mode)"
   printf "  %-30s %s\n" "identity up"          "Start Keycloak and its database; the first run creates admin and realm"
   printf "  %-30s %s\n" "identity status"      "Database health, Keycloak started/ready/live, realm; exit 1 if not ready"
   printf "  %-30s %s\n" "identity down"        "Stop Keycloak and its database (data kept)"
@@ -5905,6 +6349,7 @@ case "$CMD" in
   observe)        cmd_observe "$@" ;;
   verify)         cmd_verify "$@" ;;
   auth)           cmd_auth "$@" ;;
+  kafka)          cmd_kafka "$@" ;;
   identity)       cmd_identity "$@" ;;
   config)         cmd_config "$@" ;;
   uninstall)      cmd_uninstall "$@" ;;

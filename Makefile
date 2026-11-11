@@ -284,9 +284,10 @@ bundle: offline-check
 >  # published, including the components it could not be obtained for.
 >  cp LICENSE LICENSE-SOURCES.md "$$bundle_dir/"
 >  if [[ "$$mode" != "zk" ]]; then
->    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso/logrotate" "$$bundle_dir/docs"
+>    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/kafka/local" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso/logrotate" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
->    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/operations.sh sso/operations.py sso/preflight.py sso/probe.py sso/identity.py sso/idp_watch.py "$$bundle_dir/sso/"
+>    cp "$$src_dir/auth/kafka/local/server.properties" "$$bundle_dir/auth/kafka/local/server.properties"
+>    cp sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/operations.sh sso/operations.py sso/preflight.py sso/probe.py sso/identity.py sso/idp_watch.py sso/kafka_broker_auth.py "$$bundle_dir/sso/"
 >    cp scripts/check-bundle.py scripts/check-offline.py "$$bundle_dir/sso/"
 >    cp -r sso/theme "$$bundle_dir/sso/"
 >    # Rendered by `krate identity logrotate` with the installation's journal path.
