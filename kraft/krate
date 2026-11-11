@@ -5625,7 +5625,19 @@ cmd_kafka_auth_enable() {
     broker_services=(kafka-92 kafka-93)
   fi
 
-  compose_cmd up -d --pull never "${broker_services[@]}" kafka-ui || die "Failed to restart brokers and UI"
+  if ! compose_cmd up -d --pull never "${broker_services[@]}" kafka-ui; then
+    # Compose names only the service that is unhealthy; the container's own log names the cause.
+    local svc cid state
+    for svc in "${broker_services[@]}"; do
+      cid="$(compose_cmd ps -a -q "$svc" 2>/dev/null | head -1)" || cid=""
+      [[ -n "$cid" ]] || continue
+      state="$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$cid" 2>/dev/null)" || state=unknown
+      [[ "$state" == running/healthy ]] && continue
+      err "$svc is $state; its last log lines:"
+      docker logs --tail 40 "$cid" 2>&1 | sed 's/^/    /' >&2
+    done
+    die "Failed to restart the brokers and the UI in oauth_ssl mode (the lines above name the cause). Previous mode: krate kafka auth disable"
+  fi
 
   info "Waiting for brokers to accept authenticated connections (max 90s)..."
   local broker start_time

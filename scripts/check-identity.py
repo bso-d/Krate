@@ -7169,6 +7169,8 @@ def check_broker_apply(checks):
           f'{edition}/krate: kafka auth enable reconciles the realm (scope, policy, DCR, krate-ui-kafka) before it renders the broker material')
         e('--add-config-file /mnt/shared/config/exporter-scram.properties' in enable and 'SCRAM-SHA-512=[' not in enable,
           f'{edition}/krate: the krate-exporter SCRAM credential is provisioned from the rendered file, never as an --add-config argument')
+        e('docker logs --tail 40 "$cid" 2>&1' in enable and 'is $state; its last log lines:' in enable,
+          f'{edition}/krate: a broker that does not come up in oauth_ssl mode is named with its state and last log lines (Compose names only the service)')
         e('--add-config-file /mnt/shared/config/exporter-scram.properties >/dev/null 2>"$err"; then' in enable
           and "sed -E 's/password=[^],[:space:]]*/password=[redacted]/g; s/^/  /' \"$err\" >&2" in enable,
           f'{edition}/krate: a rejected SCRAM property is shown with its credential redacted (kafka-configs echoes it on stderr)')
