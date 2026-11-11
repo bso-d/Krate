@@ -7159,6 +7159,13 @@ def check_broker_apply(checks):
           and re.search(r"--operation Describe \\\n\s*--operation DescribeConfigs \\\n\s*--topic '\*' \\\n\s*--cluster", enable) is not None
           and re.search(r"--operation Describe \\\n\s*--group '\*'", enable) is not None and "DescribeConfigs \\\n    --group" not in enable,
           f'{edition}/krate: the exporter ACLs are two grants (Describe+DescribeConfigs on topics/cluster; Describe only on groups — GROUP refuses DescribeConfigs)')
+        # Live 2026-11-11: a `docker ps | grep -q kafka-92` guard never matched the container name
+        # krate-broker-92, so renew-tls skipped the keystore reload and disable skipped the restart.
+        for name in ('cmd_kafka_auth_disable', 'cmd_kafka_renew_tls'):
+            e('grep -q kafka-92' not in function_body(cli, name) and 'find_broker' in function_body(cli, name),
+              f'{edition}/krate: {name} must detect a running broker with find_broker (compose service of this project), never a name match')
+        e('--add-config listener.name.external.ssl.keystore.location=/mnt/shared/config/certs/broker.p12' in function_body(cli, 'cmd_kafka_renew_tls'),
+          f'{edition}/krate: renew-tls reloads the keystore through the dynamic listener config (same path; Kafka reloads a modified file)')
         for name in ('cmd_kafka_auth_enable', 'cmd_kafka_auth_disable', 'kafka_refresh_exporter'):
             e('grep -q kafka-exporter' not in function_body(cli, name),
               f'{edition}/krate: {name} must not detect the exporter by a bare name match (another cluster project\'s monitoring would be touched)')

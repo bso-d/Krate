@@ -5761,7 +5761,8 @@ cmd_kafka_auth_disable() {
 
   # Restart brokers if running
   local -a broker_services
-  if docker ps --format '{{.Names}}' | grep -q kafka-92; then
+  # A running broker of THIS cluster project (compose service lookup), never a name match.
+  if find_broker >/dev/null 2>&1; then
     info "Restarting brokers..."
     if [[ "$KRATE_VARIANT" == "kraft" ]]; then
       broker_services=(kafka-92 kafka-93 kafka-94 kafka-95)
@@ -5805,7 +5806,7 @@ cmd_kafka_renew_tls() {
 
   # Reload keystore on brokers if running
   local broker brokers
-  if docker ps --format '{{.Names}}' | grep -q kafka-92; then
+  if broker="$(find_broker 2>/dev/null)"; then
     info "Reloading TLS keystores on brokers..."
 
     if [[ "$KRATE_VARIANT" == "kraft" ]]; then
@@ -5814,7 +5815,6 @@ cmd_kafka_renew_tls() {
       brokers=(92 93)
     fi
 
-    broker="$(find_broker)"
     for node_id in "${brokers[@]}"; do
       echo "  Reloading kafka-$node_id..."
       if ! docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
