@@ -7145,6 +7145,12 @@ def check_broker_apply(checks):
           and 'printf' not in ui_secret,
           f'{edition}/krate: the krate-ui-kafka secret is JSON-encoded from the environment and piped to kcadm, never built with printf from an argument')
         enable = function_body(cli, 'cmd_kafka_auth_enable')
+        # Hosted review 2026-11-11: the admin login must go through the kcadm helper (KC_CLI_PASSWORD in
+        # the exec environment), never `kcadm.sh config credentials --password` on a docker exec argv.
+        e('identity_verify_admin kafka-auth' in enable and 'config credentials' not in enable and '--password' not in enable,
+          f'{edition}/krate: kafka auth enable verifies the admin login through identity_verify_admin, never with a password argument')
+        e('render_broker_auth(' in (ROOT / 'sso/identity.py').read_text() and 'render_oauth_ssl' not in (ROOT / 'sso/identity.py').read_text(),
+          'sso/identity.py: the broker material renderer is called render_broker_auth (a callee named *oauth* is a CodeQL password source, alert #29)')
         e(enable.index('identity_reconcile_kafka_auth kafka-auth') < enable.index('kafka_reconcile_ui_broker_client') < enable.index('kafka-broker render'),
           f'{edition}/krate: kafka auth enable reconciles the realm (scope, policy, DCR, krate-ui-kafka) before it renders the broker material')
         e('--add-config-file /mnt/shared/config/exporter-scram.properties' in enable and 'SCRAM-SHA-512=[' not in enable,

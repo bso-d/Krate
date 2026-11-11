@@ -5579,22 +5579,11 @@ cmd_kafka_auth_enable() {
 
   [[ -f "$ENV_FILE" ]] || die "No .env found; run: krate setup"
 
-  # Verify Keycloak is running and healthy
-  info "Checking Keycloak health..."
-  local keycloak_id
-  keycloak_id="$(docker ps -q --filter "label=com.docker.compose.service=keycloak" 2>/dev/null | head -1)"
-  if [[ -z "$keycloak_id" ]]; then
-    die "Keycloak must be running before enabling Kafka OAuth; run: krate identity up"
-  fi
-
-  # Verify admin login works
-  if ! docker exec "$keycloak_id" /opt/keycloak/bin/kcadm.sh config credentials \
-    --server http://localhost:8080/identity \
-    --realm master \
-    --user "$(env_value KEYCLOAK_ADMIN_USER)" \
-    --password "$(env_value KEYCLOAK_ADMIN_PASSWORD)" >/dev/null 2>&1; then
-    die "Cannot authenticate to Keycloak; verify KEYCLOAK_ADMIN_USER and KEYCLOAK_ADMIN_PASSWORD in .env"
-  fi
+  # The master admin login goes through the kcadm helper: the password travels in the
+  # exec environment (KC_CLI_PASSWORD) and the session file is per run and removed by
+  # kcadm_logout; a stopped Keycloak is refused by kcadm_login with the identity up hint.
+  info "Verifying the Keycloak admin login..."
+  identity_verify_admin kafka-auth >/dev/null
 
   info "Populating broker secrets in .env..."
   ensure_kafka_secret KAFKA_INTERBROKER_PASSWORD

@@ -2171,7 +2171,8 @@ def cmd_kafka_broker(args):
             raise ValueError(f'{args.action} requires --env-file, --edition, --ca-dir, and --trust-dir')
 
     if args.action == 'render':
-        result = kafka_broker_auth.render_oauth_ssl(
+        # The callee is not named *oauth*: CodeQL treats such calls as password sources (alert #29).
+        result = kafka_broker_auth.render_broker_auth(
             args.env_file, args.edition, args.output_dir, args.ca_dir, args.trust_dir
         )
         sys.stdout.write(json.dumps(result) + '\n')

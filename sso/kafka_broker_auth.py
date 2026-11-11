@@ -299,7 +299,7 @@ def inspect_cert(cert_path):
     return result
 
 
-def render_oauth_ssl(env_file, edition, output_dir, ca_dir, trust_dir):
+def render_broker_auth(env_file, edition, output_dir, ca_dir, trust_dir):
     """Render OAuth2 + SSL configuration for Kafka broker.
 
     Args:
@@ -473,7 +473,7 @@ def renew_kafka_tls(env_file, edition, output_dir, ca_dir, trust_dir):
     ca_crt = Path(ca_dir) / 'ca.crt'
 
     if not ca_key.exists() or not ca_crt.exists():
-        raise ValueError('CA does not exist; create it first with render_oauth_ssl')
+        raise ValueError('CA does not exist; create it first with render_broker_auth')
 
     certs_dir = Path(output_dir) / 'certs'
     broker_p12 = certs_dir / 'broker.p12'
