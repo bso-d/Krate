@@ -568,7 +568,11 @@ def realm(values):
              'enabled': True, 'defaultAction': False, 'priority': 30},
         ],
         'groups': [{'name': values['viewer_group']}, {'name': values['admin_group']}],
-        'clientScopes': [kafka_client_scope()],
+        # No clientScopes here: Keycloak creates its built-in client scopes (profile, email,
+        # roles, web-origins, basic, service_account, ...) only for an import WITHOUT that key
+        # (RealmManager.importRealm, 26.8.0); with it, every client above would get no scope
+        # at all (proven live 2026-11-11). The kafka scope is created and kept current by
+        # identity_reconcile_kafka_auth right after the first `identity up`.
         'clients': [cli_client, ui_client, idp_watch_client],
         'users': [{'username': SERVICE_ACCOUNT, 'enabled': True,
                    'serviceAccountClientId': CLI_CLIENT,

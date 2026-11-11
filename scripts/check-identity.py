@@ -227,8 +227,10 @@ def check_realm_contract(checks):
       and sorted(watch_account.get('clientRoles', {}).get('realm-management', [])) == sorted(identity.IDP_WATCH_ROLES),
       'realm plan: krate-idp-watch service account must have realm-management view/manage-identity-providers roles')
     e(realm.get('loginTheme') == 'krate', f"realm plan: loginTheme must be 'krate'; got {realm.get('loginTheme')!r}")
-    e(realm.get('clientScopes') == [identity.kafka_client_scope()],
-      f'realm plan: clientScopes must be [kafka_client_scope()]; got {realm.get("clientScopes")!r}')
+    # A clientScopes key in the import suppresses Keycloak's built-in scopes (RealmManager.importRealm):
+    # krate-ui/krate-cli would be created with no scope at all. The kafka scope is reconciled instead.
+    e('clientScopes' not in realm,
+      f'realm plan: must not carry clientScopes (Keycloak then skips its built-in scopes); got {realm.get("clientScopes")!r}')
     placeholders = set(re.findall(r'\$\{[A-Z0-9_]+\}', text))
     e(placeholders == {'${KEYCLOAK_CLI_CLIENT_SECRET}', '${KEYCLOAK_KAFBAT_CLIENT_SECRET}', '${KEYCLOAK_IDP_WATCH_CLIENT_SECRET}'},
       f'realm plan: placeholders must be exactly the three client secrets; got {sorted(placeholders)}')
