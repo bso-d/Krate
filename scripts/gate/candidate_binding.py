@@ -28,7 +28,7 @@ Not compared: file modes other than `krate`'s executable bit, `.bundle-arch`, th
 archives under `images/`, `docker-offline/`, the lock columns after `image_id`
 (`repo_digests`, `archive`, `archive_sha256`, `platform`), operator site files (`.env`,
 `monitoring/.env` and the `monitoring/.env.*` temporaries of krate's atomic writes,
-`auth/` beyond `auth/ui/local.yml`, `monitoring/auth/` beyond `local.ini`, `sso/site*.json`
+`auth/` beyond `auth/ui/local.yml` and `auth/kafka/local/server.properties`, `monitoring/auth/` beyond `local.ini`, `sso/site*.json`
 directly in `sso/`), Python bytecode (`*.pyc` directly in a `__pycache__` directory) and
 anything outside the scanned directories (such as the edition's top level beyond the
 inventory files).  The image id comparison assumes the build host and this host use the
@@ -51,7 +51,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 EDITIONS = ('epc', 'kraft')
 # Makefile build_one: cp sso/configure.py ... sso/identity.py "$bundle_dir/sso/"
 SSO_FILES = ('configure.py', 'example.json', 'configure-dual.py', 'dual-example.json',
-             'activate.sh', 'operations.sh', 'operations.py', 'preflight.py', 'probe.py', 'identity.py', 'idp_watch.py')
+             'activate.sh', 'operations.sh', 'operations.py', 'preflight.py', 'probe.py', 'identity.py', 'idp_watch.py', 'kafka_broker_auth.py')
 # Makefile build_one: cp sso/guides/... "$bundle_dir/docs/"
 GUIDES = ('identity-foundation.md', 'dual-login.md', 'pingfederate-sso.md',
           'pingfederate-iam-guide.md', 'sso-flows.md', 'perses-sso.md', 'grafana-sso.md')
@@ -147,9 +147,11 @@ def inventory(repo: str, candidate: str, edition: str) -> Dict[str, str]:
     if edition == 'epc':
         items['kafbat.yml'] = 'epc/kafbat.yml'
     items['nginx.conf'] = edition + '/nginx.conf'
+    items['nginx-stream.conf'] = edition + '/nginx-stream.conf'
     items['LICENSE'] = 'LICENSE'
     items['LICENSE-SOURCES.md'] = 'LICENSE-SOURCES.md'
     items['auth/ui/local.yml'] = edition + '/auth/ui/local.yml'
+    items['auth/kafka/local/server.properties'] = edition + '/auth/kafka/local/server.properties'
     for name in SSO_FILES:
         items['sso/' + name] = 'sso/' + name
     items['sso/check-bundle.py'] = 'scripts/check-bundle.py'

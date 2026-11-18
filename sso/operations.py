@@ -626,6 +626,10 @@ def affected_services_for_key(
         add(cluster_project, "keycloak", "config_change")
     elif key.startswith("IDP_WATCH_"):
         add(cluster_project, "idp-watch", "config_change")
+    elif re.fullmatch(r"KAFKA_BROKER_\d+_PORT", key):
+        broker_id = key.split("_")[2]
+        add(cluster_project, "proxy", "config_change")
+        add(cluster_project, f"kafka-{broker_id}", "config_change")
     else:
         for b in ("kafka-92", "kafka-93", "kafka-94", "kafka-95"):
             add(cluster_project, b, "config_change")
