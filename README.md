@@ -126,8 +126,9 @@ New packages are released as `package-kraft-vN` and `package-epc-vN`; see [Relea
 
 - **To run a cluster:** Docker Engine 25.0.3 or newer, a working Docker service, and Docker Compose. The scripts accept the `docker compose` plugin or standalone `docker-compose` 1.29.2 or newer; the examples use the plugin.
 - **To create the UI certificate:** OpenSSL, or your own certificate and key at `certs/server.crt` and `certs/server.key`.
-- **To run from a checkout or build packages:** a connected machine with Docker, Bash, Git, Python 3, Node.js and npm (for the Kafbat UI image), and GNU Make 4.0 or newer, which `./krate` calls for you. On macOS, `brew install make` provides it.
+- **To run from a checkout or build packages:** a connected machine with Docker, Bash, Git, Python 3, Node.js and npm (for the Kafbat UI image), JDK 21 (for the Kafka OAuth application client), and GNU Make 4.0 or newer, which `./krate` calls for you. On macOS, `brew install make` provides it.
 - **For KRaft/EPC monitoring:** Python 3 on the host, in addition to Docker.
+- **For application OAuth clients:** Java 17 or newer on the operator and application hosts. Building the bundled callback jar uses JDK 21 on the connected package builder.
 
 Choose the package for the target VM's processor: `amd64` means x86_64; `arm64` means ARM64. Leave room for the package, loaded images, and stored messages. The EPC guide explains how to budget its `/data` disk.
 
@@ -252,15 +253,35 @@ Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`)
 | `./krate identity status` | Shows identity service health |
 | `./krate identity users ...` | Manages local realm users (`list`, `add`, `enable`, `disable`, `reset-password`, `groups`, `logout`, `set-email`) |
 | `./krate identity idp-watch {status\|reset\|pause\|resume}` | Shows or controls the enterprise IdP reachability watcher and automatic local login fallback |
-| `./krate identity rotate ...` | Rotates identity and SSO secrets (`KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`, `KEYCLOAK_IDP_WATCH_CLIENT_SECRET`, `PING_KEYCLOAK_CLIENT_SECRET --value`) |
+| `./krate identity rotate ...` | Rotates identity and SSO secrets (`KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET`, `KEYCLOAK_IDP_WATCH_CLIENT_SECRET`, `PING_KEYCLOAK_CLIENT_SECRET --value`) |
 | `./krate identity {backup\|restore\|recover-admin}` | Backs up or restores the identity database; recovers a lost Keycloak admin login |
 | `./krate identity renew-db-tls` / `logrotate --install` | Renews the identity database certificate; hands the identity journal to the host's logrotate |
 | `./krate auth configure [--force] [--[no-]viewer-messages] [site.json]` | Plans Kafbat's Keycloak login (`auth/ui/runtime.yml`) from `.env`, and optionally PingFederate brokering from `site.json` |
 | `./krate auth apply` | Validates and applies the planned authentication configuration to the UI, proxy, and realm |
 | `./krate monitor {up\|down\|status\|logs\|reload\|ui}` | Starts, stops, or inspects the monitoring stack; reloads Prometheus configuration (`SIGHUP`) |
+| `./krate kafka auth {enable\|status\|disable}` / `./krate kafka renew-tls` | Manages the opt-in authenticated Kafka listeners and their certificates |
+| `./krate kafka client {register\|status\|rotate\|recover\|grant\|template\|enroll}` | Registers a dedicated application identity, manages its private OAuth state, and grants literal Kafka topic/group ACLs; `recover --admin` repairs registration access from Keycloak |
 | `./krate monitor realm` / `grafana-user retire <login>` | Prepares Grafana sign-in through the Krate realm (`monitoring/auth/realm.ini`); retires a colliding local Grafana user |
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
+
+### Give an application scoped Kafka access
+
+After `identity up` and `kafka auth enable`, create the application topic with a Kafka administrator before the first send. The application client receives only its requested topic and group ACLs; it cannot create topics. For example, on the supplied four-broker KRaft cluster:
+
+```bash
+docker exec krate-broker-92 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-92:9092 \
+  --command-config /mnt/shared/config/admin.properties \
+  --create --topic payments --partitions 1 --replication-factor 3
+mkdir -m 700 auth/payments-client
+./krate kafka client register --client-id payments-client \
+  --state "$PWD/auth/payments-client/state.json" \
+  --access read-write --topic payments --group payments-consumers
+./krate kafka client status --state "$PWD/auth/payments-client/state.json"
+```
+
+Keep the state directory and its mode `0600` state file private. Use the [application callback configuration](kafka-oauth-client/README.md) to connect, then verify a message is consumed; a producer process can exit successfully even when a send was denied. The offline package includes the client jar and its pinned runtime libraries. When running directly from a source checkout, build them first and set `KAFKA_OAUTH_CLIENT_HOME` to the directory containing the jar and `libs/` before starting the CLI or Studio. Use `kafka client rotate --state ...` for a rotation check and `kafka client recover --state ... --admin` if the private registration token must be repaired.
 
 ### How `.env`, image pins, and `uninstall --purge` work
 
@@ -453,7 +474,7 @@ Then start **Release offline install packages** from `main` in GitHub Actions wi
 
 - **One host is one point of failure.** Multiple brokers on the same VM do not protect against losing that VM. EPC also needs both of its coordination nodes available; losing either prevents its two-node group from reaching agreement.
 - **Remote application connections need configuration.** KRaft brokers publish external Kafka ports `19092–19095` via `proxy` using Nginx TCP passthrough; they advertise `localhost` by default. EPC brokers publish external ports `9092/9093` the same way. Change broker Compose listener settings and proxy port mappings for clients on other machines. Modify `KAFKA_ADVERTISED_HOST` (EPC) or the corresponding listener advertising for your client network.
-- **HTTPS protects the UI only.** The Kafka listeners use plaintext, without client authentication. The monitoring web endpoints use HTTP. Restrict access or add the protection your deployment needs.
+- **Kafka security is opt-in.** A new cluster starts with unauthenticated PLAINTEXT Kafka listeners until `./krate identity up` and `./krate kafka auth enable` complete. Verify `./krate kafka auth status` and every application client before exposing broker ports to other machines. Krate Studio shows the current mode and offers the same transition commands. Monitoring's Prometheus and Loki endpoints use HTTP on host loopback by default.
 - **Disk use grows with messages and topics.** EPC limits how much data each part of a topic can keep and requires topics to be created explicitly by default.
 - **Host checks still matter.** A valid package and healthy containers do not verify your network, remote clients, storage capacity, or email delivery. Follow the relevant runbook on the target VM.
 

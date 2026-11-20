@@ -29,6 +29,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KRATE_KAFKA_AUTH_SHA: ${KRATE_KAFKA_AUTH_SHA:-}
+      KAFKA_LOG4J_OPTS: -Dlog4j.configuration=file:/etc/krate/kafka-log4j.properties
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: 24
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
@@ -39,6 +40,7 @@ services:
       KAFKA_LOG_SEGMENT_BYTES: 1073741824
     volumes:
       - kafka-92-data:/var/lib/kafka/data
+      - ../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
         target: /mnt/shared/config
@@ -76,6 +78,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KRATE_KAFKA_AUTH_SHA: ${KRATE_KAFKA_AUTH_SHA:-}
+      KAFKA_LOG4J_OPTS: -Dlog4j.configuration=file:/etc/krate/kafka-log4j.properties
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: 24
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
@@ -86,6 +89,7 @@ services:
       KAFKA_LOG_SEGMENT_BYTES: 1073741824
     volumes:
       - kafka-93-data:/var/lib/kafka/data
+      - ../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
         target: /mnt/shared/config
@@ -123,6 +127,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KRATE_KAFKA_AUTH_SHA: ${KRATE_KAFKA_AUTH_SHA:-}
+      KAFKA_LOG4J_OPTS: -Dlog4j.configuration=file:/etc/krate/kafka-log4j.properties
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: 24
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
@@ -133,6 +138,7 @@ services:
       KAFKA_LOG_SEGMENT_BYTES: 1073741824
     volumes:
       - kafka-94-data:/var/lib/kafka/data
+      - ../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
         target: /mnt/shared/config
@@ -170,6 +176,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KRATE_KAFKA_AUTH_SHA: ${KRATE_KAFKA_AUTH_SHA:-}
+      KAFKA_LOG4J_OPTS: -Dlog4j.configuration=file:/etc/krate/kafka-log4j.properties
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: 24
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
@@ -180,6 +187,7 @@ services:
       KAFKA_LOG_SEGMENT_BYTES: 1073741824
     volumes:
       - kafka-95-data:/var/lib/kafka/data
+      - ../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
         target: /mnt/shared/config

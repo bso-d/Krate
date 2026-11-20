@@ -10,6 +10,9 @@ import ipaddress
 import json
 import os
 import re
+import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -194,7 +197,10 @@ def ensure_ca(ca_dir, trust_dir):
         os.chmod(ca_key, 0o600)
 
         _openssl(['req', '-new', '-x509', '-key', str(ca_key), '-out', str(ca_crt),
-                  '-days', '3650', '-subj', '/CN=Krate Kafka CA'], cwd=ca_dir)
+                  '-days', '3650', '-subj', '/CN=Krate Kafka CA',
+                  '-addext', 'basicConstraints=critical,CA:TRUE',
+                  '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
+                  '-addext', 'subjectKeyIdentifier=hash'], cwd=ca_dir)
         os.chmod(ca_crt, 0o644)
 
     # Copy ca.crt to trust_dir
@@ -233,6 +239,7 @@ def _issue_leaf_keystore(ca_dir, certs_dir, edition, advertised_host, keystore_p
     ext_file.write_text(
         f'basicConstraints=critical,CA:FALSE\n'
         f'keyUsage=critical,digitalSignature,keyEncipherment\n'
+        f'authorityKeyIdentifier=keyid,issuer\n'
         f'extendedKeyUsage=serverAuth,clientAuth\n'
         f'subjectAltName={san_list}\n'
     )
@@ -459,7 +466,7 @@ sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule require
 
 
 def renew_kafka_tls(env_file, edition, output_dir, ca_dir, trust_dir):
-    """Renew Kafka TLS: back up existing certs, issue new leaf under existing CA.
+    """Renew Kafka TLS without removing the serving pair before issuance succeeds.
 
     Args:
         env_file: path to .env file
@@ -482,6 +489,8 @@ def renew_kafka_tls(env_file, edition, output_dir, ca_dir, trust_dir):
         import identity
 
     env = identity.read_env(env_file)
+    if edition not in ('kraft', 'epc'):
+        raise ValueError(f'edition must be kraft or epc, got {repr(edition)}')
 
     ca_key = Path(ca_dir) / 'ca.key'
     ca_crt = Path(ca_dir) / 'ca.crt'
@@ -489,31 +498,62 @@ def renew_kafka_tls(env_file, edition, output_dir, ca_dir, trust_dir):
     if not ca_key.exists() or not ca_crt.exists():
         raise ValueError('CA does not exist; create it first with render_broker_auth')
 
-    certs_dir = Path(output_dir) / 'certs'
+    output_dir = Path(output_dir).resolve()
+    certs_dir = output_dir / 'certs'
     broker_p12 = certs_dir / 'broker.p12'
     broker_crt = certs_dir / 'broker.crt'
+    previous_p12 = certs_dir / '.previous.broker.p12'
+    previous_crt = certs_dir / '.previous.broker.crt'
 
-    # Back up existing
-    if broker_p12.exists():
-        broker_p12.rename(certs_dir / '.previous.broker.p12')
-    if broker_crt.exists():
-        broker_crt.rename(certs_dir / '.previous.broker.crt')
+    if not broker_p12.is_file() or not broker_crt.is_file():
+        raise ValueError('Current broker TLS pair is incomplete; run krate kafka auth enable to repair it')
+    if previous_p12.exists() or previous_crt.exists():
+        raise ValueError('Previous broker TLS material remains; resolve the earlier renewal before retrying')
 
-    # Issue new leaf
+    # All validation and OpenSSL work happens while the serving pair is intact.
     advertised_host = validate_advertised_host(env.get('KAFKA_ADVERTISED_HOST', ''))
     keystore_pw = validate_keystore_password(env, 'KAFKA_TLS_KEYSTORE_PASSWORD')
 
-    _issue_leaf_keystore(ca_dir, certs_dir, edition, advertised_host, keystore_pw)
+    with tempfile.TemporaryDirectory(prefix='.renew-', dir=certs_dir) as stage_name:
+        stage_dir = Path(stage_name)
+        _issue_leaf_keystore(ca_dir, stage_dir, edition, advertised_host, keystore_pw)
+        staged_p12 = stage_dir / 'broker.p12'
+        staged_crt = stage_dir / 'broker.crt'
+        if not keystore_opens(staged_p12, keystore_pw):
+            raise ValueError('New broker keystore cannot be opened with the configured password')
+        cert_info = inspect_cert(staged_crt)
 
-    # Return metadata
-    cert_info = inspect_cert(broker_crt)
-    sha256 = hashlib.sha256()
-    for fpath in [output_dir / 'server.properties', output_dir / 'admin.properties',
-                  output_dir / 'exporter.properties', output_dir / 'exporter-scram.properties',
-                  broker_crt]:
-        if fpath.exists():
-            sha256.update(fpath.read_bytes())
-    config_sha = sha256.hexdigest()[:32]
+        sha256 = hashlib.sha256()
+        for fpath in [output_dir / 'server.properties', output_dir / 'admin.properties',
+                      output_dir / 'exporter.properties', output_dir / 'exporter-scram.properties',
+                      staged_crt]:
+            if fpath.exists():
+                sha256.update(fpath.read_bytes())
+        config_sha = sha256.hexdigest()[:32]
+
+        # The previous files remain available until every broker has confirmed
+        # the new on-wire certificate. Copies keep the current files in place
+        # throughout backup; os.replace never exposes a partially written file.
+        staged_previous_p12 = stage_dir / '.previous.broker.p12'
+        staged_previous_crt = stage_dir / '.previous.broker.crt'
+        shutil.copy2(broker_p12, staged_previous_p12)
+        shutil.copy2(broker_crt, staged_previous_crt)
+        try:
+            os.replace(staged_previous_p12, previous_p12)
+            os.replace(staged_previous_crt, previous_crt)
+        except Exception:
+            # The current pair has not changed, so a partial backup belongs
+            # only to this attempt and must not block a later safe renewal.
+            previous_p12.unlink(missing_ok=True)
+            previous_crt.unlink(missing_ok=True)
+            raise
+        try:
+            os.replace(staged_p12, broker_p12)
+            os.replace(staged_crt, broker_crt)
+        except Exception:
+            # A failed publish is recoverable from the retained previous pair.
+            rollback_kafka_tls(output_dir)
+            raise
 
     return {
         'config_sha': config_sha,
@@ -522,7 +562,7 @@ def renew_kafka_tls(env_file, edition, output_dir, ca_dir, trust_dir):
 
 
 def rollback_kafka_tls(output_dir):
-    """Restore .previous broker files.
+    """Restore the complete previous pair and retain it for retry/recovery.
 
     Args:
         output_dir: directory with certs
@@ -531,10 +571,16 @@ def rollback_kafka_tls(output_dir):
     prev_p12 = certs_dir / '.previous.broker.p12'
     prev_crt = certs_dir / '.previous.broker.crt'
 
-    if prev_p12.exists():
-        prev_p12.rename(certs_dir / 'broker.p12')
-    if prev_crt.exists():
-        prev_crt.rename(certs_dir / 'broker.crt')
+    if not prev_p12.is_file() or not prev_crt.is_file():
+        raise ValueError('Previous broker TLS pair is incomplete; cannot roll back')
+    with tempfile.TemporaryDirectory(prefix='.rollback-', dir=certs_dir) as stage_name:
+        stage_dir = Path(stage_name)
+        staged_p12 = stage_dir / 'broker.p12'
+        staged_crt = stage_dir / 'broker.crt'
+        shutil.copy2(prev_p12, staged_p12)
+        shutil.copy2(prev_crt, staged_crt)
+        os.replace(staged_p12, certs_dir / 'broker.p12')
+        os.replace(staged_crt, certs_dir / 'broker.crt')
 
 
 def discard_previous_kafka_tls(output_dir):
@@ -560,3 +606,39 @@ def inspect_kafka_tls(output_dir):
     """
     broker_crt = Path(output_dir) / 'certs' / 'broker.crt'
     return inspect_cert(broker_crt)
+
+
+def tls_peer_matches(port, hostname, ca_path, expected_serial, connect_host='127.0.0.1'):
+    """Verify the broker's served CA, hostname and exact certificate serial.
+
+    Legacy Krate CAs lack keyUsage. Python 3.13+ default contexts enable
+    VERIFY_X509_STRICT, which rejects those CAs even though their signature
+    chain and hostname remain valid. Keep CERT_REQUIRED and hostname checking;
+    relax only that compatibility flag until operators migrate the CA.
+    """
+    hostname = hostname.removeprefix('[').removesuffix(']')
+    def peer_serial(legacy_ca: bool) -> str:
+        context = ssl.create_default_context(cafile=str(ca_path))
+        if legacy_ca:
+            context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        with socket.create_connection((connect_host, int(port)), timeout=4) as sock:
+            with context.wrap_socket(sock, server_hostname=hostname) as tls:
+                certificate = tls.getpeercert()
+                if not isinstance(certificate, dict):
+                    raise ssl.SSLError('TLS peer did not provide a verified certificate')
+                serial = certificate.get('serialNumber')
+                if not isinstance(serial, str) or not serial:
+                    raise ssl.SSLError('TLS peer certificate has no serial number')
+                return serial
+
+    try:
+        observed = peer_serial(False)
+    except ssl.SSLCertVerificationError as exc:
+        legacy_extension_errors = (
+            'CA cert does not include key usage extension',
+            'Missing Authority Key Identifier',
+        )
+        if not any(message in str(exc) for message in legacy_extension_errors):
+            raise
+        observed = peer_serial(True)
+    return int(observed, 16) == int(expected_serial, 16)

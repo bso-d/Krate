@@ -35,6 +35,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KRATE_KAFKA_AUTH_SHA: ${KRATE_KAFKA_AUTH_SHA:-}
+      KAFKA_LOG4J_OPTS: -Dlog4j.configuration=file:/etc/krate/kafka-log4j.properties
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
       # 2-broker cluster: RF=2 with min ISR 1, so a single broker outage does not
@@ -59,6 +60,7 @@ services:
       # RHEL, ignored where SELinux is not enforcing. The directory must exist
       # and be owned by the image's uid before start; './kafka' handles that.
       - ${KAFKA_DATA_DIR:-/data}/krate/broker-92:/var/lib/kafka/data:Z
+      - ../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro,z
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
         target: /mnt/shared/config
@@ -100,6 +102,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KRATE_KAFKA_AUTH_SHA: ${KRATE_KAFKA_AUTH_SHA:-}
+      KAFKA_LOG4J_OPTS: -Dlog4j.configuration=file:/etc/krate/kafka-log4j.properties
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
       # 2-broker cluster: RF=2 with min ISR 1, so a single broker outage does not
@@ -124,6 +127,7 @@ services:
       # RHEL, ignored where SELinux is not enforcing. The directory must exist
       # and be owned by the image's uid before start; './kafka' handles that.
       - ${KAFKA_DATA_DIR:-/data}/krate/broker-93:/var/lib/kafka/data:Z
+      - ../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro,z
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
         target: /mnt/shared/config

@@ -2638,7 +2638,7 @@ print(json.dumps(c))
 # initialised with and the dump expects. The database password is a role of
 # the database, not part of the dump, so it stays with the volume.
 
-IDENTITY_BACKUP_KEYS=(KEYCLOAK_ADMIN_USER KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_IDP_WATCH_CLIENT_SECRET)
+IDENTITY_BACKUP_KEYS=(KEYCLOAK_ADMIN_USER KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_CLI_CLIENT_SECRET KEYCLOAK_KAFBAT_CLIENT_SECRET KEYCLOAK_IDP_WATCH_CLIENT_SECRET KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET)
 IDENTITY_ENC=(-aes-256-cbc -pbkdf2 -iter 600000 -salt -pass env:KRATE_BACKUP_PASSPHRASE)
 
 # An encrypted tar of db.dump (pg_dump -Fc) and identity.env (the keys above).
@@ -2679,6 +2679,43 @@ cmd_identity_backup() {
 # Restore a backup into the identity database (keycloak-db is started, a lost
 # volume is recreated), take over the .env keys the backup carries, then
 # start Keycloak and verify the admin and krate-cli logins.
+identity_restore_refresh_ui() {
+  [[ "$(env_value KAFKA_UI_AUTH_CONFIG)" == runtime.yml || "$(env_value KAFKA_AUTH_MODE)" == oauth_ssl ]] || return 0
+  local ui_ids health project_filter
+  local ui_filter="label=com.docker.compose.service=kafka-ui"
+  project_filter="label=com.docker.compose.project=$(cluster_project)"
+  if ! ui_ids="$(docker ps -q --filter "$project_filter" --filter "$ui_filter")"; then
+    identity_journal restore failed "cannot determine running Kafbat UI state"
+    die "Identity database restored, but Kafbat UI state could not be checked. Check Docker, then run: krate start; krate health"
+  fi
+  if [[ "$ui_ids" == *$'\n'* ]]; then
+    identity_journal restore failed "multiple running Kafbat UI containers"
+    die "Identity database restored, but Kafbat UI state is ambiguous. Check Docker, then run: krate start; krate health"
+  fi
+  [[ -n "$ui_ids" ]] || return 0
+  # A restore can replace Keycloak's effective client even if .env did not
+  # change (including a retry after an earlier incomplete restore). Refresh
+  # only a UI that was already running; leave stopped and absent UIs staged.
+  info "Recreating the running Kafbat UI with restored identity credentials..."
+  if ! (compose_cmd up -d --pull never --no-build --no-deps --force-recreate \
+      --wait --wait-timeout "$IDENTITY_TIMEOUT" kafka-ui); then
+    identity_journal restore failed "running Kafbat UI did not recreate with restored credentials"
+    die "Identity database restored, but Kafbat UI did not reload restored credentials. Check: krate logs kafka-ui. Recover with: krate start; krate health"
+  fi
+  if ! ui_ids="$(docker ps -q --filter "$project_filter" --filter "$ui_filter")" \
+      || [[ -z "$ui_ids" || "$ui_ids" == *$'\n'* ]]; then
+    identity_journal restore failed "running Kafbat UI not found after recreation"
+    die "Identity database restored, but Kafbat UI is not running. Check: krate logs kafka-ui. Recover with: krate start; krate health"
+  fi
+  health="$(container_health "$ui_ids")"
+  if [[ "$health" != healthy ]]; then
+    identity_journal restore failed "Kafbat UI is $health after recreation"
+    die "Identity database restored, but Kafbat UI is $health. Check: krate logs kafka-ui. Recover with: krate start; krate health"
+  fi
+  identity_journal restore reconciled "running Kafbat UI reloaded with restored identity credentials"
+  ok "Running Kafbat UI reloaded with restored identity credentials"
+}
+
 cmd_identity_restore() {
   local file="${1:-}" cid kc state reason work key value changed=""
   [[ -f "$file" ]] || die "Usage: krate identity restore <file>"
@@ -2756,6 +2793,13 @@ If that keeps failing, follow the volume-lost procedure in docs/identity-foundat
   identity_reconcile_realm_policy restore
   identity_reconcile_idp_watch_client restore
   identity_reconcile_kafka_auth restore
+  if [[ "$(env_value KAFKA_AUTH_MODE)" == oauth_ssl ]]; then
+    # Older backups did not carry this secret. Generate one only when neither
+    # the backup nor this installation has it, then reconcile the restored DB.
+    ensure_kafka_secret KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET
+    kafka_reconcile_ui_broker_client
+  fi
+  identity_restore_refresh_ui
   identity_journal restore ok "$file"
   ok "Identity database restored from $file"
 }
@@ -3477,6 +3521,20 @@ cmd_health() {
     printf "  %-35s %b\n" "$name" "$label"
   done <<< "$container_ids"
 
+  local monitoring_running
+  monitoring_running=""
+  if [[ -n "${KRATE_VARIANT:-}" ]]; then
+    monitoring_running="$(docker ps -q --filter "label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring" | head -1)"
+  fi
+  if [[ -n "$monitoring_running" ]]; then
+    if monitor_security_ready; then
+      printf "  %-35s %b\n" "kafka-security observer" "${GREEN}healthy${RESET}"
+    else
+      printf "  %-35s %b\n" "kafka-security observer" "${RED}unverified${RESET}"
+      all_ok=false
+    fi
+  fi
+
   echo ""
   if $all_ok; then
     ok "All services healthy"
@@ -3916,6 +3974,48 @@ monitor_targets() {
   echo "${out% }"
 }
 
+# Monitoring runs on kafka-network and reaches the broker TLS listeners through
+# the proxy service. These are container ports, independent of host port maps.
+monitor_security_endpoints() {
+  if [[ "$KRATE_VARIANT" == kraft ]]; then
+    echo "proxy:19092,proxy:19093,proxy:19094,proxy:19095"
+  else
+    echo "proxy:9092,proxy:9093"
+  fi
+}
+
+monitor_security_ready() {
+  local cid health expected result expected_mode=false actual_mode
+  cid="$(monitor_compose ps -q kafka-security 2>/dev/null | head -1)" || cid=""
+  [[ -n "$cid" ]] || return 1
+  health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null)" || return 1
+  [[ "$health" == healthy ]] || return 1
+  if [[ "$(env_value KAFKA_AUTH_MODE)" == oauth_ssl ]]; then
+    expected_mode=true
+  fi
+  actual_mode="$(docker exec "$cid" printenv KAFKA_SECURITY_MODE 2>/dev/null)" || return 1
+  [[ "$actual_mode" == "$expected_mode" ]] || return 1
+  if [[ "$expected_mode" == true ]]; then
+    expected="$(monitor_broker_count)" || return 1
+    result="$(docker exec "$cid" python3 -c '
+import sys, urllib.request
+text = urllib.request.urlopen("http://127.0.0.1:9315/metrics", timeout=12).read().decode("ascii")
+probes = [line for line in text.splitlines() if line.startswith("krate_kafka_listener_tls_probe_success{")]
+print("ok" if len(probes) == int(sys.argv[1]) and all(line.endswith(" 1") for line in probes) else "fail")
+' "$expected" 2>/dev/null)" || return 1
+    [[ "$result" == ok ]] || return 1
+  fi
+}
+
+monitor_wait_security_ready() {
+  local attempt
+  for ((attempt=0; attempt<30; attempt++)); do
+    monitor_security_ready && return 0
+    if (( attempt < 29 )); then sleep 2; fi
+  done
+  return 1
+}
+
 # Count configured broker services independently of their runtime state.
 monitor_broker_count() {
   local services
@@ -4009,6 +4109,7 @@ This bundle was built without the observability stack."
   KAFKA_EXPECTED_BROKERS="${expected:-1}" \
   KAFKA_NETWORK="$net" \
   KAFKA_EXPORTER_TARGETS="$(monitor_targets)" \
+  KAFKA_SECURITY_ENDPOINTS="$(monitor_security_endpoints)" \
   KAFKA_EXPORTER_SASL_ENABLED="$exporter_sasl_enabled" \
   KAFKA_EXPORTER_SASL_USER="$exporter_sasl_user" \
   KAFKA_EXPORTER_SASL_PASSWORD="$exporter_sasl_password" \
@@ -4705,6 +4806,8 @@ cmd_monitor() {
           || die "Dropped monitoring SSO services could not be removed; Grafana sign-in transition stopped"
       fi
       monitor_compose up -d || die "Monitoring startup failed; Grafana sign-in transition remains owed"
+      monitor_wait_security_ready \
+        || die "Kafka security observer is not healthy or its broker TLS probes failed; check: krate monitor logs kafka-security"
       if [[ "$session_plan" == external ]]; then
         monitor_grafana_end_sessions external 120 || die "Grafana session revocation failed"
         monitor_grafana_record_holders "$target_class" || die "Grafana session record could not be written"
@@ -4747,7 +4850,10 @@ cmd_monitor() {
       monitor_grafana_record_holders "$held" || die "Grafana session record could not be written"
       monitor_compose down "$@"
       ;;
-    status)  require_compose; monitor_compose ps ;;
+    status|health)
+      require_compose
+      monitor_compose ps
+      monitor_security_ready || die "Kafka security observer is not healthy or its broker TLS probes failed; check: krate monitor logs kafka-security" ;;
     logs)    require_compose; monitor_compose logs --tail 100 "$@" ;;
     reload)
       # Re-read the configuration and alert rules without restarting Prometheus
@@ -5538,15 +5644,239 @@ kafka_set_ui_broker_client_secret() {
 # monitoring stack is attached to this cluster's network; a monitoring stack
 # that belongs to another cluster project on the same host is left alone.
 kafka_refresh_exporter() {
-  local id net
-  id="$(docker ps -q --filter "label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring" \
-    --filter "label=com.docker.compose.service=kafka-exporter" | head -1)"
-  [[ -n "$id" ]] || return 0
-  net="$(monitor_network)" || return 0
-  docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' "$id" 2>/dev/null \
-    | grep -qx "$net" || return 0
-  info "Refreshing kafka-exporter with the current SASL settings..."
-  monitor_compose up -d --pull never --no-deps kafka-exporter || warn "kafka-exporter was not refreshed; run: krate monitor up"
+  local project_ids exporter_ids observer_ids id net nets observed_net state
+  local attached=false foreign=false matches
+  local project_label="label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring"
+  if ! project_ids="$(docker ps -a -q --filter "$project_label")"; then
+    warn "Cannot list Kafka monitoring containers to verify attachment"
+    return 1
+  fi
+  [[ -n "$project_ids" ]] || return 0
+  if ! exporter_ids="$(docker ps -a -q --filter "$project_label" \
+      --filter 'label=com.docker.compose.service=kafka-exporter')" \
+      || ! observer_ids="$(docker ps -a -q --filter "$project_label" \
+      --filter 'label=com.docker.compose.service=kafka-security')"; then
+    warn "Cannot list Kafka monitoring services to verify attachment"
+    return 1
+  fi
+  if [[ "$exporter_ids" == *$'\n'* || "$observer_ids" == *$'\n'* ]]; then
+    warn "Multiple Kafka monitoring service containers found; attachment is ambiguous"
+    return 1
+  fi
+  if [[ -z "$exporter_ids" && -z "$observer_ids" ]]; then
+    warn "Kafka monitoring project exists without an exporter or security observer; attachment is ambiguous"
+    return 1
+  fi
+  if ! net="$(monitor_network)" || [[ -z "$net" ]]; then
+    warn "Cannot determine the broker network to verify Kafka monitoring attachment"
+    return 1
+  fi
+  for id in "$exporter_ids" "$observer_ids"; do
+    [[ -n "$id" ]] || continue
+    if ! nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' "$id" 2>/dev/null)"; then
+      warn "Cannot inspect Kafka monitoring network attachment"
+      return 1
+    fi
+    if [[ -z "$nets" ]]; then
+      warn "Kafka monitoring service has no inspected network attachment"
+      return 1
+    fi
+    matches=false
+    while IFS= read -r observed_net; do
+      if [[ "$observed_net" == "$net" ]]; then matches=true; break; fi
+    done <<< "$nets"
+    if $matches; then attached=true; else foreign=true; fi
+  done
+  if $attached && $foreign; then
+    warn "Kafka monitoring services have mixed broker-network attachment"
+    return 1
+  fi
+  $attached || return 0
+  info "Refreshing Kafka monitoring with the current security mode..."
+  if ! monitor_compose up -d --pull never --no-deps kafka-exporter kafka-security; then
+    warn "Attached Kafka monitoring could not be refreshed"
+    return 1
+  elif ! monitor_wait_security_ready; then
+    warn "Attached Kafka security observer did not verify the current mode"
+    return 1
+  fi
+  if ! exporter_ids="$(docker ps -q --filter "$project_label" \
+      --filter 'label=com.docker.compose.service=kafka-exporter')" \
+      || [[ -z "$exporter_ids" || "$exporter_ids" == *$'\n'* ]]; then
+    warn "Attached Kafka exporter is not running after monitoring refresh"
+    return 1
+  fi
+  if ! state="$(docker inspect -f '{{.State.Status}}' "$exporter_ids" 2>/dev/null)" \
+      || [[ "$state" != running ]]; then
+    warn "Attached Kafka exporter is not running after monitoring refresh"
+    return 1
+  fi
+  return 0
+}
+
+kafka_client_home() {
+  local home="${KAFKA_OAUTH_CLIENT_HOME:-$SCRIPT_DIR/kafka-oauth-client}"
+  if [[ -n "${KAFKA_OAUTH_CLIENT_HOME:-}" ]]; then
+    [[ -n "$REPO_DIR" ]] || die "KAFKA_OAUTH_CLIENT_HOME is for source-checkout fixtures only"
+    [[ "$home" == /* && -d "$home" && ! -L "$home" ]] || die "KAFKA_OAUTH_CLIENT_HOME must be an absolute regular directory"
+  fi
+  [[ -f "$home/krate-kafka-oauth-client.jar" ]] || die "Kafka OAuth client jar is missing; build or install the bundled client"
+  local lib
+  for lib in kafka-clients-3.9.1.jar jackson-databind-2.16.2.jar jackson-core-2.16.2.jar jackson-annotations-2.16.2.jar; do
+    [[ -f "$home/libs/$lib" ]] || die "Kafka OAuth client runtime dependency $lib is missing"
+  done
+  printf '%s\n' "$home"
+}
+
+kafka_client_java() {
+  command -v java >/dev/null || die "Java 17 or newer is required for the Kafka OAuth client"
+  local version home
+  version="$(java -version 2>&1 | head -1 | awk -F '"' '{split($2, parts, "."); print parts[1]}')"
+  [[ "$version" =~ ^[0-9]+$ && "$version" -ge 17 ]] || die "Java 17 or newer is required for the Kafka OAuth client"
+  home="$(kafka_client_home)"
+  java -cp "$home/krate-kafka-oauth-client.jar:$home/libs/*" \
+    com.krate.kafka.oauth.CredentialStateCli "$@"
+}
+
+cmd_kafka_client() {
+  local action="${1:-}" state="" key="" value="" issuer="" trust_pem="" client_id="" access="" window=172800 overlap=172800 admin=false
+  local -a acl_args=()
+  shift || true
+  if [[ "$action" == template ]]; then
+    [[ $# -eq 1 ]] || die "Usage: krate kafka client template CLIENT_ID"
+    # Keycloak assigns service_account when serviceAccountsEnabled=true; DCR's
+    # allowed-scopes policy rejects it if the request includes it explicitly.
+    python3 "$(sso_dir)/identity.py" kafka-auth managed-client --client-id "$1" \
+      | python3 -c 'import json,sys; c=json.load(sys.stdin); c["defaultClientScopes"]=[s for s in c["defaultClientScopes"] if s != "service_account"]; print(json.dumps(c))'
+    return
+  fi
+  while [[ $# -gt 0 ]]; do
+    key="$1"; shift
+    case "$key" in
+      --json) continue ;;
+      --admin) admin=true ;;
+      --state|--issuer|--trust-pem|--client-id|--access|--topic|--group|--rotation-window-seconds|--overlap-seconds)
+        [[ $# -gt 0 ]] || die "$key needs a value"
+        value="$1"; shift
+        case "$key" in
+          --state) state="$value" ;;
+          --issuer) issuer="$value" ;;
+          --trust-pem) trust_pem="$value" ;;
+          --client-id) client_id="$value" ;;
+          --access) access="$value" ;;
+          --topic|--group) acl_args+=("$key" "$value") ;;
+          --rotation-window-seconds) window="$value" ;;
+          --overlap-seconds) overlap="$value" ;;
+        esac ;;
+      *) die "Unknown Kafka client option: $key" ;;
+    esac
+  done
+  [[ "$state" == /* ]] || die "--state must be an absolute path in an existing private directory"
+  case "$action" in
+    status|rotate)
+      (( ${#acl_args[@]} == 0 )) && [[ -z "$client_id$access$issuer$trust_pem" && "$admin" == false ]] \
+        || die "Only --state is accepted for Kafka client $action"
+      if [[ "$action" == rotate ]]; then operation_lock "kafka-client-rotate"; identity_lock; fi
+      kafka_client_java "$action" --state "$state" ;;
+    recover)
+      (( ${#acl_args[@]} == 0 )) && [[ -z "$client_id$access$issuer" ]] \
+        || die "Recover accepts only --state, --admin and --trust-pem"
+      operation_lock "kafka-client-recover"; identity_lock
+      if [[ "$admin" == true ]]; then
+        [[ -f "$ENV_FILE" ]] || die "No .env found; run: krate setup"
+        client_id="$(kafka_client_java status --state "$state" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_id"])')" \
+          || die "Cannot read the Kafka client identity from private state"
+        issuer="$(env_value KEYCLOAK_PUBLIC_URL)"
+        issuer="${issuer%/}/realms/$IDENTITY_REALM"
+        [[ "$issuer" == https://* ]] || die "KEYCLOAK_PUBLIC_URL must use HTTPS for recovery"
+        [[ -n "$trust_pem" || ! -f "$CERT_CRT" ]] || trust_pem="$CERT_CRT"
+        if [[ -n "$trust_pem" ]]; then
+          [[ "$trust_pem" == /* && -f "$trust_pem" && ! -L "$trust_pem" ]] || die "--trust-pem must be an absolute regular PEM file"
+        fi
+        kafka_client_verify_registration "$client_id"
+        kafka_client_admin_oidc "$client_id" "$issuer" "$trust_pem" \
+          | kafka_client_java recover --state "$state" \
+          || die "Keycloak registration recovery failed; private state was not replaced"
+      else
+        [[ -z "$trust_pem" ]] || die "--trust-pem requires --admin for recovery"
+        [[ ! -t 0 ]] || die "Pipe a replacement DCR response or use --admin for Kafka client recovery"
+        kafka_client_java recover --state "$state"
+      fi ;;
+    register)
+      [[ -f "$ENV_FILE" ]] || die "No .env found; run: krate setup"
+      [[ -n "$client_id" && -n "$access" ]] || die "Registration needs --client-id, --access and literal --topic/--group ACLs"
+      [[ "$admin" == false ]] || die "--admin is only valid for Kafka client recover"
+      [[ -z "$issuer" ]] || die "Registration uses the configured KEYCLOAK_PUBLIC_URL; omit --issuer"
+      [[ ! -e "$state" && ! -L "$state" ]] || die "Private client state already exists; use krate kafka client status or recover"
+      kafka_client_validate_acl_args "$access" "${acl_args[@]}"
+      python3 "$(sso_dir)/identity.py" kafka-auth managed-client --client-id "$client_id" >/dev/null \
+        || die "Invalid or reserved Kafka client ID"
+      issuer="$(env_value KEYCLOAK_PUBLIC_URL)"
+      issuer="${issuer%/}/realms/$IDENTITY_REALM"
+      [[ "$issuer" == https://* ]] || die "KEYCLOAK_PUBLIC_URL must use HTTPS for registration"
+      [[ -n "$trust_pem" || ! -f "$CERT_CRT" ]] || trust_pem="$CERT_CRT"
+      if [[ -n "$trust_pem" ]]; then
+        [[ "$trust_pem" == /* && -f "$trust_pem" && ! -L "$trust_pem" ]] || die "--trust-pem must be an absolute regular PEM file"
+      fi
+      operation_lock "kafka-client-register"; identity_lock
+      local -a enroll_args=(enroll --state "$state" --client-id "$client_id" --access "$access" \
+        --rotation-window-seconds "$window" --overlap-seconds "$overlap")
+      enroll_args+=("${acl_args[@]}")
+      [[ -z "$trust_pem" ]] || enroll_args+=(--trust-pem "$trust_pem")
+      kafka_client_register_dcr "$client_id" "$issuer" "$trust_pem" \
+        | cmd_kafka_client "${enroll_args[@]}" \
+        || die "Client registration or enrollment failed; inspect the Keycloak client and private state before retrying"
+      ;;
+    enroll)
+      [[ "$admin" == false ]] || die "--admin is only valid for Kafka client recover"
+      [[ ! -t 0 ]] || die "Pipe a DCR response to krate kafka client enroll; never put credentials in arguments"
+      [[ -f "$ENV_FILE" ]] || die "No .env found; run: krate setup"
+      [[ -n "$client_id" && -n "$access" ]] || die "Enrollment needs --client-id, --access and literal --topic/--group ACLs"
+      kafka_client_validate_acl_args "$access" "${acl_args[@]}"
+      python3 "$(sso_dir)/identity.py" kafka-auth managed-client --client-id "$client_id" >/dev/null \
+        || die "Invalid or reserved Kafka client ID"
+      if [[ -z "$issuer" ]]; then
+        issuer="$(env_value KEYCLOAK_PUBLIC_URL)"
+        issuer="${issuer%/}/realms/$IDENTITY_REALM"
+      fi
+      issuer="${issuer%/}"
+      [[ "$issuer" == https://* ]] || die "Kafka client issuer must use HTTPS"
+      [[ "$window" =~ ^[0-9]+$ && "$overlap" =~ ^[0-9]+$ ]] || die "Rotation window and overlap must be positive seconds"
+      [[ -n "$trust_pem" || ! -f "$CERT_CRT" ]] || trust_pem="$CERT_CRT"
+      local -a options=(enroll --state "$state" --token-endpoint "$issuer/protocol/openid-connect/token" --issuer "$issuer" --rotation-window-seconds "$window" --overlap-seconds "$overlap")
+      if [[ -n "$trust_pem" ]]; then
+        [[ "$trust_pem" == /* && -f "$trust_pem" && ! -L "$trust_pem" ]] || die "--trust-pem must be an absolute regular PEM file"
+        options+=(--trust-pem "$trust_pem")
+      fi
+      operation_lock "kafka-client-enroll"; identity_lock
+      identity_tmpdir
+      local default_file="$IDENTITY_TMPDIR/default-dcr.json" oidc_file="$IDENTITY_TMPDIR/openid-dcr.json" registered_id public_status
+      : > "$default_file"; chmod 600 "$default_file"
+      head -c 65537 > "$default_file"
+      [[ "$(wc -c < "$default_file")" -le 65536 ]] || die "DCR response exceeds 64 KiB"
+      registered_id="$(kafka_client_dcr_bridge "$default_file" "$oidc_file" "$issuer" "$trust_pem")" \
+        || die "Cannot bridge the private Keycloak DCR response to the OpenID registration contract"
+      [[ "$registered_id" == "$client_id" ]] || die "DCR response client ID differs from --client-id"
+      kafka_client_verify_registration "$client_id"
+      public_status="$(kafka_client_java "${options[@]}" < "$oidc_file")" \
+        || die "Kafka client enrollment failed; inspect private state before retrying"
+      kafka_client_java recover --state "$state" < "$oidc_file" >/dev/null \
+        || die "Kafka client token proof failed; state exists without ACLs. Recover it with a valid DCR response"
+      kafka_client_grant_acls "$client_id" "$access" "${acl_args[@]}"
+      printf '%s\n' "$public_status" ;;
+    grant)
+      [[ "$admin" == false ]] || die "--admin is only valid for Kafka client recover"
+      [[ -n "$access" ]] || die "Grant needs --access and literal --topic/--group ACLs"
+      [[ -z "$issuer$trust_pem" ]] || die "Grant accepts only --state, --access, --topic and --group"
+      kafka_client_validate_acl_args "$access" "${acl_args[@]}"
+      client_id="$(kafka_client_java status --state "$state" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_id"])')" \
+        || die "Cannot read the Kafka client identity from private state"
+      operation_lock "kafka-client-grant"; identity_lock
+      kafka_client_verify_registration "$client_id"
+      kafka_client_grant_acls "$client_id" "$access" "${acl_args[@]}"
+      kafka_client_java status --state "$state" ;;
+    *) die "Usage: krate kafka client {template CLIENT_ID|register|enroll|status|rotate|recover [--admin]|grant} --state ABS [options]" ;;
+  esac
 }
 
 cmd_kafka() {
@@ -5566,7 +5896,8 @@ cmd_kafka() {
       esac
       ;;
     renew-tls) cmd_kafka_renew_tls "$sso_dir" "$@" ;;
-    *)         die "Usage: krate kafka {auth {enable|status|disable}|renew-tls}" ;;
+    client) cmd_kafka_client "$@" ;;
+    *)         die "Usage: krate kafka {auth {enable|status|disable}|renew-tls|client}" ;;
   esac
 }
 
@@ -5578,6 +5909,8 @@ cmd_kafka_auth_enable() {
   require_compose_file
 
   [[ -f "$ENV_FILE" ]] || die "No .env found; run: krate setup"
+  operation_lock "kafka-auth-enable"
+  identity_lock
 
   # The master admin login goes through the kcadm helper: the password travels in the
   # exec environment (KC_CLI_PASSWORD) and the session file is per run and removed by
@@ -5688,7 +6021,8 @@ cmd_kafka_auth_enable() {
     --operation Describe \
     --group '*' >/dev/null || die "Failed to grant group ACLs"
 
-  kafka_refresh_exporter
+  kafka_refresh_exporter \
+    || die "Kafka OAuth/TLS is active on brokers; broker mode changed; monitoring recovery required. Run: krate monitor up; then krate monitor status"
 
   ok "Kafka OAuth/TLS enabled successfully"
   echo ""
@@ -5734,12 +6068,26 @@ cmd_kafka_auth_status() {
         --command-config /mnt/shared/config/admin.properties \
         --entity-type users \
         --entity-name krate-exporter \
-        --describe 2>/dev/null | grep -q "krate-exporter"; then
+        --describe 2>/dev/null \
+        | grep -F "SCRAM credential configs for user-principal 'krate-exporter' are SCRAM-SHA-512=" >/dev/null; then
         ok "krate-exporter user is configured"
       else
         warn "krate-exporter user not found"
         status_code=1
       fi
+    else
+      err "No running broker found for this cluster; authenticated Kafka connectivity is unverified"
+      status_code=1
+    fi
+  elif [[ "$auth_mode" == local || -z "$auth_mode" ]]; then
+    if [[ -z "$(find_broker 2>/dev/null || true)" ]]; then
+      err "No running broker found for this cluster; local Kafka connectivity is unverified"
+      status_code=1
+    elif kafka_verify_broker_mode local "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT" 1; then
+      ok "Local brokers are responsive over plaintext"
+    else
+      err "Local brokers are not all responsive over plaintext"
+      status_code=1
     fi
   fi
 
@@ -5747,12 +6095,56 @@ cmd_kafka_auth_status() {
   return $status_code
 }
 
+# A Compose success alone does not prove the broker actually switched modes.
+# Check every expected container's listener map and a real Kafka API query.
+kafka_verify_broker_mode() {
+  local mode="$1" expected_map="$2" max_attempts="${3:-30}" node_id cid current_map internal_port attempt
+  local -a node_ids=(92 93)
+  if [[ "$KRATE_VARIANT" == kraft ]]; then node_ids+=(94 95); fi
+  for ((attempt=0; attempt<max_attempts; attempt++)); do
+    local ready=true
+    for node_id in "${node_ids[@]}"; do
+      cid="$(compose_cmd ps -q "kafka-$node_id" 2>/dev/null | head -1)" || cid=""
+      if [[ -z "$cid" ]]; then ready=false; break; fi
+      current_map="$(docker exec "$cid" printenv KAFKA_LISTENER_SECURITY_PROTOCOL_MAP 2>/dev/null)" || current_map=""
+      if [[ "$current_map" != "$expected_map" ]]; then ready=false; break; fi
+      if [[ "$KRATE_VARIANT" == kraft ]]; then
+        internal_port="$((9000 + node_id))"
+      else
+        internal_port="$((19000 + node_id))"
+      fi
+      if [[ "$mode" == oauth_ssl ]]; then
+        if ! docker exec "$cid" /opt/kafka/bin/kafka-broker-api-versions.sh \
+            --bootstrap-server "kafka-$node_id:$internal_port" \
+            --command-config /mnt/shared/config/admin.properties >/dev/null 2>&1; then
+          ready=false; break
+        fi
+      elif ! docker exec "$cid" /opt/kafka/bin/kafka-broker-api-versions.sh \
+          --bootstrap-server "kafka-$node_id:$internal_port" >/dev/null 2>&1; then
+        ready=false; break
+      fi
+    done
+    if $ready; then return 0; fi
+    if (( attempt + 1 < max_attempts )); then sleep 2; fi
+  done
+  return 1
+}
+
 cmd_kafka_auth_disable() {
   require_compose
   require_compose_file
   [[ -f "$ENV_FILE" ]] || return 0
+  operation_lock "kafka-auth-disable"
+  identity_lock
 
   info "Disabling Kafka OAuth/TLS..."
+
+  local old_mode old_map old_sha old_ui_protocol old_ui_mechanism
+  old_mode="$(env_value KAFKA_AUTH_MODE)"
+  old_map="$(env_value KAFKA_LISTENER_SECURITY_PROTOCOL_MAP)"
+  old_sha="$(env_value KRATE_KAFKA_AUTH_SHA)"
+  old_ui_protocol="$(env_value KAFKA_UI_SECURITY_PROTOCOL)"
+  old_ui_mechanism="$(env_value KAFKA_UI_SASL_MECHANISM)"
 
   set_env_file_value "$ENV_FILE" KAFKA_AUTH_MODE local
   set_env_file_value "$ENV_FILE" KAFKA_LISTENER_SECURITY_PROTOCOL_MAP "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
@@ -5772,12 +6164,61 @@ cmd_kafka_auth_disable() {
     else
       broker_services=(kafka-92 kafka-93)
     fi
-    compose_cmd up -d --pull never "${broker_services[@]}" kafka-ui || warn "Failed to restart brokers"
+    if ! compose_cmd up -d --pull never "${broker_services[@]}" kafka-ui \
+        || ! kafka_verify_broker_mode local "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"; then
+      err "Kafka brokers did not verify in local mode; restoring previous settings..."
+      set_env_file_value "$ENV_FILE" KAFKA_AUTH_MODE "$old_mode"
+      set_env_file_value "$ENV_FILE" KAFKA_LISTENER_SECURITY_PROTOCOL_MAP "$old_map"
+      set_env_file_value "$ENV_FILE" KRATE_KAFKA_AUTH_SHA "$old_sha"
+      set_env_file_value "$ENV_FILE" KAFKA_UI_SECURITY_PROTOCOL "$old_ui_protocol"
+      set_env_file_value "$ENV_FILE" KAFKA_UI_SASL_MECHANISM "$old_ui_mechanism"
+      if compose_cmd up -d --pull never "${broker_services[@]}" kafka-ui \
+          && kafka_verify_broker_mode "${old_mode:-local}" "$old_map"; then
+        die "Kafka auth disable failed; previous mode ${old_mode:-local} was restored and verified"
+      fi
+      die "Kafka auth disable failed; previous settings were restored, but broker recovery is unverified. Check krate kafka auth status and broker logs"
+    fi
+  else
+    warn "No broker is running; local mode is staged for the next start"
   fi
 
-  kafka_refresh_exporter
+  if ! kafka_refresh_exporter; then
+    if [[ -n "$broker" ]]; then
+      die "Kafka local mode is active on brokers; broker mode changed; monitoring recovery required. Run: krate monitor up; then krate monitor status"
+    fi
+    die "Kafka local mode is staged for next start; monitoring recovery required. Run: krate monitor up; then krate monitor status"
+  fi
 
   ok "Kafka OAuth/TLS disabled"
+}
+
+# Check the certificate a DevOps client actually receives through this node's
+# published proxy port. The CA and hostname are verified, not just the serial.
+kafka_tls_peer_matches() {
+  local node_id="$1" expected_serial="$2" port host
+  port="$(env_value "KAFKA_BROKER_${node_id}_PORT")"
+  if [[ -z "$port" ]]; then
+    if [[ "$KRATE_VARIANT" == kraft ]]; then port="$((19000 + node_id))"; else port="$((9000 + node_id))"; fi
+  fi
+  host="$(env_value KAFKA_ADVERTISED_HOST)"
+  PYTHONPATH="$(sso_dir)" python3 - "$port" "${host:-localhost}" "$SCRIPT_DIR/certs/kafka/ca.crt" "$expected_serial" <<'PY'
+import sys
+import kafka_broker_auth
+
+try:
+    sys.exit(0 if kafka_broker_auth.tls_peer_matches(*sys.argv[1:]) else 1)
+except (OSError, ValueError, KeyError):
+    sys.exit(1)
+PY
+}
+
+kafka_wait_tls_peer() {
+  local node_id="$1" serial="$2" attempt
+  for ((attempt=0; attempt<12; attempt++)); do
+    kafka_tls_peer_matches "$node_id" "$serial" && return 0
+    sleep 1
+  done
+  return 1
 }
 
 cmd_kafka_renew_tls() {
@@ -5786,29 +6227,36 @@ cmd_kafka_renew_tls() {
   require_docker
   require_compose_file
   [[ -f "$ENV_FILE" ]] || die "No .env found"
+  operation_lock "kafka-renew-tls"
+  identity_lock
 
   [[ "$(env_value KAFKA_AUTH_MODE)" == "oauth_ssl" ]] || die "Kafka OAuth/TLS is not enabled (KAFKA_AUTH_MODE != oauth_ssl)"
 
   info "Renewing Kafka broker TLS certificates..."
-  local serial config_sha renewal_output
+  local serial config_sha renewal_output old_serial old_sha
+  old_sha="$(env_value KRATE_KAFKA_AUTH_SHA)"
+  old_serial="$(python3 "$sso_dir/identity.py" kafka-broker inspect-tls \
+    --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["serial"])')" \
+    || die "Cannot inspect the current Kafka certificate; repair it before renewal"
 
-  renewal_output="$(python3 "$sso_dir/identity.py" kafka-broker renew-tls \
+  if ! renewal_output="$(python3 "$sso_dir/identity.py" kafka-broker renew-tls \
     --env-file "$ENV_FILE" \
     --edition "$KRATE_VARIANT" \
     --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" \
     --ca-dir "$SCRIPT_DIR/auth/kafka/ca" \
-    --trust-dir "$SCRIPT_DIR/certs/kafka" 2>&1 || die "Failed to renew TLS")"
+    --trust-dir "$SCRIPT_DIR/certs/kafka" 2>&1)"; then
+    die "Failed to renew TLS: $renewal_output"
+  fi
 
   serial="$(echo "$renewal_output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["serial"])')"
   config_sha="$(echo "$renewal_output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["config_sha"])')"
 
   fix_kafka_oauth_permissions
 
-  info "Updating .env configuration..."
-  set_env_file_value "$ENV_FILE" KRATE_KAFKA_AUTH_SHA "$config_sha"
-
   # Reload keystore on brokers if running
-  local broker brokers
+  local broker node_id bid failed_node=""
+  local -a brokers=() rollback_failed=()
   if broker="$(find_broker 2>/dev/null)"; then
     info "Reloading TLS keystores on brokers..."
 
@@ -5827,32 +6275,57 @@ cmd_kafka_renew_tls() {
         --entity-name "$node_id" \
         --alter \
         --add-config listener.name.external.ssl.keystore.location=/mnt/shared/config/certs/broker.p12 >/dev/null 2>&1; then
+        failed_node="$node_id"
+        break
+      fi
+      if ! kafka_wait_tls_peer "$node_id" "$serial"; then
+        failed_node="$node_id"
+        break
+      fi
+    done
 
-        err "Failed to reload keystore on kafka-$node_id; rolling back..."
-        python3 "$sso_dir/identity.py" kafka-broker rollback-tls \
-          --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" || true
-
-        # Reload previous keystore
-        for bid in "${brokers[@]}"; do
-          docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
+    if [[ -n "$failed_node" ]]; then
+      err "Kafka-$failed_node did not present the renewed certificate; restoring the previous pair..."
+      if ! python3 "$sso_dir/identity.py" kafka-broker rollback-tls \
+          --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl"; then
+        die "TLS renewal failed on kafka-$failed_node; file rollback failed. Previous material remains under auth/kafka/oauth_ssl/certs"
+      fi
+      fix_kafka_oauth_permissions
+      for bid in "${brokers[@]}"; do
+        if ! docker exec "$broker" /opt/kafka/bin/kafka-configs.sh \
             --bootstrap-server "$BOOTSTRAP" \
             --command-config /mnt/shared/config/admin.properties \
             --entity-type brokers \
             --entity-name "$bid" \
             --alter \
-            --add-config listener.name.external.ssl.keystore.location=/mnt/shared/config/certs/.previous.broker.p12 >/dev/null 2>&1 || true
-        done
-
-        die "TLS renewal failed and was rolled back"
+            --add-config listener.name.external.ssl.keystore.location=/mnt/shared/config/certs/broker.p12 >/dev/null 2>&1 \
+            || ! kafka_wait_tls_peer "$bid" "$old_serial"; then
+          rollback_failed+=("kafka-$bid")
+        fi
+      done
+      set_env_file_value "$ENV_FILE" KRATE_KAFKA_AUTH_SHA "$old_sha"
+      if (( ${#rollback_failed[@]} )); then
+        die "TLS renewal failed on kafka-$failed_node; rollback unverified on ${rollback_failed[*]}. Previous certificate files remain for recovery"
       fi
-    done
+      python3 "$sso_dir/identity.py" kafka-broker discard-previous-tls \
+        --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" >/dev/null \
+        || warn "Old certificate files were restored but the retained recovery copies could not be removed"
+      die "TLS renewal failed on kafka-$failed_node; the previous certificate is restored and verified on all brokers"
+    fi
 
     ok "Keystores reloaded on all brokers"
+  else
+    warn "No broker is running; the renewed certificate will be served after the next start"
   fi
+
+  # The restart digest changes only after every running broker presents the new
+  # leaf; a failed live reload retains the old digest for recovery.
+  set_env_file_value "$ENV_FILE" KRATE_KAFKA_AUTH_SHA "$config_sha"
 
   # Discard previous TLS files
   python3 "$sso_dir/identity.py" kafka-broker discard-previous-tls \
-    --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" || true
+    --output-dir "$SCRIPT_DIR/auth/kafka/oauth_ssl" >/dev/null \
+    || warn "New certificate is active, but old certificate copies could not be removed"
 
   ok "TLS certificates renewed successfully"
   echo "Serial: $serial"
@@ -5890,6 +6363,10 @@ cmd_help() {
   printf "  %-30s %s\n" "kafka auth status"    "Show Kafka auth mode and TLS certificate status"
   printf "  %-30s %s\n" "kafka auth disable"   "Disable Kafka OAuth/TLS and revert to local mode"
   printf "  %-30s %s\n" "kafka renew-tls"      "Renew Kafka broker TLS certificates (requires oauth_ssl mode)"
+  printf "  %-30s %s\n" "kafka client register" "Register a managed OAuth client and grant literal topic/group ACLs"
+  printf "  %-30s %s\n" "kafka client status|rotate" "Inspect or rotate private client credentials (secret-free status)"
+  printf "  %-30s %s\n" "kafka client recover --admin" "Recover registration state using Keycloak admin access"
+  printf "  %-30s %s\n" "kafka client grant" "Retry a verified literal topic/group ACL grant"
   printf "  %-30s %s\n" "identity up"          "Start Keycloak and its database; the first run creates admin and realm"
   printf "  %-30s %s\n" "identity status"      "Database health, Keycloak started/ready/live, realm; exit 1 if not ready"
   printf "  %-30s %s\n" "identity down"        "Stop Keycloak and its database (data kept)"
