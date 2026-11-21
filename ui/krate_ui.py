@@ -20,12 +20,14 @@ Features:
 
 import collections
 import dataclasses
+import hashlib
 import http.cookies
 import http.server
 import hmac
 import json
 import os
 import platform
+import pwd
 import queue
 import re
 import secrets
@@ -42,6 +44,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
+from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 # --- Constants & Defaults ---
@@ -76,54 +79,121 @@ KAFKA_CLIENT_STATUS_FIELDS = (
     "client_id", "secret_expires_at", "rotation_due_at", "seconds_until_expiry",
     "rotation_due", "pending", "previous_valid_until", "last_rotation_error",
 )
+KAFKA_STUDIO_CLIENT_DIR = ".krate-studio-clients"
 
 
-def validate_private_kafka_client_state(path: Any) -> str:
-    """Require a same-user private state file and private containing directory."""
-    if (not isinstance(path, str) or not path or not os.path.isabs(path)
-            or "\x00" in path or os.path.realpath(path) != path):
-        raise ValueError("Choose an absolute path to an existing Kafka client state file")
+def validate_kafka_client_id(value: Any) -> str:
+    """Accept only a literal application ID; the CLI checks its full identity policy."""
+    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value)
+            or value.startswith("krate-")):
+        raise ValueError("Client ID must be 1-64 literal letters, digits, dots, underscores or hyphens without the reserved krate- prefix")
+    return value
+
+
+def _studio_client_home() -> Path:
+    """Use the desktop user's account home, independent of request and workspace paths."""
     try:
-        file_info = os.lstat(path)
-        parent_info = os.lstat(os.path.dirname(path))
-    except OSError as exc:
-        raise ValueError("Kafka client state file or its private directory is unavailable") from exc
-    if (not stat.S_ISREG(file_info.st_mode) or stat.S_IMODE(file_info.st_mode) != 0o600
-            or file_info.st_uid != os.geteuid()):
-        raise ValueError("Kafka client state must be a same-user regular file with mode 0600")
-    if (not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.geteuid()
-            or stat.S_IMODE(parent_info.st_mode) & 0o077):
-        raise ValueError("Kafka client state directory must be private and owned by the Studio user")
-    return path
+        home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+        info = os.lstat(home)
+    except (OSError, KeyError) as exc:
+        raise ValueError("Studio user home is unavailable") from exc
+    if not home.is_absolute() or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise ValueError("Studio user home must be a same-user directory without a symlink")
+    return home
 
 
-def validate_new_kafka_client_state(path: Any) -> str:
-    """Require an absent destination in a private same-user writable directory."""
-    if (not isinstance(path, str) or not path or not os.path.isabs(path)
-            or "\x00" in path or os.path.realpath(path) != path or os.path.lexists(path)):
-        raise ValueError("Choose an unused absolute Kafka client state path without symlinks")
+def _canonical_studio_workspace_id(context: Any) -> str:
+    """Bind a managed client to the captured installed workspace identity."""
+    if (context.edition not in ("kraft", "epc") or not context.is_installed
+            or not isinstance(context.effective_dir, str)
+            or not os.path.isabs(context.effective_dir)
+            or context.installation_id != f"{context.edition}:{context.effective_dir}"):
+        raise ValueError("Select an installed KRaft or EPC workspace before managing Kafka clients")
+    canonical_dir = os.path.realpath(context.effective_dir)
+    if not os.path.isdir(canonical_dir):
+        raise ValueError("Selected Kafka workspace is unavailable")
+    return f"{context.edition}:{canonical_dir}"
+
+
+def _require_private_studio_dir(path: Path, create: bool = False) -> None:
+    """Create a directory if needed, then reject symlinks, foreign owners and weak modes."""
+    if create:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ValueError("Studio managed client directory cannot be created") from exc
     try:
-        parent_info = os.lstat(os.path.dirname(path))
+        info = os.lstat(path)
     except OSError as exc:
-        raise ValueError("Create a private Kafka client state directory first") from exc
-    if (not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.geteuid()
-            or stat.S_IMODE(parent_info.st_mode) != 0o700):
-        raise ValueError("Kafka client state directory must be owned by the Studio user with mode 0700")
-    return path
+        raise ValueError("Studio managed client directory is unavailable") from exc
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ValueError("Studio managed client directory must be same-user, mode 0700 and not a symlink")
 
 
-def validate_kafka_client_register_params(params: Any) -> dict:
+def managed_kafka_client_state_path(client_id: Any, context: Any, create: bool = False,
+                                   check_dirs: bool = True) -> str:
+    """Derive one confined state path; the request never supplies a filesystem path."""
+    client_id = validate_kafka_client_id(client_id)
+    workspace_id = _canonical_studio_workspace_id(context)
+    home = _studio_client_home()
+    workspace_key = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()
+    client_key = hashlib.sha256(client_id.encode("ascii")).hexdigest()
+    root = home / KAFKA_STUDIO_CLIENT_DIR
+    workspace_dir = root / workspace_key
+    client_dir = workspace_dir / client_key
+    if check_dirs:
+        for directory in (root, workspace_dir, client_dir):
+            _require_private_studio_dir(directory, create=create)
+    return str(client_dir / "state.json")
+
+
+def _require_private_studio_file(path: str, description: str) -> None:
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"{description} is unavailable") from exc
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise ValueError(f"{description} must be a same-user mode 0600 regular file without a symlink")
+
+
+def _check_managed_client_lock(state_path: str) -> None:
+    lock_path = state_path + ".lock"
+    if os.path.lexists(lock_path):
+        _require_private_studio_file(lock_path, "Studio managed client lock")
+
+
+def validate_private_kafka_client_state(client_id: Any, context: Any) -> str:
+    """Recheck the server-derived directories, state and lock before every CLI use."""
+    state_path = managed_kafka_client_state_path(client_id, context)
+    _require_private_studio_file(state_path, "Studio managed client state")
+    _check_managed_client_lock(state_path)
+    return state_path
+
+
+def validate_new_kafka_client_state(client_id: Any, context: Any) -> str:
+    """Prepare a private server-owned destination for one new client."""
+    state_path = managed_kafka_client_state_path(client_id, context, create=True)
+    if os.path.lexists(state_path):
+        raise ValueError("Studio already has a state file for this client ID")
+    _check_managed_client_lock(state_path)
+    return state_path
+
+
+def validate_kafka_client_register_params(params: Any, context: Any) -> dict:
     """Validate Studio form values before the CLI applies its authoritative policy."""
     if not isinstance(params, dict) or set(params) not in (
-            {"client_id", "state_path", "topic", "access"},
-            {"client_id", "state_path", "topic", "group", "access"}):
-        raise ValueError("Registration needs client ID, state path, topic, access and optional group")
-    client_id = params["client_id"]
+            {"client_id", "topic", "access"},
+            {"client_id", "topic", "group", "access"}):
+        raise ValueError("Registration needs client ID, topic, access and optional group")
+    client_id = validate_kafka_client_id(params["client_id"])
     topic = params["topic"]
     group = params.get("group", "")
     access = params["access"]
-    if (not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", client_id)
-            or not isinstance(topic, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,249}", topic)
+    if (not isinstance(topic, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,249}", topic)
             or topic in (".", "..") or not isinstance(group, str)
             or (group and (not re.fullmatch(r"[A-Za-z0-9._-]{1,249}", group) or group in (".", "..")))):
         raise ValueError("Use literal client, topic and group names with letters, digits, dot, underscore or hyphen")
@@ -131,7 +201,7 @@ def validate_kafka_client_register_params(params: Any) -> dict:
         raise ValueError("Choose read, write or read-write access")
     if (access == "write" and group) or (access != "write" and not group):
         raise ValueError("Read access needs a group; write-only access must omit the group")
-    validated = {"client_id": client_id, "state_path": validate_new_kafka_client_state(params["state_path"]),
+    validated = {"client_id": client_id, "state_path": validate_new_kafka_client_state(client_id, context),
                  "topic": topic, "access": access}
     if group:
         validated["group"] = group
@@ -2032,9 +2102,18 @@ class StructuredDataCollector:
             result["error"] = "Kafka security status is incomplete or failed; inspect the CLI output and broker logs."
         return result
 
-    def get_kafka_client_status(self, state_path: str, context: Optional[OperationContext] = None) -> dict:
+    def get_kafka_client_status(self, client_id: str, context: Optional[OperationContext] = None) -> dict:
         """Read only the public lifecycle fields from a private managed client state."""
         ctx = context or self.ws_mgr.get_context()
+        try:
+            state_path = managed_kafka_client_state_path(client_id, ctx, check_dirs=False)
+        except ValueError:
+            return {"available": False, "error": "Studio managed client storage is unavailable. Inspect the workspace and user home."}
+        try:
+            validate_private_kafka_client_state(client_id, ctx)
+        except ValueError:
+            return {"available": False, "managed_state_path": state_path,
+                    "error": "Managed client state is unavailable or unsafe. Inspect the managed location and permissions."}
         krate_bin, ws_path = ctx.cli_for_action("kafka")
         try:
             res = subprocess.run(
@@ -2045,7 +2124,7 @@ class StructuredDataCollector:
             if res.returncode != 0:
                 raise ValueError("Client status command failed")
             payload = json.loads(res.stdout)
-            if not isinstance(payload, dict) or not isinstance(payload.get("client_id"), str):
+            if not isinstance(payload, dict) or payload.get("client_id") != client_id:
                 raise ValueError("Malformed client status")
             status = {key: payload.get(key) for key in KAFKA_CLIENT_STATUS_FIELDS}
             if not isinstance(status["rotation_due"], bool) or not isinstance(status["pending"], bool):
@@ -2058,9 +2137,11 @@ class StructuredDataCollector:
                 if not isinstance(status[key], int) or isinstance(status[key], bool):
                     raise ValueError("Malformed client status")
             status["available"] = True
+            status["managed_state_path"] = state_path
             return status
         except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
-            return {"available": False, "error": "Managed Kafka client status is unavailable. Inspect the CLI output and state file permissions."}
+            return {"available": False, "managed_state_path": state_path,
+                    "error": "Managed Kafka client status is unavailable. Inspect the CLI output and state file permissions."}
 
     def get_kafka_security_alerts(self, context: Optional[OperationContext] = None) -> dict:
         """Read active Kafka security alerts from private host-bound monitoring endpoints."""
@@ -2221,7 +2302,8 @@ class StructuredDataCollector:
                 if re.fullmatch(r"Consumer group '[^']+' has no active members\.", line):
                     continue
                 parts = re.split(r"\s+", line)
-                if not saw_header or len(parts) < 6 or not all(value.isdecimal() for value in parts[2:6]):
+                if (not saw_header or len(parts) < 6 or not parts[2].isdecimal()
+                        or not all(value.isdecimal() or value == "-" for value in parts[3:6])):
                     return {
                         "groups": [],
                         "error": "Kafka lag response was incomplete or invalid; verify broker authentication and logs.",
@@ -2234,6 +2316,8 @@ class StructuredDataCollector:
                     groups_map[grp] = {
                         "group": grp,
                         "total_lag": 0,
+                        "known_lag": 0,
+                        "has_unknown_lag": False,
                         "partitions": [],
                         "status": "caught up",
                     }
@@ -2241,12 +2325,15 @@ class StructuredDataCollector:
                 groups_map[grp]["partitions"].append({
                     "topic": topic,
                     "partition": partition,
-                    "current_offset": cur_off,
-                    "log_end_offset": log_end,
-                    "lag": lag_val,
+                    "current_offset": None if cur_off == "-" else cur_off,
+                    "log_end_offset": None if log_end == "-" else log_end,
+                    "lag": None if lag_val == "-" else lag_val,
                     "consumer_id": cid,
                 })
-                groups_map[grp]["total_lag"] += int(lag_val)
+                if "-" in (cur_off, log_end, lag_val):
+                    groups_map[grp]["has_unknown_lag"] = True
+                if lag_val != "-":
+                    groups_map[grp]["known_lag"] += int(lag_val)
 
             if in_config_log:
                 return {
@@ -2256,8 +2343,14 @@ class StructuredDataCollector:
                 }
 
             for grp, data in groups_map.items():
-                t_lag = data["total_lag"]
-                if t_lag == 0:
+                t_lag = data["known_lag"]
+                if data["has_unknown_lag"]:
+                    data["total_lag"] = None
+                else:
+                    data["total_lag"] = t_lag
+                if t_lag == 0 and data["has_unknown_lag"]:
+                    data["status"] = "unknown"
+                elif t_lag == 0:
                     data["status"] = "caught up"
                 elif t_lag < 1000:
                     data["status"] = "lagging"
@@ -2982,14 +3075,15 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/v1/kafka/client/status":
             try:
                 body = self._read_json_body()
-                if set(body) != {"state_path"}:
-                    raise ValueError("Choose only a Kafka client state path")
-                state_path = validate_private_kafka_client_state(body["state_path"])
+                if set(body) != {"client_id"}:
+                    raise ValueError("Choose only a Kafka client ID")
+                client_id = validate_kafka_client_id(body["client_id"])
+                ctx = self.workspace_mgr.get_context()
+                _canonical_studio_workspace_id(ctx)
             except (ValueError, TypeError) as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
-            ctx = self.workspace_mgr.get_context()
-            data = self.data_collector.get_kafka_client_status(state_path, context=ctx)
+            data = self.data_collector.get_kafka_client_status(client_id, context=ctx)
             self._send_json(200 if data["available"] else 503, data)
             return
 
@@ -3341,7 +3435,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                         self._send_json(400, {"error": "Kafka client registration does not accept extra arguments"})
                         return
                     try:
-                        client = validate_kafka_client_register_params(params)
+                        client = validate_kafka_client_register_params(params, op_ctx)
                     except ValueError as exc:
                         self._send_json(400, {"error": str(exc)})
                         return
@@ -3352,13 +3446,17 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                     cmd.extend(["--access", client["access"]])
 
                 elif action in ("kafka_client_rotate", "kafka_client_recover_admin"):
-                    if args or not isinstance(params, dict) or set(params) != {"state_path"}:
-                        self._send_json(400, {"error": "Choose only a Kafka client state path"})
+                    if args or not isinstance(params, dict) or set(params) != {"client_id"}:
+                        self._send_json(400, {"error": "Choose only a Kafka client ID"})
                         return
                     try:
-                        state_path = validate_private_kafka_client_state(params["state_path"])
+                        state_path = validate_private_kafka_client_state(params["client_id"], op_ctx)
                     except ValueError as exc:
                         self._send_json(400, {"error": str(exc)})
+                        return
+                    preflight = self.data_collector.get_kafka_client_status(params["client_id"], context=op_ctx)
+                    if not preflight.get("available"):
+                        self._send_json(409, {"error": "Managed client identity or status could not be verified; no rotation or recovery was started."})
                         return
                     cmd.extend(["kafka", "client", "recover" if action == "kafka_client_recover_admin" else "rotate",
                                 "--state", state_path])

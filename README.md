@@ -283,6 +283,44 @@ mkdir -m 700 auth/payments-client
 
 Keep the state directory and its mode `0600` state file private. Use the [application callback configuration](kafka-oauth-client/README.md) to connect, then verify a message is consumed; a producer process can exit successfully even when a send was denied. The offline package includes the client jar and its pinned runtime libraries. When running directly from a source checkout, build them first and set `KAFKA_OAUTH_CLIENT_HOME` to the directory containing the jar and `libs/` before starting the CLI or Studio. Use `kafka client rotate --state ...` for a rotation check and `kafka client recover --state ... --admin` if the private registration token must be repaired.
 
+Studio manages clients by ID. For each installed workspace it derives a separate state location under the Studio user's `~/.krate-studio-clients/` directory; the Status screen displays that location. Registration creates its own mode `0700` directories and the CLI creates a mode `0600` state file. A CLI-managed state at another path remains usable from the CLI, but is not selected by Studio. To migrate a former Studio client:
+
+1. Stop the consuming application and avoid Studio rotation or recovery while copying. Two active copies share a registration token and secret; rotating one can strand the other.
+2. Use Studio **Check Status** with the client ID to display the managed destination. Verify the old file is a regular mode `0600` file owned by the same desktop user; copy it locally to the displayed destination under mode `0700` parent directories, retaining mode `0600` on the new file.
+
+   As the same desktop user running Studio, set `OLD_STATE` to the existing state file and `DESTINATION` to the exact location displayed by **Check Status**, then run this one-time copy. It refuses a wrong destination shape, unsafe source, weak or linked directories, and an existing destination; it prints no credential data:
+
+   ```bash
+   OLD_STATE=/private/old/state.json DESTINATION=/home/operator/.krate-studio-clients/WORKSPACE_HASH/CLIENT_HASH/state.json python3 - <<'PY'
+   import os, re, shutil, stat
+   from pathlib import Path
+   def require(ok, message):
+       if not ok: raise SystemExit(message)
+   old, dest = Path(os.environ['OLD_STATE']), Path(os.environ['DESTINATION'])
+   root = Path.home() / '.krate-studio-clients'
+   parts = dest.relative_to(root).parts
+   require(len(parts) == 3 and parts[2] == 'state.json', 'Unexpected managed destination')
+   require(all(re.fullmatch(r'[0-9a-f]{64}', part) for part in parts[:2]), 'Unexpected managed destination')
+   source = os.lstat(old)
+   require(stat.S_ISREG(source.st_mode) and source.st_uid == os.geteuid(), 'Old state is not a same-user regular file')
+   require(stat.S_IMODE(source.st_mode) == 0o600, 'Old state must have mode 0600')
+   for directory in (root, root / parts[0], root / parts[0] / parts[1]):
+       try: os.mkdir(directory, 0o700)
+       except FileExistsError: pass
+       info = os.lstat(directory)
+       require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid(), 'Managed directory is unsafe')
+       require(stat.S_IMODE(info.st_mode) == 0o700, 'Managed directory must have mode 0700')
+   with os.fdopen(os.open(old, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as src:
+       with os.fdopen(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as dst:
+           shutil.copyfileobj(src, dst)
+   PY
+   ```
+
+3. Confirm Studio **Check Status** reports the expected ID and `krate kafka client status --state DESTINATION` succeeds. If rotation is pending, run `krate kafka client recover --state DESTINATION --admin` before resuming.
+4. Update the application's JAAS `credentialStateFile` to the new destination, restart it, and verify an actual Kafka message is produced or consumed. Keep the old private file only as rollback until the new callback is proven, then retire the old copy.
+
+Never paste state or DCR JSON into Studio or logs. A client running under another user should continue to use its existing CLI path unless its state is deliberately migrated under that user's account.
+
 ### How `.env`, image pins, and `uninstall --purge` work
 
 - **Configuration and `*_IMAGE` pins:** Settings live in `.env`. The `*_IMAGE` lines are the exception: every command that runs Docker Compose (`start`, `stop`, `status`, `health`, `logs`, `install`, `setup`, `identity ...`, `monitor up`, `auth apply`) first resets them to the pins in `.env.template`, so a rebuilt Kafbat UI image or a newer package takes effect without editing `.env`. Commands that only read or edit settings (`config`, `ui`, `credentials`, `help`) leave `.env` as it is. To use a different image, change `.env.template`.

@@ -19,8 +19,8 @@
     lagData: null,
     kafkaSecurity: null,
     kafkaClientStatus: null,
-    kafkaClientCheckedPath: null,
-    kafkaRegisterPendingPath: null,
+    kafkaClientCheckedId: null,
+    kafkaRegisterPendingId: null,
     configData: null,
     usersData: null,
     gatesData: null,
@@ -128,7 +128,7 @@
     kafkaClientPrevious: document.getElementById("kafka-client-previous"),
     kafkaClientError: document.getElementById("kafka-client-error"),
     inputKafkaRegisterId: document.getElementById("input-kafka-register-id"),
-    inputKafkaRegisterPath: document.getElementById("input-kafka-register-path"),
+    kafkaClientLocation: document.getElementById("kafka-client-location"),
     inputKafkaRegisterTopic: document.getElementById("input-kafka-register-topic"),
     inputKafkaRegisterGroup: document.getElementById("input-kafka-register-group"),
     selectKafkaRegisterAccess: document.getElementById("select-kafka-register-access"),
@@ -1171,13 +1171,13 @@
         if (finishedAction.startsWith("kafka_")) {
           fetchKafkaSecurity();
           fetchKafkaSecurityAlerts();
-          if (["kafka_client_rotate", "kafka_client_recover_admin"].includes(finishedAction) && state.kafkaClientCheckedPath) fetchKafkaClientStatus();
+          if (["kafka_client_rotate", "kafka_client_recover_admin"].includes(finishedAction) && state.kafkaClientCheckedId) fetchKafkaClientStatus();
           if (finishedAction === "kafka_client_register") {
-            if (finishedSucceeded && state.kafkaRegisterPendingPath && dom.inputKafkaClientState) {
-              dom.inputKafkaClientState.value = state.kafkaRegisterPendingPath;
+            if (finishedSucceeded && state.kafkaRegisterPendingId && dom.inputKafkaClientState) {
+              dom.inputKafkaClientState.value = state.kafkaRegisterPendingId;
               fetchKafkaClientStatus();
             }
-            state.kafkaRegisterPendingPath = null;
+            state.kafkaRegisterPendingId = null;
           }
           if (state.activeView === "lag") fetchLag();
         }
@@ -1940,12 +1940,14 @@
     let totalGroups = groups.length;
     let totalPartitions = 0;
     let maxLag = 0;
+    let hasUnknownLag = false;
 
     groups.forEach((g) => {
       const parts = g.partitions || [];
       totalPartitions += parts.length;
       parts.forEach((p) => {
-        const l = parseInt(p.lag || 0, 10);
+        if (p.lag === null || p.lag === undefined || p.current_offset === null || p.log_end_offset === null) hasUnknownLag = true;
+        const l = Number.parseInt(p.lag, 10);
         if (l > maxLag) maxLag = l;
       });
     });
@@ -1954,14 +1956,14 @@
     if (dom.lagStatGroupsSub) dom.lagStatGroupsSub.textContent = `${totalGroups} Active Consumer Groups`;
     if (dom.lagStatPartitions) dom.lagStatPartitions.textContent = totalPartitions;
     if (dom.lagStatMax) {
-      dom.lagStatMax.textContent = maxLag.toLocaleString();
-      dom.lagStatMax.className = maxLag > 1000 ? "metric-value text-danger" : maxLag > 100 ? "metric-value text-warning" : "metric-value text-success";
+      dom.lagStatMax.textContent = hasUnknownLag ? maxLag > 0 ? `≥${maxLag.toLocaleString()}` : "Unknown" : maxLag.toLocaleString();
+      dom.lagStatMax.className = maxLag > 1000 ? "metric-value text-danger" : hasUnknownLag || maxLag > 100 ? "metric-value text-warning" : "metric-value text-success";
     }
     if (dom.lagStatStatus) {
-      dom.lagStatStatus.textContent = totalGroups === 0 ? "No Groups" : maxLag > 1000 ? "Severe Lag" : maxLag > 0 ? "Lagging" : "Caught Up";
-      dom.lagStatStatus.className = maxLag > 1000 ? "metric-value text-danger" : maxLag > 0 ? "metric-value text-warning" : "metric-value text-success";
+      dom.lagStatStatus.textContent = totalGroups === 0 ? "No Groups" : maxLag > 1000 ? "Severe Lag" : maxLag > 0 ? "Lagging" : hasUnknownLag ? "Lag Unknown" : "Caught Up";
+      dom.lagStatStatus.className = maxLag > 1000 ? "metric-value text-danger" : maxLag > 0 || hasUnknownLag ? "metric-value text-warning" : "metric-value text-success";
     }
-    if (dom.lagStatStatusSub) dom.lagStatStatusSub.textContent = totalGroups === 0 ? "No consumer groups" : "Measured across active groups";
+    if (dom.lagStatStatusSub) dom.lagStatStatusSub.textContent = totalGroups === 0 ? "No consumer groups" : hasUnknownLag ? "At least one partition has no reported lag" : "Measured across active groups";
 
     if (groups.length === 0) {
       dom.lagTreeContainer.innerHTML = `<div class="text-center text-muted p-4">No active consumer groups detected. Start a consumer to view lag metrics.</div>`;
@@ -1975,14 +1977,16 @@
       .filter((g) => {
         const name = (g.group || "").toLowerCase();
         if (filterText && !name.includes(filterText)) return false;
-        if (lagOnly && (g.total_lag || 0) === 0) return false;
+        if (lagOnly && g.known_lag === 0 && !g.has_unknown_lag) return false;
         return true;
       })
       .map((g) => {
         const parts = g.partitions || [];
-        const isBehind = (g.total_lag || 0) > 0;
+        const isBehind = g.known_lag > 0;
         const groupBadge = isBehind
-          ? `<span class="badge badge-warning">${g.total_lag} Lag</span>`
+          ? `<span class="badge badge-warning">${g.has_unknown_lag ? "≥" : ""}${g.known_lag} Lag${g.has_unknown_lag ? "; incomplete" : ""}</span>`
+          : g.has_unknown_lag
+          ? '<span class="badge badge-warning">Lag Unknown</span>'
           : `<span class="badge badge-success">Caught Up</span>`;
 
         return `
@@ -1995,7 +1999,7 @@
               </div>
               <div class="lag-group-stats">
                 <span>Partitions: <strong>${parts.length}</strong></span>
-                <span>Total Lag: <strong>${g.total_lag || 0}</strong></span>
+                <span>Total Lag: <strong>${g.has_unknown_lag ? g.known_lag > 0 ? `≥${g.known_lag} (incomplete)` : "Unknown" : g.total_lag}</strong></span>
               </div>
             </div>
             <div class="lag-group-body">
@@ -2013,7 +2017,8 @@
                 <tbody>
                   ${parts
                     .map((p) => {
-                      const l = parseInt(p.lag || 0, 10);
+                      const unknownLag = p.lag === null || p.lag === undefined;
+                      const l = unknownLag ? 0 : Number.parseInt(p.lag, 10);
                       const barClass = l > 1000 ? "lag-crit" : l > 100 ? "lag-warn" : "";
                       const barPercent = Math.min(100, Math.max(5, (l / 1000) * 100));
 
@@ -2021,13 +2026,13 @@
                         <tr>
                           <td>${escapeHtml(p.topic || "")}</td>
                           <td>${escapeHtml(String(p.partition || 0))}</td>
-                          <td>${escapeHtml(String(p.current_offset || 0))}</td>
-                          <td>${escapeHtml(String(p.log_end_offset || 0))}</td>
+                          <td>${p.current_offset === null ? "Unknown" : escapeHtml(String(p.current_offset ?? 0))}</td>
+                          <td>${p.log_end_offset === null ? "Unknown" : escapeHtml(String(p.log_end_offset ?? 0))}</td>
                           <td>
                             <div class="lag-bar-wrap">
-                              <div class="lag-bar-fill ${barClass}" style="width: ${barPercent}%"></div>
+                              <div class="lag-bar-fill ${barClass}" style="width: ${unknownLag ? 0 : barPercent}%"></div>
                             </div>
-                            <span>${l}</span>
+                            <span>${unknownLag ? "Unknown" : l}</span>
                           </td>
                           <td class="text-muted">${escapeHtml(p.consumer_id || "Unassigned")}</td>
                         </tr>
@@ -2046,7 +2051,7 @@
     dom.lagTreeContainer.querySelectorAll(".lag-group-header").forEach((header) => {
       header.addEventListener("click", () => {
         const body = header.nextElementSibling;
-        if (body.style.display === "none") {
+        if (getComputedStyle(body).display === "none") {
           body.style.display = "block";
           header.querySelector("svg").style.transform = "rotate(0deg)";
         } else {
@@ -2136,19 +2141,20 @@
 
   async function fetchKafkaClientStatus() {
     if (!dom.inputKafkaClientState || !dom.kafkaClientState) return;
-    const statePath = dom.inputKafkaClientState.value.trim();
+    const clientId = dom.inputKafkaClientState.value.trim();
     state.kafkaClientStatus = null;
-    state.kafkaClientCheckedPath = null;
+    state.kafkaClientCheckedId = null;
     dom.btnKafkaClientRotate.disabled = true;
     if (dom.btnKafkaClientRecover) dom.btnKafkaClientRecover.disabled = true;
     dom.kafkaClientState.textContent = "Checking managed client...";
     try {
-      const data = await apiFetch("/api/v1/kafka/client/status", { method: "POST", body: { state_path: statePath } });
+      const data = await apiFetch("/api/v1/kafka/client/status", { method: "POST", body: { client_id: clientId } });
       state.kafkaClientStatus = data;
-      state.kafkaClientCheckedPath = statePath;
+      state.kafkaClientCheckedId = clientId;
       renderKafkaClientStatus(data);
     } catch (err) {
-      renderKafkaClientStatus({ available: false, error: err.message });
+      renderKafkaClientStatus({ available: false, error: err.message,
+        managed_state_path: err.data?.managed_state_path });
     }
   }
 
@@ -2171,6 +2177,7 @@
     dom.kafkaClientPending.textContent = available ? data.pending ? "Yes" : "No" : "Not available";
     dom.kafkaClientPrevious.textContent = available ? formatEpoch(data.previous_valid_until) : "Not available";
     dom.kafkaClientError.textContent = available ? deferredSecretRotation ? "Keycloak kept the current secret; registration token refreshed. Retry when rotation is due." : data.last_rotation_error || "None" : "Not available";
+    if (dom.kafkaClientLocation) dom.kafkaClientLocation.textContent = data.managed_state_path || "Check a valid client ID to locate its managed state.";
     dom.btnKafkaClientRotate.disabled = !available || data.pending;
     if (dom.btnKafkaClientRecover) dom.btnKafkaClientRecover.disabled = !available;
   }
@@ -2626,10 +2633,10 @@
           body: { workspace: newWs },
         });
         state.kafkaClientStatus = null;
-        state.kafkaClientCheckedPath = null;
-        state.kafkaRegisterPendingPath = null;
+        state.kafkaClientCheckedId = null;
+        state.kafkaRegisterPendingId = null;
         if (dom.inputKafkaClientState) dom.inputKafkaClientState.value = "";
-        renderKafkaClientStatus({ available: false, error: "Choose a client state file for the new workspace." });
+        renderKafkaClientStatus({ available: false, error: "Choose a client ID for the new workspace." });
         showToast(`Switched workspace to ${newWs}`, "success");
         await fetchWorkspaces();
         await fetchStatus();
@@ -2828,42 +2835,41 @@
     dom.btnKafkaClientRegister?.addEventListener("click", async () => {
       const params = {
         client_id: dom.inputKafkaRegisterId.value.trim(),
-        state_path: dom.inputKafkaRegisterPath.value.trim(),
         topic: dom.inputKafkaRegisterTopic.value.trim(),
         access: dom.selectKafkaRegisterAccess.value,
       };
       if (dom.inputKafkaRegisterGroup.value.trim()) params.group = dom.inputKafkaRegisterGroup.value.trim();
-      if (!params.client_id || !params.state_path || !params.topic || (params.access !== "write" && !params.group)) {
-        showToast("Enter a client ID, new private state path, topic and a group for read access.", "warning");
+      if (!params.client_id || !params.topic || (params.access !== "write" && !params.group)) {
+        showToast("Enter a client ID, topic and a group for read access.", "warning");
         return;
       }
       if (window.confirm(`Register ${params.client_id} for ${params.access} access to topic ${params.topic}?`)) {
-        state.kafkaRegisterPendingPath = params.state_path;
+        state.kafkaRegisterPendingId = params.client_id;
         const job = await triggerJob("kafka_client_register", params);
-        if (!job) state.kafkaRegisterPendingPath = null;
+        if (!job) state.kafkaRegisterPendingId = null;
       }
     });
     dom.inputKafkaClientState?.addEventListener("input", () => {
       state.kafkaClientStatus = null;
-      state.kafkaClientCheckedPath = null;
+      state.kafkaClientCheckedId = null;
       dom.btnKafkaClientRotate.disabled = true;
       if (dom.btnKafkaClientRecover) dom.btnKafkaClientRecover.disabled = true;
-      dom.kafkaClientState.textContent = "Check the selected private state file before rotation.";
+      dom.kafkaClientState.textContent = "Check the selected client ID before rotation.";
     });
     dom.btnKafkaClientRotate?.addEventListener("click", () => {
-      const statePath = dom.inputKafkaClientState.value.trim();
-      if (!state.kafkaClientStatus?.available || state.kafkaClientCheckedPath !== statePath || state.kafkaClientStatus.pending) return;
+      const clientId = dom.inputKafkaClientState.value.trim();
+      if (!state.kafkaClientStatus?.available || state.kafkaClientCheckedId !== clientId || state.kafkaClientStatus.pending) return;
       if (window.confirm(`Rotate the secret for ${state.kafkaClientStatus.client_id}? The current secret remains valid only for the CLI-defined overlap.`)) {
         dom.btnKafkaClientRotate.disabled = true;
-        triggerJob("kafka_client_rotate", { state_path: statePath });
+        triggerJob("kafka_client_rotate", { client_id: clientId });
       }
     });
     dom.btnKafkaClientRecover?.addEventListener("click", () => {
-      const statePath = dom.inputKafkaClientState.value.trim();
-      if (!state.kafkaClientStatus?.available || state.kafkaClientCheckedPath !== statePath) return;
+      const clientId = dom.inputKafkaClientState.value.trim();
+      if (!state.kafkaClientStatus?.available || state.kafkaClientCheckedId !== clientId) return;
       if (window.confirm(`Recover ${state.kafkaClientStatus.client_id}? This refreshes Keycloak's registration token, requires Keycloak admin access, and updates private client state.`)) {
         dom.btnKafkaClientRecover.disabled = true;
-        triggerJob("kafka_client_recover_admin", { state_path: statePath });
+        triggerJob("kafka_client_recover_admin", { client_id: clientId });
       }
     });
     dom.btnKafkaAuthEnable?.addEventListener("click", () => {

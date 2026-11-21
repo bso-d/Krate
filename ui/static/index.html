@@ -693,31 +693,31 @@
           <div class="card-header">
             <div>
               <h2 class="card-title">Managed Kafka Client</h2>
-              <p class="card-desc">Inspect and rotate a registered client's secret using its private state file.</p>
+              <p class="card-desc">Inspect and rotate a registered client by ID. Studio keeps its state in a private per-user location.</p>
             </div>
           </div>
           <div class="card-body">
             <div id="kafka-client-register-form">
               <h3>Register New Client</h3>
-              <p class="text-muted">Creates a scoped Keycloak client and a private local state file. The directory must already exist with mode 0700.</p>
+              <p class="text-muted">Creates a scoped Keycloak client and a private local state file in Studio's managed location.</p>
               <div class="form-grid">
                 <div class="form-group"><label class="form-label" for="input-kafka-register-id">Client ID</label><input class="text-input" id="input-kafka-register-id" type="text" autocomplete="off" placeholder="orders-reader"></div>
-                <div class="form-group"><label class="form-label" for="input-kafka-register-path">New private state path</label><input class="text-input" id="input-kafka-register-path" type="text" autocomplete="off" spellcheck="false" placeholder="/home/operator/.config/krate/clients/orders.json"></div>
                 <div class="form-group"><label class="form-label" for="input-kafka-register-topic">Topic</label><input class="text-input" id="input-kafka-register-topic" type="text" autocomplete="off" placeholder="orders"></div>
                 <div class="form-group"><label class="form-label" for="input-kafka-register-group">Consumer group (for read access)</label><input class="text-input" id="input-kafka-register-group" type="text" autocomplete="off" placeholder="orders-readers"></div>
                 <div class="form-group"><label class="form-label" for="select-kafka-register-access">Access</label><select class="text-input" id="select-kafka-register-access"><option value="read">Read</option><option value="write">Write</option><option value="read-write">Read and write</option></select></div>
               </div>
               <button class="btn btn-sm btn-primary" id="btn-kafka-client-register" disabled>Register Client</button>
             </div>
-            <label class="form-label" for="input-kafka-client-state">Private state file (absolute path)</label>
+            <label class="form-label" for="input-kafka-client-state">Client ID</label>
             <div class="input-with-button">
-              <input class="text-input" id="input-kafka-client-state" type="text" autocomplete="off" spellcheck="false" placeholder="/home/operator/.config/krate/clients/app.json">
+              <input class="text-input" id="input-kafka-client-state" type="text" autocomplete="off" spellcheck="false" placeholder="orders-reader">
               <button class="btn btn-sm btn-ghost" id="btn-kafka-client-status">Check Status</button>
               <button class="btn btn-sm btn-secondary" id="btn-kafka-client-rotate" disabled>Rotate Secret</button>
               <span id="kafka-client-recover-wrap"><button class="btn btn-sm btn-secondary" id="btn-kafka-client-recover" disabled>Recover Registration</button></span>
             </div>
             <p id="kafka-client-recover-risk" class="text-muted">Recovery refreshes the Keycloak registration token and requires Keycloak admin access. It changes the private client state after verification.</p>
-            <p id="kafka-client-state" role="status" aria-live="polite">Choose a mode 0600 state file in a private directory.</p>
+            <p id="kafka-client-state" role="status" aria-live="polite">Enter a client ID to check its managed state.</p>
+            <p class="text-muted">Managed state location: <code id="kafka-client-location">Check a client ID to locate its managed state.</code></p>
             <dl>
               <dt>Client ID</dt><dd id="kafka-client-id">Not checked</dd>
               <dt>Secret expiry</dt><dd id="kafka-client-expiry">Not checked</dd>
@@ -726,7 +726,7 @@
               <dt>Previous secret valid until</dt><dd id="kafka-client-previous">Not checked</dd>
               <dt>Last rotation result</dt><dd id="kafka-client-error">Not checked</dd>
             </dl>
-            <p class="text-muted">Create a mode 0700 private directory first. For a new client, run <code>krate kafka client register --client-id APP_ID --state /private/client.json --topic TOPIC --group GROUP --access read</code>. Choose <code>read-write</code> for both permissions or <code>write</code> when no group is needed. If you already have a DCR response, save it as a mode 0600 file and run <code>krate kafka client enroll --client-id APP_ID --state /private/client.json --topic TOPIC --group GROUP --access read &lt; /private/dcr.json</code>. For recovery with Keycloak admin access, use <code>krate kafka client recover --state /private/client.json --admin</code>; otherwise use <code>krate kafka client recover --state /private/client.json &lt; /private/replacement-dcr.json</code>. Studio never imports or displays DCR credentials.</p>
+            <p class="text-muted">Existing CLI-managed clients can continue to use any private state path through <code>krate kafka client</code>. For migration, stop the client app and any rotation, check its ID, copy its mode 0600 state file into the displayed managed location as the same user under mode 0700 parents, then update the app's state path and verify a real Kafka callback. Never paste state or DCR JSON into Studio. See the README migration steps.</p>
           </div>
         </div>
 
