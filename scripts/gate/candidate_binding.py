@@ -55,9 +55,9 @@ SSO_FILES = ('configure.py', 'example.json', 'configure-dual.py', 'dual-example.
 # Makefile build_one: cp sso/guides/... "$bundle_dir/docs/"
 GUIDES = ('identity-foundation.md', 'dual-login.md', 'pingfederate-sso.md',
           'pingfederate-iam-guide.md', 'sso-flows.md', 'perses-sso.md', 'grafana-sso.md')
-# Makefile build_one: the two cp monitoring/... "$bundle_dir/monitoring/" lines
+# Makefile build_one: the top-level monitoring files copied into the bundle.
 MON_TOP = ('docker-compose.yml', '.env.template', 'seed-alerting.py', 'render.py',
-           'grafana-admin.py', 'README.md')
+           'grafana-admin.py', 'README.md', 'kafka-log4j.properties', 'security_metrics.py')
 # Makefile build_one: cp -r monitoring/grafana ... monitoring/idp "$bundle_dir/monitoring/"
 MON_TREES = ('grafana', 'loki', 'prometheus', 'fluent-bit', 'perses', 'idp')
 TEMPLATES = ('.env.template', 'monitoring/.env.template')

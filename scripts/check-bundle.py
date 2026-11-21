@@ -72,6 +72,23 @@ def main():
     for name in ('ui/krate_ui.py', 'ui/static/index.html', 'ui/static/styles.css', 'ui/static/app.js'):
         if not (root / name).is_file():
             raise SystemExit('Missing UI package file: ' + name)
+    for name in ('kafka-oauth-client/krate-kafka-oauth-client.jar',
+                 'kafka-oauth-client/jre/bin/java',
+                 'kafka-oauth-client/jre/lib/tzdb.dat',
+                 'kafka-oauth-client/jre/lib/security/cacerts',
+                 'kafka-oauth-client/jre/legal/java.base/LICENSE',
+                 'kafka-oauth-client/README.md', 'kafka-oauth-client/build.sh',
+                 'kafka-oauth-client/src/main/java/com/krate/kafka/oauth/CredentialStateCli.java',
+                 'kafka-oauth-client/KAFKA-LICENSE',
+                 'kafka-oauth-client/KAFKA-NOTICE',
+                 'kafka-oauth-client/libs/kafka-clients-3.9.1.jar',
+                 'kafka-oauth-client/libs/jackson-annotations-2.16.2.jar',
+                 'kafka-oauth-client/libs/jackson-core-2.16.2.jar',
+                 'kafka-oauth-client/libs/jackson-databind-2.16.2.jar',
+                 'monitoring/kafka-log4j.properties', 'monitoring/security_metrics.py',
+                 'monitoring/loki/rules/fake/krate-security.yml'):
+        if not (root / name).is_file():
+            raise SystemExit('Missing security package file: ' + name)
     monitor_template = root / 'monitoring/.env.template'
     if monitor_template.is_file() and 'FLUENT_BIT_IMAGE=' in monitor_template.read_text():
         for name in ('fluent-bit.conf', 'parsers-multiline.conf', 'metadata.lua', 'discovery.py', 'vendor/dkjson.lua',

@@ -970,6 +970,8 @@ def check_exposure(checks):
         restore = cli[cli.index('\ncmd_identity_restore() {'):cli.index('\n}', cli.index('\ncmd_identity_restore() {'))]
         e('identity_reconcile_ui_urls restore' in restore and restore.index('identity_reconcile_ui_urls restore') < restore.index('identity_journal restore ok'),
           f'{edition}/krate: restore must reconcile the krate-ui client with this host before reporting success')
+        e('identity_restore_refresh_ui' in restore and restore.index('identity_reconcile_kafka_auth restore') < restore.index('identity_restore_refresh_ui') < restore.index('identity_journal restore ok'),
+          f'{edition}/krate: restore must refresh a running Kafbat UI after Keycloak reconciliation and before reporting success')
     build = (ROOT / 'kafbat-ui/build.py').read_text()
     e("IMAGE = 'krate/kafka-ui:1.5.0-sso.9'" in build, 'kafbat-ui/build.py must build sso.9 (the templates pin it)')
     e("VITE_TAG='v1.5.0-sso.9'" in build, 'kafbat-ui/build.py must stamp the frontend with the same sso.9 tag')
@@ -7198,9 +7200,13 @@ def check_broker_apply(checks):
             e('grep -q kafka-exporter' not in function_body(cli, name),
               f'{edition}/krate: {name} must not detect the exporter by a bare name match (another cluster project\'s monitoring would be touched)')
         refresh = function_body(cli, 'kafka_refresh_exporter')
-        e('label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring' in refresh and 'net="$(monitor_network)" || return 0' in refresh
-          and 'monitor_compose up -d --pull never --no-deps kafka-exporter' in refresh,
-          f'{edition}/krate: kafka_refresh_exporter recreates the exporter only when the monitoring project is attached to this cluster\'s network')
+        e('label=com.docker.compose.project=krate-${KRATE_VARIANT}-monitoring' in refresh
+          and 'docker ps -a -q --filter "$project_label"' in refresh
+          and '[[ -n "$project_ids" ]] || return 0' in refresh
+          and 'if ! net="$(monitor_network)" || [[ -z "$net" ]]; then' in refresh
+          and 'monitor_compose up -d --pull never --no-deps kafka-exporter kafka-security' in refresh
+          and 'monitor_wait_security_ready' in refresh,
+          f'{edition}/krate: kafka_refresh_exporter distinguishes an absent project from stopped attached services and verifies the exporter and security observer after refresh')
         # In oauth_ssl mode the INTERNAL listener authenticates, so every Kafka tool the CLI runs
         # inside a broker carries the rendered admin credentials (review B3-R1 finding B1).
         lag = function_body(cli, 'cmd_lag')
@@ -10032,7 +10038,7 @@ def check_migrate_issuer(checks):
 
 
 def check_monitoring_tables(checks):
-    """Commit 12: monitoring/README.md Table 1 (all 18 services) and non-loopback bind warnings."""
+    """Monitoring README Table 1 must account for every Compose service."""
     e = checks.expect
     text = (ROOT / 'monitoring/README.md').read_text()
     e('## Table 1 — Service exposure and enforcement' in text,
@@ -10049,7 +10055,7 @@ def check_monitoring_tables(checks):
             components.append(cells[0])
 
     services = monitoring_services()
-    e(len(services) == 18, f'monitoring/docker-compose.yml must have 18 services; got {len(services)}')
+    e(len(services) == 19, f'monitoring/docker-compose.yml must have 19 services; got {len(services)}')
     e(set(components) == set(services.keys()),
       f'monitoring/README.md Table 1 must have one row per service in monitoring/docker-compose.yml; '
       f'missing {sorted(set(services.keys()) - set(components))}, unexpected {sorted(set(components) - set(services.keys()))}')
@@ -10110,8 +10116,13 @@ def check_airgap_rows(checks):
     cb = importlib.util.module_from_spec(spec_cb)
     spec_cb.loader.exec_module(cb)
     for ed in ('kraft', 'epc'):
-        e(cb.inventory(str(ROOT), 'HEAD', ed).get('nginx-stream.conf') == f'{ed}/nginx-stream.conf',
+        bound_files = cb.inventory(str(ROOT), 'HEAD', ed)
+        e(bound_files.get('nginx-stream.conf') == f'{ed}/nginx-stream.conf',
           f'candidate_binding inventory for {ed} must map nginx-stream.conf to {ed}/nginx-stream.conf')
+        for name in ('kafka-log4j.properties', 'security_metrics.py'):
+            rel = 'monitoring/' + name
+            e(bound_files.get(rel) == rel,
+              f'candidate_binding inventory for {ed} must map bundled {rel} to its source bytes')
     fixture_root = ROOT / 'harness' / 'phase4' / 'path-contract'
     fixture_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=fixture_root) as tmp:
@@ -10186,7 +10197,8 @@ def check_grafana_sessions_cli(checks):
         "CLI_NAMES = ('env_value', 'env_value_file', 'replace_env_file', 'set_env_file_value',\n"
         "             'monitor_grafana_auth_running', 'monitor_grafana_class',\n"
         "             'monitor_grafana_holders', 'monitor_grafana_session_plan',\n"
-        "             'monitor_grafana_record_holders', 'monitor_grafana_end_sessions', 'cmd_monitor')\n"
+        "             'monitor_grafana_record_holders', 'monitor_grafana_end_sessions',\n"
+        "             'monitor_wait_security_ready', 'cmd_monitor')\n"
         "OWN_ID = 'a' * 64\n"
         "OTHER_ID = 'b' * 64\n"
         "STUBS = r'''\n"
@@ -10202,6 +10214,7 @@ def check_grafana_sessions_cli(checks):
         'adopt_legacy_project() { echo prepare >> "$LOG"; }\n'
         'ensure_cert() { :; }; monitor_prepare() { :; }; monitor_realm_refresh() { :; }\n'
         'identity_reconcile_perses_clients() { :; }; monitor_port_conflicts() { :; }; note_smtp() { :; }\n'
+        'monitor_security_ready() { printf \'security-ready\\n\' >> "$LOG"; return 0; }\n'
         'grafana_address() { echo http://grafana.example.test/; }; perses_address() { echo https://perses.example.test/; }\n'
         'monitor_network() { [[ "$FAKE_CLUSTER" == up ]] && echo owned_net; }\n'
         'mktemp() {\n'

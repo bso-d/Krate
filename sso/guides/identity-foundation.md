@@ -578,7 +578,7 @@ lost" case): `keycloak-db` then starts with a fresh database. Order:
    the `keycloak` database. If `pg_restore` fails, the command stops and says
    that the database may be partially restored; run
    `./krate identity restore <file>` again, or follow "Database volume lost".
-3. Writes the four keys from `identity.env` into `.env` where they differ
+3. Writes the six keys from `identity.env` into `.env` where they differ
    (atomic write; journal line `restore reconciled .env: KEY1 KEY2`, never a
    value). `.env` then matches the restored store again.
 4. Starts `keycloak` and verifies readiness, the admin login and the
@@ -588,7 +588,13 @@ lost" case): `keycloak-db` then starts with a fresh database. Order:
    as `identity up` does (journal lines `restore reconciled krate-ui urls and
    attributes` and `restore reconciled realm policy` when something changed):
    the dump carries the backup host's URLs and an older backup the older
-   policy. Writes the journal line `restore ok <file>`.
+   policy. If the Kafka or OIDC identity mode is active and Kafbat UI is
+   already running, restore recreates only Kafbat UI so it loads the restored
+   client credentials, then waits for its health check. A stopped or absent UI
+   stays stopped or absent. If the recreate or health check fails, restore
+   reports the database as restored but exits with a Kafbat recovery error;
+   check `./krate logs kafka-ui`, run `./krate start`, then `./krate health`.
+   Once those steps succeed, it writes the journal line `restore ok <file>`.
 
 The database password is kept as it is: the restored dump contains no roles,
 so a restore from before a `rotate KEYCLOAK_DB_PASSWORD` changes nothing about

@@ -24,6 +24,10 @@ scrape_configs:
     static_configs:
       - targets: ["kafka-exporter:9308"]
 
+  - job_name: kafka-security
+    static_configs:
+      - targets: ["kafka-security:9315"]
+
   # Host disk/CPU/memory. Kafka metrics say nothing about the volume the log
   # dirs sit on, so this is what backs the capacity alerts.
   - job_name: node

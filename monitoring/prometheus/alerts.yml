@@ -18,6 +18,40 @@
 # them to the workload and reload with `krate monitor reload`.
 
 groups:
+  - name: krate-kafka-security
+    rules:
+      - alert: KafkaSecurityObserverDown
+        expr: up{job="kafka-security"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Kafka security observer is unreachable"
+          description: "The on-wire Kafka certificate check has not been scraped for 2m."
+
+      - alert: KafkaListenerTlsProbeFailed
+        expr: krate_kafka_listener_tls_probe_success == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Kafka TLS listener {{ $labels.broker }} failed verification"
+          description: "The listener failed CA, hostname, expiry or connectivity verification. Inspect the listener before renewal."
+
+      - alert: KafkaListenerLegacyCa
+        expr: krate_kafka_listener_legacy_ca == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Kafka listener {{ $labels.broker }} uses a legacy CA"
+          description: "The Kafka CA lacks keyUsage. Plan a CA cutover and update client trust before enforcing strict TLS validation."
+
+      - alert: KafkaListenerCertificateExpiring
+        expr: krate_kafka_listener_certificate_seconds_until_expiry < 30 * 24 * 60 * 60
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Kafka TLS listener {{ $labels.broker }} certificate expires within 30 days"
+          description: "Run krate kafka auth renew-tls, then verify the on-wire certificate and clients."
+
   # ── Cluster health ─────────────────────────────────────────────────────────
   - name: krate-cluster
     rules:
