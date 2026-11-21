@@ -94,7 +94,10 @@ required snake_case fields and HTTPS `registration_client_uri`; enroll that
 private representation through stdin so credentials never appear in
 process arguments. Use an existing private directory owned by the application
 account; the state and adjacent lock files are mode `0600`, cannot be symlinks,
-and must stay private. Back up the state with the same restrictions.
+and must stay private. The parent directory must be owned by that same Unix
+account with mode `0700`; enrollment, loading, and locking refuse a shared
+parent or a state/lock file owned by another account. Back up the state with
+the same restrictions.
 
 ```sh
 java -cp '/absolute/build-output/krate-kafka-oauth-client.jar:/absolute/kafka/libs/*' \
@@ -119,6 +122,21 @@ state lock. The previous secret is retained only for the configured overlap whil
 a valid Kafka token. A pending new secret is verified and finalized on the next
 refresh if interrupted after the state write. The current secret is re-read from
 the state file for every Kafka token refresh.
+
+### Move an existing state into a private directory
+
+If an older installation kept its state under a mode `0755` or shared writable
+directory, stop the application before moving it. As the Unix account that
+runs the application, create a mode `0700` private directory, verify that the
+existing state and adjacent `.lock` are regular files owned by that account,
+then move both files into the new directory without printing their contents.
+Set each file to mode `0600`, update `credentialStateFile` in the application's
+JAAS configuration to the new absolute state path, and restart the application.
+Run `krate kafka client status --state <new-absolute-path>` (or the Java `status`
+command), then produce and consume a record through the application. If the
+old files are not owned by the application account or their origin is unclear,
+re-enroll from Keycloak's trusted registration response instead of changing
+their ownership. The CLI does not migrate an unsafe state automatically.
 
 The callback triggers DCR rotation when `client_secret_expires_at -
 rotation_window_seconds` is reached. Rotation is synchronous during a Kafka login

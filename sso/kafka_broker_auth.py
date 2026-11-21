@@ -619,6 +619,7 @@ def tls_peer_matches(port, hostname, ca_path, expected_serial, connect_host='127
     hostname = hostname.removeprefix('[').removesuffix(']')
     def peer_serial(legacy_ca: bool) -> str:
         context = ssl.create_default_context(cafile=str(ca_path))
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         if legacy_ca:
             context.verify_flags &= ~ssl.VERIFY_X509_STRICT
         with socket.create_connection((connect_host, int(port)), timeout=4) as sock:

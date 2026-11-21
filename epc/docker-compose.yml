@@ -60,7 +60,7 @@ services:
       # RHEL, ignored where SELinux is not enforcing. The directory must exist
       # and be owned by the image's uid before start; './kafka' handles that.
       - ${KAFKA_DATA_DIR:-/data}/krate/broker-92:/var/lib/kafka/data:Z
-      - ../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro,z
+      - ${KRATE_SSO_DIR:-../sso}/../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro,z
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
         target: /mnt/shared/config
@@ -127,7 +127,7 @@ services:
       # RHEL, ignored where SELinux is not enforcing. The directory must exist
       # and be owned by the image's uid before start; './kafka' handles that.
       - ${KAFKA_DATA_DIR:-/data}/krate/broker-93:/var/lib/kafka/data:Z
-      - ../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro,z
+      - ${KRATE_SSO_DIR:-../sso}/../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro,z
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
         target: /mnt/shared/config

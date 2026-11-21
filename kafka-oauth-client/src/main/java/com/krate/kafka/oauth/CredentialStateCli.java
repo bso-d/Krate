@@ -22,14 +22,15 @@ public final class CredentialStateCli {
     }
 
     static String run(String[] args) throws IOException {
-        if (args.length < 1 || !Set.of("enroll", "rotate", "recover", "status").contains(args[0])) {
-            throw new IllegalArgumentException("Expected enroll, rotate, recover or status");
+        if (args.length < 1 || !Set.of("enroll", "rotate", "recover", "status", "preflight").contains(args[0])) {
+            throw new IllegalArgumentException("Expected enroll, rotate, recover, status or preflight");
         }
         String command = args[0];
         Map<String, String> options = parseOptions(args);
         Set<String> allowed = switch (command) {
             case "enroll" -> Set.of("--state", "--token-endpoint", "--issuer", "--trust-pem",
                     "--rotation-window-seconds", "--overlap-seconds");
+            case "preflight" -> Set.of("--state", "--rotation-window-seconds", "--overlap-seconds");
             default -> Set.of("--state");
         };
         if (!allowed.containsAll(options.keySet())) {
@@ -58,6 +59,16 @@ public final class CredentialStateCli {
                 }
                 yield loaded.publicStatus();
             }
+            case "preflight" -> {
+                if (options.containsKey("--rotation-window-seconds")) {
+                    positiveLong(options, "--rotation-window-seconds");
+                }
+                if (options.containsKey("--overlap-seconds")) {
+                    positiveLong(options, "--overlap-seconds");
+                }
+                CredentialState.preflightEnrollmentPath(state);
+                yield "{\"ready\":true}";
+            }
             default -> throw new IllegalArgumentException("Unsupported command");
         };
     }
@@ -81,7 +92,9 @@ public final class CredentialStateCli {
     }
 
     private static long positiveLong(Map<String, String> options, String key) {
-        long value = Long.parseLong(required(options, key));
+        String raw = required(options, key);
+        if (!raw.matches("[0-9]+")) throw new IllegalArgumentException("Invalid " + key);
+        long value = Long.parseLong(raw);
         if (value < 1) throw new IllegalArgumentException("Invalid " + key);
         return value;
     }

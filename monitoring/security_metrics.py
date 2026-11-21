@@ -30,6 +30,7 @@ def probe(endpoint: tuple[str, int], cafile: str) -> tuple[str, float | None, bo
 
     def read_expiry(legacy_ca: bool) -> float:
         context = ssl.create_default_context(cafile=cafile)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         if legacy_ca:
             context.verify_flags &= ~ssl.VERIFY_X509_STRICT
         with socket.create_connection(endpoint, timeout=2) as raw:
@@ -45,9 +46,14 @@ def probe(endpoint: tuple[str, int], cafile: str) -> tuple[str, float | None, bo
     try:
         return label, read_expiry(False), False
     except ssl.SSLCertVerificationError as exc:
-        # PR 64 generated CAs without keyUsage. Keep their signature and host
-        # verification working while exposing the legacy CA for migration.
-        if "CA cert does not include key usage extension" not in str(exc):
+        # Existing CAs can lack keyUsage and existing leaves can lack an
+        # authorityKeyIdentifier. Keep chain and hostname verification while
+        # exposing the legacy certificate for migration.
+        legacy_extension_errors = (
+            "CA cert does not include key usage extension",
+            "Missing Authority Key Identifier",
+        )
+        if not any(message in str(exc) for message in legacy_extension_errors):
             return label, None, False
         try:
             return label, read_expiry(True), True

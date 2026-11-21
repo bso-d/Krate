@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import java.io.IOException;
+import java.lang.ref.Reference;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -28,6 +29,7 @@ public final class CredentialState {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_STATE_BYTES = 65536;
     private static final Map<Path, Object> JVM_LOCKS = Collections.synchronizedMap(new WeakHashMap<>());
+    private static volatile Integer processUid;
 
     private final String clientId;
     private final String clientSecret;
@@ -114,7 +116,8 @@ public final class CredentialState {
         if (rotationWindowSeconds < 1 || overlapSeconds < 1) {
             throw new IllegalArgumentException("Rotation window and overlap must be positive");
         }
-        requireDirectorySync(path);
+        Path canonical = privateStatePath(path);
+        requireDirectorySync(canonical);
         JsonNode dcr = readJson(dcrJson);
         long expiry = requiredLong(dcr, "client_secret_expires_at");
         if (expiry <= Instant.now().getEpochSecond() + 60) {
@@ -127,27 +130,20 @@ public final class CredentialState {
                 httpsUri(tokenEndpoint), expectedIssuer, trustPem == null ? "" : trustPem,
                 rotationWindowSeconds, overlapSeconds, false, "", 0, "");
         state.validate();
-        return withLock(path, () -> {
-            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+        return withLock(canonical, () -> {
+            if (Files.exists(canonical, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IllegalStateException("Credential state already exists");
             }
-            save(path, state);
+            save(canonical, state);
             return state;
         });
     }
 
     public static CredentialState load(Path path) throws IOException {
-        if (path == null || !path.isAbsolute() || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Credential state must be an absolute regular file without a symlink");
-        }
-        Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS);
-        if (!permissions.contains(PosixFilePermission.OWNER_READ)
-                || permissions.stream().anyMatch(p -> p != PosixFilePermission.OWNER_READ
-                && p != PosixFilePermission.OWNER_WRITE)) {
-            throw new IOException("Credential state must have owner-only read/write permissions");
-        }
+        Path canonical = privateStatePath(path);
+        requirePrivateStateFile(canonical);
         ByteBuffer bytes = ByteBuffer.allocate(MAX_STATE_BYTES + 1);
-        try (SeekableByteChannel channel = Files.newByteChannel(path,
+        try (SeekableByteChannel channel = Files.newByteChannel(canonical,
                 Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
             while (bytes.hasRemaining() && channel.read(bytes) != -1) {
                 // Read one bounded snapshot of the atomically replaced state file.
@@ -179,11 +175,12 @@ public final class CredentialState {
 
     public static void save(Path path, CredentialState state) throws IOException {
         state.validate();
-        Path parent = path.getParent();
-        if (parent == null || !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Credential state parent directory does not exist");
+        Path canonical = privateStatePath(path);
+        Path parent = canonical.getParent();
+        if (Files.exists(canonical, LinkOption.NOFOLLOW_LINKS)) {
+            requirePrivateStateFile(canonical);
         }
-        requireDirectorySync(path);
+        requireDirectorySync(canonical);
         Path temp = Files.createTempFile(parent, ".krate-oauth-state-", ".tmp",
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
         try {
@@ -194,9 +191,9 @@ public final class CredentialState {
                 while (buffer.hasRemaining()) channel.write(buffer);
                 channel.force(true);
             }
-            Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE,
+            Files.move(temp, canonical, StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING);
-            requireDirectorySync(path);
+            requireDirectorySync(canonical);
         } finally {
             Files.deleteIfExists(temp);
         }
@@ -268,6 +265,19 @@ public final class CredentialState {
         return path.resolveSibling(path.getFileName() + ".lock");
     }
 
+    /** Read-only validation before remote registration creates a Keycloak client. */
+    static void preflightEnrollmentPath(Path path) throws IOException {
+        Path canonical = privateStatePath(path);
+        if (Files.exists(canonical, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Credential state already exists");
+        }
+        Path lock = lockPath(canonical);
+        if (Files.exists(lock, LinkOption.NOFOLLOW_LINKS)) {
+            requirePrivateLockFile(lock);
+        }
+        requireDirectorySync(canonical);
+    }
+
     @FunctionalInterface
     interface LockedOperation<T> {
         T run() throws IOException;
@@ -275,36 +285,104 @@ public final class CredentialState {
 
     /** A JVM-local monitor prevents Java's overlapping-file-lock failure; the file lock spans processes. */
     static <T> T withLock(Path path, LockedOperation<T> operation) throws IOException {
-        if (path == null || !path.isAbsolute() || path.getFileName() == null) {
-            throw new IOException("Credential state path must be absolute");
-        }
-        Path canonical = path.getParent().toRealPath().resolve(path.getFileName()).normalize();
+        Path canonical = privateStatePath(path);
         Object monitor;
         synchronized (JVM_LOCKS) {
             monitor = JVM_LOCKS.computeIfAbsent(canonical, ignored -> new Object());
         }
-        synchronized (monitor) {
-            try (FileChannel channel = FileChannel.open(lockPath(canonical),
-                    Set.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS),
-                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
-                 var ignored = channel.lock()) {
-                return operation.run();
+        try {
+            synchronized (monitor) {
+                Path lock = lockPath(canonical);
+                if (Files.exists(lock, LinkOption.NOFOLLOW_LINKS)) {
+                    requirePrivateLockFile(lock);
+                }
+                try (FileChannel channel = FileChannel.open(lock,
+                        Set.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                                LinkOption.NOFOLLOW_LINKS),
+                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+                     var ignored = channel.lock()) {
+                    requirePrivateLockFile(lock);
+                    return operation.run();
+                }
             }
+        } finally {
+            // Keep the WeakHashMap key reachable until this JVM monitor is released.
+            Reference.reachabilityFence(canonical);
         }
     }
 
     /** Flush the directory entry as well as file data across an atomic rename. */
     static void requireDirectorySync(Path path) throws IOException {
-        Path parent = path == null ? null : path.getParent();
-        if (parent == null || !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Credential state parent directory is unavailable");
-        }
+        Path parent = privateStatePath(path).getParent();
         try (FileChannel directory = FileChannel.open(parent,
                 Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))) {
             directory.force(true);
         } catch (IOException | RuntimeException error) {
             throw new IOException("Credential state directory sync unavailable; operator recovery may be required");
+        }
+    }
+
+    /** A newly created, private marker identifies this JVM's effective numeric UID. */
+    private static int currentUid() throws IOException {
+        Integer cached = processUid;
+        if (cached != null) return cached;
+        synchronized (CredentialState.class) {
+            if (processUid != null) return processUid;
+            Path marker = Files.createTempFile("krate-oauth-owner-", ".tmp",
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+            int uid;
+            try {
+                uid = uidOf(marker);
+            } finally {
+                Files.deleteIfExists(marker);
+            }
+            processUid = uid;
+            return uid;
+        }
+    }
+
+    private static int uidOf(Path path) throws IOException {
+        try {
+            Object uid = Files.getAttribute(path, "unix:uid", LinkOption.NOFOLLOW_LINKS);
+            if (uid instanceof Number number) return number.intValue();
+        } catch (UnsupportedOperationException error) {
+            throw new IOException("Unix file ownership is required for credential state", error);
+        }
+        throw new IOException("Unix file ownership is unavailable for credential state");
+    }
+
+    /** Resolve parent links once, then operate only beneath the verified directory. */
+    private static Path privateStatePath(Path path) throws IOException {
+        if (path == null || !path.isAbsolute() || path.getFileName() == null) {
+            throw new IOException("Credential state path must be absolute");
+        }
+        Path parent = path.getParent().toRealPath();
+        if (!Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)
+                || uidOf(parent) != currentUid()
+                || !Files.getPosixFilePermissions(parent, LinkOption.NOFOLLOW_LINKS)
+                .equals(PosixFilePermissions.fromString("rwx------"))) {
+            throw new IOException("Credential state parent must be a private directory owned by this user");
+        }
+        return parent.resolve(path.getFileName());
+    }
+
+    private static void requirePrivateStateFile(Path path) throws IOException {
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || uidOf(path) != currentUid()) {
+            throw new IOException("Credential state must be a regular file owned by this user");
+        }
+        Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS);
+        if (!permissions.contains(PosixFilePermission.OWNER_READ)
+                || permissions.stream().anyMatch(p -> p != PosixFilePermission.OWNER_READ
+                && p != PosixFilePermission.OWNER_WRITE)) {
+            throw new IOException("Credential state must have owner-only read/write permissions");
+        }
+    }
+
+    private static void requirePrivateLockFile(Path path) throws IOException {
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || uidOf(path) != currentUid()
+                || !Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
+                .equals(PosixFilePermissions.fromString("rw-------"))) {
+            throw new IOException("Credential lock must be a private regular file owned by this user");
         }
     }
 

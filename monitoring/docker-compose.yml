@@ -80,7 +80,7 @@ services:
     command: ["python3", "/etc/krate/security_metrics.py"]
     volumes:
       - ./security_metrics.py:/etc/krate/security_metrics.py:ro,z
-      - ${PERSES_CERTS_DIR:-../certs}:/etc/krate/certs:ro,z
+      - ${PERSES_CERTS_DIR:-../certs}/kafka:/etc/krate/certs/kafka:ro,z
     networks: [kafka-network, monitoring]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9315/healthz', timeout=2).read()"]

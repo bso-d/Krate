@@ -4159,6 +4159,13 @@ monitor_broker_count() {
 monitor_compose() {
   [[ -d "$MONITOR_DIR" ]] || die "monitoring/ not found in $SCRIPT_DIR
 This bundle was built without the observability stack."
+  if [[ "${1:-}" == up ]]; then
+    # The observer mounts only this public Kafka trust directory. Compose
+    # must not create a root-owned empty bind source on a local-mode install.
+    [[ ! -L "$CERTS_DIR/kafka" ]] || die "Kafka trust directory must not be a symlink: $CERTS_DIR/kafka"
+    mkdir -p "$CERTS_DIR/kafka" || die "Cannot create Kafka trust directory: $CERTS_DIR/kafka"
+    chmod 755 "$CERTS_DIR/kafka" || die "Cannot make Kafka trust directory readable: $CERTS_DIR/kafka"
+  fi
   local net
   net="$(monitor_network)" || net=""
   if [[ "$1" == "up" && -z "$net" ]]; then
@@ -6135,7 +6142,7 @@ kafka_client_java() {
 }
 
 cmd_kafka_client() {
-  local action="${1:-}" state="" key="" value="" issuer="" trust_pem="" client_id="" access="" window=172800 overlap=172800 admin=false
+  local action="${1:-}" state="" key="" value="" issuer="" trust_pem="" client_id="" access="" window=172800 overlap=172800 admin=false window_seen=false overlap_seen=false
   local -a acl_args=()
   shift || true
   if [[ "$action" == template ]]; then
@@ -6161,8 +6168,8 @@ cmd_kafka_client() {
           --client-id) client_id="$value" ;;
           --access) access="$value" ;;
           --topic|--group) acl_args+=("$key" "$value") ;;
-          --rotation-window-seconds) window="$value" ;;
-          --overlap-seconds) overlap="$value" ;;
+          --rotation-window-seconds) window="$value"; window_seen=true ;;
+          --overlap-seconds) overlap="$value"; overlap_seen=true ;;
         esac ;;
       *) die "Unknown Kafka client option: $key" ;;
     esac
@@ -6170,13 +6177,15 @@ cmd_kafka_client() {
   [[ "$state" == /* ]] || die "--state must be an absolute path in an existing private directory"
   case "$action" in
     status|rotate)
-      (( ${#acl_args[@]} == 0 )) && [[ -z "$client_id$access$issuer$trust_pem" && "$admin" == false ]] \
-        || die "Only --state is accepted for Kafka client $action"
+      if (( ${#acl_args[@]} != 0 )) || [[ -n "$client_id$access$issuer$trust_pem" || "$admin" == true || "$window_seen" == true || "$overlap_seen" == true ]]; then
+        die "Only --state is accepted for Kafka client $action"
+      fi
       if [[ "$action" == rotate ]]; then operation_lock "kafka-client-rotate"; identity_lock; fi
       kafka_client_java "$action" --state "$state" ;;
     recover)
-      (( ${#acl_args[@]} == 0 )) && [[ -z "$client_id$access$issuer" ]] \
-        || die "Recover accepts only --state, --admin and --trust-pem"
+      if (( ${#acl_args[@]} != 0 )) || [[ -n "$client_id$access$issuer" || "$window_seen" == true || "$overlap_seen" == true ]]; then
+        die "Recover accepts only --state, --admin and --trust-pem"
+      fi
       operation_lock "kafka-client-recover"; identity_lock
       if [[ "$admin" == true ]]; then
         [[ -f "$ENV_FILE" ]] || die "No .env found; run: krate setup"
@@ -6215,6 +6224,8 @@ cmd_kafka_client() {
         [[ "$trust_pem" == /* && -f "$trust_pem" && ! -L "$trust_pem" ]] || die "--trust-pem must be an absolute regular PEM file"
       fi
       operation_lock "kafka-client-register"; identity_lock
+      kafka_client_java preflight --state "$state" --rotation-window-seconds "$window" --overlap-seconds "$overlap" >/dev/null \
+        || die "Kafka client registration preflight failed: use a same-user mode 0700 state directory and positive rotation window/overlap seconds"
       local -a enroll_args=(enroll --state "$state" --client-id "$client_id" --access "$access" \
         --rotation-window-seconds "$window" --overlap-seconds "$overlap")
       enroll_args+=("${acl_args[@]}")
@@ -6263,7 +6274,8 @@ cmd_kafka_client() {
     grant)
       [[ "$admin" == false ]] || die "--admin is only valid for Kafka client recover"
       [[ -n "$access" ]] || die "Grant needs --access and literal --topic/--group ACLs"
-      [[ -z "$issuer$trust_pem" ]] || die "Grant accepts only --state, --access, --topic and --group"
+      [[ -z "$issuer$trust_pem$client_id" && "$window_seen" == false && "$overlap_seen" == false ]] \
+        || die "Grant accepts only --state, --access, --topic and --group"
       kafka_client_validate_acl_args "$access" "${acl_args[@]}"
       client_id="$(kafka_client_java status --state "$state" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_id"])')" \
         || die "Cannot read the Kafka client identity from private state"
