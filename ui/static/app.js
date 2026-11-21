@@ -160,6 +160,8 @@
     btnOpenRotateModal: document.getElementById("btn-open-rotate-modal"),
     btnBackupIdentity: document.getElementById("btn-backup-identity"),
     identityStatStatus: document.getElementById("identity-stat-status"),
+    identityStatDb: document.getElementById("identity-stat-db"),
+    identityStatWatch: document.getElementById("identity-stat-watch"),
     identityStatCount: document.getElementById("identity-stat-count"),
 
     // View 6: SSO Wizard
@@ -1447,10 +1449,37 @@
       state.clusterStatus = data;
       renderStatus(data);
     } catch (err) {
+      state.clusterStatus = null;
       dom.badgeClusterStatus.className = "mui-status-indicator status-stopped";
       dom.badgeClusterStatus.title = "Cluster: Offline / Unreachable";
       const lbl = dom.badgeClusterStatus.querySelector(".status-label");
       if (lbl) lbl.innerHTML = "Cluster: <strong>Offline</strong>";
+      renderIdentitySummary(null);
+    }
+  }
+
+  function renderIdentitySummary(identity) {
+    const serviceLabel = (state) => ({
+      healthy: "Healthy",
+      unhealthy: "Unhealthy",
+      starting: "Starting",
+      stopped: "Stopped",
+      absent: "Not running",
+    })[state] || "Unknown";
+    const keycloak = identity?.state;
+    if (dom.identityStatStatus) {
+      dom.identityStatStatus.textContent = serviceLabel(keycloak);
+      dom.identityStatStatus.className =
+        keycloak === "healthy" ? "metric-value text-success" : "metric-value text-warning";
+    }
+    if (dom.identityStatDb) {
+      dom.identityStatDb.textContent = `Database: ${serviceLabel(identity?.database)}`;
+    }
+    const watchdog = identity?.watchdog;
+    if (dom.identityStatWatch) {
+      dom.identityStatWatch.textContent = serviceLabel(watchdog);
+      dom.identityStatWatch.className =
+        watchdog === "healthy" ? "metric-value text-success" : "metric-value text-warning";
     }
   }
 
@@ -1523,11 +1552,7 @@
     }
 
     // Identity summary
-    if (data.identity && dom.identityStatStatus) {
-      dom.identityStatStatus.textContent = data.identity.state || "Down";
-      dom.identityStatStatus.className =
-        data.identity.state === "healthy" ? "metric-value text-success" : "metric-value text-warning";
-    }
+    renderIdentitySummary(data.identity);
 
     // Portals & Alerts
     if (data.portals) {
@@ -2445,9 +2470,12 @@
   async function fetchUsers() {
     try {
       const data = await apiFetch("/api/v1/identity/users");
+      if ("error" in data) throw new Error("Identity directory currently unavailable");
       state.usersData = data;
       renderUsers(data);
     } catch (err) {
+      state.usersData = null;
+      if (dom.identityStatCount) dom.identityStatCount.textContent = "Unknown";
       if (dom.tbodyUsers) {
         dom.tbodyUsers.innerHTML = `<tr><td colspan="5" class="text-center text-muted">Identity directory currently unavailable.</td></tr>`;
       }

@@ -623,23 +623,23 @@
         <div class="metrics-grid">
           <div class="metric-card">
             <div class="metric-title">Keycloak Service</div>
-            <div class="metric-value text-success" id="identity-stat-status">Running</div>
-            <div class="metric-sub" id="identity-stat-db">PostgreSQL Connected</div>
+            <div class="metric-value text-warning" id="identity-stat-status">Checking</div>
+            <div class="metric-sub" id="identity-stat-db">Database: Checking</div>
           </div>
           <div class="metric-card">
             <div class="metric-title">Directory Users</div>
-            <div class="metric-value" id="identity-stat-count">0</div>
+            <div class="metric-value" id="identity-stat-count">Checking</div>
             <div class="metric-sub">Provisioned Accounts</div>
           </div>
           <div class="metric-card">
             <div class="metric-title">IdP Watchdog</div>
-            <div class="metric-value text-success" id="identity-stat-watch">Active</div>
+            <div class="metric-value text-warning" id="identity-stat-watch">Checking</div>
             <div class="metric-sub">Failover Monitoring</div>
           </div>
           <div class="metric-card">
-            <div class="metric-title">Local Admin</div>
-            <div class="metric-value text-info" id="identity-stat-admin">Protected</div>
-            <div class="metric-sub">Dual Auth Fallback</div>
+            <div class="metric-title">Admin Recovery</div>
+            <div class="metric-value text-info" id="identity-stat-admin">CLI available</div>
+            <div class="metric-sub">krate identity recover-admin</div>
           </div>
         </div>
 

@@ -128,7 +128,7 @@ New packages are released as `package-kraft-vN` and `package-epc-vN`; see [Relea
 - **To create the UI certificate:** OpenSSL, or your own certificate and key at `certs/server.crt` and `certs/server.key`.
 - **To run from a checkout or build packages:** a connected machine with Docker, Bash, Git, Python 3, Node.js and npm (for the Kafbat UI image), JDK 21 (for the Kafka OAuth application client), and GNU Make 4.0 or newer, which `./krate` calls for you. On macOS, `brew install make` provides it.
 - **For KRaft/EPC monitoring:** Python 3 on the host, in addition to Docker.
-- **For application OAuth clients:** Java 17 or newer on the operator and application hosts. Building the bundled callback jar uses JDK 21 on the connected package builder.
+- **For application OAuth clients:** The KRaft/EPC offline package includes a pinned OpenJDK 21 runtime for operator commands and Studio managed-client actions. Application hosts need Java 17 or newer for the callback jar. A source checkout needs Java 17 or newer for operator commands; building the callback jar uses JDK 21 on the connected package builder.
 
 Choose the package for the target VM's processor: `amd64` means x86_64; `arm64` means ARM64. Leave room for the package, loaded images, and stored messages. The EPC guide explains how to budget its `/data` disk.
 
@@ -281,7 +281,7 @@ mkdir -m 700 auth/payments-client
 ./krate kafka client status --state "$PWD/auth/payments-client/state.json"
 ```
 
-Keep the state directory and its mode `0600` state file private. Use the [application callback configuration](kafka-oauth-client/README.md) to connect, then verify a message is consumed; a producer process can exit successfully even when a send was denied. The offline package includes the client jar and its pinned runtime libraries. When running directly from a source checkout, build them first and set `KAFKA_OAUTH_CLIENT_HOME` to the directory containing the jar and `libs/` before starting the CLI or Studio. Use `kafka client rotate --state ...` for a rotation check and `kafka client recover --state ... --admin` if the private registration token must be repaired.
+Keep the state directory and its mode `0600` state file private. Use the [application callback configuration](kafka-oauth-client/README.md) to connect, then verify a message is consumed; a producer process can exit successfully even when a send was denied. The offline package includes the client jar, its pinned runtime libraries, and the operator Java runtime, so managed-client commands work without installing Java on the offline host. When running directly from a source checkout, build the jar and libraries first and set `KAFKA_OAUTH_CLIENT_HOME` to their directory before starting the CLI or Studio. Use `kafka client rotate --state ...` for a rotation check and `kafka client recover --state ... --admin` if the private registration token must be repaired.
 
 Studio manages clients by ID. For each installed workspace it derives a separate state location under the Studio user's `~/.krate-studio-clients/` directory; the Status screen displays that location. Registration creates its own mode `0700` directories and the CLI creates a mode `0600` state file. A CLI-managed state at another path remains usable from the CLI, but is not selected by Studio. To migrate a former Studio client:
 

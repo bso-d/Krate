@@ -27,7 +27,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh Krate-UI.command krate-ui.sh
+CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh scripts/extract-keycloak-jre.sh Krate-UI.command krate-ui.sh
 VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
@@ -342,6 +342,8 @@ bundle: offline-check
 >    done
 >    docker rm "$$kafka_cid" >/dev/null
 >    bash kafka-oauth-client/build.sh "$$oauth_dir/libs" "$$oauth_dir"
+>    keycloak_image="$$(awk -F= '/^KEYCLOAK_IMAGE=/{print $$2}' "$$src_dir/.env.template")"
+>    bash scripts/extract-keycloak-jre.sh "$$keycloak_image" "$(ARCH)" "$$oauth_dir/jre"
 >    cp kafka-oauth-client/README.md "$$oauth_dir/README.md"
 >    cp kafka-oauth-client/build.sh "$$oauth_dir/build.sh"
 >    cp -r kafka-oauth-client/src "$$oauth_dir/src"

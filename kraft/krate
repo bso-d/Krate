@@ -5736,12 +5736,25 @@ kafka_client_home() {
 }
 
 kafka_client_java() {
-  command -v java >/dev/null || die "Java 17 or newer is required for the Kafka OAuth client"
-  local version home
-  version="$(java -version 2>&1 | head -1 | awk -F '"' '{split($2, parts, "."); print parts[1]}')"
-  [[ "$version" =~ ^[0-9]+$ && "$version" -ge 17 ]] || die "Java 17 or newer is required for the Kafka OAuth client"
+  local version home java_bin
   home="$(kafka_client_home)"
-  java -cp "$home/krate-kafka-oauth-client.jar:$home/libs/*" \
+  java_bin="$home/jre/bin/java"
+  if [[ -n "$REPO_DIR" && ! -x "$java_bin" ]]; then
+    command -v java >/dev/null || die "Java 17 or newer is required for a source-checkout Kafka OAuth client"
+    java_bin="$(command -v java)"
+  elif [[ -z "$REPO_DIR" ]]; then
+    [[ -f "$java_bin" && -x "$java_bin" && ! -L "$java_bin" ]] \
+      || die "Bundled Kafka OAuth Java runtime is missing; reinstall the offline package"
+  fi
+  if ! version="$("$java_bin" -version 2>&1 | head -1 | awk -F '"' '{split($2, parts, "."); print parts[1]}')"; then
+    [[ -n "$REPO_DIR" ]] && die "Java 17 or newer could not run for the Kafka OAuth client"
+    die "Bundled Kafka OAuth Java runtime is unusable; reinstall the offline package"
+  fi
+  if [[ ! "$version" =~ ^[0-9]+$ || "$version" -lt 17 ]]; then
+    [[ -n "$REPO_DIR" ]] && die "Java 17 or newer is required for the Kafka OAuth client"
+    die "Bundled Kafka OAuth Java runtime is unusable; reinstall the offline package"
+  fi
+  "$java_bin" -cp "$home/krate-kafka-oauth-client.jar:$home/libs/*" \
     com.krate.kafka.oauth.CredentialStateCli "$@"
 }
 

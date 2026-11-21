@@ -1511,6 +1511,7 @@ class StructuredDataCollector:
 
         containers = []
         cluster_state = "stopped"
+        docker_inspected = False
         direct_ok, sg_needed = check_docker_socket_permission()
         docker_prefix = ["sg", "docker", "-c"] if sg_needed else []
         fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.Ports}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Label \"com.docker.compose.project\"}}\t{{.ID}}"
@@ -1535,6 +1536,7 @@ class StructuredDataCollector:
                 timeout=8,
             )
             if res.returncode == 0:
+                docker_inspected = True
                 running_brokers = 0
                 total_brokers = 0
                 for line in res.stdout.strip().split("\n"):
@@ -1611,10 +1613,21 @@ class StructuredDataCollector:
         except Exception:
             pass
 
-        identity_state = "down"
-        kc_containers = [c for c in containers if "keycloak" in c["name"]]
-        if any(c["state"] == "running" for c in kc_containers):
-            identity_state = "healthy" if any(c["health"] == "healthy" for c in kc_containers) else "starting"
+        def identity_service_health(service: str) -> str:
+            if not docker_inspected:
+                return "unknown"
+            matches = [c for c in containers if c["project"] == expected_project and c["service"] == service]
+            if not matches:
+                return "absent"
+            if any(c["state"] == "running" and c["health"] == "unhealthy" for c in matches):
+                return "unhealthy"
+            if any(c["state"] == "running" and c["health"] == "healthy" for c in matches):
+                return "healthy"
+            if any(c["state"] == "running" for c in matches):
+                return "starting"
+            return "stopped"
+
+        identity_state = identity_service_health("keycloak")
 
         try:
             usage = shutil.disk_usage(ws_path)
@@ -1647,7 +1660,12 @@ class StructuredDataCollector:
             "cluster_state": cluster_state,
             "containers": containers,
             "monitoring": {"state": monitoring_state},
-            "identity": {"enabled": len(kc_containers) > 0, "state": identity_state},
+            "identity": {
+                "enabled": None if identity_state == "unknown" else identity_state != "absent",
+                "state": identity_state,
+                "database": identity_service_health("keycloak-db"),
+                "watchdog": identity_service_health("idp-watch"),
+            },
             "disk": disk_info,
             "host": self.get_host_info(context=ctx),
             "portals": portals,
@@ -2401,7 +2419,7 @@ class StructuredDataCollector:
                     "users": [],
                     "admin_group": admin_group,
                     "viewer_group": viewer_group,
-                    "error": res.stderr.strip() or res.stdout.strip(),
+                    "error": res.stderr.strip() or res.stdout.strip() or "Identity directory query failed",
                 }
 
             users = []
@@ -2460,7 +2478,7 @@ class StructuredDataCollector:
                 "users": [],
                 "admin_group": admin_group,
                 "viewer_group": viewer_group,
-                "error": str(e),
+                "error": str(e) or "Identity directory query failed",
             }
 
 
@@ -2984,7 +3002,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
             if path == "/api/v1/lag":
                 ctx = self.workspace_mgr.get_context()
                 data = self.data_collector.get_lag(context=ctx)
-                self._send_json(503 if data.get("error") else 200, data)
+                self._send_json(503 if "error" in data else 200, data)
                 return
 
             if path == "/api/v1/kafka/auth":
@@ -3002,7 +3020,7 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
             if path == "/api/v1/identity/users":
                 ctx = self.workspace_mgr.get_context()
                 data = self.data_collector.get_identity_users(context=ctx)
-                self._send_json(200, data)
+                self._send_json(503 if data.get("error") else 200, data)
                 return
 
             if path == "/api/v1/jobs":

@@ -50,9 +50,12 @@ mode-0600 state, and grants literal ACLs. Use `--access read`, `write`, or
 one. The registration response contains only the eight status fields listed
 below. No secret belongs in command arguments, properties, or logs.
 
-The offline bundle includes `kafka-oauth-client/krate-kafka-oauth-client.jar` and
+The offline bundle includes `kafka-oauth-client/krate-kafka-oauth-client.jar`,
 `kafka-oauth-client/libs/` with Kafka clients 3.9.1 and three Jackson 2.16.2
-jars. In a **source checkout**, assemble the same layout from the pinned build
+jars, and `kafka-oauth-client/jre/` with the pinned Keycloak image's OpenJDK 21
+for CLI and Studio managed-client operations on the offline host. Application
+processes need their own Java 17 or newer runtime. In a **source checkout**,
+assemble the jar and libraries from the pinned build
 output and set `KAFKA_OAUTH_CLIENT_HOME` to its absolute directory before using
 the CLI or Studio:
 

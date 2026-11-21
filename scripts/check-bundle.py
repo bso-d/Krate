@@ -73,6 +73,10 @@ def main():
         if not (root / name).is_file():
             raise SystemExit('Missing UI package file: ' + name)
     for name in ('kafka-oauth-client/krate-kafka-oauth-client.jar',
+                 'kafka-oauth-client/jre/bin/java',
+                 'kafka-oauth-client/jre/lib/tzdb.dat',
+                 'kafka-oauth-client/jre/lib/security/cacerts',
+                 'kafka-oauth-client/jre/legal/java.base/LICENSE',
                  'kafka-oauth-client/README.md', 'kafka-oauth-client/build.sh',
                  'kafka-oauth-client/src/main/java/com/krate/kafka/oauth/CredentialStateCli.java',
                  'kafka-oauth-client/KAFKA-LICENSE',
