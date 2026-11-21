@@ -5766,6 +5766,9 @@ cmd_lag() {
   require_compose; require_compose_file
   kafka_admin_args
 
+  # Broker logging is INFO on stdout. Use Kafka's bundled WARN/stderr tool config
+  # for these execs so log lines cannot be mistaken for group IDs or lag rows.
+
   local group=""
   local topic=""
 
@@ -5790,7 +5793,7 @@ cmd_lag() {
     echo ""
 
     local raw
-    raw=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+    raw=$(docker exec -e KAFKA_LOG4J_OPTS= "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
       ${KAFKA_ADMIN_ARGS[@]+"${KAFKA_ADMIN_ARGS[@]}"} \
       --bootstrap-server "$BOOTSTRAP" \
       --describe --group "$group") || die "Failed to describe group '$group'"
@@ -5858,7 +5861,7 @@ cmd_lag() {
     echo ""
 
     local groups
-    groups=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+    groups=$(docker exec -e KAFKA_LOG4J_OPTS= "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
       ${KAFKA_ADMIN_ARGS[@]+"${KAFKA_ADMIN_ARGS[@]}"} \
       --bootstrap-server "$BOOTSTRAP" \
       --list 2>/dev/null | grep -v "^$" | sort) || die "Failed to list consumer groups"
@@ -5877,7 +5880,7 @@ cmd_lag() {
       [[ -z "$grp" ]] && continue
 
       local raw_desc
-      raw_desc=$(docker exec "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
+      raw_desc=$(docker exec -e KAFKA_LOG4J_OPTS= "$broker" /opt/kafka/bin/kafka-consumer-groups.sh \
         ${KAFKA_ADMIN_ARGS[@]+"${KAFKA_ADMIN_ARGS[@]}"} \
         --bootstrap-server "$BOOTSTRAP" \
         --describe --group "$grp" 2>/dev/null || true)
