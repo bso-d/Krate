@@ -2863,11 +2863,12 @@ p5_cap() { # like cap, with stdin closed: s_client and the Kafka console tools w
   return $rc
 }
 p5_tool() { # TOOL args...: /opt/kafka/bin/TOOL of the pinned image in the proxy's network namespace, capped at 90 s by the image's own timeout
-  p5_cap docker run --rm --network "container:$P5_PROXY" -v "$P5_DIR:/gate:ro" "$P5_IMG" timeout 90 "/opt/kafka/bin/$1" "${@:2}"
+  # The gate's client files stay root-only (0700 directory, 0600 files); the pinned image defaults to appuser.
+  p5_cap docker run --rm --user 0:0 --network "container:$P5_PROXY" -v "$P5_DIR:/gate:ro" "$P5_IMG" timeout 90 "/opt/kafka/bin/$1" "${@:2}"
 }
 p5_produce() { # BOOTSTRAP TOPIC: the three records of the state dir through the console producer's stdin, same vantage
   local rc
-  CAP="$(docker run -i --rm --network "container:$P5_PROXY" -v "$P5_DIR:/gate:ro" "$P5_IMG" timeout 90 /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$1" --producer.config /gate/client-ui.properties --topic "$2" < "$P5_DIR/records.txt" 2>&1)"; rc=$?
+  CAP="$(docker run -i --rm --user 0:0 --network "container:$P5_PROXY" -v "$P5_DIR:/gate:ro" "$P5_IMG" timeout 90 /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$1" --producer.config /gate/client-ui.properties --topic "$2" < "$P5_DIR/records.txt" 2>&1)"; rc=$?
   printf -- '--- kafka-console-producer.sh --topic %s (exit %s)\n%s\n' "$2" "$rc" "$CAP" >> "$RAW"
   return $rc
 }
