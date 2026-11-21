@@ -10116,8 +10116,13 @@ def check_airgap_rows(checks):
     cb = importlib.util.module_from_spec(spec_cb)
     spec_cb.loader.exec_module(cb)
     for ed in ('kraft', 'epc'):
-        e(cb.inventory(str(ROOT), 'HEAD', ed).get('nginx-stream.conf') == f'{ed}/nginx-stream.conf',
+        bound_files = cb.inventory(str(ROOT), 'HEAD', ed)
+        e(bound_files.get('nginx-stream.conf') == f'{ed}/nginx-stream.conf',
           f'candidate_binding inventory for {ed} must map nginx-stream.conf to {ed}/nginx-stream.conf')
+        for name in ('kafka-log4j.properties', 'security_metrics.py'):
+            rel = 'monitoring/' + name
+            e(bound_files.get(rel) == rel,
+              f'candidate_binding inventory for {ed} must map bundled {rel} to its source bytes')
     fixture_root = ROOT / 'harness' / 'phase4' / 'path-contract'
     fixture_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=fixture_root) as tmp:
