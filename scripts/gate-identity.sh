@@ -2946,7 +2946,8 @@ run_phase5() { # Phase 5: Kafka authentication in oauth_ssl mode (a localhost ru
   # KA3: status names the mode, the certificate (subject, SANs incl. the proxy) and probes the brokers with the admin credentials (17-kafka-auth-status.log).
   cap "$KRATE" kafka auth status; rc=$?
   ev="$(printf '%s' "$CAP" | grep -o -E 'Kafka Authentication Mode: [a-z_]+|"subject": "[^"]+"|DNS:[a-z0-9-]+|Broker is authenticated and responsive|krate-exporter user is configured' | tr '\n' ' ')"
-  [[ $rc -eq 0 && "$CAP" == *"Kafka Authentication Mode: oauth_ssl"* && "$CAP" == *'"subject": "CN=kafka-broker"'* && "$CAP" == *"DNS:kafka-${P5_IDS[0]}"* && "$CAP" == *"DNS:proxy"* \
+  status_norm="${CAP// = /=}"  # OpenSSL subject spacing varies across supported hosts.
+  [[ $rc -eq 0 && "$CAP" == *"Kafka Authentication Mode: oauth_ssl"* && "$status_norm" == *'"subject": "CN=kafka-broker"'* && "$CAP" == *"DNS:kafka-${P5_IDS[0]}"* && "$CAP" == *"DNS:proxy"* \
     && "$CAP" == *"DNS:localhost"* && "$CAP" == *"Broker is authenticated and responsive"* && "$CAP" == *"krate-exporter user is configured"* ]]; st=$?
   ok_if KA3 5 KA "$st" "status exit=$rc: $ev"
 
