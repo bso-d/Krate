@@ -3355,6 +3355,10 @@ cmd_start() {
     compose_cmd up -d
     echo ""
     cmd_health || true      # wait for the cluster to settle, then show final health
+    # A stopped-broker auth change is staged; reconcile any attached monitoring
+    # only after the brokers are running again.
+    kafka_refresh_exporter \
+      || die "Cluster started, but Kafka monitoring recovery is required. Run: krate monitor up; then krate monitor status"
   fi
 }
 
@@ -6211,13 +6215,11 @@ cmd_kafka_auth_disable() {
     fi
   else
     warn "No broker is running; local mode is staged for the next start"
+    warn "Attached Kafka monitoring will be reconciled by krate start"
   fi
 
-  if ! kafka_refresh_exporter; then
-    if [[ -n "$broker" ]]; then
-      die "Kafka local mode is active on brokers; broker mode changed; monitoring recovery required. Run: krate monitor up; then krate monitor status"
-    fi
-    die "Kafka local mode is staged for next start; monitoring recovery required. Run: krate monitor up; then krate monitor status"
+  if [[ -n "$broker" ]] && ! kafka_refresh_exporter; then
+    die "Kafka local mode is active on brokers; broker mode changed; monitoring recovery required. Run: krate monitor up; then krate monitor status"
   fi
 
   ok "Kafka OAuth/TLS disabled"
