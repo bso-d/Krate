@@ -27,7 +27,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh Krate-UI.command krate-ui.sh
+CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh scripts/extract-keycloak-jre.sh Krate-UI.command krate-ui.sh
 VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
@@ -310,6 +310,7 @@ bundle: offline-check
 >    cp monitoring/docker-compose.yml monitoring/.env.template monitoring/seed-alerting.py monitoring/render.py "$$bundle_dir/monitoring/"
 >    cp monitoring/grafana-admin.py monitoring/README.md "$$bundle_dir/monitoring/"
 >    cp -r monitoring/grafana monitoring/loki monitoring/prometheus monitoring/fluent-bit monitoring/perses monitoring/idp "$$bundle_dir/monitoring/"
+>    cp monitoring/kafka-log4j.properties monitoring/security_metrics.py "$$bundle_dir/monitoring/"
 >    # Local test runs leave Python bytecode beside discovery.py; never ship it.
 >    find "$$bundle_dir/monitoring" -name __pycache__ -type d -prune -exec rm -rf {} +
 >    # Finder metadata from a browsed working copy is not product: the binding check would refuse it.
@@ -317,6 +318,35 @@ bundle: offline-check
 >    # Only the local default is copied: never stage site auth files or secrets.
 >    mkdir -p "$$bundle_dir/monitoring/auth"
 >    cp monitoring/auth/local.ini "$$bundle_dir/monitoring/auth/local.ini"
+>  fi
+>
+>  # Build from the pinned Kafka image selected for this edition. The four
+>  # runtime jars support the host credential command; application JVMs use the
+>  # callback jar with their own Kafka client dependencies.
+>  if [[ "$$mode" != "zk" ]]; then
+>    oauth_dir="$$bundle_dir/kafka-oauth-client"
+>    mkdir -p "$$oauth_dir/libs"
+>    kafka_image="$$(awk -F= '/^KAFKA_IMAGE=/{print $$2}' "$$src_dir/.env.template")"
+>    kafka_cid="$$(docker create --platform "linux/$(ARCH)" --entrypoint /bin/true "$$kafka_image")"
+>    for jar in kafka-clients-3.9.1.jar jackson-annotations-2.16.2.jar jackson-core-2.16.2.jar jackson-databind-2.16.2.jar; do
+>      if ! docker cp "$$kafka_cid:/opt/kafka/libs/$$jar" "$$oauth_dir/libs/$$jar"; then
+>        docker rm "$$kafka_cid" >/dev/null
+>        exit 1
+>      fi
+>    done
+>    for notice in LICENSE NOTICE; do
+>      if ! docker cp "$$kafka_cid:/opt/kafka/$$notice" "$$oauth_dir/KAFKA-$$notice"; then
+>        docker rm "$$kafka_cid" >/dev/null
+>        exit 1
+>      fi
+>    done
+>    docker rm "$$kafka_cid" >/dev/null
+>    bash kafka-oauth-client/build.sh "$$oauth_dir/libs" "$$oauth_dir"
+>    keycloak_image="$$(awk -F= '/^KEYCLOAK_IMAGE=/{print $$2}' "$$src_dir/.env.template")"
+>    bash scripts/extract-keycloak-jre.sh "$$keycloak_image" "$(ARCH)" "$$oauth_dir/jre"
+>    cp kafka-oauth-client/README.md "$$oauth_dir/README.md"
+>    cp kafka-oauth-client/build.sh "$$oauth_dir/build.sh"
+>    cp -r kafka-oauth-client/src "$$oauth_dir/src"
 >  fi
 >
 >  # Krate Studio desktop UI and multiplatform double-click launchers.

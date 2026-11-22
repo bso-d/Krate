@@ -167,6 +167,320 @@ _ops_py() {
   PYTHONDONTWRITEBYTECODE=1 python3 -B "$sso_path/operations.py" "$@"
 }
 
+# Validate the Keycloak client readback before granting Kafka permissions. A
+# DCR response alone does not prove that the rotation policy or kafka scope was
+# applied to the registered service account.
+kafka_client_verify_registration() {
+  local client_id="$1" uuid account_id principal
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" >/dev/null \
+    || die "Keycloak admin login failed; run: krate identity status"
+  uuid="$(kcadm_client_id "$IDENTITY_REALM" "$client_id")" || die "Keycloak client lookup failed"
+  [[ -n "$uuid" ]] || die "The DCR client $client_id is not registered in realm $IDENTITY_REALM"
+  if ! kcadm -- get "clients/$uuid" -r "$IDENTITY_REALM" 2>/dev/null \
+      | python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+expected = sys.argv[1]
+attrs = c.get("attributes") or {}
+valid = (c.get("clientId") == expected and c.get("enabled") is True
+         and c.get("publicClient") is False and c.get("serviceAccountsEnabled") is True
+         and c.get("clientAuthenticatorType") == "client-secret"
+         and attrs.get("krate.managed.kafka.client") == "true"
+         and attrs.get("krate.kafka.auth.mode") == "secret-dcr"
+         and "kafka" in (c.get("defaultClientScopes") or []))
+sys.exit(0 if valid else 1)
+' "$client_id"; then
+    die "DCR client $client_id must be enabled, confidential, service-account based, managed secret-dcr, and have the kafka default scope"
+  fi
+  account_id="$(kcadm -- get "clients/$uuid/service-account-user" -r "$IDENTITY_REALM" --fields id --format csv --noquotes)" \
+    || die "Keycloak service-account lookup failed"
+  [[ -n "$account_id" ]] || die "DCR client $client_id has no service-account user"
+  principal="service-account-$client_id"
+  if ! kcadm -- get "users/$account_id" -r "$IDENTITY_REALM" \
+      | python3 -c '
+import json, sys
+user = json.load(sys.stdin)
+user.setdefault("attributes", {})["kafka_principal"] = [sys.argv[1]]
+print(json.dumps(user))
+' "$principal" \
+      | KCADM_STDIN=1 kcadm -- update "users/$account_id" -r "$IDENTITY_REALM" -f - >/dev/null 2>&1; then
+    die "Cannot set the Kafka principal for DCR client $client_id"
+  fi
+  if ! kcadm -- get "users/$account_id" -r "$IDENTITY_REALM" 2>/dev/null \
+      | python3 -c 'import json,sys; u=json.load(sys.stdin); sys.exit(0 if u.get("attributes",{}).get("kafka_principal")==[sys.argv[1]] else 1)' "$principal"; then
+    die "Keycloak did not retain the Kafka principal for DCR client $client_id"
+  fi
+  kcadm_logout
+}
+
+# Keycloak's default DCR provider accepts the managed ClientRepresentation but
+# returns camelCase fields. A same-RAT read through the OpenID DCR provider
+# yields the standard secret/expiry/RAT/URI contract used by the Java client.
+# Both representations stay in the private identity work directory.
+kafka_client_dcr_bridge() {
+  local default_file="$1" oidc_file="$2" issuer="$3" trust_pem="$4"
+  python3 - "$default_file" "$oidc_file" "$issuer" "$trust_pem" <<'PY'
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+try:
+    source, target, issuer, trust_pem = sys.argv[1:]
+    with open(source, encoding='utf-8') as handle:
+        default = json.load(handle)
+    client_id = default['clientId']
+    rat = default['registrationAccessToken']
+    secret = default['secret']
+    if not all(isinstance(item, str) and item for item in (client_id, rat, secret)):
+        raise ValueError('incomplete default DCR response')
+    if not issuer.startswith('https://'):
+        raise ValueError('issuer must be HTTPS')
+    url = issuer.rstrip('/') + '/clients-registrations/openid-connect/' + urllib.parse.quote(client_id, safe='')
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    def read_oidc(legacy_ca):
+        context = ssl.create_default_context(cafile=trust_pem or None)
+        if legacy_ca:
+            # Older Krate CAs omitted keyUsage. Keep CA and hostname checks.
+            context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), NoRedirect)
+        request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + rat})
+        with opener.open(request, timeout=15) as response:
+            if response.status != 200:
+                raise ValueError('OpenID DCR read failed')
+            return response.read(65537)
+
+    try:
+        raw = read_oidc(False)
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if not isinstance(reason, ssl.SSLCertVerificationError) or 'CA cert does not include key usage extension' not in str(reason):
+            raise
+        raw = read_oidc(True)
+    if len(raw) > 65536:
+        raise ValueError('OpenID DCR response is too large')
+    oidc = json.loads(raw)
+    if (oidc.get('client_id') != client_id or oidc.get('client_secret') != secret
+            or not oidc.get('registration_access_token')
+            or not str(oidc.get('registration_client_uri', '')).startswith('https://')
+            or int(oidc.get('client_secret_expires_at') or 0) <= int(time.time()) + 60):
+        raise ValueError('OpenID DCR response is incomplete or expired')
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as handle:
+        handle.write(raw)
+        handle.flush()
+        os.fsync(handle.fileno())
+    print(client_id)
+except Exception:
+    raise SystemExit('Cannot validate the private DCR response or retrieve its OpenID registration credentials')
+PY
+}
+
+# Refresh a registration access token through the Keycloak admin API and read
+# its OpenID registration representation over the trusted public HTTPS endpoint.
+# The RAT and client secret travel only in memory/standard streams.
+kafka_client_admin_oidc() {
+  local client_id="$1" issuer="$2" trust_pem="$3" uuid rat_response rc=0
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" >/dev/null \
+    || die "Keycloak admin login failed; run: krate identity status"
+  uuid="$(kcadm_client_id "$IDENTITY_REALM" "$client_id")" \
+    || die "Keycloak client lookup failed for $client_id"
+  [[ -n "$uuid" ]] || die "Keycloak client $client_id does not exist"
+  rat_response="$(kcadm -- create "clients/$uuid/registration-access-token" -r "$IDENTITY_REALM" -o 2>/dev/null)" \
+    || die "Keycloak could not refresh the registration access token for $client_id"
+  python3 - "$client_id" "$issuer" "$trust_pem" 3<<< "$rat_response" <<'PY' || rc=$?
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+try:
+    client_id, issuer, trust_pem = sys.argv[1:]
+    response = json.load(os.fdopen(3))
+    rat = response['registrationAccessToken']
+    if not isinstance(rat, str) or not rat or not issuer.startswith('https://'):
+        raise ValueError('invalid registration token')
+    url = issuer.rstrip('/') + '/clients-registrations/openid-connect/' + urllib.parse.quote(client_id, safe='')
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    def read_oidc(legacy_ca):
+        context = ssl.create_default_context(cafile=trust_pem or None)
+        if legacy_ca:
+            # Existing PR64 CAs may lack keyUsage; trust and hostname remain checked.
+            context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), NoRedirect)
+        request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + rat})
+        with opener.open(request, timeout=20) as response:
+            if response.status != 200:
+                raise ValueError('OpenID DCR read failed')
+            return response.read(65537)
+
+    try:
+        raw = read_oidc(False)
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if not isinstance(reason, ssl.SSLCertVerificationError) or 'CA cert does not include key usage extension' not in str(reason):
+            raise
+        raw = read_oidc(True)
+    if len(raw) > 65536:
+        raise ValueError('OpenID DCR response is too large')
+    created = json.loads(raw)
+    if (created.get('client_id') != client_id or not created.get('client_secret')
+            or created.get('registration_access_token') != rat
+            or not str(created.get('registration_client_uri', '')).startswith('https://')
+            or int(created.get('client_secret_expires_at') or 0) <= int(time.time()) + 60):
+        raise ValueError('OpenID DCR response is incomplete or expired')
+    sys.stdout.buffer.write(raw)
+except Exception:
+    raise SystemExit('Cannot retrieve current OpenID registration credentials; inspect Keycloak logs')
+PY
+  unset rat_response
+  kcadm_logout
+  return "$rc"
+}
+
+# Admin registration is retryable after client creation but before private state
+# creation: an existing client must pass the same managed registration readback.
+kafka_client_register_dcr() {
+  local client_id="$1" issuer="$2" trust_pem="$3" uuid
+  kcadm_login master user "$(env_value KEYCLOAK_ADMIN_USER)" "$(env_value KEYCLOAK_ADMIN_PASSWORD)" >/dev/null \
+    || die "Keycloak admin login failed; run: krate identity status"
+  uuid="$(kcadm_client_id "$IDENTITY_REALM" "$client_id")" \
+    || die "Keycloak client lookup failed for $client_id"
+  if [[ -z "$uuid" ]]; then
+    python3 "$(sso_dir)/identity.py" kafka-auth managed-client --client-id "$client_id" \
+      | KCADM_STDIN=1 kcadm -- create clients -r "$IDENTITY_REALM" -f - >/dev/null 2>&1 \
+      || die "Keycloak refused to create the managed client $client_id"
+  fi
+  kcadm_logout
+  kafka_client_verify_registration "$client_id"
+  kafka_client_admin_oidc "$client_id" "$issuer" "$trust_pem" \
+    | python3 -c 'import json,sys; c=json.load(sys.stdin); print(json.dumps({"clientId":c["client_id"],"secret":c["client_secret"],"registrationAccessToken":c["registration_access_token"]}))'
+}
+
+kafka_client_acl_readback_has() {
+  local broker="$1" principal="$2" kind="$3" name="$4"; shift 4
+  local -a resource_args=()
+  case "$kind" in
+    TOPIC) resource_args=(--topic "$name") ;;
+    GROUP) resource_args=(--group "$name") ;;
+    CLUSTER) resource_args=(--cluster) ;;
+    *) return 1 ;;
+  esac
+  local output attempt
+  for ((attempt=0; attempt<5; attempt++)); do
+    output="$(docker exec "$broker" /opt/kafka/bin/kafka-acls.sh \
+      --bootstrap-server "$BOOTSTRAP" \
+      --command-config /mnt/shared/config/admin.properties \
+      --list --resource-pattern-type literal "${resource_args[@]}" 2>/dev/null)" || output=""
+    if printf '%s\n' "$output" | python3 -c '
+import re, sys
+kind, name, principal, *ops = sys.argv[1:]
+text = sys.stdin.read()
+header = re.compile(r"Current ACLs for resource `?ResourcePattern\(resourceType="
+                    + re.escape(kind) + r",\s*name=" + re.escape(name)
+                    + r",\s*patternType=LITERAL\)`?:")
+match = header.search(text)
+if match is None:
+    sys.exit(1)
+section = text[match.end():].split("Current ACLs for resource ", 1)[0]
+for op in ops:
+    pattern = (r"\(principal=" + re.escape(principal)
+               + r",\s*host=[^,]+,\s*operation=" + re.escape(op)
+               + r",\s*permissionType=ALLOW\)")
+    if re.search(pattern, section) is None:
+        sys.exit(1)
+' "$kind" "$name" "$principal" "$@"; then
+      return 0
+    fi
+    if (( attempt < 4 )); then sleep 1; fi
+  done
+  return 1
+}
+
+kafka_client_validate_acl_args() {
+  local access="$1"; shift
+  local -a topics=() groups=()
+  local option resource
+  while [[ $# -gt 0 ]]; do
+    [[ $# -ge 2 ]] || die "$1 needs a literal resource name"
+    option="$1"; resource="$2"; shift 2
+    [[ "$resource" =~ ^[A-Za-z0-9._-]{1,249}$ && "$resource" != . && "$resource" != .. ]] \
+      || die "Kafka topic and group names must be literal 1-249 character names without wildcards"
+    case "$option" in
+      --topic) topics+=("$resource") ;;
+      --group) groups+=("$resource") ;;
+      *) die "Unknown Kafka ACL resource option: $option" ;;
+    esac
+  done
+  (( ${#topics[@]} )) || die "At least one literal --topic is required"
+  [[ "$access" == read || "$access" == write || "$access" == read-write ]] \
+    || die "--access must be read, write, or read-write"
+  if [[ "$access" != write && ${#groups[@]} -eq 0 ]]; then
+    die "Read access needs at least one literal --group"
+  fi
+  if [[ "$access" == write && ${#groups[@]} -ne 0 ]]; then
+    die "Write-only access cannot include a consumer group ACL"
+  fi
+}
+
+kafka_client_grant_acls() {
+  local client_id="$1" access="$2"; shift 2
+  kafka_client_validate_acl_args "$access" "$@"
+  local -a topics=() groups=()
+  local option resource broker principal
+  while [[ $# -gt 0 ]]; do
+    option="$1"; resource="$2"; shift 2
+    case "$option" in
+      --topic) topics+=("$resource") ;;
+      --group) groups+=("$resource") ;;
+    esac
+  done
+  [[ "$(env_value KAFKA_AUTH_MODE)" == oauth_ssl ]] || die "Kafka OAuth/TLS is not enabled; run: krate kafka auth enable"
+  broker="$(find_broker 2>/dev/null)" || die "No running broker found; start Kafka before granting client ACLs"
+  principal="User:service-account-$client_id"
+  local -a base=(exec "$broker" /opt/kafka/bin/kafka-acls.sh --bootstrap-server "$BOOTSTRAP" --command-config /mnt/shared/config/admin.properties --add --allow-principal "$principal" --resource-pattern-type literal)
+  local topic group
+  for topic in "${topics[@]}"; do
+    local -a permissions=(--operation Describe)
+    local -a required=(DESCRIBE)
+    [[ "$access" == write ]] || permissions+=(--operation Read)
+    [[ "$access" == write ]] || required+=(READ)
+    [[ "$access" == read ]] || permissions+=(--operation Write)
+    [[ "$access" == read ]] || required+=(WRITE)
+    docker "${base[@]}" "${permissions[@]}" --topic "$topic" >/dev/null 2>&1 \
+      || die "Cannot grant $access ACLs on topic $topic to $client_id"
+    kafka_client_acl_readback_has "$broker" "$principal" TOPIC "$topic" "${required[@]}" \
+      || die "Kafka did not confirm the requested topic ACLs for $client_id on $topic"
+  done
+  for group in "${groups[@]}"; do
+    docker "${base[@]}" --operation Read --group "$group" >/dev/null 2>&1 \
+      || die "Cannot grant group ACL on $group to $client_id"
+    kafka_client_acl_readback_has "$broker" "$principal" GROUP "$group" READ \
+      || die "Kafka did not confirm the requested group ACL for $client_id on $group"
+  done
+  if [[ "$access" != read ]]; then
+    docker "${base[@]}" --operation IdempotentWrite --cluster >/dev/null 2>&1 \
+      || die "Cannot grant idempotent producer permission to $client_id"
+    kafka_client_acl_readback_has "$broker" "$principal" CLUSTER kafka-cluster IDEMPOTENT_WRITE \
+      || die "Kafka did not confirm the idempotent producer ACL for $client_id"
+  fi
+}
+
 _ops_common_args() {
   local pkg="false"
   if is_package; then
@@ -350,6 +664,10 @@ cmd_config() {
       [[ "$key" =~ ^[A-Z0-9_]+_IMAGE$ ]] && die "Image pins come from .env.template; change $key there, or export it in the shell for one run."
 
       operation_lock "config-set"
+      case "$key" in
+        KAFKA_*|KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET|KRATE_KAFKA_AUTH_SHA)
+          identity_lock ;;
+      esac
       local state="pristine"
       case "$key" in
         KEYCLOAK_DB_PASSWORD|KEYCLOAK_ADMIN_PASSWORD|KEYCLOAK_CLI_CLIENT_SECRET|KEYCLOAK_KAFBAT_CLIENT_SECRET|KEYCLOAK_IDP_WATCH_CLIENT_SECRET|PING_KEYCLOAK_CLIENT_SECRET)

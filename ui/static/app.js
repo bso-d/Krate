@@ -17,6 +17,10 @@
     clusterStatus: null,
     doctorData: null,
     lagData: null,
+    kafkaSecurity: null,
+    kafkaClientStatus: null,
+    kafkaClientCheckedId: null,
+    kafkaRegisterPendingId: null,
     configData: null,
     usersData: null,
     gatesData: null,
@@ -93,9 +97,42 @@
     lagStatPartitions: document.getElementById("lag-stat-partitions"),
     lagStatMax: document.getElementById("lag-stat-max"),
     lagStatStatus: document.getElementById("lag-stat-status"),
+    lagStatStatusSub: document.getElementById("lag-stat-status-sub"),
     inputLagFilter: document.getElementById("input-lag-filter"),
     chkLagOnly: document.getElementById("chk-lag-only"),
     lagTreeContainer: document.getElementById("lag-tree-container"),
+    kafkaSecurityState: document.getElementById("kafka-security-state"),
+    kafkaSecurityGuidance: document.getElementById("kafka-security-guidance"),
+    kafkaSecurityMode: document.getElementById("kafka-security-mode"),
+    kafkaSecurityListeners: document.getElementById("kafka-security-listeners"),
+    kafkaSecurityBroker: document.getElementById("kafka-security-broker"),
+    kafkaSecurityExporter: document.getElementById("kafka-security-exporter"),
+    kafkaSecuritySerial: document.getElementById("kafka-security-serial"),
+    kafkaSecurityExpiry: document.getElementById("kafka-security-expiry"),
+    btnKafkaAuthRefresh: document.getElementById("btn-kafka-auth-refresh"),
+    btnKafkaAuthEnable: document.getElementById("btn-kafka-auth-enable"),
+    btnKafkaAuthDisable: document.getElementById("btn-kafka-auth-disable"),
+    btnKafkaRenewTls: document.getElementById("btn-kafka-renew-tls"),
+    kafkaAlertsState: document.getElementById("kafka-alerts-state"),
+    tbodyKafkaSecurityAlerts: document.getElementById("tbody-kafka-security-alerts"),
+    btnKafkaAlertsRefresh: document.getElementById("btn-kafka-alerts-refresh"),
+    inputKafkaClientState: document.getElementById("input-kafka-client-state"),
+    btnKafkaClientStatus: document.getElementById("btn-kafka-client-status"),
+    btnKafkaClientRotate: document.getElementById("btn-kafka-client-rotate"),
+    btnKafkaClientRecover: document.getElementById("btn-kafka-client-recover"),
+    kafkaClientState: document.getElementById("kafka-client-state"),
+    kafkaClientId: document.getElementById("kafka-client-id"),
+    kafkaClientExpiry: document.getElementById("kafka-client-expiry"),
+    kafkaClientDue: document.getElementById("kafka-client-due"),
+    kafkaClientPending: document.getElementById("kafka-client-pending"),
+    kafkaClientPrevious: document.getElementById("kafka-client-previous"),
+    kafkaClientError: document.getElementById("kafka-client-error"),
+    inputKafkaRegisterId: document.getElementById("input-kafka-register-id"),
+    kafkaClientLocation: document.getElementById("kafka-client-location"),
+    inputKafkaRegisterTopic: document.getElementById("input-kafka-register-topic"),
+    inputKafkaRegisterGroup: document.getElementById("input-kafka-register-group"),
+    selectKafkaRegisterAccess: document.getElementById("select-kafka-register-access"),
+    btnKafkaClientRegister: document.getElementById("btn-kafka-client-register"),
 
     // View 4: Config Editor
     configTabs: document.querySelectorAll(".config-tabs-bar .tab-btn"),
@@ -123,6 +160,8 @@
     btnOpenRotateModal: document.getElementById("btn-open-rotate-modal"),
     btnBackupIdentity: document.getElementById("btn-backup-identity"),
     identityStatStatus: document.getElementById("identity-stat-status"),
+    identityStatDb: document.getElementById("identity-stat-db"),
+    identityStatWatch: document.getElementById("identity-stat-watch"),
     identityStatCount: document.getElementById("identity-stat-count"),
 
     // View 6: SSO Wizard
@@ -1089,9 +1128,11 @@
     };
 
     source.addEventListener("done", (event) => {
+      let finishedSucceeded = false;
       try {
         const payload = JSON.parse(event.data);
         const isSuccess = payload.status === "succeeded";
+        finishedSucceeded = isSuccess;
         appendTerminalLine(`\n[System] Job finished with status: ${payload.status} (exit code: ${payload.exit_code})`, isSuccess ? "stdout" : "stderr");
 
         // Handle ephemeral one-time credentials
@@ -1128,6 +1169,19 @@
         }
         if (finishedAction === "gates") {
           fetchGates();
+        }
+        if (finishedAction.startsWith("kafka_")) {
+          fetchKafkaSecurity();
+          fetchKafkaSecurityAlerts();
+          if (["kafka_client_rotate", "kafka_client_recover_admin"].includes(finishedAction) && state.kafkaClientCheckedId) fetchKafkaClientStatus();
+          if (finishedAction === "kafka_client_register") {
+            if (finishedSucceeded && state.kafkaRegisterPendingId && dom.inputKafkaClientState) {
+              dom.inputKafkaClientState.value = state.kafkaRegisterPendingId;
+              fetchKafkaClientStatus();
+            }
+            state.kafkaRegisterPendingId = null;
+          }
+          if (state.activeView === "lag") fetchLag();
         }
       }
     });
@@ -1193,6 +1247,7 @@
       "monitor_status",
       "monitor_logs",
       "monitor_ui",
+      "kafka_auth_status",
     ].includes(action);
     if (state.clusterStatus?.mutation_active && isMutationAction) {
       const activeHolder = state.clusterStatus.active_mutation_job_id || "lock held";
@@ -1221,7 +1276,7 @@
       const isMutation =
         res.is_mutation !== undefined
           ? Boolean(res.is_mutation)
-          : !["health", "credentials", "status", "logs", "doctor", "gates", "identity_status", "monitor_status", "monitor_logs", "monitor_ui"].includes(action);
+          : !["health", "credentials", "status", "logs", "doctor", "gates", "identity_status", "monitor_status", "monitor_logs", "monitor_ui", "kafka_auth_status"].includes(action);
       state.activeJob = {
         id: res.job_id,
         action,
@@ -1261,34 +1316,59 @@
 
     // 1. Docker Socket
     if (dom.stepDockerChip) {
-      const dockerCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("docker"));
-      const isDockerUp = dockerCheck ? dockerCheck.status === "passed" : (statusData.cluster_state !== "unknown");
-      dom.stepDockerChip.textContent = isDockerUp ? "Socket Ready" : "Daemon Down";
-      dom.stepDockerChip.className = `step-status-chip ${isDockerUp ? "badge-success" : "badge-danger"}`;
+      const dockerChecks = doctorData?.checks || [];
+      const engine = dockerChecks.find((c) => c.name === "Docker Engine");
+      const daemon = dockerChecks.find((c) => c.name === "Docker Daemon");
+      const compose = dockerChecks.find((c) => c.name === "Docker Compose");
+      let label = "Not Checked";
+      let badge = "badge-neutral";
+      if (engine?.status === "error") {
+        label = "Install Docker";
+        badge = "badge-danger";
+      } else if (daemon?.status === "error") {
+        label = "Daemon Down";
+        badge = "badge-danger";
+      } else if (compose?.status === "error") {
+        label = "Compose Missing";
+        badge = "badge-danger";
+      } else if (daemon?.status === "warn") {
+        label = "Access Pending";
+        badge = "badge-warning";
+      } else if (engine?.status === "warn" || compose?.status === "warn") {
+        label = "Check Docker";
+        badge = "badge-warning";
+      } else if (engine?.status === "ok" && daemon?.status === "ok" && compose?.status === "ok") {
+        label = "Docker Ready";
+        badge = "badge-success";
+      }
+      dom.stepDockerChip.textContent = label;
+      dom.stepDockerChip.className = `step-status-chip ${badge}`;
     }
 
     // 2. TLS Certificates
     if (dom.stepCertsChip) {
-      const certCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("cert"));
-      const certValid = certCheck ? certCheck.status === "passed" : true;
-      dom.stepCertsChip.textContent = certValid ? "Valid SANs" : "Regen Required";
-      dom.stepCertsChip.className = `step-status-chip ${certValid ? "badge-success" : "badge-warning"}`;
+      const certCheck = doctorData?.checks?.find((c) => c.name === "TLS Certificate");
+      dom.stepCertsChip.textContent = certCheck?.status === "ok" ? "Certificate Present"
+        : certCheck?.status === "warn" ? "Generate Certs" : certCheck?.status === "error" ? "Check Certs" : "Not Checked";
+      dom.stepCertsChip.className = `step-status-chip ${certCheck?.status === "ok" ? "badge-success"
+        : certCheck?.status === "warn" || certCheck?.status === "error" ? "badge-warning" : "badge-neutral"}`;
     }
 
     // 3. Offline Images
     if (dom.stepImagesChip) {
-      const imgCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("image"));
-      const imgsLoaded = imgCheck ? imgCheck.status === "passed" : true;
-      dom.stepImagesChip.textContent = imgsLoaded ? "Images Loaded" : "Load Required";
-      dom.stepImagesChip.className = `step-status-chip ${imgsLoaded ? "badge-success" : "badge-warning"}`;
+      const imgCheck = doctorData?.checks?.find((c) => c.name === "Offline Images");
+      dom.stepImagesChip.textContent = imgCheck?.status === "ok" ? "Images Loaded"
+        : imgCheck?.status === "warn" || imgCheck?.status === "error" ? "Load Required" : "Not Checked";
+      dom.stepImagesChip.className = `step-status-chip ${imgCheck?.status === "ok"
+        ? "badge-success" : imgCheck?.status === "warn" || imgCheck?.status === "error" ? "badge-warning" : "badge-neutral"}`;
     }
 
     // 4. Installation
     if (dom.stepInstallChip) {
-      if (statusData.is_package && !statusData.is_installed) {
+      if (statusData.runtime_kind === "package_uninstalled" || (statusData.is_package && !statusData.is_installed)) {
         dom.stepInstallChip.textContent = "Install Required";
         dom.stepInstallChip.className = "step-status-chip badge-warning";
-      } else if (statusData.is_package && statusData.is_installed) {
+      } else if (statusData.runtime_kind === "installed" || (statusData.is_package && statusData.is_installed)) {
         dom.stepInstallChip.textContent = "Installed";
         dom.stepInstallChip.className = "step-status-chip badge-success";
       } else {
@@ -1394,10 +1474,37 @@
       state.clusterStatus = data;
       renderStatus(data);
     } catch (err) {
+      state.clusterStatus = null;
       dom.badgeClusterStatus.className = "mui-status-indicator status-stopped";
       dom.badgeClusterStatus.title = "Cluster: Offline / Unreachable";
       const lbl = dom.badgeClusterStatus.querySelector(".status-label");
       if (lbl) lbl.innerHTML = "Cluster: <strong>Offline</strong>";
+      renderIdentitySummary(null);
+    }
+  }
+
+  function renderIdentitySummary(identity) {
+    const serviceLabel = (state) => ({
+      healthy: "Healthy",
+      unhealthy: "Unhealthy",
+      starting: "Starting",
+      stopped: "Stopped",
+      absent: "Not running",
+    })[state] || "Unknown";
+    const keycloak = identity?.state;
+    if (dom.identityStatStatus) {
+      dom.identityStatStatus.textContent = serviceLabel(keycloak);
+      dom.identityStatStatus.className =
+        keycloak === "healthy" ? "metric-value text-success" : "metric-value text-warning";
+    }
+    if (dom.identityStatDb) {
+      dom.identityStatDb.textContent = `Database: ${serviceLabel(identity?.database)}`;
+    }
+    const watchdog = identity?.watchdog;
+    if (dom.identityStatWatch) {
+      dom.identityStatWatch.textContent = serviceLabel(watchdog);
+      dom.identityStatWatch.className =
+        watchdog === "healthy" ? "metric-value text-success" : "metric-value text-warning";
     }
   }
 
@@ -1422,17 +1529,6 @@
     }
     if (data.mutation_active !== undefined) {
       updateWorkspaceSelectorLock(Boolean(data.mutation_active));
-    }
-
-    // Update Package Install Wizard Step
-    if (dom.stepInstallChip) {
-      if (data.is_package && !data.is_installed) {
-        dom.stepInstallChip.textContent = "Install Required";
-      } else if (data.is_package && data.is_installed) {
-        dom.stepInstallChip.textContent = "Installed";
-      } else {
-        dom.stepInstallChip.textContent = "Checkout Ready";
-      }
     }
 
     // Cluster State Badge (Color-Changing Lucide Icon)
@@ -1470,11 +1566,7 @@
     }
 
     // Identity summary
-    if (data.identity && dom.identityStatStatus) {
-      dom.identityStatStatus.textContent = data.identity.state || "Down";
-      dom.identityStatStatus.className =
-        data.identity.state === "healthy" ? "metric-value text-success" : "metric-value text-warning";
-    }
+    renderIdentitySummary(data.identity);
 
     // Portals & Alerts
     if (data.portals) {
@@ -1860,11 +1952,22 @@
   async function fetchLag() {
     try {
       const data = await apiFetch("/api/v1/lag");
+      if (data.error) throw new Error(data.error);
       state.lagData = data;
       renderLag(data);
     } catch (err) {
+      state.lagData = null;
+      if (dom.lagStatGroups) dom.lagStatGroups.textContent = "—";
+      if (dom.lagStatGroupsSub) dom.lagStatGroupsSub.textContent = "Query unavailable";
+      if (dom.lagStatPartitions) dom.lagStatPartitions.textContent = "—";
+      if (dom.lagStatMax) dom.lagStatMax.textContent = "—";
+      if (dom.lagStatStatus) {
+        dom.lagStatStatus.textContent = "Unavailable";
+        dom.lagStatStatus.className = "metric-value text-danger";
+      }
+      if (dom.lagStatStatusSub) dom.lagStatStatusSub.textContent = "Query unavailable";
       if (dom.lagTreeContainer) {
-        dom.lagTreeContainer.innerHTML = `<div class="text-center text-muted p-4">Lag metrics currently unavailable. Verify Kafka brokers are healthy.</div>`;
+        dom.lagTreeContainer.innerHTML = `<div class="text-center text-danger p-4">Lag query failed: ${escapeHtml(err.message)}. Check Kafka broker authentication and retry.</div>`;
       }
     }
   }
@@ -1876,12 +1979,14 @@
     let totalGroups = groups.length;
     let totalPartitions = 0;
     let maxLag = 0;
+    let hasUnknownLag = false;
 
     groups.forEach((g) => {
       const parts = g.partitions || [];
       totalPartitions += parts.length;
       parts.forEach((p) => {
-        const l = parseInt(p.lag || 0, 10);
+        if (p.lag === null || p.lag === undefined || p.current_offset === null || p.log_end_offset === null) hasUnknownLag = true;
+        const l = Number.parseInt(p.lag, 10);
         if (l > maxLag) maxLag = l;
       });
     });
@@ -1890,13 +1995,14 @@
     if (dom.lagStatGroupsSub) dom.lagStatGroupsSub.textContent = `${totalGroups} Active Consumer Groups`;
     if (dom.lagStatPartitions) dom.lagStatPartitions.textContent = totalPartitions;
     if (dom.lagStatMax) {
-      dom.lagStatMax.textContent = maxLag.toLocaleString();
-      dom.lagStatMax.className = maxLag > 1000 ? "metric-value text-danger" : maxLag > 100 ? "metric-value text-warning" : "metric-value text-success";
+      dom.lagStatMax.textContent = hasUnknownLag ? maxLag > 0 ? `≥${maxLag.toLocaleString()}` : "Unknown" : maxLag.toLocaleString();
+      dom.lagStatMax.className = maxLag > 1000 ? "metric-value text-danger" : hasUnknownLag || maxLag > 100 ? "metric-value text-warning" : "metric-value text-success";
     }
     if (dom.lagStatStatus) {
-      dom.lagStatStatus.textContent = maxLag > 1000 ? "Severe Lag" : maxLag > 100 ? "Lagging" : "Caught Up";
-      dom.lagStatStatus.className = maxLag > 1000 ? "metric-value text-danger" : maxLag > 100 ? "metric-value text-warning" : "metric-value text-success";
+      dom.lagStatStatus.textContent = totalGroups === 0 ? "No Groups" : maxLag > 1000 ? "Severe Lag" : maxLag > 0 ? "Lagging" : hasUnknownLag ? "Lag Unknown" : "Caught Up";
+      dom.lagStatStatus.className = maxLag > 1000 ? "metric-value text-danger" : maxLag > 0 || hasUnknownLag ? "metric-value text-warning" : "metric-value text-success";
     }
+    if (dom.lagStatStatusSub) dom.lagStatStatusSub.textContent = totalGroups === 0 ? "No consumer groups" : hasUnknownLag ? "At least one partition has no reported lag" : "Measured across active groups";
 
     if (groups.length === 0) {
       dom.lagTreeContainer.innerHTML = `<div class="text-center text-muted p-4">No active consumer groups detected. Start a consumer to view lag metrics.</div>`;
@@ -1910,14 +2016,16 @@
       .filter((g) => {
         const name = (g.group || "").toLowerCase();
         if (filterText && !name.includes(filterText)) return false;
-        if (lagOnly && (g.total_lag || 0) === 0) return false;
+        if (lagOnly && g.known_lag === 0 && !g.has_unknown_lag) return false;
         return true;
       })
       .map((g) => {
         const parts = g.partitions || [];
-        const isBehind = (g.total_lag || 0) > 0;
+        const isBehind = g.known_lag > 0;
         const groupBadge = isBehind
-          ? `<span class="badge badge-warning">${g.total_lag} Lag</span>`
+          ? `<span class="badge badge-warning">${g.has_unknown_lag ? "≥" : ""}${g.known_lag} Lag${g.has_unknown_lag ? "; incomplete" : ""}</span>`
+          : g.has_unknown_lag
+          ? '<span class="badge badge-warning">Lag Unknown</span>'
           : `<span class="badge badge-success">Caught Up</span>`;
 
         return `
@@ -1930,7 +2038,7 @@
               </div>
               <div class="lag-group-stats">
                 <span>Partitions: <strong>${parts.length}</strong></span>
-                <span>Total Lag: <strong>${g.total_lag || 0}</strong></span>
+                <span>Total Lag: <strong>${g.has_unknown_lag ? g.known_lag > 0 ? `≥${g.known_lag} (incomplete)` : "Unknown" : g.total_lag}</strong></span>
               </div>
             </div>
             <div class="lag-group-body">
@@ -1948,7 +2056,8 @@
                 <tbody>
                   ${parts
                     .map((p) => {
-                      const l = parseInt(p.lag || 0, 10);
+                      const unknownLag = p.lag === null || p.lag === undefined;
+                      const l = unknownLag ? 0 : Number.parseInt(p.lag, 10);
                       const barClass = l > 1000 ? "lag-crit" : l > 100 ? "lag-warn" : "";
                       const barPercent = Math.min(100, Math.max(5, (l / 1000) * 100));
 
@@ -1956,13 +2065,13 @@
                         <tr>
                           <td>${escapeHtml(p.topic || "")}</td>
                           <td>${escapeHtml(String(p.partition || 0))}</td>
-                          <td>${escapeHtml(String(p.current_offset || 0))}</td>
-                          <td>${escapeHtml(String(p.log_end_offset || 0))}</td>
+                          <td>${p.current_offset === null ? "Unknown" : escapeHtml(String(p.current_offset ?? 0))}</td>
+                          <td>${p.log_end_offset === null ? "Unknown" : escapeHtml(String(p.log_end_offset ?? 0))}</td>
                           <td>
                             <div class="lag-bar-wrap">
-                              <div class="lag-bar-fill ${barClass}" style="width: ${barPercent}%"></div>
+                              <div class="lag-bar-fill ${barClass}" style="width: ${unknownLag ? 0 : barPercent}%"></div>
                             </div>
-                            <span>${l}</span>
+                            <span>${unknownLag ? "Unknown" : l}</span>
                           </td>
                           <td class="text-muted">${escapeHtml(p.consumer_id || "Unassigned")}</td>
                         </tr>
@@ -1981,7 +2090,7 @@
     dom.lagTreeContainer.querySelectorAll(".lag-group-header").forEach((header) => {
       header.addEventListener("click", () => {
         const body = header.nextElementSibling;
-        if (body.style.display === "none") {
+        if (getComputedStyle(body).display === "none") {
           body.style.display = "block";
           header.querySelector("svg").style.transform = "rotate(0deg)";
         } else {
@@ -1990,6 +2099,126 @@
         }
       });
     });
+  }
+
+  async function fetchKafkaSecurity() {
+    if (dom.kafkaSecurityState) dom.kafkaSecurityState.textContent = "Checking Kafka security...";
+    try {
+      const data = await apiFetch("/api/v1/kafka/auth");
+      state.kafkaSecurity = data;
+      renderKafkaSecurity(data);
+    } catch (err) {
+      const data = { ...(err.data || {}), healthy: false, error: err.message };
+      state.kafkaSecurity = data;
+      renderKafkaSecurity(data);
+    }
+  }
+
+  function renderKafkaSecurity(data) {
+    if (!dom.kafkaSecurityState) return;
+    const mode = data.mode || "unknown";
+    const certificate = data.certificate || {};
+    dom.kafkaSecurityMode.textContent = mode === "oauth_ssl" ? "OAuth/TLS" : mode === "local" ? "Local (plaintext)" : "Unknown";
+    dom.kafkaSecurityListeners.textContent = data.listener_protocols || "Unknown";
+    dom.kafkaSecurityBroker.textContent = data.broker_authenticated ? "Authenticated and responsive" : "Not verified";
+    dom.kafkaSecurityExporter.textContent = data.exporter_configured ? "Configured" : "Not verified";
+    dom.kafkaSecuritySerial.textContent = certificate.serial || "Not available";
+    dom.kafkaSecurityExpiry.textContent = certificate.not_after || "Not available";
+    dom.btnKafkaRenewTls.disabled = mode !== "oauth_ssl";
+    dom.btnKafkaAuthDisable.disabled = mode !== "oauth_ssl";
+    if (dom.btnKafkaClientRegister) dom.btnKafkaClientRegister.disabled = !(data.healthy && mode === "oauth_ssl");
+    if (!data.healthy) {
+      dom.kafkaSecurityState.textContent = data.error || "Kafka security status needs attention";
+      dom.kafkaSecurityState.className = "text-danger";
+      dom.kafkaSecurityGuidance.textContent = "Run krate kafka auth status and inspect the live execution log before another change. Re-run Enable OAuth/TLS to reconcile a failed transition.";
+    } else if (mode === "local") {
+      dom.kafkaSecurityState.textContent = "Local Kafka mode — external clients are unauthenticated";
+      dom.kafkaSecurityState.className = "text-warning";
+      dom.kafkaSecurityGuidance.textContent = "Start Keycloak with krate identity up, then enable OAuth/TLS. This recreates brokers and Kafka UI; verify client access afterward.";
+    } else {
+      dom.kafkaSecurityState.textContent = "OAuth/TLS active — broker authenticated; exporter SCRAM user configured";
+      dom.kafkaSecurityState.className = "text-success";
+      dom.kafkaSecurityGuidance.textContent = "Check exporter and security-observer availability under Observability. Use Renew Broker TLS to replace the broker leaf certificate, then verify clients and certificate expiry.";
+    }
+  }
+
+  async function fetchKafkaSecurityAlerts() {
+    if (!dom.kafkaAlertsState) return;
+    dom.kafkaAlertsState.textContent = "Checking";
+    try {
+      renderKafkaSecurityAlerts(await apiFetch("/api/v1/kafka/security-alerts"));
+    } catch (err) {
+      renderKafkaSecurityAlerts(err.data && Array.isArray(err.data.alerts)
+        ? err.data : { alerts: [], unavailable_sources: ["Monitoring"], complete: false });
+    }
+  }
+
+  function renderKafkaSecurityAlerts(data) {
+    if (!dom.kafkaAlertsState || !dom.tbodyKafkaSecurityAlerts) return;
+    const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+    const missing = Array.isArray(data.unavailable_sources) ? data.unavailable_sources : [];
+    dom.kafkaAlertsState.className = data.complete
+      ? alerts.some((alert) => alert.state === "firing") ? "badge badge-danger" : alerts.length ? "badge badge-warning" : "badge badge-success"
+      : "badge badge-neutral";
+    dom.kafkaAlertsState.textContent = missing.length
+      ? `Monitoring unavailable: ${missing.join(", ")}`
+      : alerts.length ? `${alerts.length} active` : "No active security alerts";
+    const rows = alerts.map((alert) => {
+      const severity = alert.severity === "critical" ? "Critical" : alert.severity === "info" ? "Info" : "Warning";
+      const severityClass = severity === "Critical" ? "badge-danger" : severity === "Info" ? "badge-info" : "badge-warning";
+      const time = String(alert.active_at || "").replace(/(\.\d{3})\d+Z$/, "$1Z");
+      const parsed = time ? new Date(time) : null;
+      const activeAt = parsed && !Number.isNaN(parsed.getTime()) ? parsed.toLocaleString() : "Unknown";
+      return `<tr><td><strong>${escapeHtml(alert.name || "Unknown")}</strong><br>${escapeHtml(alert.summary || "")}</td>`
+        + `<td><span class="badge ${severityClass}">${severity}</span></td>`
+        + `<td>${escapeHtml(alert.state || "unknown")}</td><td>${escapeHtml(activeAt)}</td><td>${escapeHtml(alert.source || "")}</td></tr>`;
+    });
+    if (missing.length) rows.push(`<tr><td colspan="5" class="text-warning">Monitoring unavailable: ${escapeHtml(missing.join(", "))}. Alert visibility is incomplete.</td></tr>`);
+    if (!rows.length) rows.push('<tr><td colspan="5" class="text-center text-muted">No active Kafka security alerts.</td></tr>');
+    dom.tbodyKafkaSecurityAlerts.innerHTML = rows.join("");
+  }
+
+  async function fetchKafkaClientStatus() {
+    if (!dom.inputKafkaClientState || !dom.kafkaClientState) return;
+    const clientId = dom.inputKafkaClientState.value.trim();
+    state.kafkaClientStatus = null;
+    state.kafkaClientCheckedId = null;
+    dom.btnKafkaClientRotate.disabled = true;
+    if (dom.btnKafkaClientRecover) dom.btnKafkaClientRecover.disabled = true;
+    dom.kafkaClientState.textContent = "Checking managed client...";
+    try {
+      const data = await apiFetch("/api/v1/kafka/client/status", { method: "POST", body: { client_id: clientId } });
+      state.kafkaClientStatus = data;
+      state.kafkaClientCheckedId = clientId;
+      renderKafkaClientStatus(data);
+    } catch (err) {
+      renderKafkaClientStatus({ available: false, error: err.message,
+        managed_state_path: err.data?.managed_state_path });
+    }
+  }
+
+  function renderKafkaClientStatus(data) {
+    if (!dom.kafkaClientState) return;
+    const available = data.available === true;
+    const deferredSecretRotation = data.last_rotation_error === "dcr-secret-not-rotated";
+    const formatEpoch = (seconds) => {
+      if (!Number.isSafeInteger(seconds) || seconds <= 0) return "None";
+      const date = new Date(seconds * 1000);
+      return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+    };
+    dom.kafkaClientState.textContent = available
+      ? data.pending ? "Rotation pending; inspect status before retrying" : deferredSecretRotation ? "Secret rotation deferred; Keycloak kept the current secret" : data.last_rotation_error ? "Last rotation failed; inspect the result below" : data.rotation_due ? "Rotation due" : "Client status available"
+      : data.error || "Client status unavailable";
+    dom.kafkaClientState.className = available ? data.pending || data.rotation_due || data.last_rotation_error ? "text-warning" : "text-success" : "text-danger";
+    dom.kafkaClientId.textContent = available ? data.client_id || "Unknown" : "Not available";
+    dom.kafkaClientExpiry.textContent = available ? `${formatEpoch(data.secret_expires_at)} (${Math.ceil(data.seconds_until_expiry / 86400)} days left)` : "Not available";
+    dom.kafkaClientDue.textContent = available ? `${data.rotation_due ? "Yes" : "No"} (${formatEpoch(data.rotation_due_at)})` : "Not available";
+    dom.kafkaClientPending.textContent = available ? data.pending ? "Yes" : "No" : "Not available";
+    dom.kafkaClientPrevious.textContent = available ? formatEpoch(data.previous_valid_until) : "Not available";
+    dom.kafkaClientError.textContent = available ? deferredSecretRotation ? "Keycloak kept the current secret; registration token refreshed. Retry when rotation is due." : data.last_rotation_error || "None" : "Not available";
+    if (dom.kafkaClientLocation) dom.kafkaClientLocation.textContent = data.managed_state_path || "Check a valid client ID to locate its managed state.";
+    dom.btnKafkaClientRotate.disabled = !available || data.pending;
+    if (dom.btnKafkaClientRecover) dom.btnKafkaClientRecover.disabled = !available;
   }
 
   // Configuration Editor
@@ -2255,9 +2484,12 @@
   async function fetchUsers() {
     try {
       const data = await apiFetch("/api/v1/identity/users");
+      if ("error" in data) throw new Error("Identity directory currently unavailable");
       state.usersData = data;
       renderUsers(data);
     } catch (err) {
+      state.usersData = null;
+      if (dom.identityStatCount) dom.identityStatCount.textContent = "Unknown";
       if (dom.tbodyUsers) {
         dom.tbodyUsers.innerHTML = `<tr><td colspan="5" class="text-center text-muted">Identity directory currently unavailable.</td></tr>`;
       }
@@ -2385,7 +2617,11 @@
     if (viewName === "services") fetchStatus();
     if (viewName === "lag") fetchLag();
     if (viewName === "config") fetchConfig();
-    if (viewName === "identity") fetchUsers();
+    if (viewName === "identity") {
+      fetchUsers();
+      fetchKafkaSecurity();
+      fetchKafkaSecurityAlerts();
+    }
     if (viewName === "observability") fetchStatus();
     if (viewName === "release") fetchGates();
   }
@@ -2438,12 +2674,21 @@
           method: "POST",
           body: { workspace: newWs },
         });
+        state.kafkaClientStatus = null;
+        state.kafkaClientCheckedId = null;
+        state.kafkaRegisterPendingId = null;
+        if (dom.inputKafkaClientState) dom.inputKafkaClientState.value = "";
+        renderKafkaClientStatus({ available: false, error: "Choose a client ID for the new workspace." });
         showToast(`Switched workspace to ${newWs}`, "success");
         await fetchWorkspaces();
         await fetchStatus();
         await fetchDoctor();
         await fetchConfig();
         await fetchGates();
+        if (state.activeView === "identity") {
+          await fetchKafkaSecurity();
+          await fetchKafkaSecurityAlerts();
+        }
       } catch (err) {
         if (dom.selectWorkspace && state.activeWorkspace) {
           dom.selectWorkspace.value = state.activeWorkspace;
@@ -2505,8 +2750,8 @@
 
     // Lag actions
     dom.btnRefreshLag?.addEventListener("click", fetchLag);
-    dom.inputLagFilter?.addEventListener("input", () => renderLag(state.lagData || {}));
-    dom.chkLagOnly?.addEventListener("change", () => renderLag(state.lagData || {}));
+    dom.inputLagFilter?.addEventListener("input", () => { if (state.lagData) renderLag(state.lagData); });
+    dom.chkLagOnly?.addEventListener("change", () => { if (state.lagData) renderLag(state.lagData); });
 
     // Config actions
     dom.configTabs.forEach((tab) => {
@@ -2621,6 +2866,65 @@
     dom.btnRefreshUsers?.addEventListener("click", fetchUsers);
     dom.btnOpenAddUser?.addEventListener("click", () => openModal(dom.modalAddUser));
     dom.btnOpenRotateModal?.addEventListener("click", () => openModal(dom.modalRotate));
+    dom.btnKafkaAuthRefresh?.addEventListener("click", fetchKafkaSecurity);
+    dom.btnKafkaAlertsRefresh?.addEventListener("click", fetchKafkaSecurityAlerts);
+    dom.btnKafkaClientStatus?.addEventListener("click", fetchKafkaClientStatus);
+    dom.selectKafkaRegisterAccess?.addEventListener("change", () => {
+      const writeOnly = dom.selectKafkaRegisterAccess.value === "write";
+      dom.inputKafkaRegisterGroup.disabled = writeOnly;
+      if (writeOnly) dom.inputKafkaRegisterGroup.value = "";
+    });
+    dom.btnKafkaClientRegister?.addEventListener("click", async () => {
+      const params = {
+        client_id: dom.inputKafkaRegisterId.value.trim(),
+        topic: dom.inputKafkaRegisterTopic.value.trim(),
+        access: dom.selectKafkaRegisterAccess.value,
+      };
+      if (dom.inputKafkaRegisterGroup.value.trim()) params.group = dom.inputKafkaRegisterGroup.value.trim();
+      if (!params.client_id || !params.topic || (params.access !== "write" && !params.group)) {
+        showToast("Enter a client ID, topic and a group for read access.", "warning");
+        return;
+      }
+      if (window.confirm(`Register ${params.client_id} for ${params.access} access to topic ${params.topic}?`)) {
+        state.kafkaRegisterPendingId = params.client_id;
+        const job = await triggerJob("kafka_client_register", params);
+        if (!job) state.kafkaRegisterPendingId = null;
+      }
+    });
+    dom.inputKafkaClientState?.addEventListener("input", () => {
+      state.kafkaClientStatus = null;
+      state.kafkaClientCheckedId = null;
+      dom.btnKafkaClientRotate.disabled = true;
+      if (dom.btnKafkaClientRecover) dom.btnKafkaClientRecover.disabled = true;
+      dom.kafkaClientState.textContent = "Check the selected client ID before rotation.";
+    });
+    dom.btnKafkaClientRotate?.addEventListener("click", () => {
+      const clientId = dom.inputKafkaClientState.value.trim();
+      if (!state.kafkaClientStatus?.available || state.kafkaClientCheckedId !== clientId || state.kafkaClientStatus.pending) return;
+      if (window.confirm(`Rotate the secret for ${state.kafkaClientStatus.client_id}? The current secret remains valid only for the CLI-defined overlap.`)) {
+        dom.btnKafkaClientRotate.disabled = true;
+        triggerJob("kafka_client_rotate", { client_id: clientId });
+      }
+    });
+    dom.btnKafkaClientRecover?.addEventListener("click", () => {
+      const clientId = dom.inputKafkaClientState.value.trim();
+      if (!state.kafkaClientStatus?.available || state.kafkaClientCheckedId !== clientId) return;
+      if (window.confirm(`Recover ${state.kafkaClientStatus.client_id}? This refreshes Keycloak's registration token, requires Keycloak admin access, and updates private client state.`)) {
+        dom.btnKafkaClientRecover.disabled = true;
+        triggerJob("kafka_client_recover_admin", { client_id: clientId });
+      }
+    });
+    dom.btnKafkaAuthEnable?.addEventListener("click", () => {
+      if (window.confirm("Enable Kafka OAuth/TLS? This recreates the brokers and Kafka UI. Confirm Keycloak is healthy and Kafka clients are ready for secure access.")) {
+        triggerJob("kafka_auth_enable");
+      }
+    });
+    dom.btnKafkaRenewTls?.addEventListener("click", () => triggerJob("kafka_renew_tls"));
+    dom.btnKafkaAuthDisable?.addEventListener("click", () => {
+      if (window.confirm("Disable Kafka authentication? External Kafka clients will be able to connect without credentials after broker recreation.")) {
+        triggerJob("kafka_auth_disable");
+      }
+    });
     dom.btnBackupIdentity?.addEventListener("click", () => {
       if (dom.inputBackupFile && !dom.inputBackupFile.value.trim()) {
         const dateStamp = new Date().toISOString().slice(0, 10);
@@ -2718,12 +3022,21 @@
   // Periodic Polling Loop
   // --------------------------------------------------------------------------
   function startPolling() {
+    let securityAlertTicks = 0;
     setInterval(() => {
       if (document.hidden) return; // Save CPU when tab is hidden
       fetchStatus();
       if (state.activeView === "setup") fetchDoctor();
       if (state.activeView === "lag") fetchLag();
-      if (state.activeView === "identity") fetchUsers();
+      if (state.activeView === "identity") {
+        fetchUsers();
+        securityAlertTicks += 1;
+        if (securityAlertTicks >= 8) {
+          securityAlertTicks = 0;
+          fetchKafkaSecurity();
+          fetchKafkaSecurityAlerts();
+        }
+      }
     }, 4000);
   }
 

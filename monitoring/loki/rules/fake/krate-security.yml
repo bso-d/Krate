@@ -1,0 +1,19 @@
+groups:
+  - name: krate-kafka-security-events
+    interval: 1m
+    rules:
+      - alert: KafkaAccessDenied
+        expr: sum by (container) (count_over_time({container=~"(krate|epc)-broker-[0-9]+"} |= "Denied operation = " [5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka access denied on {{ $labels.container }}"
+          description: "A Kafka ACL refused an operation. Inspect the broker authorizer log in Loki for the principal and resource."
+
+      - alert: KafkaInvalidScramCredentials
+        expr: sum by (container) (count_over_time({container=~"(krate|epc)-broker-[0-9]+"} |= "invalid credentials with SASL mechanism" [5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka client authentication failed on {{ $labels.container }}"
+          description: "A client supplied invalid SCRAM credentials. Inspect broker logs in Loki before changing credentials."

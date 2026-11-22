@@ -49,6 +49,22 @@ AUTH_MODE_KEYS = (
     "PERSES_IDP",
 )
 
+# These values describe a completed Kafka auth transition, so only the
+# reconciler commands may write them after rendering and checking the stack.
+MANAGED_KAFKA_AUTH_KEYS = frozenset((
+    "KAFKA_AUTH_MODE",
+    "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+    "KRATE_KAFKA_AUTH_SHA",
+    "KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET",
+))
+
+
+def managed_kafka_auth_error(key: str) -> str:
+    if key == "KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET":
+        return (f"{key} is managed by Kafka authentication; use krate identity rotate {key} "
+                "for an existing installation, or krate kafka auth enable to provision it.")
+    return f"{key} is managed by Kafka authentication; use krate kafka auth enable or krate kafka auth disable."
+
 SENSITIVE_KEY_PATTERN = re.compile(
     r"(PASSWORD|SECRET|TOKEN|PASSPHRASE|KEY|ENCRYPTION)",
     re.IGNORECASE,
@@ -519,6 +535,15 @@ def validate_key_value(
     if "\x00" in value or "\n" in value or "\r" in value:
         return f"Invalid control character in value for {key}"
 
+    if key in MANAGED_KAFKA_AUTH_KEYS:
+        return managed_kafka_auth_error(key)
+    if key == "KAFKA_ADVERTISED_HOST":
+        from kafka_broker_auth import validate_advertised_host
+        try:
+            validate_advertised_host(value)
+        except ValueError as exc:
+            return str(exc)
+
     classification = classify_key(key)
     if classification == "release_pin":
         return f"Image pins come from .env.template; change {key} there, or export it in the shell for one run."
@@ -861,6 +886,12 @@ def build_config_plan(
             pending_apply = False
 
         if not file_changed and not pending_apply:
+            continue
+
+        # The Kafka auth commands own both the file write and service
+        # reconciliation for these keys. A stale generic apply ledger must
+        # never turn them into an unrelated broker restart.
+        if key in MANAGED_KAFKA_AUTH_KEYS and not file_changed:
             continue
 
         val_to_check = new_val if new_val is not None else ""

@@ -17,6 +17,32 @@ VictoriaLogs through separate outputs and queues. See
 `./krate monitor ui`) prints both addresses and logins. Grafana, its SSO configuration, its dashboards and its email rules
 are not changed by the parallel path.
 
+## Kafka security signals
+
+`kafka-security` connects to every edition-specific external Kafka listener
+through the internal `proxy` name and checks the certificate served on the
+wire. Prometheus scrapes its TLS verification and remaining certificate life
+every 15 seconds. It has no Kafka credentials and publishes no host port.
+`KafkaListenerTlsProbeFailed` covers expired, untrusted, wrong-host and
+unreachable listeners after two minutes; `KafkaListenerCertificateExpiring`
+warns when a verified certificate has less than 30 days left. The expiry
+series disappears after verification fails, so diagnose an expired certificate
+through the TLS probe failure, not through an expiry series. A CA created by
+older Krate versions without the key-usage extension remains verifiable under
+the legacy compatibility path and raises `KafkaListenerLegacyCa`; plan a CA
+cutover and update clients' trust before enforcing strict verification.
+
+The pinned Kafka broker logging configuration copies the upstream settings and
+also sends **denied** authorizer events to container stdout. Fluent Bit can then
+ship those events to Loki and VictoriaLogs. Loki's local ruler sends
+`KafkaAccessDenied` and `KafkaInvalidScramCredentials` to Alertmanager. The
+rules match specific observed messages, avoiding the routine TLS handshake
+failures from health probes. Loki's rule files are bind-mounted read-only; after
+changing them, run `./krate monitor up` and verify the ruler loaded the new
+file. Alertmanager email remains opt-in through the existing SMTP settings.
+Search the broker's container label in Loki to see the denied principal and
+resource; alert labels contain only the broker container name.
+
 Grafana's sign-in is `GRAFANA_AUTH_CONFIG`: `local.ini` (Grafana's own login, the
 default) or `realm.ini` (Krate sign-in; see
 [`sso/guides/grafana-sso.md`](../sso/guides/grafana-sso.md)). Grafana keeps its sessions
@@ -190,7 +216,8 @@ the target host; no automatic relabelling is performed.
 | `victorialogs` | none | `monitoring`, `perses` | none — `-httpAuth.*` basic auth exists at v1.53.0 but is unused; no OIDC (research-backing §3.4) | none — unauthenticated insert/select/vmui/metrics/flags; delete disabled (no `-delete.enable`); Perses reaches it only through 4 allowedEndpoints (POST select paths) | `:9428` open to all `monitoring` **and** `perses` peers and host-local, unauthenticated read+write (table 2 rows `monitoring → victorialogs:9428`, `perses → victorialogs:9428`, `grafana → victorialogs:9428`, `host → *:*`) |
 | `alertmanager` | none | `monitoring` | none — `--web.config.file` basic auth exists at v0.34.1, unused; no OIDC (research-backing §3.3) | none — unauthenticated UI, config dump and **writes** (silences, alert injection, `-/reload`) from any `monitoring` peer; cluster gossip off (`--cluster.listen-address=` empty; `:9094` not listening, not exposed) | `:9093` open to `monitoring` peers and host-local (table 2 rows `monitoring → alertmanager:9093`, `grafana → alertmanager:9093`, `host → *:*`); owner decision: recorded, private `alerting` network rejected (plan §7); no UI consumer |
 | `node-exporter` | none | `monitoring` | none (`--web.config.file` available, unused) | none | `:9100` host metrics (incl. `/debug/pprof/*` links) open to `monitoring` peers and host-local (table 2 rows `monitoring → node-exporter:9100`, `grafana → node-exporter:9100`); runs `pid: host` with `/proc`, `/sys`, `/` mounted read-only — host visibility tradeoff, recorded |
-| `kafka-exporter` | none | `kafka-network`, `monitoring` | none — TLS/mTLS flags only at v1.8.0, no basic auth (research-backing §4.2) | none | `:9308` metrics open to both networks' peers and host-local (table 2 rows `monitoring → kafka-exporter:9308`, `kafka-network → kafka-exporter:9308`, `grafana → kafka-exporter:9308`); it is a Kafka client on the brokers' PLAINTEXT listener — the cluster's own trust model, unchanged (plan §7) |
+| `kafka-exporter` | none | `kafka-network`, `monitoring` | none — TLS/mTLS flags only at v1.8.0, no basic auth (research-backing §4.2) | none | `:9308` metrics open to both networks' peers and host-local (table 2 rows `monitoring → kafka-exporter:9308`, `kafka-network → kafka-exporter:9308`, `grafana → kafka-exporter:9308`); it uses SCRAM when Kafka OAuth/TLS is enabled and PLAINTEXT in local mode |
+| `kafka-security` | none | `kafka-network`, `monitoring` | none — internal metrics endpoint, no user login | checks the certificate served by each external Kafka listener over TLS; no Kafka credentials | `:9315` metrics open to both networks' peers and host-local, with no host port published (table 2 rows `monitoring → kafka-security:9315`, `kafka-network → kafka-security:9315`, `grafana → kafka-security:9315`); read-only access to the Kafka CA, no broker key |
 | `fluent-bit` | none | `monitoring` | none | none — **no listener at all**: Krate's `[SERVICE]` sets no `HTTP_Server` (default off at 5.1.3, research-backing §4.3); client to `loki:3100` and `victorialogs:9428` only | the image exposes `:2020` but nothing listens (census probes are refused — no table-2 row); reads host container logs read-only (`/var/lib/docker/containers:ro`, metadata only, no Docker socket) |
 | `log-discovery` | none | none (`network_mode: none`) | none | none — `read_only`, `cap_drop ALL`, no-new-privileges, tmpfs `/run/krate` | unreachable (no network namespace); shares `fluent_bit_sources` volume with fluent-bit (metadata-only file admission) |
 
@@ -223,6 +250,7 @@ port 443). Table 1 lists, per service, what it publishes and who authenticates i
 | `monitoring` | `victorialogs` | 9428 | Fluent Bit's second output and Perses' log datasource; monitoring peers get unauthenticated insert/select/vmui (verified research-backing §3.4); delete disabled (no `-delete.enable`). |
 | `monitoring` | `node-exporter` | 9100 | Prometheus scrapes it; host metrics (and pprof links) are open to monitoring peers by design — that is the product's disk-capacity alerting path. |
 | `monitoring` | `kafka-exporter` | 9308 | Prometheus scrapes it; metrics-only endpoint, no auth option at v1.8.0 beyond TLS (research-backing §4.2). |
+| `monitoring` | `kafka-security` | 9315 | Prometheus scrapes on-wire Kafka TLS status; the unauthenticated endpoint exposes only listener verification and certificate lifetime. |
 | `monitoring` | `grafana` | 3000 | Grafana needs the monitoring network for its datasources; in realm mode its own port has no login left, so monitoring peers reach the same port the loopback publish exposes — answering only through the realm (as the `kafka-network` row already records). |
 | `perses` | `perses` | 8080 | The gateway, guard, seed and migrate path share this network by design; in realm mode direct `:8080` answers 401 without a realm token (`enable_auth: true`, V2) — the gateway-mode full bypass (research-backing §3.6) is refused with the realm (V1). |
 | `perses` | `oauth2-proxy` | 4180 | Only the gateway and the guard talk to it (auth endpoints); no host port, `trusted_proxy_ips` limited to RFC1918 (render.py:266). A perses-network peer can hit its endpoints but cannot mint a session without the realm. |
@@ -236,9 +264,11 @@ port 443). Table 1 lists, per service, what it publishes and who authenticates i
 | `kafka-network` | `kafka-ui` | 8080 | Kafbat's unauthenticated `/metrics` and `/actuator/` are open on the shared network (the cluster proxy 404s them publicly, K27); unchanged by Phase 4. |
 | `kafka-network` | `proxy` | `*` | The cluster proxy listens on 80/443 for its networks; it answers only the hosts and paths it serves (same wording as the existing `grafana → proxy:*` row). |
 | `kafka-network` | `kafka-exporter` | 9308 | The exporter joins the cluster network to reach brokers by name (compose:41-48); its metrics endpoint is open to that network as it is to `monitoring`. |
+| `kafka-network` | `kafka-security` | 9315 | The observer joins the cluster network to check external broker TLS through `proxy`; its metrics endpoint is reachable by cluster peers. |
 | `grafana` | `kafka-[0-9]*` | `*` | Grafana is a `kafka-network` peer, so the brokers' listeners are open to it exactly as they are to every other peer of that network (the cluster's own trust model, unchanged). |
 | `grafana` | `kafka-ui` | 8080 | As above: Kafbat's unauthenticated `/metrics` and `/actuator/` on the shared network. |
 | `grafana` | `kafka-exporter` | 9308 | A metrics endpoint with no login, on the two networks Grafana needs for its datasources. |
+| `grafana` | `kafka-security` | 9315 | Grafana shares the observer's `monitoring` and `kafka-network`; this internal metrics endpoint has no login. |
 | `grafana` | `proxy` | `*` | The cluster proxy, reachable from `kafka-network`; it answers only the hosts and paths it serves. |
 | `grafana` | `alertmanager` | 9093 | Grafana shares `monitoring`; alerting API open as row 2. (Provisioned alerting goes through Grafana itself; no Alertmanager datasource ships — research-backing §5.) |
 | `grafana` | `prometheus` | 9090 | Grafana's provisioned Prometheus datasource (`access: proxy`, datasources.yml:4-12): the server-side query path every signed-in user gets; Viewer non-GET writes refused by the plugin route rules (ds_proxy.go:324-334) and lifecycle off (U8). |

@@ -67,6 +67,31 @@ services:
       driver: "json-file"
       options: { max-size: "50m", max-file: "3" }
 
+  # Checks the certificate served by the external Kafka listeners, so an
+  # expired or untrusted live certificate is visible even when the file on disk
+  # looks correct. It has no Kafka credentials and is not exposed on the host.
+  kafka-security:
+    image: ${LOG_DISCOVERY_IMAGE:?Merge LOG_DISCOVERY_IMAGE from monitoring/.env.template into .env}
+    container_name: ${MONITOR_PROJECT:-krate-monitoring}-kafka-security
+    restart: unless-stopped
+    environment:
+      KAFKA_SECURITY_MODE: ${KAFKA_EXPORTER_SASL_ENABLED:-false}
+      KAFKA_SECURITY_ENDPOINTS: ${KAFKA_SECURITY_ENDPOINTS:?Set proxy Kafka listener endpoints}
+    command: ["python3", "/etc/krate/security_metrics.py"]
+    volumes:
+      - ./security_metrics.py:/etc/krate/security_metrics.py:ro,z
+      - ${PERSES_CERTS_DIR:-../certs}/kafka:/etc/krate/certs/kafka:ro,z
+    networks: [kafka-network, monitoring]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9315/healthz', timeout=2).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "3" }
+
   # ── node-exporter — host disk/CPU/memory ────────────────────────────────────
   # Kafka metrics say nothing about the disk the logs sit on. This is what backs
   # the disk-capacity alerts, which matter most where broker data shares one volume.
@@ -150,6 +175,7 @@ services:
       - "${LOKI_BIND:-127.0.0.1}:${LOKI_PORT:-3100}:3100"
     volumes:
       - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro,z
+      - ./loki/rules:/etc/loki/rules:ro,z
       - loki_data:/loki
     # Loki's gRPC port (9096) is used only inside this single binary, whose ring
     # advertises 127.0.0.1 (loki-config.yml common.instance_addr): on the loopback

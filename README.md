@@ -126,8 +126,9 @@ New packages are released as `package-kraft-vN` and `package-epc-vN`; see [Relea
 
 - **To run a cluster:** Docker Engine 25.0.3 or newer, a working Docker service, and Docker Compose. The scripts accept the `docker compose` plugin or standalone `docker-compose` 1.29.2 or newer; the examples use the plugin.
 - **To create the UI certificate:** OpenSSL, or your own certificate and key at `certs/server.crt` and `certs/server.key`.
-- **To run from a checkout or build packages:** a connected machine with Docker, Bash, Git, Python 3, Node.js and npm (for the Kafbat UI image), and GNU Make 4.0 or newer, which `./krate` calls for you. On macOS, `brew install make` provides it.
+- **To run from a checkout or build packages:** a connected machine with Docker, Bash, Git, Python 3, Node.js and npm (for the Kafbat UI image), JDK 21 (for the Kafka OAuth application client), and GNU Make 4.0 or newer, which `./krate` calls for you. On macOS, `brew install make` provides it.
 - **For KRaft/EPC monitoring:** Python 3 on the host, in addition to Docker.
+- **For application OAuth clients:** The KRaft/EPC offline package includes a pinned OpenJDK 21 runtime for operator commands and Studio managed-client actions. Application hosts need Java 17 or newer for the callback jar. A source checkout needs Java 17 or newer for operator commands; building the callback jar uses JDK 21 on the connected package builder.
 
 Choose the package for the target VM's processor: `amd64` means x86_64; `arm64` means ARM64. Leave room for the package, loaded images, and stored messages. The EPC guide explains how to budget its `/data` disk.
 
@@ -252,15 +253,73 @@ Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`)
 | `./krate identity status` | Shows identity service health |
 | `./krate identity users ...` | Manages local realm users (`list`, `add`, `enable`, `disable`, `reset-password`, `groups`, `logout`, `set-email`) |
 | `./krate identity idp-watch {status\|reset\|pause\|resume}` | Shows or controls the enterprise IdP reachability watcher and automatic local login fallback |
-| `./krate identity rotate ...` | Rotates identity and SSO secrets (`KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`, `KEYCLOAK_IDP_WATCH_CLIENT_SECRET`, `PING_KEYCLOAK_CLIENT_SECRET --value`) |
+| `./krate identity rotate ...` | Rotates identity and SSO secrets (`KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET`, `KEYCLOAK_IDP_WATCH_CLIENT_SECRET`, `PING_KEYCLOAK_CLIENT_SECRET --value`) |
 | `./krate identity {backup\|restore\|recover-admin}` | Backs up or restores the identity database; recovers a lost Keycloak admin login |
 | `./krate identity renew-db-tls` / `logrotate --install` | Renews the identity database certificate; hands the identity journal to the host's logrotate |
 | `./krate auth configure [--force] [--[no-]viewer-messages] [site.json]` | Plans Kafbat's Keycloak login (`auth/ui/runtime.yml`) from `.env`, and optionally PingFederate brokering from `site.json` |
 | `./krate auth apply` | Validates and applies the planned authentication configuration to the UI, proxy, and realm |
 | `./krate monitor {up\|down\|status\|logs\|reload\|ui}` | Starts, stops, or inspects the monitoring stack; reloads Prometheus configuration (`SIGHUP`) |
+| `./krate kafka auth {enable\|status\|disable}` / `./krate kafka renew-tls` | Manages the opt-in authenticated Kafka listeners and their certificates |
+| `./krate kafka client {register\|status\|rotate\|recover\|grant\|template\|enroll}` | Registers a dedicated application identity, manages its private OAuth state, and grants literal Kafka topic/group ACLs; `recover --admin` repairs registration access from Keycloak |
 | `./krate monitor realm` / `grafana-user retire <login>` | Prepares Grafana sign-in through the Krate realm (`monitoring/auth/realm.ini`); retires a colliding local Grafana user |
 
 Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
+
+### Give an application scoped Kafka access
+
+After `identity up` and `kafka auth enable`, create the application topic with a Kafka administrator before the first send. The application client receives only its requested topic and group ACLs; it cannot create topics. For example, on the supplied four-broker KRaft cluster:
+
+```bash
+docker exec krate-broker-92 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-92:9092 \
+  --command-config /mnt/shared/config/admin.properties \
+  --create --topic payments --partitions 1 --replication-factor 3
+mkdir -m 700 auth/payments-client
+./krate kafka client register --client-id payments-client \
+  --state "$PWD/auth/payments-client/state.json" \
+  --access read-write --topic payments --group payments-consumers
+./krate kafka client status --state "$PWD/auth/payments-client/state.json"
+```
+
+Keep the state directory and its mode `0600` state file private. Use the [application callback configuration](kafka-oauth-client/README.md) to connect, then verify a message is consumed; a producer process can exit successfully even when a send was denied. The offline package includes the client jar, its pinned runtime libraries, and the operator Java runtime, so managed-client commands work without installing Java on the offline host. When running directly from a source checkout, build the jar and libraries first and set `KAFKA_OAUTH_CLIENT_HOME` to their directory before starting the CLI or Studio. Use `kafka client rotate --state ...` for a rotation check and `kafka client recover --state ... --admin` if the private registration token must be repaired.
+
+Studio manages clients by ID. For each installed workspace it derives a separate state location under the Studio user's `~/.krate-studio-clients/` directory; the Status screen displays that location. Registration creates its own mode `0700` directories and the CLI creates a mode `0600` state file. A CLI-managed state at another path remains usable from the CLI, but is not selected by Studio. To migrate a former Studio client:
+
+1. Stop the consuming application and avoid Studio rotation or recovery while copying. Two active copies share a registration token and secret; rotating one can strand the other.
+2. Use Studio **Check Status** with the client ID to display the managed destination. Verify the old file is a regular mode `0600` file owned by the same desktop user; copy it locally to the displayed destination under mode `0700` parent directories, retaining mode `0600` on the new file.
+
+   As the same desktop user running Studio, set `OLD_STATE` to the existing state file and `DESTINATION` to the exact location displayed by **Check Status**, then run this one-time copy. It refuses a wrong destination shape, unsafe source, weak or linked directories, and an existing destination; it prints no credential data:
+
+   ```bash
+   OLD_STATE=/private/old/state.json DESTINATION=/home/operator/.krate-studio-clients/WORKSPACE_HASH/CLIENT_HASH/state.json python3 - <<'PY'
+   import os, re, shutil, stat
+   from pathlib import Path
+   def require(ok, message):
+       if not ok: raise SystemExit(message)
+   old, dest = Path(os.environ['OLD_STATE']), Path(os.environ['DESTINATION'])
+   root = Path.home() / '.krate-studio-clients'
+   parts = dest.relative_to(root).parts
+   require(len(parts) == 3 and parts[2] == 'state.json', 'Unexpected managed destination')
+   require(all(re.fullmatch(r'[0-9a-f]{64}', part) for part in parts[:2]), 'Unexpected managed destination')
+   source = os.lstat(old)
+   require(stat.S_ISREG(source.st_mode) and source.st_uid == os.geteuid(), 'Old state is not a same-user regular file')
+   require(stat.S_IMODE(source.st_mode) == 0o600, 'Old state must have mode 0600')
+   for directory in (root, root / parts[0], root / parts[0] / parts[1]):
+       try: os.mkdir(directory, 0o700)
+       except FileExistsError: pass
+       info = os.lstat(directory)
+       require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid(), 'Managed directory is unsafe')
+       require(stat.S_IMODE(info.st_mode) == 0o700, 'Managed directory must have mode 0700')
+   with os.fdopen(os.open(old, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as src:
+       with os.fdopen(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as dst:
+           shutil.copyfileobj(src, dst)
+   PY
+   ```
+
+3. Confirm Studio **Check Status** reports the expected ID and `krate kafka client status --state DESTINATION` succeeds. If rotation is pending, run `krate kafka client recover --state DESTINATION --admin` before resuming.
+4. Update the application's JAAS `credentialStateFile` to the new destination, restart it, and verify an actual Kafka message is produced or consumed. Keep the old private file only as rollback until the new callback is proven, then retire the old copy.
+
+Never paste state or DCR JSON into Studio or logs. A client running under another user should continue to use its existing CLI path unless its state is deliberately migrated under that user's account.
 
 ### How `.env`, image pins, and `uninstall --purge` work
 
@@ -453,7 +512,7 @@ Then start **Release offline install packages** from `main` in GitHub Actions wi
 
 - **One host is one point of failure.** Multiple brokers on the same VM do not protect against losing that VM. EPC also needs both of its coordination nodes available; losing either prevents its two-node group from reaching agreement.
 - **Remote application connections need configuration.** KRaft brokers publish external Kafka ports `19092–19095` via `proxy` using Nginx TCP passthrough; they advertise `localhost` by default. EPC brokers publish external ports `9092/9093` the same way. Change broker Compose listener settings and proxy port mappings for clients on other machines. Modify `KAFKA_ADVERTISED_HOST` (EPC) or the corresponding listener advertising for your client network.
-- **HTTPS protects the UI only.** The Kafka listeners use plaintext, without client authentication. The monitoring web endpoints use HTTP. Restrict access or add the protection your deployment needs.
+- **Kafka security is opt-in.** A new cluster starts with unauthenticated PLAINTEXT Kafka listeners until `./krate identity up` and `./krate kafka auth enable` complete. Verify `./krate kafka auth status` and every application client before exposing broker ports to other machines. Krate Studio shows the current mode and offers the same transition commands. Monitoring's Prometheus and Loki endpoints use HTTP on host loopback by default.
 - **Disk use grows with messages and topics.** EPC limits how much data each part of a topic can keep and requires topics to be created explicitly by default.
 - **Host checks still matter.** A valid package and healthy containers do not verify your network, remote clients, storage capacity, or email delivery. Follow the relevant runbook on the target VM.
 

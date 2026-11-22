@@ -72,6 +72,9 @@ as copyleft.
 | JavaScript bundled in Grafana, Perses and Kafbat UI | npm tarballs of copyleft packages in the production dependency closure of the lockfile at the build commit | registry.npmjs.org `dist.integrity` |
 
 The Red Hat OpenJDK in Keycloak is an RPM; its source is the `java-21-openjdk` SRPM.
+KRaft and EPC offline packages also copy that pinned image's OpenJDK runtime into
+`kafka-oauth-client/jre/` for host credential commands, including its `legal/`
+notices. The same source-inventory entry covers this second copy.
 
 ## UNRESOLVED components
 

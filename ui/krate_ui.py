@@ -20,18 +20,22 @@ Features:
 
 import collections
 import dataclasses
+import hashlib
 import http.cookies
 import http.server
 import hmac
 import json
 import os
 import platform
+import pwd
 import queue
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import tempfile
 import threading
@@ -40,6 +44,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
+from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 # --- Constants & Defaults ---
@@ -64,6 +69,143 @@ except ImportError:
     _krate_ops = None
 
 _ops_helper = _krate_ops
+
+KAFKA_SECURITY_ALERTS = frozenset({
+    "KafkaSecurityObserverDown", "KafkaListenerTlsProbeFailed",
+    "KafkaListenerLegacyCa", "KafkaListenerCertificateExpiring",
+    "KafkaAccessDenied", "KafkaInvalidScramCredentials",
+})
+KAFKA_CLIENT_STATUS_FIELDS = (
+    "client_id", "secret_expires_at", "rotation_due_at", "seconds_until_expiry",
+    "rotation_due", "pending", "previous_valid_until", "last_rotation_error",
+)
+KAFKA_STUDIO_CLIENT_DIR = ".krate-studio-clients"
+
+
+def validate_kafka_client_id(value: Any) -> str:
+    """Accept only a literal application ID; the CLI checks its full identity policy."""
+    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value)
+            or value.startswith("krate-")):
+        raise ValueError("Client ID must be 1-64 literal letters, digits, dots, underscores or hyphens without the reserved krate- prefix")
+    return value
+
+
+def _studio_client_home() -> Path:
+    """Use the desktop user's account home, independent of request and workspace paths."""
+    try:
+        home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+        info = os.lstat(home)
+    except (OSError, KeyError) as exc:
+        raise ValueError("Studio user home is unavailable") from exc
+    if not home.is_absolute() or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise ValueError("Studio user home must be a same-user directory without a symlink")
+    return home
+
+
+def _canonical_studio_workspace_id(context: Any) -> str:
+    """Bind a managed client to the captured installed workspace identity."""
+    if (context.edition not in ("kraft", "epc") or not context.is_installed
+            or not isinstance(context.effective_dir, str)
+            or not os.path.isabs(context.effective_dir)
+            or context.installation_id != f"{context.edition}:{context.effective_dir}"):
+        raise ValueError("Select an installed KRaft or EPC workspace before managing Kafka clients")
+    canonical_dir = os.path.realpath(context.effective_dir)
+    if not os.path.isdir(canonical_dir):
+        raise ValueError("Selected Kafka workspace is unavailable")
+    return f"{context.edition}:{canonical_dir}"
+
+
+def _require_private_studio_dir(path: Path, create: bool = False) -> None:
+    """Create a directory if needed, then reject symlinks, foreign owners and weak modes."""
+    if create:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ValueError("Studio managed client directory cannot be created") from exc
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ValueError("Studio managed client directory is unavailable") from exc
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ValueError("Studio managed client directory must be same-user, mode 0700 and not a symlink")
+
+
+def managed_kafka_client_state_path(client_id: Any, context: Any, create: bool = False,
+                                   check_dirs: bool = True) -> str:
+    """Derive one confined state path; the request never supplies a filesystem path."""
+    client_id = validate_kafka_client_id(client_id)
+    workspace_id = _canonical_studio_workspace_id(context)
+    home = _studio_client_home()
+    workspace_key = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()
+    client_key = hashlib.sha256(client_id.encode("ascii")).hexdigest()
+    root = home / KAFKA_STUDIO_CLIENT_DIR
+    workspace_dir = root / workspace_key
+    client_dir = workspace_dir / client_key
+    if check_dirs:
+        for directory in (root, workspace_dir, client_dir):
+            _require_private_studio_dir(directory, create=create)
+    return str(client_dir / "state.json")
+
+
+def _require_private_studio_file(path: str, description: str) -> None:
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"{description} is unavailable") from exc
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise ValueError(f"{description} must be a same-user mode 0600 regular file without a symlink")
+
+
+def _check_managed_client_lock(state_path: str) -> None:
+    lock_path = state_path + ".lock"
+    if os.path.lexists(lock_path):
+        _require_private_studio_file(lock_path, "Studio managed client lock")
+
+
+def validate_private_kafka_client_state(client_id: Any, context: Any) -> str:
+    """Recheck the server-derived directories, state and lock before every CLI use."""
+    state_path = managed_kafka_client_state_path(client_id, context)
+    _require_private_studio_file(state_path, "Studio managed client state")
+    _check_managed_client_lock(state_path)
+    return state_path
+
+
+def validate_new_kafka_client_state(client_id: Any, context: Any) -> str:
+    """Prepare a private server-owned destination for one new client."""
+    state_path = managed_kafka_client_state_path(client_id, context, create=True)
+    if os.path.lexists(state_path):
+        raise ValueError("Studio already has a state file for this client ID")
+    _check_managed_client_lock(state_path)
+    return state_path
+
+
+def validate_kafka_client_register_params(params: Any, context: Any) -> dict:
+    """Validate Studio form values before the CLI applies its authoritative policy."""
+    if not isinstance(params, dict) or set(params) not in (
+            {"client_id", "topic", "access"},
+            {"client_id", "topic", "group", "access"}):
+        raise ValueError("Registration needs client ID, topic, access and optional group")
+    client_id = validate_kafka_client_id(params["client_id"])
+    topic = params["topic"]
+    group = params.get("group", "")
+    access = params["access"]
+    if (not isinstance(topic, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,249}", topic)
+            or topic in (".", "..") or not isinstance(group, str)
+            or (group and (not re.fullmatch(r"[A-Za-z0-9._-]{1,249}", group) or group in (".", "..")))):
+        raise ValueError("Use literal client, topic and group names with letters, digits, dot, underscore or hyphen")
+    if access not in ("read", "write", "read-write"):
+        raise ValueError("Choose read, write or read-write access")
+    if (access == "write" and group) or (access != "write" and not group):
+        raise ValueError("Read access needs a group; write-only access must omit the group")
+    validated = {"client_id": client_id, "state_path": validate_new_kafka_client_state(client_id, context),
+                 "topic": topic, "access": access}
+    if group:
+        validated["group"] = group
+    return validated
 
 
 class WorkspaceSwitchConflictError(RuntimeError):
@@ -956,7 +1098,7 @@ class JobSupervisor:
                             exec_cmd = ["bash"] + [str(c) for c in exec_cmd]
                 if use_sg_docker:
                     if isinstance(exec_cmd, list):
-                        cmd_str = " ".join(f"'{c}'" for c in exec_cmd)
+                        cmd_str = shlex.join([str(c) for c in exec_cmd])
                     else:
                         cmd_str = exec_cmd
                     exec_cmd = ["sg", "docker", "-c", cmd_str]
@@ -1369,6 +1511,7 @@ class StructuredDataCollector:
 
         containers = []
         cluster_state = "stopped"
+        docker_inspected = False
         direct_ok, sg_needed = check_docker_socket_permission()
         docker_prefix = ["sg", "docker", "-c"] if sg_needed else []
         fmt = "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.Ports}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Label \"com.docker.compose.project\"}}\t{{.ID}}"
@@ -1393,6 +1536,7 @@ class StructuredDataCollector:
                 timeout=8,
             )
             if res.returncode == 0:
+                docker_inspected = True
                 running_brokers = 0
                 total_brokers = 0
                 for line in res.stdout.strip().split("\n"):
@@ -1469,10 +1613,21 @@ class StructuredDataCollector:
         except Exception:
             pass
 
-        identity_state = "down"
-        kc_containers = [c for c in containers if "keycloak" in c["name"]]
-        if any(c["state"] == "running" for c in kc_containers):
-            identity_state = "healthy" if any(c["health"] == "healthy" for c in kc_containers) else "starting"
+        def identity_service_health(service: str) -> str:
+            if not docker_inspected:
+                return "unknown"
+            matches = [c for c in containers if c["project"] == expected_project and c["service"] == service]
+            if not matches:
+                return "absent"
+            if any(c["state"] == "running" and c["health"] == "unhealthy" for c in matches):
+                return "unhealthy"
+            if any(c["state"] == "running" and c["health"] == "healthy" for c in matches):
+                return "healthy"
+            if any(c["state"] == "running" for c in matches):
+                return "starting"
+            return "stopped"
+
+        identity_state = identity_service_health("keycloak")
 
         try:
             usage = shutil.disk_usage(ws_path)
@@ -1505,7 +1660,12 @@ class StructuredDataCollector:
             "cluster_state": cluster_state,
             "containers": containers,
             "monitoring": {"state": monitoring_state},
-            "identity": {"enabled": len(kc_containers) > 0, "state": identity_state},
+            "identity": {
+                "enabled": None if identity_state == "unknown" else identity_state != "absent",
+                "state": identity_state,
+                "database": identity_service_health("keycloak-db"),
+                "watchdog": identity_service_health("idp-watch"),
+            },
             "disk": disk_info,
             "host": self.get_host_info(context=ctx),
             "portals": portals,
@@ -1901,6 +2061,176 @@ class StructuredDataCollector:
                 endpoints = preferred + others
         return ",".join(endpoints)
 
+    def get_kafka_auth_status(self, context: Optional[OperationContext] = None) -> dict:
+        """Read the CLI's secret-free Kafka security status for the active workspace."""
+        ctx = context or self.ws_mgr.get_context()
+        krate_bin, ws_path = ctx.cli_for_action("kafka")
+        try:
+            res = subprocess.run(
+                [krate_bin, "kafka", "auth", "status"],
+                cwd=ws_path,
+                env=ctx.subprocess_env(),
+                capture_output=True,
+                text=True,
+                timeout=40,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return {
+                "mode": "unknown",
+                "healthy": False,
+                "error": "Kafka security status could not be read. Check the Krate CLI and broker logs.",
+            }
+
+        output = res.stdout
+        mode_match = re.search(r"^Kafka Authentication Mode: (local|oauth_ssl)$", output, re.MULTILINE)
+        listener_match = re.search(r"^Listener Security Protocol Map: ([A-Z_:,]+)$", output, re.MULTILINE)
+        mode = mode_match.group(1) if mode_match else "unknown"
+        certificate = {}
+        for line in output.splitlines():
+            if line.startswith("{"):
+                try:
+                    metadata = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(metadata, dict):
+                    certificate = {
+                        key: str(metadata[key])
+                        for key in ("serial", "subject", "not_after")
+                        if key in metadata
+                    }
+                break
+
+        broker_authenticated = "Broker is authenticated and responsive" in output
+        exporter_configured = "krate-exporter user is configured" in output
+        healthy = res.returncode == 0 and mode in ("local", "oauth_ssl")
+        if mode == "local":
+            healthy = healthy and "Local brokers are responsive over plaintext" in output
+        elif mode == "oauth_ssl":
+            healthy = healthy and broker_authenticated and exporter_configured and bool(certificate.get("serial"))
+
+        result = {
+            "mode": mode,
+            "healthy": healthy,
+            "listener_protocols": listener_match.group(1) if listener_match else "unknown",
+            "certificate": certificate,
+            "broker_authenticated": broker_authenticated,
+            "exporter_configured": exporter_configured,
+        }
+        if not healthy:
+            result["error"] = "Kafka security status is incomplete or failed; inspect the CLI output and broker logs."
+        return result
+
+    def get_kafka_client_status(self, client_id: str, context: Optional[OperationContext] = None) -> dict:
+        """Read only the public lifecycle fields from a private managed client state."""
+        ctx = context or self.ws_mgr.get_context()
+        try:
+            state_path = managed_kafka_client_state_path(client_id, ctx, check_dirs=False)
+        except ValueError:
+            return {"available": False, "error": "Studio managed client storage is unavailable. Inspect the workspace and user home."}
+        try:
+            validate_private_kafka_client_state(client_id, ctx)
+        except ValueError:
+            return {"available": False, "managed_state_path": state_path,
+                    "error": "Managed client state is unavailable or unsafe. Inspect the managed location and permissions."}
+        krate_bin, ws_path = ctx.cli_for_action("kafka")
+        try:
+            res = subprocess.run(
+                [krate_bin, "kafka", "client", "status", "--state", state_path],
+                cwd=ws_path, env=ctx.subprocess_env(), capture_output=True,
+                text=True, timeout=40,
+            )
+            if res.returncode != 0:
+                raise ValueError("Client status command failed")
+            payload = json.loads(res.stdout)
+            if not isinstance(payload, dict) or payload.get("client_id") != client_id:
+                raise ValueError("Malformed client status")
+            status = {key: payload.get(key) for key in KAFKA_CLIENT_STATUS_FIELDS}
+            if not isinstance(status["rotation_due"], bool) or not isinstance(status["pending"], bool):
+                raise ValueError("Malformed client status")
+            for key in ("client_id", "last_rotation_error"):
+                value = status[key]
+                if value is not None and (not isinstance(value, str) or len(value) > 2048):
+                    raise ValueError("Malformed client status")
+            for key in ("secret_expires_at", "rotation_due_at", "seconds_until_expiry", "previous_valid_until"):
+                if not isinstance(status[key], int) or isinstance(status[key], bool):
+                    raise ValueError("Malformed client status")
+            status["available"] = True
+            status["managed_state_path"] = state_path
+            return status
+        except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
+            return {"available": False, "managed_state_path": state_path,
+                    "error": "Managed Kafka client status is unavailable. Inspect the CLI output and state file permissions."}
+
+    def get_kafka_security_alerts(self, context: Optional[OperationContext] = None) -> dict:
+        """Read active Kafka security alerts from private host-bound monitoring endpoints."""
+        ctx = context or self.ws_mgr.get_context()
+        mon = self.get_config(context=ctx).get("monitoring_env", {})
+        expected_project = getattr(ctx, "monitoring_project", "")
+        fmt = '{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}\t{{.Ports}}'
+        _, sg_needed = check_docker_socket_permission()
+        docker_cmd = (["sg", "docker", "-c", f"docker ps --format '{fmt}'"] if sg_needed
+                      else ["docker", "ps", "--format", fmt])
+        owned_ports = {}
+        if expected_project:
+            try:
+                listed = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=5)
+                if listed.returncode == 0:
+                    for line in listed.stdout.splitlines():
+                        parts = line.split("\t", 2)
+                        if len(parts) == 3 and parts[0] == expected_project:
+                            owned_ports.setdefault(parts[1], set()).update(parts[2].split(", "))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        sources = (
+            ("Prometheus", "PROM_BIND", "PROM_PORT", "9090", "/api/v1/alerts"),
+            ("Loki", "LOKI_BIND", "LOKI_PORT", "3100", "/prometheus/api/v1/alerts"),
+        )
+        alerts = []
+        unavailable = []
+        for source, bind_key, port_key, default_port, route in sources:
+            bind = str(mon.get(bind_key) or "127.0.0.1").strip()
+            port = str(mon.get(port_key) or default_port).strip()
+            if (bind not in ("127.0.0.1", "localhost", "::1") or len(port) > 5
+                    or not port.isascii() or not port.isdecimal() or not 1 <= int(port) <= 65535):
+                unavailable.append(source)
+                continue
+            host = "[::1]" if bind == "::1" else "127.0.0.1"
+            mapped_port = f"{host}:{port}->{default_port}/tcp"
+            if mapped_port not in owned_ports.get(source.lower(), set()):
+                unavailable.append(source)
+                continue
+            try:
+                req = urllib.request.Request(f"http://{host}:{port}{route}", headers={"Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    payload = json.load(response)
+                source_alerts = payload.get("data", {}).get("alerts") if payload.get("status") == "success" else None
+                if not isinstance(source_alerts, list):
+                    raise ValueError("Malformed monitoring response")
+                for item in source_alerts:
+                    if not isinstance(item, dict):
+                        continue
+                    labels = item.get("labels") or {}
+                    annotations = item.get("annotations") or {}
+                    if not isinstance(labels, dict) or not isinstance(annotations, dict):
+                        continue
+                    name = labels.get("alertname")
+                    if name not in KAFKA_SECURITY_ALERTS:
+                        continue
+                    state = item.get("state")
+                    if state not in ("pending", "firing"):
+                        continue
+                    alerts.append({
+                        "name": name,
+                        "severity": labels.get("severity") if labels.get("severity") in ("critical", "warning", "info") else "warning",
+                        "state": state,
+                        "active_at": str(item.get("activeAt") or ""),
+                        "summary": str(annotations.get("summary") or name),
+                        "source": source,
+                    })
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                unavailable.append(source)
+        return {"alerts": alerts, "unavailable_sources": unavailable, "complete": not unavailable}
+
     def get_lag(self, context: Optional[OperationContext] = None) -> dict:
         """Single-JVM batch execution of kafka-consumer-groups.sh --describe --all-groups."""
         ctx = context or self.ws_mgr.get_context()
@@ -1926,19 +2256,14 @@ class StructuredDataCollector:
             if res.returncode == 0:
                 lines = [ln.strip() for ln in res.stdout.strip().split("\n") if ln.strip()]
                 matched_workspace = []
-                fallback_names = []
                 for ln in lines:
                     parts = ln.split("\t")
                     cname = parts[0].strip()
                     cproj = parts[1].strip() if len(parts) > 1 else ""
-                    if cproj == expected_project or cname.startswith(expected_prefix):
+                    if cproj == expected_project and cname.startswith(expected_prefix):
                         matched_workspace.append(cname)
-                    elif not cproj and not cname.startswith("epc-broker-" if variant == "kraft" else "krate-broker-"):
-                        fallback_names.append(cname)
                 if matched_workspace:
                     broker_container = sorted(matched_workspace)[0]
-                elif fallback_names:
-                    broker_container = fallback_names[0]
         except Exception:
             pass
 
@@ -1958,6 +2283,8 @@ class StructuredDataCollector:
                 "--describe",
                 "--all-groups",
             ]
+            if cfg.get("env", {}).get("KAFKA_AUTH_MODE") == "oauth_ssl":
+                exec_args.extend(["--command-config", "/mnt/shared/config/admin.properties"])
             if docker_prefix:
                 cmd = ["sg", "docker", "-c", " ".join(f"'{a}'" for a in exec_args)]
             else:
@@ -1967,50 +2294,81 @@ class StructuredDataCollector:
             if res.returncode != 0:
                 return {
                     "groups": [],
-                    "error": f"kafka-consumer-groups.sh failed: {res.stderr.strip()}",
+                    "error": f"Kafka lag query failed (exit {res.returncode}); verify broker authentication and configuration.",
+                    "error_code": "lag_query_failed",
                 }
 
             groups_map = {}
-            for line in res.stdout.strip().split("\n"):
-                line = line.strip()
-                if not line or line.startswith("GROUP") or line.startswith("Consumer group"):
+            in_config_log = False
+            saw_header = False
+            for raw_line in res.stdout.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\] INFO\b", line):
+                    in_config_log = line.endswith("Config values:")
+                    continue
+                if in_config_log and re.fullmatch(r"[A-Za-z0-9_.-]+\s*=\s*.*", line):
+                    continue
+                if in_config_log and re.fullmatch(r"\(org\.apache\.kafka\.[A-Za-z0-9_.]+Config\)", line):
+                    in_config_log = False
+                    continue
+                in_config_log = False
+                if re.fullmatch(r"GROUP\s+TOPIC\s+PARTITION\s+CURRENT-OFFSET\s+LOG-END-OFFSET\s+LAG(?:\s+.*)?", line):
+                    saw_header = True
+                    continue
+                if re.fullmatch(r"Consumer group '[^']+' has no active members\.", line):
                     continue
                 parts = re.split(r"\s+", line)
-                if len(parts) >= 6:
-                    grp = parts[0]
-                    topic = parts[1]
-                    partition = parts[2]
-                    cur_off = parts[3]
-                    log_end = parts[4]
-                    lag_val = parts[5]
-                    cid = parts[6] if len(parts) > 6 else ""
+                if (not saw_header or len(parts) < 6 or not parts[2].isdecimal()
+                        or not all(value.isdecimal() or value == "-" for value in parts[3:6])):
+                    return {
+                        "groups": [],
+                        "error": "Kafka lag response was incomplete or invalid; verify broker authentication and logs.",
+                        "error_code": "invalid_lag_response",
+                    }
+                grp, topic, partition, cur_off, log_end, lag_val = parts[:6]
+                cid = parts[6] if len(parts) > 6 else ""
 
-                    try:
-                        int_lag = int(lag_val)
-                    except ValueError:
-                        int_lag = 0
+                if grp not in groups_map:
+                    groups_map[grp] = {
+                        "group": grp,
+                        "total_lag": 0,
+                        "known_lag": 0,
+                        "has_unknown_lag": False,
+                        "partitions": [],
+                        "status": "caught up",
+                    }
 
-                    if grp not in groups_map:
-                        groups_map[grp] = {
-                            "group": grp,
-                            "total_lag": 0,
-                            "partitions": [],
-                            "status": "caught up",
-                        }
+                groups_map[grp]["partitions"].append({
+                    "topic": topic,
+                    "partition": partition,
+                    "current_offset": None if cur_off == "-" else cur_off,
+                    "log_end_offset": None if log_end == "-" else log_end,
+                    "lag": None if lag_val == "-" else lag_val,
+                    "consumer_id": cid,
+                })
+                if "-" in (cur_off, log_end, lag_val):
+                    groups_map[grp]["has_unknown_lag"] = True
+                if lag_val != "-":
+                    groups_map[grp]["known_lag"] += int(lag_val)
 
-                    groups_map[grp]["partitions"].append({
-                        "topic": topic,
-                        "partition": partition,
-                        "current_offset": cur_off,
-                        "log_end_offset": log_end,
-                        "lag": lag_val,
-                        "consumer_id": cid,
-                    })
-                    groups_map[grp]["total_lag"] += int_lag
+            if in_config_log:
+                return {
+                    "groups": [],
+                    "error": "Kafka lag response was incomplete or invalid; verify broker authentication and logs.",
+                    "error_code": "invalid_lag_response",
+                }
 
             for grp, data in groups_map.items():
-                t_lag = data["total_lag"]
-                if t_lag == 0:
+                t_lag = data["known_lag"]
+                if data["has_unknown_lag"]:
+                    data["total_lag"] = None
+                else:
+                    data["total_lag"] = t_lag
+                if t_lag == 0 and data["has_unknown_lag"]:
+                    data["status"] = "unknown"
+                elif t_lag == 0:
                     data["status"] = "caught up"
                 elif t_lag < 1000:
                     data["status"] = "lagging"
@@ -2023,8 +2381,12 @@ class StructuredDataCollector:
                 "bootstrap_server": bootstrap_server,
             }
 
-        except Exception as ex:
-            return {"groups": [], "error": str(ex)}
+        except Exception:
+            return {
+                "groups": [],
+                "error": "Kafka lag query could not complete; verify Docker and broker availability.",
+                "error_code": "lag_query_exception",
+            }
 
     def get_identity_users(self, context: Optional[OperationContext] = None) -> dict:
         ctx = context or self.ws_mgr.get_context()
@@ -2057,7 +2419,7 @@ class StructuredDataCollector:
                     "users": [],
                     "admin_group": admin_group,
                     "viewer_group": viewer_group,
-                    "error": res.stderr.strip() or res.stdout.strip(),
+                    "error": res.stderr.strip() or res.stdout.strip() or "Identity directory query failed",
                 }
 
             users = []
@@ -2116,7 +2478,7 @@ class StructuredDataCollector:
                 "users": [],
                 "admin_group": admin_group,
                 "viewer_group": viewer_group,
-                "error": str(e),
+                "error": str(e) or "Identity directory query failed",
             }
 
 
@@ -2640,13 +3002,25 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
             if path == "/api/v1/lag":
                 ctx = self.workspace_mgr.get_context()
                 data = self.data_collector.get_lag(context=ctx)
-                self._send_json(200, data)
+                self._send_json(503 if "error" in data else 200, data)
+                return
+
+            if path == "/api/v1/kafka/auth":
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_kafka_auth_status(context=ctx)
+                self._send_json(503 if data.get("error") else 200, data)
+                return
+
+            if path == "/api/v1/kafka/security-alerts":
+                ctx = self.workspace_mgr.get_context()
+                data = self.data_collector.get_kafka_security_alerts(context=ctx)
+                self._send_json(503 if not data["complete"] else 200, data)
                 return
 
             if path == "/api/v1/identity/users":
                 ctx = self.workspace_mgr.get_context()
                 data = self.data_collector.get_identity_users(context=ctx)
-                self._send_json(200, data)
+                self._send_json(503 if data.get("error") else 200, data)
                 return
 
             if path == "/api/v1/jobs":
@@ -2714,6 +3088,21 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
             if sid:
                 self.session_store.revoke_session(sid)
             self._send_json(200, {"status": "logged_out"})
+            return
+
+        if path == "/api/v1/kafka/client/status":
+            try:
+                body = self._read_json_body()
+                if set(body) != {"client_id"}:
+                    raise ValueError("Choose only a Kafka client ID")
+                client_id = validate_kafka_client_id(body["client_id"])
+                ctx = self.workspace_mgr.get_context()
+                _canonical_studio_workspace_id(ctx)
+            except (ValueError, TypeError) as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            data = self.data_collector.get_kafka_client_status(client_id, context=ctx)
+            self._send_json(200 if data["available"] else 503, data)
             return
 
         # 4. Switch Workspace
@@ -3045,6 +3434,52 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
                         return
                     cmd.append("auth")
                     cmd.extend(sub_args)
+
+                elif action in ("kafka_auth_enable", "kafka_auth_status", "kafka_auth_disable", "kafka_renew_tls"):
+                    if args or params:
+                        self._send_json(400, {"error": "Kafka security jobs do not accept extra arguments or parameters"})
+                        return
+                    kafka_commands = {
+                        "kafka_auth_enable": ["kafka", "auth", "enable"],
+                        "kafka_auth_status": ["kafka", "auth", "status"],
+                        "kafka_auth_disable": ["kafka", "auth", "disable"],
+                        "kafka_renew_tls": ["kafka", "renew-tls"],
+                    }
+                    cmd.extend(kafka_commands[action])
+                    is_mutation = action != "kafka_auth_status"
+
+                elif action == "kafka_client_register":
+                    if args:
+                        self._send_json(400, {"error": "Kafka client registration does not accept extra arguments"})
+                        return
+                    try:
+                        client = validate_kafka_client_register_params(params, op_ctx)
+                    except ValueError as exc:
+                        self._send_json(400, {"error": str(exc)})
+                        return
+                    cmd.extend(["kafka", "client", "register", "--client-id", client["client_id"],
+                                "--state", client["state_path"], "--topic", client["topic"]])
+                    if client.get("group"):
+                        cmd.extend(["--group", client["group"]])
+                    cmd.extend(["--access", client["access"]])
+
+                elif action in ("kafka_client_rotate", "kafka_client_recover_admin"):
+                    if args or not isinstance(params, dict) or set(params) != {"client_id"}:
+                        self._send_json(400, {"error": "Choose only a Kafka client ID"})
+                        return
+                    try:
+                        state_path = validate_private_kafka_client_state(params["client_id"], op_ctx)
+                    except ValueError as exc:
+                        self._send_json(400, {"error": str(exc)})
+                        return
+                    preflight = self.data_collector.get_kafka_client_status(params["client_id"], context=op_ctx)
+                    if not preflight.get("available"):
+                        self._send_json(409, {"error": "Managed client identity or status could not be verified; no rotation or recovery was started."})
+                        return
+                    cmd.extend(["kafka", "client", "recover" if action == "kafka_client_recover_admin" else "rotate",
+                                "--state", state_path])
+                    if action == "kafka_client_recover_admin":
+                        cmd.append("--admin")
 
                 elif action.startswith("service_"):
                     sub = action.replace("service_", "", 1)
