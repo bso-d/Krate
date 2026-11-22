@@ -110,7 +110,7 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
   --rendezvous-nonce TOKEN
                    --browser agent only: the rendezvous nonce the Mac launcher generated
                    (scripts/gate/mac/run-vm-gate.sh); every hello and response must carry it; never printed
-  --wipe           remove an existing .env/auth/certs in that directory first (required when present)
+  --wipe           remove existing edition .env/auth/certs and edition-owned monitoring/.env first
   --keep           leave the fixture running at the end (no teardown; also
                    keeps the receipt's .state for the kept fixture's readers)
   --no-screenshots skip the end-user screenshot story (X1/X3/X4 leave the required inventory)
@@ -321,8 +321,10 @@ if [[ ! -d "$MON_DIR/prometheus" || -L "$MON_DIR/prometheus" || ! -f "$MON_DIR/p
   exit 2
 fi
 if [[ -e "$MON_DIR/.env" || -L "$MON_DIR/.env" ]]; then
-  echo "$MON_DIR/.env exists; this gate requires an empty monitoring fixture before it can own or remove that file." >&2
-  exit 2
+  if ! $WIPE || [[ "$MON_DIR" != "$ED/monitoring" ]]; then
+    echo "$MON_DIR/.env exists; --wipe can remove it only from a disposable edition-owned monitoring directory." >&2
+    exit 2
+  fi
 fi
 for monitor_state in "$MON_DIR/auth/realm.ini" "$MON_DIR/auth/secrets" "$MON_DIR/auth/perses"; do
   if [[ -e "$monitor_state" || -L "$monitor_state" ]]; then
