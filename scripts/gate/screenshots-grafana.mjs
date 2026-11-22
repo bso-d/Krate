@@ -156,6 +156,13 @@ async function keycloakLogin(page, user, password, totpB32) {
   await page.click('#kc-login');
 }
 
+async function openDashboardAfterLogin(page) {
+  await page.waitForURL((u) => u.toString().startsWith(`${G}/`) && !u.toString().includes('/login'), { timeout: 30000 });
+  await page.waitForLoadState('networkidle');
+  await page.goto(DASHBOARD, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(5000);
+}
+
 // X3 must prove Grafana's own sign-in and dashboard path independently.
 // noinspection DuplicatedCode
 async function signedInDashboard(ctx, user, password, totpB32) {
@@ -164,10 +171,7 @@ async function signedInDashboard(ctx, user, password, totpB32) {
   const signIn = page.getByRole('link', { name: /Krate sign-in/ });  // lab6-verified selector
   await signIn.first().click();
   await keycloakLogin(page, user, password, totpB32);
-  await page.waitForURL((u) => u.toString().startsWith(`${G}/`) && !u.toString().includes('/login'), { timeout: 30000 });
-  await page.waitForLoadState('networkidle');
-  await page.goto(DASHBOARD, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(5000);
+  await openDashboardAfterLogin(page);
   return page;
 }
 
@@ -179,6 +183,8 @@ let storySucceeded = false;
 // X3 owns its browser, network guard, manifest and failure evidence lifecycle.
 // noinspection DuplicatedCode
 try {
+  // Both screenshot stories use the same browser context settings, but remain standalone.
+  // noinspection DuplicatedCode
   const ctx = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
   page = MAC ? (ctx.pages()[0] || await ctx.newPage()) : await ctx.newPage();
   // Review T07/T21: the external-request guard and the served-response tracker are CONTEXT-wide and installed before the first
@@ -218,10 +224,7 @@ try {
 
   // ── shot 3: the Viewer on the Kafka overview dashboard, no Edit/New controls ──
   await keycloakLogin(page, VIEWER, VIEWER_PW, VIEWER_TOTP);
-  await page.waitForURL((u) => u.toString().startsWith(`${G}/`) && !u.toString().includes('/login'), { timeout: 30000 });
-  await page.waitForLoadState('networkidle');
-  await page.goto(DASHBOARD, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(5000);
+  await openDashboardAfterLogin(page);
   assert(page.url().startsWith(DASHBOARD), `the Viewer landed on the provisioned overview dashboard (${page.url().split(/[?#]/)[0]})`);
   // NEEDS-LIVE-VERIFICATION: the exact absence selectors for the Viewer (Grafana 12.2
   // toolbar). Candidates to confirm in the walk: [aria-label="Edit dashboard"], the

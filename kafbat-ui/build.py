@@ -6,6 +6,7 @@ Python 3 and Docker. No compiler/package downloads occur on the deployed VM.
 """
 import argparse
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -84,12 +85,13 @@ def fetch_runtime_packages(arch, directory):
 
 
 def main():
+    # This builder also runs by itself, so it selects its own CA bundle.
+    # noinspection DuplicatedCode
     def _configure_ca_bundle():
         if os.environ.get('SSL_CERT_FILE'):
             return
         try:
-            import certifi
-            ca = certifi.where()
+            ca = importlib.import_module('certifi').where()
             if os.path.isfile(ca):
                 os.environ['SSL_CERT_FILE'] = ca
                 return
