@@ -94,7 +94,7 @@ def main():
                 os.environ['SSL_CERT_FILE'] = ca
                 return
         except ImportError:
-            certifi = None
+            pass
         for ca_path in (
             '/etc/ssl/cert.pem',
             '/etc/ssl/certs/ca-certificates.crt',
@@ -247,6 +247,8 @@ def main():
     print(f'Built {local_ref} ({args.arch}). Ready for the offline EPC and Krate bundles.', flush=True)
 
 
+# The isolated AST probe in check-identity.py executes this definition without imports.
+# noinspection DuplicatedCode
 def certificate_failure(error):
     """The certificate-verification failure anywhere in an exception chain (cycles stopped), else None."""
     seen = set()

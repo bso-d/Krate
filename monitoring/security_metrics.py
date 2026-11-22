@@ -94,6 +94,8 @@ def main() -> None:
         raise FileNotFoundError(cafile)
 
     class Handler(BaseHTTPRequestHandler):
+        # BaseHTTPRequestHandler dispatches the uppercase HTTP method name.
+        # noinspection PyPep8Naming
         def do_GET(self) -> None:
             if self.path == "/healthz":
                 body = b"ok\n"

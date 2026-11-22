@@ -19,18 +19,24 @@ import tempfile
 from pathlib import Path
 
 
+def _required_secret(env, key):
+    """Read a nonempty 16-256 character secret before format-specific validation."""
+    value = env.get(key, '').strip()
+    if not value:
+        raise ValueError(f'{key} is empty or missing')
+    if len(value) < 16:
+        raise ValueError(f'{key} is {len(value)} chars; minimum 16 required')
+    if len(value) > 256:
+        raise ValueError(f'{key} is {len(value)} chars; maximum 256 allowed')
+    return value
+
+
 def validate_jaas_secret(env, key):
     """Validate a JAAS secret: nonempty, 16-256 chars, no whitespace/control/special chars.
 
     Raises ValueError if the secret is invalid for JAAS property files.
     """
-    secret = env.get(key, '').strip()
-    if not secret:
-        raise ValueError(f'{key} is empty or missing')
-    if len(secret) < 16:
-        raise ValueError(f'{key} is {len(secret)} chars; minimum 16 required')
-    if len(secret) > 256:
-        raise ValueError(f'{key} is {len(secret)} chars; maximum 256 allowed')
+    secret = _required_secret(env, key)
     # Check for forbidden chars: whitespace, control chars, quotes, backslash, semicolon, brackets, comma
     forbidden = set(' \t\n\r\x00"\'\\;[],')
     forbidden.update(chr(i) for i in range(32))
@@ -45,13 +51,7 @@ def validate_keystore_password(env, key='KAFKA_TLS_KEYSTORE_PASSWORD'):
 
     Raises ValueError if the password is invalid.
     """
-    password = env.get(key, '').strip()
-    if not password:
-        raise ValueError(f'{key} is empty or missing')
-    if len(password) < 16:
-        raise ValueError(f'{key} is {len(password)} chars; minimum 16 required')
-    if len(password) > 256:
-        raise ValueError(f'{key} is {len(password)} chars; maximum 256 allowed')
+    password = _required_secret(env, key)
     # Check for forbidden chars: CR, LF, NUL
     if '\r' in password or '\n' in password or '\x00' in password:
         raise ValueError(f'{key} contains forbidden line-break or NUL character')
@@ -465,7 +465,7 @@ sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule require
     }
 
 
-def renew_kafka_tls(env_file, edition, output_dir, ca_dir, trust_dir):
+def renew_kafka_tls(env_file, edition, output_dir, ca_dir):
     """Renew Kafka TLS without removing the serving pair before issuance succeeds.
 
     Args:
@@ -473,7 +473,6 @@ def renew_kafka_tls(env_file, edition, output_dir, ca_dir, trust_dir):
         edition: 'kraft' or 'epc'
         output_dir: directory with certs
         ca_dir: directory with CA
-        trust_dir: directory for public CA cert
 
     Returns:
         Secret-free metadata dict
@@ -617,6 +616,7 @@ def tls_peer_matches(port, hostname, ca_path, expected_serial, connect_host='127
     relax only that compatibility flag until operators migrate the CA.
     """
     hostname = hostname.removeprefix('[').removesuffix(']')
+
     def peer_serial(legacy_ca: bool) -> str:
         context = ssl.create_default_context(cafile=str(ca_path))
         context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -630,7 +630,7 @@ def tls_peer_matches(port, hostname, ca_path, expected_serial, connect_host='127
                 serial = certificate.get('serialNumber')
                 if not isinstance(serial, str) or not serial:
                     raise ssl.SSLError('TLS peer certificate has no serial number')
-                return serial
+        return serial
 
     try:
         observed = peer_serial(False)

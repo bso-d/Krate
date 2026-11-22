@@ -276,24 +276,21 @@ function runRow(req) {
   // read machinery.
   const certLocal = join(TMP, 'gate-cert.pem');
   writeFileSync(certLocal, guestReadFile(GUEST_CERT_PATH, null));
+  let argv;
   if (sub === 'sweep') {
-    const argv = [join(HERE, row.script), 'sweep', '--ip', STATE.vmIp, '--host', PUBLIC_HOST, '--spot', row.spot,
+    argv = [join(HERE, row.script), 'sweep', '--ip', STATE.vmIp, '--host', PUBLIC_HOST, '--spot', row.spot,
       '--cert', certLocal, '--port', String(PORTS[0]), '--out', outDir];
     if (STATE.g6) argv.push('--v6', v6Target(STATE.g6, STATE.iface));
-    const spawned = spawnSync('node', argv, { encoding: 'utf8', timeout: row.budgetS * 1000, env: { ...process.env, TMPDIR: TMP } });
-    const rc = spawned.status === null ? 3 : spawned.status;
-    const stdout = (spawned.stdout || '') + (spawned.error ? `\n${String(spawned.error.message || spawned.error)}` : '');
-    return { rc, stdout, stderr: spawned.stderr || '', outDir: existsSync(outDir) ? outDir : null };
-  }
-  if (sub === 'clientaddr') {
-    const argv = [join(HERE, row.script), 'clientaddr', '--ip', STATE.vmIp, '--host', PUBLIC_HOST,
+  } else if (sub === 'clientaddr') {
+    argv = [join(HERE, row.script), 'clientaddr', '--ip', STATE.vmIp, '--host', PUBLIC_HOST,
       '--port', String(PORTS[0]), '--cert', certLocal, '--ua', row.ua(req.id), '--xff', row.xff, '--out', outDir];   // N7: the row's https port comes from the agent's --ports, not a hardcoded 443
-    const spawned = spawnSync('node', argv, { encoding: 'utf8', timeout: row.budgetS * 1000, env: { ...process.env, TMPDIR: TMP } });
-    const rc = spawned.status === null ? 3 : spawned.status;
-    const stdout = (spawned.stdout || '') + (spawned.error ? `\n${String(spawned.error.message || spawned.error)}` : '');
-    return { rc, stdout, stderr: spawned.stderr || '', outDir: existsSync(outDir) ? outDir : null };
+  } else {
+    die(`agent: row ${req.row} maps to unmapped sub ${sub}`);
   }
-  die(`agent: row ${req.row} maps to unmapped sub ${sub}`);
+  const spawned = spawnSync('node', argv, { encoding: 'utf8', timeout: row.budgetS * 1000, env: { ...process.env, TMPDIR: TMP } });
+  const rc = spawned.status === null ? 3 : spawned.status;
+  const stdout = (spawned.stdout || '') + (spawned.error ? `\n${String(spawned.error.message || spawned.error)}` : '');
+  return { rc, stdout, stderr: spawned.stderr || '', outDir: existsSync(outDir) ? outDir : null };
 }
 
 // ── manifest (Mac-held, F4) ──

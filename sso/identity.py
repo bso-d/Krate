@@ -1919,8 +1919,8 @@ def cmd_kafka_auth(args):
         def _policy_differs(wanted_pol, have_pol):
             if not isinstance(have_pol, dict):
                 return True
-            for k in ('name', 'description', 'enabled', 'profiles'):
-                if differs(wanted_pol.get(k), have_pol.get(k)):
+            for field_name in ('name', 'description', 'enabled', 'profiles'):
+                if differs(wanted_pol.get(field_name), have_pol.get(field_name)):
                     return True
             w_conds = wanted_pol.get('conditions') or []
             h_conds = have_pol.get('conditions') or []
@@ -2167,8 +2167,10 @@ def cmd_kafka_broker(args):
 
     # Validate required arguments based on action
     if args.action in ('render', 'renew-tls'):
-        if not args.env_file or not args.edition or not args.ca_dir or not args.trust_dir:
-            raise ValueError(f'{args.action} requires --env-file, --edition, --ca-dir, and --trust-dir')
+        if not args.env_file or not args.edition or not args.ca_dir:
+            raise ValueError(f'{args.action} requires --env-file, --edition, and --ca-dir')
+        if args.action == 'render' and not args.trust_dir:
+            raise ValueError('render requires --trust-dir')
 
     if args.action == 'render':
         # The callee is not named *oauth*: CodeQL treats such calls as password sources (alert #29).
@@ -2179,7 +2181,7 @@ def cmd_kafka_broker(args):
         return 0
     elif args.action == 'renew-tls':
         result = kafka_broker_auth.renew_kafka_tls(
-            args.env_file, args.edition, args.output_dir, args.ca_dir, args.trust_dir
+            args.env_file, args.edition, args.output_dir, args.ca_dir
         )
         sys.stdout.write(json.dumps(result) + '\n')
         return 0
@@ -2195,6 +2197,7 @@ def cmd_kafka_broker(args):
         result = kafka_broker_auth.inspect_kafka_tls(args.output_dir)
         sys.stdout.write(json.dumps(result) + '\n')
         return 0
+    raise ValueError(f'Unsupported kafka-broker action: {args.action}')
 
 
 def main():

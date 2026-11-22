@@ -409,6 +409,15 @@ def aports_tree(cache, origin, commit, *, session=None):
     raise Unresolved(f'aports tree lookup failed for {origin}@{commit[:12]} ({reasons})')
 
 
+def _store_verified_blob(cache, entry, data):
+    got = git_blob_sha1(data)
+    if got != entry['id']:
+        raise VerificationError(f'{entry["path"]}: git blob {got} != tree entry {entry["id"]}')
+    path = cache.blob('gitblob', entry['id'])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
 def fetch_aports_dir(cache, origin, commit, *, session=None):
     sess = session or _session_for(cache)
     sess.check_deadline(f'{origin}@{commit[:12]}')
@@ -424,12 +433,7 @@ def fetch_aports_dir(cache, origin, commit, *, session=None):
             except Exception as exc:
                 sess.record_failure('gitlab', f'blob {e["id"][:12]} ({origin}@{commit[:12]})', exc)
                 break
-            got = git_blob_sha1(data)
-            if got != e['id']:
-                raise VerificationError(f'{e["path"]}: git blob {got} != tree entry {e["id"]}')
-            path = cache.blob('gitblob', e['id'])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            _store_verified_blob(cache, e, data)
     missing = [e for e in entries if not cache.blob('gitblob', e['id']).exists()]
     if missing and not sess.is_tripped('github-git'):
         try:
@@ -449,12 +453,7 @@ def fetch_aports_dir(cache, origin, commit, *, session=None):
             except Exception as exc:
                 sess.record_failure('github-http', f'{e["path"]}@{commit[:12]}', exc)
                 break
-            got = git_blob_sha1(data)
-            if got != e['id']:
-                raise VerificationError(f'{e["path"]}: git blob {got} != tree entry {e["id"]}')
-            path = cache.blob('gitblob', e['id'])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            _store_verified_blob(cache, e, data)
     files = []
     for e in entries:
         path = cache.blob('gitblob', e['id'])
