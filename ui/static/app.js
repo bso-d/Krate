@@ -1160,8 +1160,9 @@
         const finishedAction = state.activeJob?.action || "";
         if (finishedAction === "load-images") {
           state.setupJobResults[finishedAction] = finishedSucceeded ? "succeeded" : "failed";
-        } else if (finishedAction === "install" && finishedSucceeded) {
-          state.setupJobResults["load-images"] = "succeeded";
+        } else if (finishedAction === "install") {
+          state.setupJobResults["install"] = finishedSucceeded ? "succeeded" : "failed";
+          if (finishedSucceeded) state.setupJobResults["load-images"] = "succeeded";
         } else if (finishedAction === "clear_images") {
           delete state.setupJobResults["load-images"];
         }
@@ -1323,11 +1324,15 @@
     if (!statusData) return;
 
     const packageNeedsInstall = statusData.runtime_kind === "package_uninstalled" ||
-      (statusData.is_package && !statusData.is_installed);
+      Boolean(statusData.install_incomplete);
     if (dom.btnQuickStart) {
-      dom.btnQuickStart.disabled = false;
-      dom.btnQuickStart.querySelector("span").textContent = packageNeedsInstall ? "Install & Start" : "Start Cluster";
-      dom.btnQuickStart.title = packageNeedsInstall
+      const dockerUnknown = statusData.cluster_state === "unknown";
+      dom.btnQuickStart.disabled = dockerUnknown;
+      dom.btnQuickStart.querySelector("span").textContent = packageNeedsInstall
+        ? statusData.is_installed ? "Retry Install" : "Install & Start" : "Start Cluster";
+      dom.btnQuickStart.title = dockerUnknown
+        ? "Docker status unavailable; run Doctor and restore Docker access"
+        : packageNeedsInstall
         ? "Install the bundle, load images, generate TLS and start the cluster"
         : "Start the installed cluster";
     }
@@ -1389,9 +1394,18 @@
 
     // 4. Installation
     if (dom.stepInstallChip) {
-      if (statusData.runtime_kind === "package_uninstalled" || (statusData.is_package && !statusData.is_installed)) {
+      if (state.setupJobResults["install"] === "failed" && packageNeedsInstall) {
+        dom.stepInstallChip.textContent = "Install Failed";
+        dom.stepInstallChip.className = "step-status-chip badge-danger";
+      } else if (statusData.install_incomplete) {
+        dom.stepInstallChip.textContent = "Install Interrupted";
+        dom.stepInstallChip.className = "step-status-chip badge-danger";
+      } else if (statusData.runtime_kind === "package_uninstalled" || (statusData.is_package && !statusData.is_installed)) {
         dom.stepInstallChip.textContent = "Install Required";
         dom.stepInstallChip.className = "step-status-chip badge-warning";
+      } else if (statusData.runtime_kind === "installed" && !statusData.install_complete) {
+        dom.stepInstallChip.textContent = "Files Present; Verify";
+        dom.stepInstallChip.className = "step-status-chip badge-neutral";
       } else if (statusData.runtime_kind === "installed" || (statusData.is_package && statusData.is_installed)) {
         dom.stepInstallChip.textContent = "Installed";
         dom.stepInstallChip.className = "step-status-chip badge-success";
@@ -1400,21 +1414,34 @@
         dom.stepInstallChip.className = "step-status-chip badge-info";
       }
     }
+    if (dom.stepInstallDesc) {
+      const dataDir = doctorData?.checks?.find((c) => c.name === "EPC Data Directory");
+      dom.stepInstallDesc.textContent = dataDir?.status === "error"
+        ? "EPC data path missing: mount the data disk before Install; see the package guide"
+        : "Install bundle, generate TLS, load images and start Kafka";
+    }
 
     // 5. Start Cluster
     if (dom.stepStartChip) {
       const installFirst = packageNeedsInstall;
+      const stateVal = (statusData.cluster_state || "unknown").toLowerCase();
       for (const button of [dom.btnStepStart, dom.btnStepStartMonitor]) {
         if (!button) continue;
-        button.disabled = installFirst;
-        button.title = installFirst ? "Install the package first" : "Start the selected service";
+        button.disabled = installFirst || stateVal === "unknown";
+        button.title = installFirst ? "Install the package first"
+          : stateVal === "unknown" ? "Docker status unavailable; run Doctor" : "Start the selected service";
       }
-      const stateVal = (statusData.cluster_state || "stopped").toLowerCase();
       if (stateVal === "running" || stateVal === "healthy") {
         dom.stepStartChip.textContent = "Production Live";
         dom.stepStartChip.className = "step-status-chip badge-success";
-      } else if (stateVal === "degraded" || stateVal === "starting") {
+      } else if (stateVal === "starting") {
         dom.stepStartChip.textContent = "Starting...";
+        dom.stepStartChip.className = "step-status-chip badge-warning";
+      } else if (stateVal === "degraded") {
+        dom.stepStartChip.textContent = "Degraded";
+        dom.stepStartChip.className = "step-status-chip badge-danger";
+      } else if (stateVal === "unknown") {
+        dom.stepStartChip.textContent = "Status Unknown";
         dom.stepStartChip.className = "step-status-chip badge-warning";
       } else {
         dom.stepStartChip.textContent = "Cluster Stopped";
@@ -1562,7 +1589,7 @@
     }
 
     // Cluster State Badge (Color-Changing Lucide Icon)
-    const stateVal = (data.cluster_state || "stopped").toLowerCase();
+    const stateVal = (data.cluster_state || "unknown").toLowerCase();
     if (stateVal === "running" || stateVal === "healthy") {
       dom.badgeClusterStatus.className = "mui-status-indicator status-healthy";
       dom.badgeClusterStatus.title = "Cluster: Healthy & Running";
@@ -1573,6 +1600,11 @@
       dom.badgeClusterStatus.title = `Cluster: ${data.cluster_state}`;
       const lbl = dom.badgeClusterStatus.querySelector(".status-label");
       if (lbl) lbl.innerHTML = `Cluster: <strong>${data.cluster_state}</strong>`;
+    } else if (stateVal === "unknown") {
+      dom.badgeClusterStatus.className = "mui-status-indicator status-warning";
+      dom.badgeClusterStatus.title = "Cluster status unknown; run Doctor to check Docker";
+      const lbl = dom.badgeClusterStatus.querySelector(".status-label");
+      if (lbl) lbl.innerHTML = "Cluster: <strong>Unknown</strong>";
     } else {
       dom.badgeClusterStatus.className = "mui-status-indicator status-stopped";
       dom.badgeClusterStatus.title = "Cluster: Stopped";
@@ -2746,7 +2778,7 @@
     // Setup & Wizard actions
     dom.btnRunDoctor?.addEventListener("click", () => triggerJob("doctor"));
     dom.btnQuickStart?.addEventListener("click", () => {
-      if (state.clusterStatus?.is_package && !state.clusterStatus?.is_installed) {
+      if (state.clusterStatus?.runtime_kind === "package_uninstalled" || state.clusterStatus?.install_incomplete) {
         triggerJob("install");
       } else {
         triggerJob("start");

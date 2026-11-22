@@ -1465,7 +1465,7 @@
       </div>
       <div class="modal-body">
         <div class="info-box mb-3">
-          <p><strong>Rule #3 Safe Isolation:</strong> This action strictly removes only the 18 pinned Krate and monitoring container images from the local Docker daemon. Unrelated host Docker images and caches are untouched.</p>
+          <p><strong>Rule #3 Safe Isolation:</strong> This action removes the pinned Krate and monitoring container images in this package from the local Docker daemon. Unrelated host Docker images and caches are untouched.</p>
           <p class="mt-2 text-sm text-muted">You will need to run <code>krate load-images</code> or build the UI image before starting the cluster again.</p>
         </div>
         <p class="text-sm">Are you sure you want to proceed with clearing all offline Krate images?</p>

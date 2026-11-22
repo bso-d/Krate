@@ -221,6 +221,18 @@ ssh -L 8686:127.0.0.1:8686 -L 8443:127.0.0.1:443 user@host
 
 Open the exact `Access URL` printed by Studio on the workstation. Its private `?token=` parameter authenticates the browser; keep that URL private. In **Setup & Doctor**, click **Install Docker** if needed, optionally **Load Images**, then **Install**. Install loads the bundled images, generates the initial self-signed TLS certificate and starts the cluster. Confirm **Certificate Present** and **Production Live**. Use **Start Cluster** after a stop. In **Cluster Services**, start **Identity / SSO**; in **Identity & Users**, enable OAuth/TLS; in **Observability**, start monitoring. Open Kafbat from the displayed portal link if its host name resolves and is reachable from the workstation. Otherwise, for the default local Kafbat sign-in, use the second tunnel above and open `https://127.0.0.1:8443/`. Replace or trust the self-signed certificate before relying on browser trust for production; an untrusted-certificate warning is expected on a fresh fixture.
 
+For EPC, the default broker data path is `/data`. Prepare it on the host **before** using Studio Install. On a production host with an attached, formatted persistent disk, substitute its actual filesystem UUID and run:
+
+```bash
+lsblk -f  # identify the attached data filesystem's UUID
+disk_uuid='PASTE-THE-FILESYSTEM-UUID-FROM-LSBLK'
+sudo mkdir -p /data
+sudo mount "/dev/disk/by-uuid/$disk_uuid" /data
+findmnt -n -o SOURCE,TARGET,FSTYPE /data
+```
+
+Arrange the same mount at boot using the host's storage policy before writing production messages. For a disposable VM test using its root disk, `sudo mkdir -p /data` is enough to satisfy the path check, but that is not a production storage plan. Studio Doctor reports **EPC Data Directory** as an error while the path is absent. The pre-install Configuration editor cannot apply settings to an uninstalled package. After a failed install that copied files, its Configuration editor can change `KAFKA_DATA_DIR` to another existing directory; retry **Install** after saving. **Install Interrupted** means the current install did not finish. **Files Present; Verify** on an older installation means no completion record exists; check its live health before use. Existing installations retain the **Start Cluster** control.
+
 Studio launched this way is a foreground process. After a host reboot, run `./krate studio --no-browser` again from the installed workspace (normally `/opt/krate/kraft` or `/opt/krate/epc`), restore any SSH tunnel, and open the newly printed Access URL. The cluster's Docker services may recover independently; verify their actual state in Studio after reconnecting. A shell session may also need `newgrp docker` or a new login to use Docker directly after Studio installs it; Studio handles its own Docker group access.
 
 For command-line installation instead, if Docker is missing and you included its packages, run `./krate docker-install` first. It needs administrator access. Then run:

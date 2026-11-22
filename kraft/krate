@@ -308,6 +308,15 @@ import_site_files() {
 deploy_release() {
   local from="$1" taken previous work
   ensure_home_dir
+  # Mark the target incomplete before the first release file can be replaced.
+  # This also covers a tar failure before the installed CLI can run.
+  local install_marker
+  mkdir -p "$KRATE_HOME/auth" || die "Cannot create install state directory"
+  install_marker="$(mktemp "$KRATE_HOME/auth/.install-in-progress.XXXXXX")" || die "Cannot create install state"
+  printf 'started_at=%s\n' "$(date -u +%FT%TZ)" > "$install_marker"
+  chmod 600 "$install_marker"
+  mv -f "$install_marker" "$KRATE_HOME/auth/.install-in-progress"
+  rm -f "$KRATE_HOME/auth/.install-complete"
   work="$(mktemp -d)" || die "Cannot create a temporary directory"
   # The release archive is written once, listed, then extracted: the listing is exactly
   # what was copied. Site files, every .env.* beside .env (the temporary copies an
@@ -3266,6 +3275,16 @@ port_in_use() {
 }
 
 # ─── install ──────────────────────────────────────────────────────────────────
+install_mark_incomplete() {
+  local home="$1" marker
+  mkdir -p "$home/auth" || die "Cannot create install state directory"
+  marker="$(mktemp "$home/auth/.install-in-progress.XXXXXX")" || die "Cannot create install state"
+  printf 'started_at=%s\n' "$(date -u +%FT%TZ)" > "$marker"
+  chmod 600 "$marker"
+  mv -f "$marker" "$home/auth/.install-in-progress"
+  rm -f "$home/auth/.install-complete"
+}
+
 cmd_install() {
   local from=""
   if [[ "${1:-}" == --from ]]; then
@@ -3298,6 +3317,10 @@ cmd_install() {
   # Taken here, in the installation: from a package the exec above replaces this
   # process (and its exit trap), so a lock taken earlier would stay behind.
   identity_lock_if_enabled
+  # A direct installed-workspace install also needs an incomplete marker.
+  if [[ -z "$REPO_DIR" ]]; then
+    install_mark_incomplete "$SCRIPT_DIR"
+  fi
 
   # 3. Settings, passwords and certificate
   info "Preparing settings, passwords and the TLS certificate..."
@@ -3308,7 +3331,7 @@ cmd_install() {
   info "Starting cluster..."
   compose_cmd up -d
   echo ""
-  cmd_health || true      # wait for the cluster to settle, then show final health
+  cmd_health || die "Install did not reach a healthy cluster. Check: krate logs; then retry: krate install"
   echo ""
 
   sep
@@ -3319,6 +3342,14 @@ cmd_install() {
   echo -e "  $SCRIPT_DIR/krate logs -f    — follow all logs"
   echo -e "  $SCRIPT_DIR/krate identity logrotate --install   — rotate the identity journal with the host's logrotate${RESET}"
   echo ""
+  if [[ -z "$REPO_DIR" ]]; then
+    local receipt
+    receipt="$(mktemp "$SCRIPT_DIR/auth/.install-complete.XXXXXX")" || die "Cannot create install receipt"
+    printf 'healthy_at=%s\n' "$(date -u +%FT%TZ)" > "$receipt"
+    chmod 600 "$receipt"
+    mv -f "$receipt" "$SCRIPT_DIR/auth/.install-complete"
+    rm -f "$SCRIPT_DIR/auth/.install-in-progress"
+  fi
 }
 
 # ─── load-images ──────────────────────────────────────────────────────────────
@@ -3495,6 +3526,27 @@ cmd_health() {
   echo ""
 
   local all_ok=true crashing=""
+
+  # Compose ps -q omits stopped containers. A surviving broker cannot make a
+  # partial core cluster appear healthy when another required service exited.
+  local required_service required_id required_state
+  local -a required_services=(kafka-92 kafka-93 kafka-ui proxy)
+  if [[ "${KRATE_VARIANT:-}" == kraft ]]; then
+    required_services=(kafka-92 kafka-93 kafka-94 kafka-95 kafka-ui proxy)
+  fi
+  for required_service in "${required_services[@]}"; do
+    required_id="$(compose_cmd ps -a -q "$required_service" 2>/dev/null | head -1 || true)"
+    if [[ -z "$required_id" ]]; then
+      printf "  %-35s %b\n" "$required_service" "${RED}missing${RESET}"
+      all_ok=false
+    else
+      required_state="$(docker inspect --format '{{.State.Status}}' "$required_id" 2>/dev/null || echo gone)"
+      if [[ "$required_state" != running ]]; then
+        printf "  %-35s %b\n" "$required_service" "${RED}${required_state}${RESET}"
+        all_ok=false
+      fi
+    fi
+  done
 
   while IFS= read -r cid; do
     [[ -z "$cid" ]] && continue
