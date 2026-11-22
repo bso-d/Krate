@@ -2065,9 +2065,13 @@ class StructuredDataCollector:
         """Read the CLI's secret-free Kafka security status for the active workspace."""
         ctx = context or self.ws_mgr.get_context()
         krate_bin, ws_path = ctx.cli_for_action("kafka")
+        cmd = [krate_bin, "kafka", "auth", "status"]
+        _, sg_needed = check_docker_socket_permission()
+        if sg_needed:
+            cmd = ["sg", "docker", "-c", shlex.join(cmd)]
         try:
             res = subprocess.run(
-                [krate_bin, "kafka", "auth", "status"],
+                cmd,
                 cwd=ws_path,
                 env=ctx.subprocess_env(),
                 capture_output=True,

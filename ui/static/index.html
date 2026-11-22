@@ -170,9 +170,9 @@
               <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
               <span>Run Doctor</span>
             </button>
-            <button class="btn btn-primary" id="btn-quick-start">
+            <button class="btn btn-primary" id="btn-quick-start" disabled title="Checking package state">
               <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              <span>Start Cluster</span>
+              <span>Checking...</span>
             </button>
           </div>
         </div>
@@ -182,9 +182,9 @@
           <div class="card-header">
             <div>
               <h2 class="card-title">Air-Gapped Setup Workflow</h2>
-              <p class="card-desc">Zero-CLI guided deployment pipeline from bare machine to live cluster.</p>
+              <p class="card-desc">After verifying and extracting the offline bundle, run <code>./krate studio</code>. Then use these controls to deploy the cluster.</p>
             </div>
-            <span class="badge badge-info">Zero-CLI Pipeline</span>
+            <span class="badge badge-info">Guided Package Setup</span>
           </div>
           <div class="wizard-steps">
             <div class="wizard-step" id="step-docker">
@@ -198,25 +198,14 @@
               </div>
               <button class="btn btn-sm btn-secondary step-btn" id="btn-step-docker">Install Docker</button>
             </div>
-            <div class="wizard-step" id="step-certs">
-              <div class="step-badge-row">
-                <span class="step-num">2</span>
-                <span class="step-status-chip" id="step-certs-chip">Not Checked</span>
-              </div>
-              <div class="step-content">
-                <div class="step-title">TLS Certificates</div>
-                <div class="step-desc" id="step-certs-desc">Certificate and key files in the selected workspace</div>
-              </div>
-              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-certs">Gen Certs</button>
-            </div>
             <div class="wizard-step" id="step-images">
               <div class="step-badge-row">
-                <span class="step-num">3</span>
+                <span class="step-num">2</span>
                 <span class="step-status-chip" id="step-images-chip">Not Checked</span>
               </div>
               <div class="step-content">
-                <div class="step-title">Offline Images</div>
-                <div class="step-desc" id="step-images-desc">Pinned digests in .env.template</div>
+                <div class="step-title">Preload Offline Images (Optional)</div>
+                <div class="step-desc" id="step-images-desc">Install also loads the bundled images</div>
               </div>
               <div class="step-btn-group">
                 <button class="btn btn-sm btn-secondary step-btn" id="btn-step-images">Load Images</button>
@@ -225,14 +214,25 @@
             </div>
             <div class="wizard-step" id="step-install">
               <div class="step-badge-row">
-                <span class="step-num">4</span>
+                <span class="step-num">3</span>
                 <span class="step-status-chip" id="step-install-chip">Package Step</span>
               </div>
               <div class="step-content">
                 <div class="step-title">Install Package</div>
-                <div class="step-desc" id="step-install-desc">Install bundle into $KRATE_HOME and start</div>
+                <div class="step-desc" id="step-install-desc">Install bundle, generate TLS, load images and start Kafka</div>
               </div>
               <button class="btn btn-sm btn-secondary step-btn" id="btn-step-install">Install</button>
+            </div>
+            <div class="wizard-step" id="step-certs">
+              <div class="step-badge-row">
+                <span class="step-num">4</span>
+                <span class="step-status-chip" id="step-certs-chip">Not Checked</span>
+              </div>
+              <div class="step-content">
+                <div class="step-title">Certificate Files</div>
+                <div class="step-desc" id="step-certs-desc">Generated during install; Doctor checks files, not the live TLS listener</div>
+              </div>
+              <button class="btn btn-sm btn-secondary step-btn" id="btn-step-certs" title="Run Doctor to check certificate files">Check Files</button>
             </div>
             <div class="wizard-step" id="step-start">
               <div class="step-badge-row">
@@ -240,12 +240,12 @@
                 <span class="step-status-chip" id="step-start-chip">Not Checked</span>
               </div>
               <div class="step-content">
-                <div class="step-title">Start Cluster</div>
-                <div class="step-desc" id="step-start-desc">Launch Kafka, Kafbat UI &amp; Proxy</div>
+                <div class="step-title">Verify or Start Cluster</div>
+                <div class="step-desc" id="step-start-desc">Install starts Kafka, Kafbat UI &amp; Proxy; use this control after a stop</div>
               </div>
               <div class="step-btn-group">
-                <button class="btn btn-sm btn-primary step-btn" id="btn-step-start">Start Cluster</button>
-                <button class="btn btn-sm btn-secondary step-btn" id="btn-step-start-monitor" title="Start Prometheus, Grafana, Perses monitoring stack">+ Monitor</button>
+                <button class="btn btn-sm btn-primary step-btn" id="btn-step-start" disabled title="Install the package first">Start Cluster</button>
+                <button class="btn btn-sm btn-secondary step-btn" id="btn-step-start-monitor" disabled title="Install the package first">+ Monitor</button>
               </div>
             </div>
           </div>
@@ -1047,11 +1047,14 @@
             </div>
           </div>
 
-          <!-- Zero-CLI Remote Host Connector -->
+          <!-- Remote Host Connector -->
           <div class="card">
             <div class="card-header">
-              <h2 class="card-title">Remote Host Bootstrapper</h2>
-              <span class="badge badge-info">Zero-CLI OpenSSH</span>
+              <div>
+                <h2 class="card-title">Remote Host Connector</h2>
+                <p class="card-desc">Connect to another host from an already running Studio session.</p>
+              </div>
+              <span class="badge badge-info">Browser SSH</span>
             </div>
             <form id="form-remote-ssh" onsubmit="return false;">
               <div class="form-group">

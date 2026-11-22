@@ -28,6 +28,7 @@
     rawConfigTarget: ".env",
     activeView: "setup",
     activeJob: null, // { id, action, status }
+    setupJobResults: {}, // Only the current browser session; never a persisted health claim.
     sseSource: null,
     lastEventId: 0,
     terminalLogs: [],
@@ -1157,6 +1158,13 @@
         console.error("Error parsing done event:", e);
       } finally {
         const finishedAction = state.activeJob?.action || "";
+        if (finishedAction === "load-images") {
+          state.setupJobResults[finishedAction] = finishedSucceeded ? "succeeded" : "failed";
+        } else if (finishedAction === "install" && finishedSucceeded) {
+          state.setupJobResults["load-images"] = "succeeded";
+        } else if (finishedAction === "clear_images") {
+          delete state.setupJobResults["load-images"];
+        }
         source.close();
         state.sseSource = null;
         state.activeJob = null;
@@ -1314,6 +1322,16 @@
   function updateStepperChips(statusData, doctorData) {
     if (!statusData) return;
 
+    const packageNeedsInstall = statusData.runtime_kind === "package_uninstalled" ||
+      (statusData.is_package && !statusData.is_installed);
+    if (dom.btnQuickStart) {
+      dom.btnQuickStart.disabled = false;
+      dom.btnQuickStart.querySelector("span").textContent = packageNeedsInstall ? "Install & Start" : "Start Cluster";
+      dom.btnQuickStart.title = packageNeedsInstall
+        ? "Install the bundle, load images, generate TLS and start the cluster"
+        : "Start the installed cluster";
+    }
+
     // 1. Docker Socket
     if (dom.stepDockerChip) {
       const dockerChecks = doctorData?.checks || [];
@@ -1348,19 +1366,25 @@
     // 2. TLS Certificates
     if (dom.stepCertsChip) {
       const certCheck = doctorData?.checks?.find((c) => c.name === "TLS Certificate");
+      const installFirst = packageNeedsInstall;
       dom.stepCertsChip.textContent = certCheck?.status === "ok" ? "Certificate Present"
-        : certCheck?.status === "warn" ? "Generate Certs" : certCheck?.status === "error" ? "Check Certs" : "Not Checked";
+        : installFirst ? "Created During Install"
+          : certCheck?.status === "warn" ? "Certificate Missing" : certCheck?.status === "error" ? "Check Certs" : "Not Checked";
       dom.stepCertsChip.className = `step-status-chip ${certCheck?.status === "ok" ? "badge-success"
-        : certCheck?.status === "warn" || certCheck?.status === "error" ? "badge-warning" : "badge-neutral"}`;
+        : installFirst ? "badge-info"
+          : certCheck?.status === "warn" || certCheck?.status === "error" ? "badge-warning" : "badge-neutral"}`;
     }
 
     // 3. Offline Images
     if (dom.stepImagesChip) {
       const imgCheck = doctorData?.checks?.find((c) => c.name === "Offline Images");
-      dom.stepImagesChip.textContent = imgCheck?.status === "ok" ? "Images Loaded"
-        : imgCheck?.status === "warn" || imgCheck?.status === "error" ? "Load Required" : "Not Checked";
+      const imageJob = state.setupJobResults["load-images"];
+      dom.stepImagesChip.textContent = imgCheck?.status === "ok" ? "Images Verified"
+        : imageJob === "succeeded" ? "Loaded This Session" : imageJob === "failed" ? "Load Failed"
+          : imgCheck?.status === "warn" || imgCheck?.status === "error" ? "Load Required" : "Not Checked";
       dom.stepImagesChip.className = `step-status-chip ${imgCheck?.status === "ok"
-        ? "badge-success" : imgCheck?.status === "warn" || imgCheck?.status === "error" ? "badge-warning" : "badge-neutral"}`;
+        ? "badge-success" : imageJob === "failed" ? "badge-danger" : imageJob === "succeeded" ? "badge-info"
+          : imgCheck?.status === "warn" || imgCheck?.status === "error" ? "badge-warning" : "badge-neutral"}`;
     }
 
     // 4. Installation
@@ -1379,6 +1403,12 @@
 
     // 5. Start Cluster
     if (dom.stepStartChip) {
+      const installFirst = packageNeedsInstall;
+      for (const button of [dom.btnStepStart, dom.btnStepStartMonitor]) {
+        if (!button) continue;
+        button.disabled = installFirst;
+        button.title = installFirst ? "Install the package first" : "Start the selected service";
+      }
       const stateVal = (statusData.cluster_state || "stopped").toLowerCase();
       if (stateVal === "running" || stateVal === "healthy") {
         dom.stepStartChip.textContent = "Production Live";
@@ -2675,6 +2705,7 @@
           body: { workspace: newWs },
         });
         state.kafkaClientStatus = null;
+        state.setupJobResults = {};
         state.kafkaClientCheckedId = null;
         state.kafkaRegisterPendingId = null;
         if (dom.inputKafkaClientState) dom.inputKafkaClientState.value = "";
@@ -2722,16 +2753,10 @@
       }
     });
     dom.btnStepDocker?.addEventListener("click", () => triggerJob("docker-install"));
-    dom.btnStepCerts?.addEventListener("click", () => triggerJob("gen-cert"));
+    dom.btnStepCerts?.addEventListener("click", () => triggerJob("doctor"));
     dom.btnStepImages?.addEventListener("click", () => triggerJob("load-images"));
     dom.btnStepInstall?.addEventListener("click", () => triggerJob("install"));
-    dom.btnStepStart?.addEventListener("click", () => {
-      if (state.clusterStatus?.is_package && !state.clusterStatus?.is_installed) {
-        triggerJob("install");
-      } else {
-        triggerJob("start");
-      }
-    });
+    dom.btnStepStart?.addEventListener("click", () => triggerJob("start"));
 
     // Services actions
     dom.btnServicesStart?.addEventListener("click", () => triggerJob("start"));

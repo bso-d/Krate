@@ -3466,10 +3466,14 @@ cmd_load_images() {
 
   info "Loading ${#tars[@]} image(s) into Docker..."
   for tar in "${tars[@]}"; do
-    local name
+    local name output
     name="$(basename "$tar")"
     echo -n "    $name ... "
-    docker load -i "$tar" 2>&1 | sed -n 's/^Loaded image: //p' || echo ""
+    if ! output="$(docker load -i "$tar" 2>&1)"; then
+      printf '%s\n' "$output" >&2
+      die "Failed to load image archive: $name"
+    fi
+    printf '%s\n' "$output" | sed -n 's/^Loaded image: //p'
   done
   ok "All images loaded"
 }
