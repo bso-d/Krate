@@ -190,29 +190,29 @@
             <div class="wizard-step" id="step-docker">
               <div class="step-badge-row">
                 <span class="step-num">1</span>
-                <span class="step-status-chip" id="step-docker-chip">Socket Verified</span>
+                <span class="step-status-chip" id="step-docker-chip">Not Checked</span>
               </div>
               <div class="step-content">
                 <div class="step-title">Docker Engine</div>
-                <div class="step-desc" id="step-docker-desc">Verifying Docker daemon &amp; Compose socket...</div>
+                <div class="step-desc" id="step-docker-desc">Checks Docker CLI, daemon access, and Compose</div>
               </div>
               <button class="btn btn-sm btn-secondary step-btn" id="btn-step-docker">Install Docker</button>
             </div>
             <div class="wizard-step" id="step-certs">
               <div class="step-badge-row">
                 <span class="step-num">2</span>
-                <span class="step-status-chip" id="step-certs-chip">Valid SANs</span>
+                <span class="step-status-chip" id="step-certs-chip">Not Checked</span>
               </div>
               <div class="step-content">
                 <div class="step-title">TLS Certificates</div>
-                <div class="step-desc" id="step-certs-desc">CA &amp; SANs for Kafka/UI/Proxy</div>
+                <div class="step-desc" id="step-certs-desc">Certificate and key files in the selected workspace</div>
               </div>
               <button class="btn btn-sm btn-secondary step-btn" id="btn-step-certs">Gen Certs</button>
             </div>
             <div class="wizard-step" id="step-images">
               <div class="step-badge-row">
                 <span class="step-num">3</span>
-                <span class="step-status-chip" id="step-images-chip">Digest Pinned</span>
+                <span class="step-status-chip" id="step-images-chip">Not Checked</span>
               </div>
               <div class="step-content">
                 <div class="step-title">Offline Images</div>
@@ -237,7 +237,7 @@
             <div class="wizard-step" id="step-start">
               <div class="step-badge-row">
                 <span class="step-num">5</span>
-                <span class="step-status-chip" id="step-start-chip">Production Live</span>
+                <span class="step-status-chip" id="step-start-chip">Not Checked</span>
               </div>
               <div class="step-content">
                 <div class="step-title">Start Cluster</div>
@@ -256,7 +256,7 @@
           <div class="card-header">
             <div>
               <h2 class="card-title">Preflight Diagnostics Checklist</h2>
-              <p class="card-desc">Evaluates host OS, port collisions, Docker permissions, certificate validity, and system limits.</p>
+              <p class="card-desc">Checks Docker access, Compose, workspace files, and certificate file presence.</p>
             </div>
             <div class="doctor-summary-badges">
               <span class="badge badge-success" id="doc-badge-passed">0 Passing</span>
@@ -358,7 +358,7 @@
             <div class="maintenance-item">
               <div class="maintenance-info">
                 <strong>Clear Images (krate clear-images)</strong>
-                <p>Removes all 18 Krate pinned Docker images to reclaim host disk space (Rule #3 compliant; host images are untouched).</p>
+                <p>Removes images referenced by Krate settings and the bundle lock, plus krate-offline tags. Images in use may be skipped.</p>
               </div>
               <button class="btn btn-secondary" id="btn-setup-clear-images">Clear Images</button>
             </div>

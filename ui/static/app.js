@@ -1316,34 +1316,59 @@
 
     // 1. Docker Socket
     if (dom.stepDockerChip) {
-      const dockerCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("docker"));
-      const isDockerUp = dockerCheck ? dockerCheck.status === "passed" : (statusData.cluster_state !== "unknown");
-      dom.stepDockerChip.textContent = isDockerUp ? "Socket Ready" : "Daemon Down";
-      dom.stepDockerChip.className = `step-status-chip ${isDockerUp ? "badge-success" : "badge-danger"}`;
+      const dockerChecks = doctorData?.checks || [];
+      const engine = dockerChecks.find((c) => c.name === "Docker Engine");
+      const daemon = dockerChecks.find((c) => c.name === "Docker Daemon");
+      const compose = dockerChecks.find((c) => c.name === "Docker Compose");
+      let label = "Not Checked";
+      let badge = "badge-neutral";
+      if (engine?.status === "error") {
+        label = "Install Docker";
+        badge = "badge-danger";
+      } else if (daemon?.status === "error") {
+        label = "Daemon Down";
+        badge = "badge-danger";
+      } else if (compose?.status === "error") {
+        label = "Compose Missing";
+        badge = "badge-danger";
+      } else if (daemon?.status === "warn") {
+        label = "Access Pending";
+        badge = "badge-warning";
+      } else if (engine?.status === "warn" || compose?.status === "warn") {
+        label = "Check Docker";
+        badge = "badge-warning";
+      } else if (engine?.status === "ok" && daemon?.status === "ok" && compose?.status === "ok") {
+        label = "Docker Ready";
+        badge = "badge-success";
+      }
+      dom.stepDockerChip.textContent = label;
+      dom.stepDockerChip.className = `step-status-chip ${badge}`;
     }
 
     // 2. TLS Certificates
     if (dom.stepCertsChip) {
-      const certCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("cert"));
-      const certValid = certCheck ? certCheck.status === "passed" : true;
-      dom.stepCertsChip.textContent = certValid ? "Valid SANs" : "Regen Required";
-      dom.stepCertsChip.className = `step-status-chip ${certValid ? "badge-success" : "badge-warning"}`;
+      const certCheck = doctorData?.checks?.find((c) => c.name === "TLS Certificate");
+      dom.stepCertsChip.textContent = certCheck?.status === "ok" ? "Certificate Present"
+        : certCheck?.status === "warn" ? "Generate Certs" : certCheck?.status === "error" ? "Check Certs" : "Not Checked";
+      dom.stepCertsChip.className = `step-status-chip ${certCheck?.status === "ok" ? "badge-success"
+        : certCheck?.status === "warn" || certCheck?.status === "error" ? "badge-warning" : "badge-neutral"}`;
     }
 
     // 3. Offline Images
     if (dom.stepImagesChip) {
-      const imgCheck = doctorData?.checks?.find((c) => (c.name || "").toLowerCase().includes("image"));
-      const imgsLoaded = imgCheck ? imgCheck.status === "passed" : true;
-      dom.stepImagesChip.textContent = imgsLoaded ? "Images Loaded" : "Load Required";
-      dom.stepImagesChip.className = `step-status-chip ${imgsLoaded ? "badge-success" : "badge-warning"}`;
+      const imgCheck = doctorData?.checks?.find((c) => c.name === "Offline Images");
+      dom.stepImagesChip.textContent = imgCheck?.status === "ok" ? "Images Loaded"
+        : imgCheck?.status === "warn" || imgCheck?.status === "error" ? "Load Required" : "Not Checked";
+      dom.stepImagesChip.className = `step-status-chip ${imgCheck?.status === "ok"
+        ? "badge-success" : imgCheck?.status === "warn" || imgCheck?.status === "error" ? "badge-warning" : "badge-neutral"}`;
     }
 
     // 4. Installation
     if (dom.stepInstallChip) {
-      if (statusData.is_package && !statusData.is_installed) {
+      if (statusData.runtime_kind === "package_uninstalled" || (statusData.is_package && !statusData.is_installed)) {
         dom.stepInstallChip.textContent = "Install Required";
         dom.stepInstallChip.className = "step-status-chip badge-warning";
-      } else if (statusData.is_package && statusData.is_installed) {
+      } else if (statusData.runtime_kind === "installed" || (statusData.is_package && statusData.is_installed)) {
         dom.stepInstallChip.textContent = "Installed";
         dom.stepInstallChip.className = "step-status-chip badge-success";
       } else {
@@ -1504,17 +1529,6 @@
     }
     if (data.mutation_active !== undefined) {
       updateWorkspaceSelectorLock(Boolean(data.mutation_active));
-    }
-
-    // Update Package Install Wizard Step
-    if (dom.stepInstallChip) {
-      if (data.is_package && !data.is_installed) {
-        dom.stepInstallChip.textContent = "Install Required";
-      } else if (data.is_package && data.is_installed) {
-        dom.stepInstallChip.textContent = "Installed";
-      } else {
-        dom.stepInstallChip.textContent = "Checkout Ready";
-      }
     }
 
     // Cluster State Badge (Color-Changing Lucide Icon)
