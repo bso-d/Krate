@@ -3285,6 +3285,14 @@ install_mark_incomplete() {
   rm -f "$home/auth/.install-complete"
 }
 
+install_mark_attempt() {
+  local marker
+  marker="$(mktemp "$KRATE_HOME/.install-attempt.XXXXXX")" || die "Cannot record package install attempt in $KRATE_HOME. Run as its owner or with sudo."
+  printf 'started_at=%s\n' "$(date -u +%FT%TZ)" > "$marker"
+  chmod 600 "$marker"
+  mv -f "$marker" "$KRATE_HOME/.install-attempt"
+}
+
 cmd_install() {
   local from=""
   if [[ "${1:-}" == --from ]]; then
@@ -3293,6 +3301,18 @@ cmd_install() {
   fi
   step "Krate install"
   echo ""
+
+  # Keep a failed package attempt visible to Studio after a browser reload.
+  if is_package; then
+    if [[ "$KRATE_HOME" == "/opt/krate/${KRATE_VARIANT:-}" ]] \
+        && { [[ -L /opt/krate ]] || [[ -L "$KRATE_HOME" ]]; }; then
+      die "Cannot use a symlink as the default installation directory: $KRATE_HOME"
+    fi
+    if [[ ! -d "$KRATE_HOME" ]]; then
+      ensure_home_dir
+    fi
+    install_mark_attempt
+  fi
 
   # 1. Preflight — fail safe with guidance instead of half-applying. The
   #    takeover source is passed so its .env and certificate are inspected.
@@ -3311,6 +3331,7 @@ cmd_install() {
     cmd_load_images
     echo ""
     deploy_release "$from"
+    rm -f "$KRATE_HOME/.install-attempt"
     echo ""
     KRATE_DEPLOYED=1 exec "$KRATE_HOME/krate" install
   fi
@@ -3349,6 +3370,7 @@ cmd_install() {
     chmod 600 "$receipt"
     mv -f "$receipt" "$SCRIPT_DIR/auth/.install-complete"
     rm -f "$SCRIPT_DIR/auth/.install-in-progress"
+    rm -f "$SCRIPT_DIR/.install-attempt"
   fi
 }
 

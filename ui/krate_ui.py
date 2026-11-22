@@ -1340,6 +1340,22 @@ class StructuredDataCollector:
         except OSError:
             return False
 
+    @staticmethod
+    def _package_attempt_exists(ctx: OperationContext) -> bool:
+        if ctx.runtime_kind == "checkout":
+            return False
+        receipt = os.path.join(ctx.install_dir, ".install-attempt")
+        try:
+            return stat.S_ISREG(os.lstat(receipt).st_mode)
+        except OSError:
+            return False
+
+    @classmethod
+    def _install_incomplete(cls, ctx: OperationContext) -> bool:
+        return cls._install_marker_exists(ctx, ".install-in-progress") or (
+            ctx.runtime_kind == "package_uninstalled" and cls._package_attempt_exists(ctx)
+        )
+
     @classmethod
     def _install_complete(cls, ctx: OperationContext) -> bool:
         return (cls._install_marker_exists(ctx, ".install-complete")
@@ -1692,7 +1708,8 @@ class StructuredDataCollector:
             "is_package": ctx.is_package,
             "is_installed": ctx.is_installed,
             "install_complete": self._install_complete(ctx),
-            "install_incomplete": self._install_marker_exists(ctx, ".install-in-progress"),
+            "install_incomplete": self._install_incomplete(ctx),
+            "install_attempt_incomplete": ctx.is_installed and self._package_attempt_exists(ctx),
             "krate_home": ctx.install_dir,
             "config_revision": ctx.config_revision,
             "mutation_active": mut_active,
@@ -1865,7 +1882,7 @@ class StructuredDataCollector:
                     "message": f"Install completed in {ctx.install_dir}",
                     "fix_action": None,
                 })
-            elif self._install_marker_exists(ctx, ".install-in-progress"):
+            elif self._install_incomplete(ctx):
                 checks.append({
                     "name": "Package Installation",
                     "status": "error",
@@ -1886,6 +1903,14 @@ class StructuredDataCollector:
                     "name": "Package Installation",
                     "status": "warn",
                     "message": f"Bundle not installed into {ctx.install_dir} yet (run krate install before start)",
+                    "fix_action": "install",
+                })
+                problems += 1
+            if ctx.is_installed and self._package_attempt_exists(ctx):
+                checks.append({
+                    "name": "Package Upgrade Attempt",
+                    "status": "error",
+                    "message": "A package upgrade failed or was interrupted. The existing installation remains available; inspect the job error and retry Install.",
                     "fix_action": "install",
                 })
                 problems += 1

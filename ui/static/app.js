@@ -22,6 +22,9 @@
     kafkaClientCheckedId: null,
     kafkaRegisterPendingId: null,
     configData: null,
+    credentials: null,
+    credentialsGeneration: 0,
+    workspaceSwitchPending: false,
     usersData: null,
     gatesData: null,
     activeConfigTab: "cluster-env",
@@ -432,6 +435,7 @@
 
     // Credentials Modal & Reveal controls
     document.getElementById("btn-open-credentials-modal")?.addEventListener("click", () => {
+      clearCredentials();
       openModal(dom.modalCredentialsReveal);
       fetchCredentials();
     });
@@ -490,27 +494,31 @@
     });
 
     dom.btnCopyAllCreds?.addEventListener("click", async () => {
-      if (!state.credentials) await fetchCredentials();
+      if (state.workspaceSwitchPending) return;
+      clearCredentials();
+      const generation = state.credentialsGeneration;
+      await fetchCredentials();
+      if (generation !== state.credentialsGeneration) return;
       const creds = state.credentials;
       if (!creds) return;
       const text = [
         "Krate Cluster Credentials",
         "=========================",
-        `Kafbat UI: ${creds.ui?.kafbat_url || "https://localhost/"}`,
-        `Username: ${creds.ui?.KAFKA_UI_USER || "admin"}`,
-        `Password: ${creds.ui?.KAFKA_UI_PASSWORD || ""}`,
+        `Kafbat UI: ${creds.ui?.url || ""}`,
+        `Username: ${creds.ui?.username || ""}`,
+        `Password: ${creds.ui?.password || ""}`,
         "",
-        `Grafana: ${creds.monitoring?.grafana_url || "https://localhost/grafana/"}`,
-        `Username: ${creds.monitoring?.GRAFANA_USER || "admin"}`,
-        `Password: ${creds.monitoring?.GRAFANA_PASSWORD || ""}`,
+        `Grafana: ${creds.monitoring?.grafana_url || ""}`,
+        `Username: ${creds.monitoring?.grafana_user || ""}`,
+        `Password: ${creds.monitoring?.grafana_password || ""}`,
         "",
-        `Perses: ${creds.monitoring?.perses_url || "https://localhost:3443/"}`,
-        `Username: ${creds.monitoring?.PERSES_ADMIN_USER || "admin"}`,
-        `Password: ${creds.monitoring?.PERSES_ADMIN_PASSWORD || ""}`,
+        `Perses: ${creds.monitoring?.perses_url || ""}`,
+        `Username: ${creds.monitoring?.perses_user || ""}`,
+        `Password: ${creds.monitoring?.perses_password || ""}`,
         "",
-        `Keycloak Realm: ${creds.identity?.public_url || "https://localhost/identity"}`,
-        `Admin: ${creds.identity?.KEYCLOAK_ADMIN_USER || "admin"}`,
-        `Password: ${creds.identity?.KEYCLOAK_ADMIN_PASSWORD || ""}`,
+        `Keycloak Realm: ${creds.identity?.public_url || ""}`,
+        `Admin: ${creds.identity?.admin_user || ""}`,
+        `Password: ${creds.identity?.admin_password || ""}`,
       ].join("\n");
       try {
         await navigator.clipboard.writeText(text);
@@ -654,6 +662,7 @@
         if (viewerGroup) overrides.KEYCLOAK_VIEWER_GROUP = viewerGroup;
       }
 
+      clearCredentials();
       try {
         const payload = {
           preset_id: presetId,
@@ -665,12 +674,13 @@
           closeModal(dom.modalSetupWizard);
           showToast("Configuration preset applied successfully!", "success");
           fetchStatus();
-          fetchCredentials();
         } else {
           showToast(res?.error || "Failed to apply preset", "error");
         }
       } catch (err) {
         showToast(`Preset apply error: ${err.message}`, "error");
+      } finally {
+        fetchCredentials();
       }
     });
 
@@ -1171,6 +1181,8 @@
         state.activeJob = null;
         updateWorkspaceSelectorLock(false);
         fetchStatus();
+        clearCredentials();
+        fetchCredentials();
         if (finishedAction === "install" || finishedAction === "doctor_fix") {
           fetchWorkspaces();
           fetchDoctor();
@@ -1225,13 +1237,13 @@
 
   function updateWorkspaceSelectorLock(mutationActive = false) {
     const isMutating = Boolean(
-      mutationActive ||
+      state.workspaceSwitchPending || mutationActive ||
         (state.activeJob && state.activeJob.status === "running" && state.activeJob.isMutation !== false)
     );
     if (dom.selectWorkspace) {
       dom.selectWorkspace.disabled = isMutating;
       dom.selectWorkspace.title = isMutating
-        ? "Workspace switching is disabled while a mutation operation is running"
+        ? state.workspaceSwitchPending ? "Workspace switch is in progress" : "Workspace switching is disabled while a mutation operation is running"
         : "Select active Krate workspace";
     }
   }
@@ -1394,11 +1406,14 @@
 
     // 4. Installation
     if (dom.stepInstallChip) {
-      if (state.setupJobResults["install"] === "failed" && packageNeedsInstall) {
-        dom.stepInstallChip.textContent = "Install Failed";
+      if (state.setupJobResults["install"] === "failed" && (packageNeedsInstall || statusData.install_attempt_incomplete)) {
+        dom.stepInstallChip.textContent = statusData.install_attempt_incomplete ? "Upgrade Failed" : "Install Failed";
+        dom.stepInstallChip.className = "step-status-chip badge-danger";
+      } else if (statusData.install_attempt_incomplete) {
+        dom.stepInstallChip.textContent = "Upgrade Needs Retry";
         dom.stepInstallChip.className = "step-status-chip badge-danger";
       } else if (statusData.install_incomplete) {
-        dom.stepInstallChip.textContent = "Install Interrupted";
+        dom.stepInstallChip.textContent = "Install Needs Retry";
         dom.stepInstallChip.className = "step-status-chip badge-danger";
       } else if (statusData.runtime_kind === "package_uninstalled" || (statusData.is_package && !statusData.is_installed)) {
         dom.stepInstallChip.textContent = "Install Required";
@@ -1450,41 +1465,73 @@
     }
   }
 
-  async function fetchCredentials() {
+  function clearCredentials() {
+    state.credentialsGeneration += 1;
+    state.credentials = null;
+    if (dom.btnCopyAllCreds) dom.btnCopyAllCreds.disabled = true;
+    for (const id of ["cred-user-kafbat", "cred-user-grafana", "cred-user-perses", "cred-user-keycloak",
+      "cred-pass-kafbat", "cred-pass-grafana", "cred-pass-perses", "cred-pass-keycloak"]) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.textContent = "Loading...";
+      delete el.dataset.secret;
+    }
+    for (const id of ["rev-pass-kafbat", "rev-pass-grafana", "rev-pass-perses", "rev-pass-keycloak"]) {
+      const el = document.getElementById(id);
+      if (el) { el.value = ""; el.type = "password"; }
+    }
+    for (const id of ["rev-user-kafbat", "rev-user-grafana", "rev-user-perses", "rev-user-keycloak"]) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "Loading...";
+    }
+    for (const id of ["rev-link-kafbat", "rev-link-grafana", "rev-link-perses"]) {
+      const el = document.getElementById(id);
+      if (el) { el.removeAttribute("href"); el.textContent = "Unavailable"; }
+    }
+    for (const btn of document.querySelectorAll(".btn-cred-copy, .btn-copy-direct, .btn-reveal-toggle")) {
+      btn.disabled = true;
+      if (btn.classList.contains("btn-reveal-toggle")) btn.textContent = "Show";
+    }
+  }
+
+  async function fetchCredentials(duringWorkspaceSwitch = false) {
+    if (state.workspaceSwitchPending && !duringWorkspaceSwitch) return;
+    const generation = state.credentialsGeneration;
     try {
       const res = await apiFetch("/api/v1/credentials");
-      if (!res) return;
+      if (generation !== state.credentialsGeneration || (state.workspaceSwitchPending && !duringWorkspaceSwitch)) return;
+      if (!res) throw new Error("Empty credentials response");
       state.credentials = res;
 
-      const uiUser = res.ui?.KAFKA_UI_USER || "admin";
-      const uiPass = res.ui?.KAFKA_UI_PASSWORD || "(unconfigured)";
-      const grafUser = res.monitoring?.GRAFANA_USER || "admin";
-      const grafPass = res.monitoring?.GRAFANA_PASSWORD || "(unconfigured)";
-      const persesUser = res.monitoring?.PERSES_ADMIN_USER || "admin";
-      const persesPass = res.monitoring?.PERSES_ADMIN_PASSWORD || "(unconfigured)";
-      const kcUser = res.identity?.KEYCLOAK_ADMIN_USER || "admin";
-      const kcPass = res.identity?.KEYCLOAK_ADMIN_PASSWORD || "(unconfigured)";
+      const uiUser = res.ui?.username || "(unconfigured)";
+      const uiPass = res.ui?.password || "";
+      const grafUser = res.monitoring?.grafana_user || "(unconfigured)";
+      const grafPass = res.monitoring?.grafana_password || "";
+      const persesUser = res.monitoring?.perses_user || "(unconfigured)";
+      const persesPass = res.monitoring?.perses_password || "";
+      const kcUser = res.identity?.admin_user || "(unconfigured)";
+      const kcPass = res.identity?.admin_password || "";
 
       // Overview grid elements
       const elUiU = document.getElementById("cred-user-kafbat");
       if (elUiU) elUiU.textContent = uiUser;
       const elUiP = document.getElementById("cred-pass-kafbat");
-      if (elUiP) { elUiP.dataset.secret = uiPass; elUiP.textContent = "••••••••••••••••"; }
+      if (elUiP) { elUiP.dataset.secret = uiPass; elUiP.textContent = uiPass ? "••••••••••••••••" : "(unconfigured)"; }
 
       const elGrU = document.getElementById("cred-user-grafana");
       if (elGrU) elGrU.textContent = grafUser;
       const elGrP = document.getElementById("cred-pass-grafana");
-      if (elGrP) { elGrP.dataset.secret = grafPass; elGrP.textContent = "••••••••••••••••"; }
+      if (elGrP) { elGrP.dataset.secret = grafPass; elGrP.textContent = grafPass ? "••••••••••••••••" : "(unconfigured)"; }
 
       const elPeU = document.getElementById("cred-user-perses");
       if (elPeU) elPeU.textContent = persesUser;
       const elPeP = document.getElementById("cred-pass-perses");
-      if (elPeP) { elPeP.dataset.secret = persesPass; elPeP.textContent = "••••••••••••••••"; }
+      if (elPeP) { elPeP.dataset.secret = persesPass; elPeP.textContent = persesPass ? "••••••••••••••••" : "(unconfigured)"; }
 
       const elKcU = document.getElementById("cred-user-keycloak");
       if (elKcU) elKcU.textContent = kcUser;
       const elKcP = document.getElementById("cred-pass-keycloak");
-      if (elKcP) { elKcP.dataset.secret = kcPass; elKcP.textContent = "••••••••••••••••"; }
+      if (elKcP) { elKcP.dataset.secret = kcPass; elKcP.textContent = kcPass ? "••••••••••••••••" : "(unconfigured)"; }
 
       // Modal inputs
       const mUiU = document.getElementById("rev-user-kafbat");
@@ -1507,9 +1554,9 @@
       const mKcP = document.getElementById("rev-pass-keycloak");
       if (mKcP) mKcP.value = kcPass;
 
-      if (res.ui?.kafbat_url && document.getElementById("rev-link-kafbat")) {
-        document.getElementById("rev-link-kafbat").href = res.ui.kafbat_url;
-        document.getElementById("rev-link-kafbat").textContent = res.ui.kafbat_url;
+      if (res.ui?.url && document.getElementById("rev-link-kafbat")) {
+        document.getElementById("rev-link-kafbat").href = res.ui.url;
+        document.getElementById("rev-link-kafbat").textContent = res.ui.url;
       }
       if (res.monitoring?.grafana_url && document.getElementById("rev-link-grafana")) {
         document.getElementById("rev-link-grafana").href = res.monitoring.grafana_url;
@@ -1519,8 +1566,26 @@
         document.getElementById("rev-link-perses").href = res.monitoring.perses_url;
         document.getElementById("rev-link-perses").textContent = res.monitoring.perses_url;
       }
+      if (dom.btnCopyAllCreds) dom.btnCopyAllCreds.disabled = false;
+      for (const btn of document.querySelectorAll(".btn-cred-copy")) {
+        btn.disabled = !document.getElementById(btn.getAttribute("data-target"))?.dataset.secret;
+      }
+      for (const btn of document.querySelectorAll(".btn-copy-direct")) {
+        btn.disabled = !document.getElementById(btn.getAttribute("data-target"))?.value;
+      }
+      for (const btn of document.querySelectorAll(".btn-reveal-toggle")) {
+        btn.disabled = !document.getElementById(btn.getAttribute("data-input"))?.value;
+      }
     } catch (e) {
       console.warn("Could not fetch credentials:", e);
+      if (generation !== state.credentialsGeneration || (state.workspaceSwitchPending && !duringWorkspaceSwitch)) return;
+      for (const id of ["cred-user-kafbat", "cred-user-grafana", "cred-user-perses", "cred-user-keycloak",
+        "cred-pass-kafbat", "cred-pass-grafana", "cred-pass-perses", "cred-pass-keycloak",
+        "rev-user-kafbat", "rev-user-grafana", "rev-user-perses", "rev-user-keycloak"]) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = "Unavailable — reopen Credentials to retry";
+      }
+      showToast("Could not load credentials. Reopen Credentials to retry.", "warning");
     }
   }
 
@@ -1597,9 +1662,10 @@
       if (lbl) lbl.innerHTML = "Cluster: <strong>Healthy</strong>";
     } else if (stateVal === "degraded" || stateVal === "starting") {
       dom.badgeClusterStatus.className = "mui-status-indicator status-warning";
-      dom.badgeClusterStatus.title = `Cluster: ${data.cluster_state}`;
+      const label = stateVal === "degraded" ? "Degraded" : "Starting";
+      dom.badgeClusterStatus.title = `Cluster: ${label}`;
       const lbl = dom.badgeClusterStatus.querySelector(".status-label");
-      if (lbl) lbl.innerHTML = `Cluster: <strong>${data.cluster_state}</strong>`;
+      if (lbl) lbl.innerHTML = `Cluster: <strong>${label}</strong>`;
     } else if (stateVal === "unknown") {
       dom.badgeClusterStatus.className = "mui-status-indicator status-warning";
       dom.badgeClusterStatus.title = "Cluster status unknown; run Doctor to check Docker";
@@ -2730,12 +2796,19 @@
 
     // Workspace switch
     dom.selectWorkspace?.addEventListener("change", async (e) => {
+      if (state.workspaceSwitchPending) return;
       const newWs = e.target.value;
+      state.workspaceSwitchPending = true;
+      updateWorkspaceSelectorLock();
+      clearCredentials();
+      const credentialsModalButton = document.getElementById("btn-open-credentials-modal");
+      if (credentialsModalButton) credentialsModalButton.disabled = true;
       try {
         await apiFetch("/api/v1/workspaces/switch", {
           method: "POST",
           body: { workspace: newWs },
         });
+        clearCredentials();
         state.kafkaClientStatus = null;
         state.setupJobResults = {};
         state.kafkaClientCheckedId = null;
@@ -2747,16 +2820,23 @@
         await fetchStatus();
         await fetchDoctor();
         await fetchConfig();
+        await fetchCredentials(true);
         await fetchGates();
         if (state.activeView === "identity") {
           await fetchKafkaSecurity();
           await fetchKafkaSecurityAlerts();
         }
       } catch (err) {
+        clearCredentials();
         if (dom.selectWorkspace && state.activeWorkspace) {
           dom.selectWorkspace.value = state.activeWorkspace;
         }
+        await fetchCredentials(true);
         showToast(`Failed to switch workspace: ${err.message}`, "danger");
+      } finally {
+        state.workspaceSwitchPending = false;
+        if (credentialsModalButton) credentialsModalButton.disabled = false;
+        updateWorkspaceSelectorLock();
       }
     });
 
@@ -2887,9 +2967,13 @@
         });
         renderConfigPlanPreview(res);
         await fetchConfig();
+        clearCredentials();
+        await fetchCredentials();
         showToast("Configuration recovery completed and verified", "success");
       } catch (err) {
         await fetchConfig();
+        clearCredentials();
+        await fetchCredentials();
         showToast(`Recovery failed: ${err.message}`, "danger");
       }
     });
@@ -2910,9 +2994,13 @@
         renderConfigPlanPreview(res);
         await fetchConfig();
         await fetchStatus();
+        clearCredentials();
+        await fetchCredentials();
         showToast("Configuration applied and verified", "success");
       } catch (err) {
         await fetchConfig();
+        clearCredentials();
+        await fetchCredentials();
         showToast(`Apply failed: ${err.message}`, "danger");
       } finally {
         updateWorkspaceSelectorLock(Boolean(state.activeJob && state.activeJob.status === "running" && state.activeJob.isMutation));
@@ -3107,6 +3195,7 @@
     setupActions();
 
     await initializeAuth();
+    clearCredentials();
     await fetchWorkspaces();
     await fetchStatus();
     await fetchCredentials();
