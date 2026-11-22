@@ -1650,17 +1650,17 @@ class StructuredDataCollector:
         except Exception:
             pass
 
-        def identity_service_health(service: str) -> str:
+        def identity_service_health(identity_service: str) -> str:
             if not docker_inspected:
                 return "unknown"
-            matches = [c for c in containers if c["project"] == expected_project and c["service"] == service]
-            if not matches:
+            identity_matches = [c for c in containers if c["project"] == expected_project and c["service"] == identity_service]
+            if not identity_matches:
                 return "absent"
-            if any(c["state"] == "running" and c["health"] == "unhealthy" for c in matches):
+            if any(c["state"] == "running" and c["health"] == "unhealthy" for c in identity_matches):
                 return "unhealthy"
-            if any(c["state"] == "running" and c["health"] == "healthy" for c in matches):
+            if any(c["state"] == "running" and c["health"] == "healthy" for c in identity_matches):
                 return "healthy"
-            if any(c["state"] == "running" for c in matches):
+            if any(c["state"] == "running" for c in identity_matches):
                 return "starting"
             return "stopped"
 
