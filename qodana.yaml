@@ -173,7 +173,7 @@ coverage:
 # Quality gate: fail the CI/CD pipeline if any condition is not met
 failureConditions:
   severityThresholds:
-    any: 300
+    any: 0
     critical: 5
     high: 10
   dependencyLicenses:

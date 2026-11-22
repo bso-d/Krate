@@ -6,6 +6,7 @@ Python 3 and Docker. No compiler/package downloads occur on the deployed VM.
 """
 import argparse
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -84,17 +85,18 @@ def fetch_runtime_packages(arch, directory):
 
 
 def main():
+    # This builder also runs by itself, so it selects its own CA bundle.
+    # noinspection DuplicatedCode
     def _configure_ca_bundle():
         if os.environ.get('SSL_CERT_FILE'):
             return
         try:
-            import certifi
-            ca = certifi.where()
+            ca = importlib.import_module('certifi').where()
             if os.path.isfile(ca):
                 os.environ['SSL_CERT_FILE'] = ca
                 return
         except ImportError:
-            certifi = None
+            pass
         for ca_path in (
             '/etc/ssl/cert.pem',
             '/etc/ssl/certs/ca-certificates.crt',
@@ -247,6 +249,8 @@ def main():
     print(f'Built {local_ref} ({args.arch}). Ready for the offline EPC and Krate bundles.', flush=True)
 
 
+# The isolated AST probe in check-identity.py executes this definition without imports.
+# noinspection DuplicatedCode
 def certificate_failure(error):
     """The certificate-verification failure anywhere in an exception chain (cycles stopped), else None."""
     seen = set()

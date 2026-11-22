@@ -37,6 +37,8 @@
 // certificate (Response.serverAddr/securityDetails, M0 point 4), `MAP * ~NOTFOUND` keeping
 // the browser offline, external attempts collected and failing the story. 5 PNGs in the
 // container vantage, 6 with the interstitial shot in the Mac vantage.
+// X3 keeps its own browser dependency and assertion boundary.
+// noinspection DuplicatedCode
 import { createRequire } from 'node:module';
 // The harness image installs playwright globally; ESM ignores NODE_PATH, so resolve it explicitly.
 const require = createRequire(process.env.PW_MODULES ? process.env.PW_MODULES + '/resolve-from-here.js' : import.meta.url);
@@ -70,6 +72,8 @@ const asserted = [];
 function assert(cond, what) { if (!cond) throw new Error('assert: ' + what); asserted.push(what); }
 
 // base32 (RFC 4648, no padding) -> Buffer: the enrolment state file stores the TOTP seed as base32.
+// Keep TOTP decoding in this standalone end-user story.
+// noinspection DuplicatedCode
 function base32ToBytes(s) {
   const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
   let bits = 0; let value = 0; const out = [];
@@ -109,6 +113,8 @@ async function capture(page, slug, caption) {
   });
   console.log(`${file}\t${caption}`);
 }
+// Screenshot admission is local to X3 so another gate story cannot loosen it.
+// noinspection DuplicatedCode
 async function shot(page, slug, caption) {
   // X3 rule: every story shot is taken AFTER its DOM assertions passed — a capture
   // with no pending assertion is a bug in this story, not a screenshot.
@@ -150,16 +156,22 @@ async function keycloakLogin(page, user, password, totpB32) {
   await page.click('#kc-login');
 }
 
+async function openDashboardAfterLogin(page) {
+  await page.waitForURL((u) => u.toString().startsWith(`${G}/`) && !u.toString().includes('/login'), { timeout: 30000 });
+  await page.waitForLoadState('networkidle');
+  await page.goto(DASHBOARD, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(5000);
+}
+
+// X3 must prove Grafana's own sign-in and dashboard path independently.
+// noinspection DuplicatedCode
 async function signedInDashboard(ctx, user, password, totpB32) {
   const page = await ctx.newPage();
   await page.goto(`${G}/`, { waitUntil: 'networkidle' });
   const signIn = page.getByRole('link', { name: /Krate sign-in/ });  // lab6-verified selector
   await signIn.first().click();
   await keycloakLogin(page, user, password, totpB32);
-  await page.waitForURL((u) => u.toString().startsWith(`${G}/`) && !u.toString().includes('/login'), { timeout: 30000 });
-  await page.waitForLoadState('networkidle');
-  await page.goto(DASHBOARD, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(5000);
+  await openDashboardAfterLogin(page);
   return page;
 }
 
@@ -168,7 +180,11 @@ let page = null;
 const serve = MAC ? attachServeTracker(null) : null;
 const ext = MAC ? externalAttemptsTracker(HOST) : null;
 let storySucceeded = false;
+// X3 owns its browser, network guard, manifest and failure evidence lifecycle.
+// noinspection DuplicatedCode
 try {
+  // Both screenshot stories use the same browser context settings, but remain standalone.
+  // noinspection DuplicatedCode
   const ctx = MAC ? browser : await browser.newContext({ ignoreHTTPSErrors: true, locale: 'en-US', timezoneId: 'UTC', viewport: { width: 1440, height: 900 } });
   page = MAC ? (ctx.pages()[0] || await ctx.newPage()) : await ctx.newPage();
   // Review T07/T21: the external-request guard and the served-response tracker are CONTEXT-wide and installed before the first
@@ -208,10 +224,7 @@ try {
 
   // ── shot 3: the Viewer on the Kafka overview dashboard, no Edit/New controls ──
   await keycloakLogin(page, VIEWER, VIEWER_PW, VIEWER_TOTP);
-  await page.waitForURL((u) => u.toString().startsWith(`${G}/`) && !u.toString().includes('/login'), { timeout: 30000 });
-  await page.waitForLoadState('networkidle');
-  await page.goto(DASHBOARD, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(5000);
+  await openDashboardAfterLogin(page);
   assert(page.url().startsWith(DASHBOARD), `the Viewer landed on the provisioned overview dashboard (${page.url().split(/[?#]/)[0]})`);
   // NEEDS-LIVE-VERIFICATION: the exact absence selectors for the Viewer (Grafana 12.2
   // toolbar). Candidates to confirm in the walk: [aria-label="Edit dashboard"], the

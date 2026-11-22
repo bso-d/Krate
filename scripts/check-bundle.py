@@ -62,7 +62,7 @@ def main():
     for name in ('nginx.conf', 'nginx-stream.conf'):
         if not (root / name).is_file():
             raise SystemExit('Missing proxy configuration file: ' + name)
-    for name in ('sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh', 'sso/operations.sh', 'sso/operations.py',
+    for name in ('sso/__init__.py', 'sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh', 'sso/operations.sh', 'sso/operations.py',
                  'sso/check-bundle.py', 'sso/check-offline.py',
                  'sso/preflight.py', 'sso/probe.py', 'sso/identity.py', 'sso/idp_watch.py', 'sso/kafka_broker_auth.py', 'sso/logrotate/krate-identity.conf',
                  'sso/theme/krate/login/theme.properties', 'sso/theme/krate/login/login.ftl',

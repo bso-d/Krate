@@ -398,6 +398,8 @@ def _norm(info):
 # ---------------------------------------------------------------- main
 
 def main(argv=None):
+    # Keep the standalone downloader's CA selection local to its entry point.
+    # noinspection DuplicatedCode
     def _configure_ca_bundle():
         if os.environ.get('SSL_CERT_FILE'):
             return
