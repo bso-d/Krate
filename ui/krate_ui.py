@@ -1331,6 +1331,37 @@ class StructuredDataCollector:
         self.gates_last_run: Optional[float] = None
 
     @staticmethod
+    def _install_marker_exists(ctx: OperationContext, name: str) -> bool:
+        if ctx.runtime_kind == "checkout":
+            return False
+        receipt = os.path.join(ctx.install_dir, "auth", name)
+        try:
+            return stat.S_ISREG(os.lstat(receipt).st_mode)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _package_attempt_exists(ctx: OperationContext) -> bool:
+        if ctx.runtime_kind == "checkout":
+            return False
+        receipt = os.path.join(ctx.install_dir, ".install-attempt")
+        try:
+            return stat.S_ISREG(os.lstat(receipt).st_mode)
+        except OSError:
+            return False
+
+    @classmethod
+    def _install_incomplete(cls, ctx: OperationContext) -> bool:
+        return cls._install_marker_exists(ctx, ".install-in-progress") or (
+            ctx.runtime_kind == "package_uninstalled" and cls._package_attempt_exists(ctx)
+        )
+
+    @classmethod
+    def _install_complete(cls, ctx: OperationContext) -> bool:
+        return (cls._install_marker_exists(ctx, ".install-complete")
+                and not cls._install_marker_exists(ctx, ".install-in-progress"))
+
+    @staticmethod
     def _ws_dict_from_context(ctx: OperationContext) -> Dict[str, Any]:
         return {
             "source_dir": ctx.source_dir,
@@ -1510,7 +1541,7 @@ class StructuredDataCollector:
         expected_mon_project = ctx.monitoring_project or f"krate-{variant}-monitoring"
 
         containers = []
-        cluster_state = "stopped"
+        cluster_state = "unknown"
         docker_inspected = False
         direct_ok, sg_needed = check_docker_socket_permission()
         docker_prefix = ["sg", "docker", "-c"] if sg_needed else []
@@ -1537,12 +1568,18 @@ class StructuredDataCollector:
             )
             if res.returncode == 0:
                 docker_inspected = True
-                running_brokers = 0
-                total_brokers = 0
-                for line in res.stdout.strip().split("\n"):
-                    if not line:
-                        continue
-                    parts = line.split("\t")
+                rows = [line.split("\t") for line in res.stdout.splitlines() if line]
+                # Earlier installations kept a Compose project named after the
+                # package. The fixed broker name identifies its active project
+                # before prepare has recorded KRATE_PROJECT in .env.
+                if (not env.get("KRATE_PROJECT") and not os.environ.get("KRATE_PROJECT")
+                        and ctx.cluster_project == f"krate-{variant}"):
+                    anchor = "krate-broker-92" if variant == "kraft" else "epc-broker-92"
+                    owners = {row[6] for row in rows if len(row) > 6 and row[0] == anchor
+                              and row[5] in ("", "kafka-92") and row[6]}
+                    if len(owners) == 1:
+                        expected_project = owners.pop()
+                for parts in rows:
                     name = parts[0]
                     svc_label = parts[5] if len(parts) > 5 else ""
                     proj_label = parts[6] if len(parts) > 6 else ""
@@ -1595,13 +1632,29 @@ class StructuredDataCollector:
                             "ports": ports,
                         })
 
-                        if "broker" in name or service_name.startswith("kafka-9"):
-                            total_brokers += 1
-                            if state == "running":
-                                running_brokers += 1
-
-                if running_brokers > 0:
-                    cluster_state = "running" if running_brokers == total_brokers else "degraded"
+                required = ["kafka-92", "kafka-93", "kafka-ui", "proxy"]
+                if variant == "kraft":
+                    required[2:2] = ["kafka-94", "kafka-95"]
+                core_states = []
+                for service in required:
+                    matches = [c for c in containers if c["project"] == expected_project
+                               and c["service"] == service]
+                    if any(c["state"] == "running" and c["health"] == "healthy" for c in matches):
+                        core_states.append("ready")
+                    elif any(c["state"] == "running" and c["health"] == "starting" for c in matches):
+                        core_states.append("starting")
+                    elif any(c["state"] == "running" for c in matches):
+                        core_states.append("unhealthy")
+                    else:
+                        core_states.append("stopped")
+                if all(value == "ready" for value in core_states):
+                    cluster_state = "running"
+                elif all(value in ("ready", "starting") for value in core_states):
+                    cluster_state = "starting"
+                elif any(value != "stopped" for value in core_states):
+                    cluster_state = "degraded"
+                else:
+                    cluster_state = "stopped"
         except Exception:
             pass
 
@@ -1613,17 +1666,17 @@ class StructuredDataCollector:
         except Exception:
             pass
 
-        def identity_service_health(service: str) -> str:
+        def identity_service_health(identity_service: str) -> str:
             if not docker_inspected:
                 return "unknown"
-            matches = [c for c in containers if c["project"] == expected_project and c["service"] == service]
-            if not matches:
+            identity_matches = [c for c in containers if c["project"] == expected_project and c["service"] == identity_service]
+            if not identity_matches:
                 return "absent"
-            if any(c["state"] == "running" and c["health"] == "unhealthy" for c in matches):
+            if any(c["state"] == "running" and c["health"] == "unhealthy" for c in identity_matches):
                 return "unhealthy"
-            if any(c["state"] == "running" and c["health"] == "healthy" for c in matches):
+            if any(c["state"] == "running" and c["health"] == "healthy" for c in identity_matches):
                 return "healthy"
-            if any(c["state"] == "running" for c in matches):
+            if any(c["state"] == "running" for c in identity_matches):
                 return "starting"
             return "stopped"
 
@@ -1654,6 +1707,9 @@ class StructuredDataCollector:
             "runtime_kind": ctx.runtime_kind,
             "is_package": ctx.is_package,
             "is_installed": ctx.is_installed,
+            "install_complete": self._install_complete(ctx),
+            "install_incomplete": self._install_incomplete(ctx),
+            "install_attempt_incomplete": ctx.is_installed and self._package_attempt_exists(ctx),
             "krate_home": ctx.install_dir,
             "config_revision": ctx.config_revision,
             "mutation_active": mut_active,
@@ -1818,20 +1874,71 @@ class StructuredDataCollector:
             })
 
         # Check Package Installation status when running from an extracted bundle
-        if ctx.is_package or ctx.runtime_kind == "package_uninstalled":
-            if ctx.is_installed and ctx.effective_dir:
+        if ctx.runtime_kind in ("package_uninstalled", "installed"):
+            if ctx.is_installed and ctx.effective_dir and self._install_complete(ctx):
                 checks.append({
                     "name": "Package Installation",
                     "status": "ok",
-                    "message": f"Installed in {ctx.install_dir}",
+                    "message": f"Install completed in {ctx.install_dir}",
                     "fix_action": None,
                 })
+            elif self._install_incomplete(ctx):
+                checks.append({
+                    "name": "Package Installation",
+                    "status": "error",
+                    "message": f"Install in {ctx.install_dir} was interrupted or failed. Retry Install after fixing the job error.",
+                    "fix_action": "install",
+                })
+                problems += 1
+            elif ctx.is_installed:
+                checks.append({
+                    "name": "Package Installation",
+                    "status": "warn",
+                    "message": f"Release files exist in {ctx.install_dir}; older installations have no completion record. Check live health before use.",
+                    "fix_action": None,
+                })
+                problems += 1
             else:
                 checks.append({
                     "name": "Package Installation",
                     "status": "warn",
                     "message": f"Bundle not installed into {ctx.install_dir} yet (run krate install before start)",
                     "fix_action": "install",
+                })
+                problems += 1
+            if ctx.is_installed and self._package_attempt_exists(ctx):
+                checks.append({
+                    "name": "Package Upgrade Attempt",
+                    "status": "error",
+                    "message": "A package upgrade failed or was interrupted. The existing installation remains available; inspect the job error and retry Install.",
+                    "fix_action": "install",
+                })
+                problems += 1
+
+        if ctx.edition == "epc":
+            data_dir = "/data"
+            for env_file in (ctx.env_path, os.path.join(ctx.source_dir, ".env"),
+                             os.path.join(ctx.source_dir, ".env.template")):
+                if not env_file or not os.path.isfile(env_file):
+                    continue
+                with open(env_file, "r", encoding="utf-8", errors="replace") as handle:
+                    for line in handle:
+                        if line.startswith("KAFKA_DATA_DIR="):
+                            data_dir = line.partition("=")[2].strip().strip("\"'") or "/data"
+                break
+            if os.path.isdir(data_dir):
+                checks.append({
+                    "name": "EPC Data Directory",
+                    "status": "ok",
+                    "message": f"{data_dir} exists",
+                    "fix_action": None,
+                })
+            else:
+                checks.append({
+                    "name": "EPC Data Directory",
+                    "status": "error",
+                    "message": f"{data_dir} does not exist. Mount a data disk there before Install; Studio cannot set this path until the package is installed.",
+                    "fix_action": None,
                 })
                 problems += 1
 
@@ -2065,9 +2172,13 @@ class StructuredDataCollector:
         """Read the CLI's secret-free Kafka security status for the active workspace."""
         ctx = context or self.ws_mgr.get_context()
         krate_bin, ws_path = ctx.cli_for_action("kafka")
+        cmd = [krate_bin, "kafka", "auth", "status"]
+        _, sg_needed = check_docker_socket_permission()
+        if sg_needed:
+            cmd = ["sg", "docker", "-c", shlex.join(cmd)]
         try:
             res = subprocess.run(
-                [krate_bin, "kafka", "auth", "status"],
+                cmd,
                 cwd=ws_path,
                 env=ctx.subprocess_env(),
                 capture_output=True,

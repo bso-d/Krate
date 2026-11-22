@@ -119,6 +119,21 @@ ALLOWED_BLOCKS = [re.compile(pattern, re.MULTILINE) for pattern in (
     r'docker_install_(rpm|deb) ',
     r'systemctl (enable|start) docker',
 )]
+EPC_DATA_PREFLIGHT_PARITY = '''
+  # ── EPC data directory preflight ──
+  # EPC bind mounts broker data from a host path. Check it before copying any
+  # release files, so an absent disk cannot leave a partial install behind.
+  local data_env_file="$site_dir/.env" data_dir
+  [[ -f "$data_env_file" ]] || data_env_file="$ENV_TEMPLATE"
+  data_dir="$(grep -E '^KAFKA_DATA_DIR=' "$data_env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)"
+  data_dir="${data_dir:-/data}"
+  if [[ -d "$data_dir" ]]; then
+    ok "EPC data directory $data_dir exists"
+  else
+    err "EPC data directory $data_dir does not exist — mount the data disk at /data before Install (or set KAFKA_DATA_DIR in a package .env before starting Studio)"
+    problems=$((problems + 1))
+  fi
+'''.strip('\n')
 
 
 class Checks:
@@ -4233,7 +4248,8 @@ def check_parity(checks):
         changed = [line[1:] for line in body.splitlines() if line[:1] in '+-']
         text = '\n'.join(changed)
         allowed = (not FORBIDDEN_IN_HUNK.search(text)
-                   and (all(any(pattern.search(line) for pattern in ALLOWED_LINES) for line in changed)
+                   and (text == EPC_DATA_PREFLIGHT_PARITY
+                        or all(any(pattern.search(line) for pattern in ALLOWED_LINES) for line in changed)
                         or any(pattern.search(text) for pattern in ALLOWED_BLOCKS)))
         first = next((line for line in changed if line.strip()), '')
         checks.expect(allowed, f'kraft/epc parity: unexplained hunk {header} ({first.strip()[:60]!r})')
@@ -6344,8 +6360,15 @@ deploy_release ""
             (home / name).parent.mkdir(parents=True, exist_ok=True)
             (home / name).write_text(text)
             (home / name).chmod(0o600)
+        old_receipt = home / 'auth/.install-complete'
+        old_receipt.write_text('previous successful release\n')
+        old_receipt.chmod(0o600)
         result = run_bash(script, package, home)
         e(result.returncode == 0, f'the extraction must succeed; got {result.returncode}: {result.stderr.strip()[:200]}')
+        pending_receipt = home / 'auth/.install-in-progress'
+        e(not old_receipt.exists(), 'copying release files must invalidate an old completion receipt')
+        e(pending_receipt.is_file() and not pending_receipt.is_symlink() and mode(pending_receipt) == 0o600,
+          'copying release files must leave a private in-progress receipt until healthy completion')
         for name in ('krate', 'docker-compose.yml', '.env.template', 'nginx.conf', 'nginx-stream.conf', 'monitoring/docker-compose.yml', 'monitoring/.env.template', 'sso/identity.py'):
             e((home / name).is_file() and mode(home / name) & 0o044 == 0o044, f'release file {name} must be group/world-readable after a umask-077 install')
         for name in ('auth', 'auth/ui', 'auth/keycloak', 'auth/keycloak/truststores'):
@@ -8471,7 +8494,7 @@ def check_mfa_docs(checks):
 
 
 def check_health(checks):
-    """N4: health names the Compose service of a crash-looping container (RestartCount, Restarting) and survives a vanished one."""
+    """N4: health names crash-looping services and refuses missing or stopped core services."""
     e = checks.expect
     if bash_binary() is None:
         return
@@ -8498,6 +8521,65 @@ cmd_health --no-wait
       f'health: a container restarted by its policy (sampled while starting) and a restarting one are named by Compose service; got {out.strip()[-300:]}')
     e('gone' in out and 'kafka-92' not in out.split('Not healthy:')[-1],
       f'health: a container that vanished is reported as gone without stopping the report, and a healthy one is not blamed; got {out.strip()[-300:]}')
+
+    # Compose ps -q hides stopped containers. Exercise each shipped edition's
+    # core-service list with that behavior; only the Docker boundary is stubbed.
+    for edition in EDITIONS:
+        core_script = BASH_STUBS + bash_functions(ROOT / edition / 'krate', 'health_pending_count', 'cmd_health') + r'''
+KRATE_VARIANT="$1"; SCENARIO="$2"
+require_compose() { :; }; require_compose_file() { :; }
+if [[ "$KRATE_VARIANT" == kraft ]]; then
+  services=(kafka-92 kafka-93 kafka-94 kafka-95 kafka-ui proxy)
+else
+  services=(kafka-92 kafka-93 kafka-ui proxy)
+fi
+compose_cmd() {
+  [[ "$1" == ps ]] || return 2
+  if [[ "$2" == -q ]]; then
+    local svc
+    for svc in "${services[@]}"; do
+      [[ "$SCENARIO" == stopped-proxy && "$svc" == proxy ]] && continue
+      [[ "$SCENARIO" == missing-ui && "$svc" == kafka-ui ]] && continue
+      [[ "$SCENARIO" == missing-last-broker && "$svc" == kafka-95 ]] && continue
+      printf '%s\n' "$svc"
+    done
+  elif [[ "$2" == -a && "$3" == -q ]]; then
+    [[ "$SCENARIO" == missing-ui && "$4" == kafka-ui ]] && return 0
+    [[ "$SCENARIO" == missing-last-broker && "$4" == kafka-95 ]] && return 0
+    printf '%s\n' "$4"
+  else
+    return 2
+  fi
+}
+docker() {
+  [[ "$1" == ps ]] && return 0
+  [[ "$1" == inspect ]] || return 2
+  local cid="${*: -1}" format="$2" status=running
+  [[ "$format" != --format ]] || format="$3"
+  [[ "$SCENARIO" != stopped-proxy || "$cid" != proxy ]] || status=exited
+  if [[ "$format" == *'|'* ]]; then
+    printf '/%s|%s|healthy|false|0|%s\n' "$cid" "$status" "$cid"
+  elif [[ "$format" == *State.Health* ]]; then
+    echo healthy
+  else
+    echo "$status"
+  fi
+}
+cmd_health --no-wait
+'''
+        scenarios = ['healthy', 'missing-ui', 'stopped-proxy']
+        if edition == 'kraft':
+            scenarios.append('missing-last-broker')
+        for scenario in scenarios:
+            result = run_bash(core_script, edition, scenario)
+            output = result.stdout + result.stderr
+            if scenario == 'healthy':
+                e(result.returncode == 0 and 'All services healthy' in output,
+                  f'health: {edition} all core services ready must pass; got rc={result.returncode}: {output[-300:]}')
+            else:
+                expected = 'exited' if scenario == 'stopped-proxy' else 'missing'
+                e(result.returncode == 1 and expected in output and 'All services healthy' not in output,
+                  f'health: {edition} {scenario} must fail and name {expected}; got rc={result.returncode}: {output[-300:]}')
 
 
 def check_install_lock(checks):
