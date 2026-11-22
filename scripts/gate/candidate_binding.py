@@ -49,8 +49,8 @@ import subprocess
 from typing import Dict, Iterable, List, Optional, Tuple
 
 EDITIONS = ('epc', 'kraft')
-# Makefile build_one: cp sso/configure.py ... sso/identity.py "$bundle_dir/sso/"
-SSO_FILES = ('configure.py', 'example.json', 'configure-dual.py', 'dual-example.json',
+# Makefile build_one: cp sso/__init__.py ... sso/kafka_broker_auth.py "$bundle_dir/sso/"
+SSO_FILES = ('__init__.py', 'configure.py', 'example.json', 'configure-dual.py', 'dual-example.json',
              'activate.sh', 'operations.sh', 'operations.py', 'preflight.py', 'probe.py', 'identity.py', 'idp_watch.py', 'kafka_broker_auth.py')
 # Makefile build_one: cp sso/guides/... "$bundle_dir/docs/"
 GUIDES = ('identity-foundation.md', 'dual-login.md', 'pingfederate-sso.md',
