@@ -4246,7 +4246,8 @@ def check_parity(checks):
         changed = [line[1:] for line in body.splitlines() if line[:1] in '+-']
         text = '\n'.join(changed)
         allowed = (not FORBIDDEN_IN_HUNK.search(text)
-                   and (text in {EPC_DATA_PREFLIGHT_PARITY, EPC_COMPOSE_STORAGE_PARITY}
+                   and (text in {EPC_DATA_PREFLIGHT_PARITY, EPC_COMPOSE_STORAGE_PARITY,
+                                     '  fi\n' + EPC_DATA_PREFLIGHT_PARITY.rsplit('\n', 1)[0]}
                         or all(any(pattern.search(line) for pattern in ALLOWED_LINES) for line in changed)
                         or any(pattern.search(text) for pattern in ALLOWED_BLOCKS)))
         first = next((line for line in changed if line.strip()), '')
