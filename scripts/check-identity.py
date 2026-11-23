@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -4562,7 +4563,7 @@ def check_network_refusals(checks, edition, site, auth_mode, rendered):
 
 
 def check_renewal_warning(checks, edition, site, rendered):
-    """preflight warns 30 days before the database certificate expires and refuses within a day."""
+    """Preflight warns 30 days before database certificate expiry and refuses within a day."""
     tls = site / 'auth/keycloak/db-tls'
     identity.renew_server(tls, days=10)
     result = preflight(site, 'identity', rendered)
@@ -4570,7 +4571,23 @@ def check_renewal_warning(checks, edition, site, rendered):
                   and 'expires within 30 days' in result.stderr,
                   f'{edition}: preflight must pass with a warning naming krate identity renew-db-tls for a certificate with 10 days left;'
                   f' got exit {result.returncode}: {result.stderr.strip()}')
-    identity.renew_server(tls, days=0)
+    # A one-day certificate enters the refusal window at the next clock second.
+    # OpenSSL 4 rejects -days 0, so wait for the same check used by preflight.
+    identity.renew_server(tls, days=1)
+    cert = tls / 'server.crt'
+    deadline = time.monotonic() + 3
+    while True:
+        horizon = subprocess.run(['openssl', 'x509', '-in', str(cert), '-checkend', '86400', '-noout'],
+                                 capture_output=True, text=True)
+        if horizon.returncode:
+            if not checks.expect(0 < identity.seconds_left(cert) < 86400,
+                                 f'{edition}: the one-day certificate must be valid and within the refusal window'):
+                return
+            break
+        if time.monotonic() >= deadline:
+            checks.expect(False, f'{edition}: one-day certificate did not enter the refusal window within 3 seconds')
+            return
+        time.sleep(0.1)
     result = preflight(site, 'identity', rendered)
     checks.expect(result.returncode == 1 and 'expires within a day' in result.stderr and 'renew-db-tls' in result.stderr,
                   f'{edition}: preflight must refuse a certificate expiring today; got exit {result.returncode}: {result.stderr.strip()}')

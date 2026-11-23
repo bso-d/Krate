@@ -106,7 +106,7 @@ help:
 >  VARIANT=kraft|epc       Which cluster the monitor-* targets act on
 >EOF
 
-.PHONY: offline-check identity-check studio-operator-check
+.PHONY: offline-check identity-check studio-operator-check source-rpm-check
 .PHONY: sso-config
 .PHONY: dual-config kafbat-ui ui
 
@@ -122,7 +122,7 @@ dual-config:
 sso-config:
 >python3 sso/configure.py --app "$(SSO_APP)" --settings "$(SSO_SETTINGS)" --output "$(SSO_OUTPUT)"
 
-check: syntax lint compose-check offline-check identity-check studio-operator-check
+check: syntax lint compose-check offline-check identity-check studio-operator-check source-rpm-check
 
 offline-check:
 >python3 scripts/check-offline.py
@@ -133,6 +133,9 @@ identity-check:
 
 studio-operator-check:
 >python3 -B scripts/check-studio-operator.py
+
+source-rpm-check:
+>python3 -B scripts/check-source-rpm.py
 
 offline-smoke: offline-check
 >bash

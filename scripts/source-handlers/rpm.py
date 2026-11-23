@@ -3,9 +3,9 @@ source repositories.
 
 The rpm database is read without running the image's software: an SQLite rpmdb (RHEL 9)
 is parsed here; a Berkeley DB rpmdb (RHEL 8) is queried with the image's own `rpm`
-binary in a network-less throwaway container. Each SRPM is downloaded from
-cdn-ubi.redhat.com and checked against the SHA-256 in that repository's repodata
-(primary.xml), which repomd.xml references by checksum."""
+binary in a network-less throwaway container. SRPMs are verified against
+checksummed UBI repodata, a Red Hat advisory for a known unindexed build, or
+the content-addressed layers of a Red Hat source container."""
 from __future__ import annotations
 
 import gzip
@@ -21,6 +21,14 @@ from common import (Component, Unresolved, VerificationError, aggregate_expressi
                     sha256_bytes, sha256_file, slug)
 
 UBI = 'https://cdn-ubi.redhat.com/content/public/ubi/dist'
+# Only vendor-published checksums can authorize a file no longer listed in repodata.
+RED_HAT_ARCHIVED_SRPM = {
+    'java-21-openjdk-21.0.12.1.1-1.2.el9.src.rpm': (
+        '6a30b328d38f58f098f2f4f49d0257c226d88011fd1461790f55b8fc65b14741',
+        71434410,
+        'RHSA-2026:55787',
+    ),
+}
 TAGS = {1000: 'name', 1001: 'version', 1002: 'release', 1003: 'epoch', 1011: 'vendor',
         1014: 'license', 1022: 'arch', 1044: 'sourcerpm'}
 QF = '%{NAME}\\t%{EPOCH}\\t%{VERSION}\\t%{RELEASE}\\t%{ARCH}\\t%{LICENSE}\\t%{SOURCERPM}\\t%{VENDOR}\\n'
@@ -186,26 +194,49 @@ def find_srpm(cache, srpm, majors, basearches):
     return None, None
 
 
+def archived_srpm(comp, cache):
+    srpm = comp.fetch['srpm']
+    pin = RED_HAT_ARCHIVED_SRPM.get(srpm)
+    if not pin or '9' not in comp.fetch['majors'] or set(comp.fetch['vendors']) != {'Red Hat, Inc.'}:
+        return None
+    arches = sorted(comp.fetch['basearch'] & {'aarch64', 'x86_64'})
+    if not arches:
+        return None
+    digest, size, advisory = pin
+    urls = [f'{UBI}/ubi9/9/{arch}/appstream/source/SRPMS/Packages/{srpm[0]}/{srpm}' for arch in arches]
+    path, url = cache.fetch(urls, 'sha256', digest, size=size)
+    return path, url, f'SHA-256 published by Red Hat at https://access.redhat.com/errata/{advisory}'
+
+
 def fetch(comp, cache, _out_dir, rel_root):
     srpm = comp.fetch['srpm']
     if srpm.endswith('.nosrc.rpm') or not srpm.endswith('.src.rpm'):
         raise Unresolved(f'package records no source RPM ({srpm}); vendor {comp.fetch["vendors"]}')
+    relative = f'{rel_root}/rpm/{slug(comp.name)}/{srpm}'
     hit, where = find_srpm(cache, srpm, comp.fetch['majors'], comp.fetch['basearch'])
-    if not hit:
+    if hit:
+        algo, digest, size, url = hit
+        path, url = cache.fetch([url], algo, digest, size=size)
+        proof = f'{algo} from UBI {where[0]} {where[2]} source repodata (primary.xml, checksum-pinned by repomd.xml)'
+        return [(path, relative, url, proof)]
+    archive_failure = ''
+    try:
+        got = archived_srpm(comp, cache)
+    except Unresolved as exc:
+        got = None
+        archive_failure = f'; direct vendor archive: {exc}'
+    if got is None:
         got = srpm_from_source_container(cache, srpm, comp.fetch['majors'], comp.fetch.get('built_before'),
                                          comp.fetch.get('preferred') or ())
-        if got:
-            path, url, how = got
-            return [(path, f'{rel_root}/rpm/{slug(comp.name)}/{srpm}', url, how)]
-        vend = ', '.join(comp.fetch['vendors'])
-        raise Unresolved(f'{srpm} is not in the public UBI {"/".join(sorted(m for m in comp.fetch["majors"] if m))} '
-                         f'source repositories (baseos/appstream/codeready-builder, newest builds only) nor in the '
-                         f'Red Hat UBI source container images searched (ubi-micro/ubi-minimal/ubi built before the '
-                         f'image); vendor: {vend}')
-    algo, digest, size, url = hit
-    path, url = cache.fetch([url], algo, digest, size=size)
-    return [(path, f'{rel_root}/rpm/{slug(comp.name)}/{srpm}', url,
-             f'{algo} from UBI {where[0]} {where[2]} source repodata (primary.xml, checksum-pinned by repomd.xml)')]
+    if got is not None:
+        path, url, proof = got
+        return [(path, relative, url, proof)]
+    vend = ', '.join(sorted(comp.fetch['vendors']))
+    majors = '/'.join(sorted(m for m in comp.fetch['majors'] if m))
+    raise Unresolved(f'{srpm} is not in the public UBI {majors} source repositories '
+                     '(baseos/appstream/codeready-builder, newest builds only) nor in the '
+                     'Red Hat UBI source container images searched (ubi-micro/ubi-minimal/ubi built before the '
+                     f'image); vendor: {vend}{archive_failure}')
 
 
 # ---------------------------------------------------------------- source containers
