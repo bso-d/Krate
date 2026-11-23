@@ -14,6 +14,8 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
+from dataclasses import dataclass
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlsplit
@@ -23,21 +25,30 @@ STUDIO = [sys.executable, '-B', str(ROOT / 'ui/krate_ui.py'), '--workspace', str
 PROBE = [sys.executable, '-B', str(ROOT / 'sso/check-public-origin.py')]
 
 
-class StudioOperatorChecks(unittest.TestCase):
-    def setUp(self):
-        fixture = tempfile.TemporaryDirectory(dir='/tmp' if os.geteuid() == 0 else None)
-        self.addCleanup(fixture.cleanup)
-        directory = Path(fixture.name)
-        self.runtime = directory / 'runtime'
-        self.runtime.mkdir(mode=0o700)
-        self.command = STUDIO
-        self.child_options = {}
-        self.operator_uid = os.geteuid()
-        if self.operator_uid == 0:
+@dataclass(frozen=True)
+class StudioFixture:
+    runtime: Path
+    command: list
+    child_options: dict
+    operator_uid: int
+    environment: dict
+
+
+@contextmanager
+def operator_fixture():
+    root = os.geteuid() == 0
+    with tempfile.TemporaryDirectory(dir='/tmp' if root else None) as path:
+        directory = Path(path)
+        runtime = directory / 'runtime'
+        runtime.mkdir(mode=0o700)
+        command = STUDIO
+        child_options = {}
+        operator_uid = os.geteuid()
+        if root:
             operator = pwd.getpwnam('nobody')
-            self.assertNotEqual(operator.pw_uid, 0)
-            self.assertNotEqual(operator.pw_gid, 0)
-            self.operator_uid = operator.pw_uid
+            if not operator.pw_uid or not operator.pw_gid:
+                raise RuntimeError('Studio fixture requires an unprivileged nobody account')
+            operator_uid = operator.pw_uid
             # Root checkouts may be inaccessible to the operator. Stage only
             # the production entrypoint and workspace sentinel in this fixture.
             directory.chmod(0o755)
@@ -48,84 +59,90 @@ class StudioOperatorChecks(unittest.TestCase):
             ui = directory / 'krate_ui.py'
             shutil.copyfile(ROOT / 'ui/krate_ui.py', ui)
             ui.chmod(0o644)
-            os.chown(self.runtime, operator.pw_uid, operator.pw_gid)
-            self.command = [sys.executable, '-B', str(ui), '--workspace', str(workspace)]
-            self.child_options = dict(user=operator.pw_uid, group=operator.pw_gid, extra_groups=[], cwd=directory)
-        self.environment = dict(os.environ, RUNTIME_DIRECTORY=str(self.runtime),
-                                HOME=str(self.runtime), KRATE_UI_HOST='127.0.0.1')
+            os.chown(runtime, operator.pw_uid, operator.pw_gid)
+            command = [sys.executable, '-B', str(ui), '--workspace', str(workspace)]
+            child_options = dict(user=operator.pw_uid, group=operator.pw_gid, extra_groups=[], cwd=directory)
+        environment = dict(os.environ, RUNTIME_DIRECTORY=str(runtime), HOME=str(runtime), KRATE_UI_HOST='127.0.0.1')
+        yield StudioFixture(runtime, command, child_options, operator_uid, environment)
 
+
+class StudioOperatorChecks(unittest.TestCase):
     def test_managed_studio_rotates_token_without_logging_it(self):
-        env = dict(self.environment, KRATE_UI_BOOTSTRAP_TOKEN='do-not-reuse')
-        command = [*self.command, '--managed', '--host', '127.0.0.1', '--port', '0']
+        with operator_fixture() as fixture:
+            env = dict(fixture.environment, KRATE_UI_BOOTSTRAP_TOKEN='do-not-reuse')
+            command = [*fixture.command, '--managed', '--host', '127.0.0.1', '--port', '0']
 
-        def launch():
-            url_file = self.runtime / 'access-url'
-            previous = url_file.read_text() if url_file.exists() else ''
-            process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       text=True, **self.child_options)
-            try:
-                deadline = time.monotonic() + 15
-                while time.monotonic() < deadline:
-                    if process.poll() is not None:
-                        self.fail(process.communicate()[1])
-                    if url_file.exists() and url_file.read_text() != previous:
-                        break
-                    time.sleep(0.03)
-                else:
-                    self.fail('Studio did not publish a fresh access URL')
-                self.assertEqual(stat.S_IMODE(url_file.stat().st_mode), 0o600)
-                self.assertEqual(url_file.stat().st_uid, self.operator_uid)
-                url = url_file.read_text().strip()
-                self.assertRegex(url, r'^http://127\.0\.0\.1:[1-9][0-9]*/\?token=.{32,}$')
-                self.assertNotIn('do-not-reuse', url)
-                parsed = urlsplit(url)
-                conn = HTTPConnection('127.0.0.1', parsed.port, timeout=3)
+            def launch():
+                url_file = fixture.runtime / 'access-url'
+                previous = url_file.read_text() if url_file.exists() else ''
+                process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           text=True, **fixture.child_options)
                 try:
-                    for token, status in [('do-not-reuse', 403), (parsed.query.split('=', 1)[1], 200)]:
-                        conn.request('POST', '/api/v1/auth/exchange', json.dumps({'token': token}),
-                                     {'Content-Type': 'application/json'})
-                        response = conn.getresponse()
-                        self.assertEqual(response.status, status)
-                        response.read()
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        if process.poll() is not None:
+                            self.fail(process.communicate()[1])
+                        if url_file.exists() and url_file.read_text() != previous:
+                            break
+                        time.sleep(0.03)
+                    else:
+                        self.fail('Studio did not publish a fresh access URL')
+                    self.assertEqual(stat.S_IMODE(url_file.stat().st_mode), 0o600)
+                    self.assertEqual(url_file.stat().st_uid, fixture.operator_uid)
+                    url = url_file.read_text().strip()
+                    self.assertRegex(url, r'^http://127\.0\.0\.1:[1-9][0-9]*/\?token=.{32,}$')
+                    self.assertNotIn('do-not-reuse', url)
+                    parsed = urlsplit(url)
+                    conn = HTTPConnection('127.0.0.1', parsed.port, timeout=3)
+                    try:
+                        for token, status in [('do-not-reuse', 403), (parsed.query.split('=', 1)[1], 200)]:
+                            conn.request('POST', '/api/v1/auth/exchange', json.dumps({'token': token}),
+                                         {'Content-Type': 'application/json'})
+                            response = conn.getresponse()
+                            self.assertEqual(response.status, status)
+                            response.read()
+                    finally:
+                        conn.close()
                 finally:
-                    conn.close()
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                out, err = process.communicate(timeout=5)
-            self.assertIn('Access URL file:', out)
-            self.assertNotIn(url.split('token=', 1)[1], out + err)
-            return url
+                    if process.poll() is None:
+                        process.terminate()
+                    out, err = process.communicate(timeout=5)
+                self.assertIn('Access URL file:', out)
+                self.assertNotIn(url.split('token=', 1)[1], out + err)
+                return url
 
-        first = launch()
-        second = launch()
-        self.assertNotEqual(first.split('token=')[1], second.split('token=')[1])
+            first = launch()
+            second = launch()
+            self.assertNotEqual(first.split('token=')[1], second.split('token=')[1])
 
     def test_managed_studio_refuses_insecure_runtime_directory(self):
-        self.runtime.chmod(0o755)
-        result = subprocess.run([*self.command, '--managed'], env=self.environment, capture_output=True,
-                                text=True, timeout=10, **self.child_options)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('operator-owned and private', result.stderr)
+        with operator_fixture() as fixture:
+            fixture.runtime.chmod(0o755)
+            result = subprocess.run([*fixture.command, '--managed'], env=fixture.environment, capture_output=True,
+                                    text=True, timeout=10, **fixture.child_options)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('operator-owned and private', result.stderr)
 
     @unittest.skipUnless(os.geteuid() == 0, 'requires an actual root process')
     def test_managed_studio_refuses_root(self):
-        result = subprocess.run([*STUDIO, '--managed', '--host', '127.0.0.1'],
-                                env=self.environment, capture_output=True, text=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('must run as a non-root operator', result.stderr)
-        self.assertFalse((self.runtime / 'access-url').exists())
+        with operator_fixture() as fixture:
+            result = subprocess.run([*STUDIO, '--managed', '--host', '127.0.0.1'],
+                                    env=fixture.environment, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('must run as a non-root operator', result.stderr)
+            self.assertFalse((fixture.runtime / 'access-url').exists())
 
     def test_managed_studio_refuses_secret_and_remote_bind(self):
-        for args, expected in [
-            (['--host', '0.0.0.0'], 'loopback'),
-            (['--token', 'disallowed'], 'token'),
-        ]:
-            result = subprocess.run([*self.command, '--managed', *args], env=self.environment,
-                                    capture_output=True, text=True, timeout=10, **self.child_options)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn(expected, result.stderr.lower())
-            self.assertNotIn('disallowed', result.stderr)
+        with operator_fixture() as fixture:
+            for args, expected in [
+                (['--host', '0.0.0.0'], 'loopback'),
+                (['--token', 'disallowed'], 'token'),
+            ]:
+                result = subprocess.run([*fixture.command, '--managed', *args], env=fixture.environment,
+                                        capture_output=True, text=True, timeout=10, **fixture.child_options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr.lower())
+                self.assertNotIn('disallowed', result.stderr)
 
 
 class CertificatePairChecks(unittest.TestCase):
