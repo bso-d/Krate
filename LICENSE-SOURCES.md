@@ -60,7 +60,7 @@ as copyleft.
 | --- | --- | --- |
 | Debian packages (`/var/lib/dpkg/status`, distroless `status.d`), including `Built-Using` | `.dsc`, orig and Debian tarballs of the exact source version | SHA-1 file ids on snapshot.debian.org and the `.dsc` `Checksums-Sha256` |
 | Alpine packages (`/lib/apk/db/installed`) | the `aports` directory at the package's recorded build commit, plus every distfile | git blob ids of that commit (GitLab or `alpinelinux/aports` mirror), APKBUILD `sha512sums` |
-| RPM packages (Red Hat UBI images: Keycloak, Confluent) | the exact `.src.rpm`, from Red Hat's public UBI source repositories or, for builds those repositories no longer carry, from Red Hat's UBI source container images (`<ubi>:<tag>-source`) | SHA-256 in the repository's `primary.xml`; or the source-container layer digest from the registry manifest plus the SRPM's content-addressed blob name |
+| RPM packages (Red Hat UBI images: Keycloak, Confluent) | the exact `.src.rpm`, from Red Hat's public UBI source repositories, a directly downloadable vendor-checksummed SRPM no longer in repodata, or Red Hat's UBI source container images (`<ubi>:<tag>-source`) | SHA-256 in the repository's `primary.xml`; a Red Hat advisory's SHA-256; or the source-container layer digest from the registry manifest plus the SRPM's content-addressed blob name |
 | Java libraries (JAR files, including Spring Boot nested JARs) | `-sources.jar` and POM of the exact version | the repository's published checksum; the shipped JAR is compared with the published binary |
 | Go binaries (`go version -m`) | module zips of copyleft modules (for example the MPL-2.0 HashiCorp modules) | `go mod download` against sum.golang.org, and the `h1:` hash in the binary |
 | Grafana and Loki (AGPL-3.0) | complete tree of the commit the image was built from | git commit id |
@@ -74,7 +74,10 @@ as copyleft.
 The Red Hat OpenJDK in Keycloak is an RPM; its source is the `java-21-openjdk` SRPM.
 KRaft and EPC offline packages also copy that pinned image's OpenJDK runtime into
 `kafka-oauth-client/jre/` for host credential commands, including its `legal/`
-notices. The same source-inventory entry covers this second copy.
+notices. The same source-inventory entry covers this second copy. Red Hat’s AppStream index
+no longer lists the older OpenJDK SRPM for Keycloak 26.8.0, but the file remains
+available directly on its CDN. The collector verifies the exact file against
+[RHSA-2026:55787](https://access.redhat.com/errata/RHSA-2026:55787).
 
 ## UNRESOLVED components
 
