@@ -3436,7 +3436,12 @@ ensure_data_dirs() (
       || die "EPC broker parent is not on the verified filesystem: $base/krate"
     if [[ ! -d "$d" ]]; then
       info "Creating broker data directory $base/$d"
-      "${sudo_cmd[@]}" mkdir -p "$d" || die "Could not create $base/$d — create it manually and re-run."
+      # Studio's umask protects its own state; new broker paths still need
+      # their ordinary traversal modes. Do not chmod an existing data tree.
+      if [[ ! -d krate ]]; then
+        "${sudo_cmd[@]}" mkdir -m 0755 -- krate || die "Could not create $base/krate — create it manually and re-run."
+      fi
+      "${sudo_cmd[@]}" mkdir -m 0755 -- "$d" || die "Could not create $base/$d — create it manually and re-run."
     fi
     [[ "$(bash "$SCRIPT_DIR/storage-guard.sh" filesystem "$d")" == "$base_device" ]] \
       || die "EPC broker path is not on the verified filesystem: $base/$d"

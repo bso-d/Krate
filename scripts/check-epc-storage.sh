@@ -157,3 +157,54 @@ if bash "$restart_driver" old_path "$trace" --no-deps || [[ -s "$trace" ]]; then
   failure 'Compose option could remove the service selector from restart'
 fi
 printf '%s\n' 'PASS EPC restart: Compose option cannot restart unverified brokers'
+
+# Fresh Studio processes can have umask 077. Verify the real host setup
+# routine creates traversable new paths without relaxing existing paths.
+permission_driver="$working/permission-driver.sh"
+{
+  cat <<'DRIVER'
+set -euo pipefail
+umask 077
+info() { :; }
+warn() { :; }
+ok() { :; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+epc_require_storage() { :; }
+env_value_file() {
+  case "$2" in KAFKA_DATA_DIR) printf '%s\n' "$data_base" ;; KAFKA_DATA_FS_UUID) printf 'uuid\n' ;; esac
+}
+env_value() {
+  case "$1" in KAFKA_UID) id -u ;; KAFKA_GID) id -g ;; esac
+}
+sudo() { "$@"; }
+stat() { printf '%s:%s\n' "$(id -u)" "$(id -g)"; }
+docker() { printf 'name=seccomp\n'; }
+bash() {
+  [[ "$1" == */storage-guard.sh && ( "$2" == anchor || "$2" == filesystem ) ]] || exit 2
+  printf '8:17\n'
+}
+data_base="$1"
+SCRIPT_DIR=/fake ENV_FILE=/nonexistent
+DRIVER
+  sed -n '/^ensure_data_dirs() ($/,/^)$/{p;}' "$root/epc/krate"
+  printf '%s\n' 'ensure_data_dirs'
+} > "$permission_driver"
+mkdir "$working/fresh" "$working/existing"
+mkdir "$working/existing/krate" "$working/existing/krate/broker-92"
+chmod 0751 "$working/existing/krate" "$working/existing/krate/broker-92"
+bash "$permission_driver" "$working/fresh"
+bash "$permission_driver" "$working/existing"
+python3 - "$working" <<'PY'
+from pathlib import Path
+import stat
+import sys
+base = Path(sys.argv[1])
+for rel, expected in (
+    ('fresh/krate', 0o755), ('fresh/krate/broker-92', 0o755), ('fresh/krate/broker-93', 0o755),
+    ('existing/krate', 0o751), ('existing/krate/broker-92', 0o751), ('existing/krate/broker-93', 0o755),
+):
+    mode = stat.S_IMODE((base / rel).stat().st_mode)
+    if mode != expected:
+        sys.exit(f'{rel}: expected {expected:04o}, got {mode:04o}')
+PY
+printf '%s\n' 'PASS EPC data: explicit fresh path modes under umask 077; keep existing modes'
