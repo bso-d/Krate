@@ -23,6 +23,7 @@ def verify(configured_url, ca_file=None):
     expected_issuer = origin + issuer_path
     authority = target.netloc.rsplit(':', 1)[0] if target.port == 443 else target.netloc
     context = ssl.create_default_context(cafile=ca_file)
+    context.hostname_checks_common_name = False
     connection = http.client.HTTPSConnection(host, target.port or 443, context=context, timeout=10)
     try:
         # Explicit authority matches the installed browser-facing origin, including non-default ports.

@@ -145,6 +145,18 @@ class OriginChecks(unittest.TestCase):
                 self.assertIn('issuer', probe().stderr.lower())
                 server.result = 302
                 self.assertIn('302', probe().stderr)
+
+                # A trusted certificate with only a DNS common name is not browser-valid.
+                subprocess.run(
+                    ['openssl', 'req', '-new', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                     '-days', '2', '-subj', '/CN=localhost', '-keyout', str(key), '-out', str(cert)],
+                    check=True, stderr=subprocess.DEVNULL,
+                )
+                context.load_cert_chain(cert, key)
+                server.result, server.issuer = 200, origin + '/identity/realms/krate'
+                cn_only = probe()
+                self.assertNotEqual(cn_only.returncode, 0)
+                self.assertIn('TLS certificate verification', cn_only.stderr)
             finally:
                 server.shutdown()
                 server.server_close()
