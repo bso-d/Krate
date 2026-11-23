@@ -57,8 +57,10 @@ done
 [[ -n "$VM" && -n "$PHASE" && -n "$HOST" && -n "$GUEST_ROOT" ]] || usage
 guest_path_ok "$GUEST_ROOT" || { echo "run-vm-gate: --guest-root must be a normalized absolute guest path matching ^/[A-Za-z0-9._/-]+\$ (no '..', '.', '//' or trailing '/'): $GUEST_ROOT" >&2; exit 2; }
 if [[ "${EDITION_DIR%/}" == */epc ]]; then
-  guest_path_ok "$EPC_DATA" && [[ "$EPC_UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
-    { echo 'run-vm-gate: EPC requires --epc-data-dir and --epc-data-fs-uuid for a dedicated disposable guest disk.' >&2; exit 2; }
+  if ! guest_path_ok "$EPC_DATA" || [[ ! "$EPC_UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    echo 'run-vm-gate: EPC requires --epc-data-dir and --epc-data-fs-uuid for a dedicated disposable guest disk.' >&2
+    exit 2
+  fi
   EPC_ARGS=" --epc-data-dir $EPC_DATA --epc-data-fs-uuid $EPC_UUID"
 elif [[ -n "$EPC_DATA" || -n "$EPC_UUID" ]]; then
   echo 'run-vm-gate: EPC data disk flags are valid only for EPC.' >&2; exit 2
