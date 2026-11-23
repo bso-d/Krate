@@ -221,17 +221,17 @@ ssh -L 8686:127.0.0.1:8686 -L 8443:127.0.0.1:443 user@host
 
 Open the exact `Access URL` printed by Studio on the workstation. Its private `?token=` parameter authenticates the browser; keep that URL private. In **Setup & Doctor**, click **Install Docker** if needed, optionally **Load Images**, then **Install**. Install loads the bundled images, generates the initial self-signed TLS certificate and starts the cluster. Confirm **Certificate Present** and **Production Live**. Use **Start Cluster** after a stop. In **Cluster Services**, start **Identity / SSO**; in **Identity & Users**, enable OAuth/TLS; in **Observability**, start monitoring. Open Kafbat from the displayed portal link if its host name resolves and is reachable from the workstation. Otherwise, for the default local Kafbat sign-in, use the second tunnel above and open `https://127.0.0.1:8443/`. Replace or trust the self-signed certificate before relying on browser trust for production; an untrusted-certificate warning is expected on a fresh fixture.
 
-For EPC, the default broker data path is `/data`. Prepare it on the host **before** using Studio Install. On a production host with an attached, formatted persistent disk, substitute its actual filesystem UUID and run:
+For EPC, prepare a dedicated ext4 or XFS data filesystem **before** running Studio Install. Mount it read-write at the exact broker data mountpoint (normally `/data`), and configure the host to mount that same filesystem at boot. In the extracted EPC package, set the expected filesystem UUID from your storage inventory, not from whatever is mounted now:
 
 ```bash
-lsblk -f  # identify the attached data filesystem's UUID
-disk_uuid='PASTE-THE-FILESYSTEM-UUID-FROM-LSBLK'
-sudo mkdir -p /data
-sudo mount "/dev/disk/by-uuid/$disk_uuid" /data
-findmnt -n -o SOURCE,TARGET,FSTYPE /data
+./krate config set KAFKA_DATA_DIR=/data
+./krate config set KAFKA_DATA_FS_UUID=<verified-filesystem-uuid>
+./krate doctor
 ```
 
-Arrange the same mount at boot using the host's storage policy before writing production messages. For a disposable VM test using its root disk, `sudo mkdir -p /data` is enough to satisfy the path check, but that is not a production storage plan. Studio Doctor reports **EPC Data Directory** as an error while the path is absent. The pre-install Configuration editor cannot apply settings to an uninstalled package. After a failed install that copied files, its Configuration editor can change `KAFKA_DATA_DIR` to another existing directory; retry **Install** after saving. **Install Interrupted** means the current install did not finish. **Files Present; Verify** on an older installation means no completion record exists; check its live health before use. Existing installations retain the **Start Cluster** control.
+Do not start EPC on a root-disk directory, even in a test fixture for the guarded install. Studio Doctor checks the mount and device identity. If the check fails, restore the expected mount before retrying; do not replace the configured UUID with that of an unintended disk. See the [EPC storage guide](epc/storage.md) for existing installations, upgrade and recovery. An installation that currently keeps messages on the root disk needs a separate, verified data migration before upgrading; overlaying that directory with an empty disk does not migrate anything.
+
+**Install Interrupted** means the current install did not finish. **Files Present; Verify** on an older installation means no completion record exists; check its live health before use. Existing installations retain the **Start Cluster** control.
 
 #### Keep Studio available after a Linux host reboot
 
