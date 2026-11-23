@@ -201,5 +201,81 @@ class OriginChecks(unittest.TestCase):
                 worker.join(timeout=5)
 
 
+class ActivationTrustChecks(unittest.TestCase):
+    def test_public_chain_and_self_signed_bootstrap_on_legacy_ssl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+
+            def openssl(*args):
+                subprocess.run(['openssl', *args], cwd=base, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            openssl('req', '-new', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+                    '-subj', '/CN=Krate fixture root', '-addext', 'basicConstraints=critical,CA:TRUE',
+                    '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=hash',
+                    '-keyout', 'root.key', '-out', 'root.pem')
+            for name, signer, extensions in (
+                ('intermediate', 'root', 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n'),
+                ('leaf', 'intermediate', 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost\n'),
+            ):
+                (base / 'ext').write_text(extensions + 'authorityKeyIdentifier=keyid:always\nsubjectKeyIdentifier=hash\n')
+                openssl('req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', f'/CN={name}',
+                        '-keyout', f'{name}.key', '-out', f'{name}.csr')
+                openssl('x509', '-req', '-days', '2', '-in', f'{name}.csr', '-CA', f'{signer}.pem',
+                        '-CAkey', f'{signer}.key', '-CAcreateserial', '-extfile', 'ext', '-out', f'{name}.pem')
+            bundle = base / 'bundle.pem'
+            bundle.write_bytes((base / 'leaf.pem').read_bytes() + (base / 'intermediate.pem').read_bytes())
+            openssl('req', '-new', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+                    '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost',
+                    '-keyout', 'fixture.key', '-out', 'fixture.pem')
+            client = """
+import runpy, socket, ssl, sys
+from pathlib import Path
+partial_chain = getattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN', 0)
+if partial_chain:
+    del ssl.VERIFY_X509_PARTIAL_CHAIN
+def load_test_os_roots(context, purpose=ssl.Purpose.SERVER_AUTH):
+    context.load_verify_locations(cafile=sys.argv[5])
+ssl.SSLContext.load_default_certs = load_test_os_roots
+probe = runpy.run_path(sys.argv[1])
+context = probe['trust_context'](Path(sys.argv[2]))
+context.verify_flags &= ~partial_chain
+with socket.create_connection(('127.0.0.1', int(sys.argv[3])), 5) as tcp:
+    with context.wrap_socket(tcp, server_hostname=sys.argv[4]) as https:
+        https.sendall(b'GET / HTTP/1.0\\r\\n\\r\\n')
+        while https.recv(4096):
+            pass
+"""
+            class Ready(BaseHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    return
+
+                def do_GET(self):
+                    self.send_response(200)
+                    self.end_headers()
+
+            for pem, key in [(bundle, 'leaf.key'), (base / 'fixture.pem', 'fixture.key')]:
+                with self.subTest(pem=pem.name), HTTPServer(('127.0.0.1', 0), Ready) as server:
+                    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    tls.load_cert_chain(pem, base / key)
+                    server.socket = tls.wrap_socket(server.socket, server_side=True)
+                    worker = threading.Thread(target=server.serve_forever, daemon=True)
+                    worker.start()
+                    try:
+                        command = [sys.executable, '-B', '-c', client, str(ROOT / 'sso/probe.py'),
+                                   str(pem), str(server.server_port)]
+                        root = str(base / 'root.pem')
+                        good = subprocess.run([*command, 'localhost', root], capture_output=True,
+                                              text=True, timeout=10)
+                        self.assertEqual(good.returncode, 0, good.stderr)
+                        wrong = subprocess.run([*command, 'wrong.invalid', root], capture_output=True,
+                                               text=True, timeout=10)
+                        self.assertNotEqual(wrong.returncode, 0)
+                        self.assertIn('hostname mismatch', wrong.stderr.lower())
+                    finally:
+                        server.shutdown()
+                        worker.join(timeout=5)
+
+
 if __name__ == '__main__':
     unittest.main()

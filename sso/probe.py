@@ -154,7 +154,8 @@ def make_target(issuer, runtime_file, certificate):
 
 def trust_context(certificate):
     try:
-        context = ssl.create_default_context(cafile=str(certificate))
+        context = ssl.create_default_context()
+        context.load_verify_locations(cafile=str(certificate))
     except FileNotFoundError:
         raise Failure(f'{certificate} is missing: install the CA-issued certificate and key in certs/, or run krate gen-cert') from None
     except OSError as error:  # an unreadable file or one that is not a PEM certificate (ssl.SSLError)
@@ -162,8 +163,8 @@ def trust_context(certificate):
             raise
         raise Failure(f'{certificate} cannot be used as the trust anchor ({describe(error)}): install the CA-issued certificate '
                       'and key in certs/, or run krate gen-cert') from None
-    # The provisioned certificate/chain is the local trust anchor, including
-    # enterprise-issued leaf certificates. Hostname and expiry remain checked.
+    # Keep OS roots for issued chains; also accept local development trust.
+    # Hostname and expiry remain checked.
     if hasattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN'):
         context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
     return context
