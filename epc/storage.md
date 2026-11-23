@@ -11,19 +11,25 @@ bind mounts and an ambiguous stack of mounts are refused.
    persistent through your normal host provisioning (for example, a UUID
    entry in fstab). The host and Compose daemon must see the same mount.
 2. Before opening Studio or running install, stage the expected value in
-   the package's `.env`. For a new package with no `.env`:
+   the extracted package's `.env`. Create it from the package template only
+   if it does not already exist:
 
    ```sh
-   ./krate config set KAFKA_DATA_DIR=/data
-   ./krate config set KAFKA_DATA_FS_UUID=<verified-lowercase-filesystem-uuid>
-   ./krate doctor
+   if [ ! -e .env ] && [ ! -L .env ]; then
+     install -m 600 .env.template .env
+   fi
    ```
 
-   Replace the angle-bracket value with the recorded UUID. Preserve an existing
-   installation's `.env`; make the change in the installed or explicitly
-   selected takeover directory instead. Studio's install form does not
-   discover or enroll unknown disks. Also set the expectation in the
-   retained site configuration when staging an upgrade.
+   Edit the existing `KAFKA_DATA_DIR` and `KAFKA_DATA_FS_UUID` lines in
+   `.env` once, using the chosen mount path and independently verified
+   lowercase UUID. Do not modify `.env.template` or append duplicate keys.
+   Run `./krate doctor` from the package and check that the EPC filesystem
+   matches. In an extracted bundle, `./krate config set` targets the
+   installed CLI and cannot stage settings before the first install.
+
+   For an existing installation or explicit takeover, stage the pin in the
+   retained site `.env` instead and preserve its other settings. Studio's
+   install form does not discover or enroll unknown disks.
 3. Run `./krate install` (or Studio Install) once Doctor confirms filesystem
    identity. To migrate older running brokers, arrange a maintenance window,
    stop them with the current installation, and install the guarded release
