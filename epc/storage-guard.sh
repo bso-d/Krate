@@ -149,6 +149,20 @@ epc_storage_site() {
   if [[ "$emit" == yes ]]; then printf '%s\t%s\n' "$base" "$uuid"; fi
 }
 
+epc_storage_broker_device_id() {
+  local table="$1" sys_block="$2" row devroot permissions fstype device
+  # Docker resolves the UUID symlink before binding, which leaves the kernel
+  # device name in the devtmpfs mount root. Read only its sysfs numeric
+  # metadata; do not ask the container to stat or open the raw block node.
+  row="$(epc_storage_mount_row /run/krate/expected-storage-device "$table")" || return 1
+  read -r _ devroot permissions fstype _ <<< "$row"
+  [[ "$fstype" == devtmpfs && ",$permissions," == *,ro,* ]] || return 1
+  [[ "$devroot" =~ ^/[[:alnum:]_][[:alnum:]_.-]*$ ]] || return 1
+  read -r device < "$sys_block/${devroot#/}/dev" || return 1
+  [[ "$device" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  printf '%s\n' "$device"
+}
+
 epc_storage_broker() {
   local device node="${KAFKA_NODE_ID:-}"
   if [[ "$node" != 92 && "$node" != 93 ]]; then
@@ -156,7 +170,7 @@ epc_storage_broker() {
     return 1
   fi
   # Only inspect metadata; no file on the data disk can attest to device identity.
-  if ! device="$(epc_storage_device_id /run/krate/expected-storage-device)"; then
+  if ! device="$(epc_storage_broker_device_id /proc/self/mountinfo /sys/class/block)"; then
     epc_storage_error 'expected storage device metadata is missing; broker startup refused.'
     return 1
   fi

@@ -3386,7 +3386,10 @@ ensure_data_dirs() (
   # Anchor writes in the checked mount with a relative path. Re-check its
   # device before creating paths in case it moved between checks.
   epc_require_storage || die "EPC storage changed while preparing $base"
-  local node
+  local node selinux=false
+  if docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null | grep -q '^name=selinux'; then
+    selinux=true
+  fi
   for node in 92 93; do
     d="krate/broker-$node"
     [[ ! -L "krate" && ! -L "$d" ]] || die "Refusing symbolic link in EPC broker path $d"
@@ -3404,6 +3407,15 @@ ensure_data_dirs() (
       "${sudo_cmd[@]}" chown "$uid:$gid" "$d" || die "Could not chown $base/$d
 Run this, then re-run the install:
   sudo chown -R $uid:$gid $base/krate"
+    fi
+    # Compose's noncreating bind opts do not relabel with current Docker.
+    # Label only the validated broker tree, not its backing device or mount.
+    if $selinux; then
+      (
+        cd -- "$d" || exit 1
+        bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid" >/dev/null || exit 1
+        "${sudo_cmd[@]}" find . -xdev -exec chcon -h -t container_file_t -l s0 -- {} +
+      ) || die "Could not apply the SELinux container-file label to $base/$d"
     fi
   done
   local avail_gb

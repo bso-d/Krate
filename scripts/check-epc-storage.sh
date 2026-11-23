@@ -4,8 +4,9 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$root/epc/storage-guard.sh"
 failure() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-fixture="$(mktemp)"
-trap 'rm -f -- "$fixture"' EXIT
+working="$(mktemp -d)"
+fixture="$working/mountinfo"
+trap 'rm -r -- "$working"' EXIT
 run() {
   local label="$1" mount="$2" fsroot="$3" device="$4" expected="$5" output status=0
   output="$(epc_storage_mount_check "$mount" "$fsroot" "$device" "$fixture" 2>&1)" || status=$?
@@ -69,3 +70,13 @@ if epc_storage_value KAFKA_DATA_DIR "$fixture"; then failure 'duplicate dotenv a
 printf '%s\n' "KAFKA_DATA_DIR=/data/\$PATH" > "$fixture"
 if epc_storage_value KAFKA_DATA_DIR "$fixture"; then failure 'interpolated storage path accepted'; fi
 printf 'PASS %s\n' 'reject ambiguous dotenv storage pins and ambient overrides'
+
+mkdir -p "$working/sys/vdb1"
+printf '%s\n' '253:17' > "$working/sys/vdb1/dev"
+printf '%s\n' '31 30 0:6 /vdb1 /run/krate/expected-storage-device ro,nosuid - devtmpfs devtmpfs rw' > "$fixture"
+[[ "$(epc_storage_broker_device_id "$fixture" "$working/sys")" == 253:17 ]]
+printf '%s\n' '31 30 0:6 /vdb1 /run/krate/expected-storage-device rw,nosuid - devtmpfs devtmpfs rw' > "$fixture"
+if epc_storage_broker_device_id "$fixture" "$working/sys"; then failure 'accepted writable expected metadata bind'; fi
+printf '%s\n' '31 30 0:6 /vdb1 /run/krate/expected-storage-device ro - ext4 disk rw' > "$fixture"
+if epc_storage_broker_device_id "$fixture" "$working/sys"; then failure 'accepted fake expected metadata on ordinary disk'; fi
+printf 'PASS %s\n' 'source expected device number from read-only devtmpfs bind and Linux sysfs'
