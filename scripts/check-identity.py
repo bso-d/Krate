@@ -5196,7 +5196,7 @@ def check_probe_diagnostic_privacy(checks):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(Path, 'read_text', read_runtime), \
                 mock.patch.object(probe, 'urlopen', request), \
-                mock.patch.object(ssl, 'create_default_context', return_value=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)), \
+                mock.patch.object(probe, 'trust_context', return_value=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)), \
                 mock.patch.object(socket, 'getaddrinfo', resolver), \
                 mock.patch.object(signal, 'signal'), \
                 mock.patch.object(signal, 'alarm', side_effect=lambda seconds: alarms.append(seconds) or 0), \
@@ -5280,8 +5280,9 @@ def check_probe_causes(checks):
     hostile_name = 'evil\x1b[2J.' + 'H' * 5000  # a redirect target's host name: 9 characters, then a flood
     as_directory = object()
     detour_lookups = ((PUBLIC_HOST, 443), ('elsewhere.example.test', 443))  # the issuer's host first, then where a redirect led
-    calls, lookups, cafiles, alarms, hooks = [], [], [], [], {}
+    calls, lookups, cafiles, defaults, alarms, hooks = [], [], [], [], [], {}
     real_context, real_alarm, real_read_text = ssl.create_default_context, signal.alarm, pathlib.Path.read_text
+    real_load_locations = ssl.SSLContext.load_verify_locations
 
     class Reply:
         def __init__(self, body):
@@ -5326,11 +5327,15 @@ def check_probe_causes(checks):
         """create_default_context without the partial-chain flag that Python 3.13+ sets by default: probe.py must set it itself."""
         if 'context' in hooks:
             raise hooks['context']
-        cafiles.append(context_kwargs.get('cafile'))
+        defaults.append((context_args, context_kwargs))
         bare = real_context(*context_args, **context_kwargs)
         if hasattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN'):
             bare.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
         return bare
+
+    def track_load_locations(context, *args, **kwargs):
+        cafiles.append(kwargs.get('cafile'))
+        return real_load_locations(context, *args, **kwargs)
 
     def counting_alarm(seconds):
         alarms.append(seconds)
@@ -5351,6 +5356,7 @@ def check_probe_causes(checks):
         if 'read_text' in hooks:
             setattr(pathlib.Path, 'read_text', failing_read_text)
         del alarms[:]
+        ssl.SSLContext.load_verify_locations = track_load_locations
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 try:
@@ -5369,6 +5375,7 @@ def check_probe_causes(checks):
         finally:
             resolver_restored = socket.getaddrinfo is fake_getaddrinfo
             socket.getaddrinfo, ssl.create_default_context, signal.alarm = real_getaddrinfo, real_context, real_alarm
+            ssl.SSLContext.load_verify_locations = real_load_locations
             setattr(pathlib.Path, 'read_text', real_read_text)
             sys.argv = real_argv
             setattr(probe, 'urlopen', real_urlopen)
@@ -5559,7 +5566,7 @@ def check_probe_causes(checks):
             hooks.clear()
             if row['hook']:
                 hooks[row['hook'][0]] = row['hook'][1]
-            del calls[:], lookups[:], cafiles[:]
+            del calls[:], lookups[:], cafiles[:], defaults[:]
             result = run(site, row['stub'] or raising(AssertionError('urlopen must not be reached')), row['extra'])
             err = result['err']
             what = f'probe.py ({row["title"]})'
@@ -5587,7 +5594,7 @@ def check_probe_causes(checks):
         place(site / 'auth/ui/runtime.yml', runtime(keycloak))
         place(site / 'certs/server.crt', certificate)
         for connect_args in ((), ('--connect-ip', '127.0.0.1')):
-            del calls[:], lookups[:], cafiles[:]
+            del calls[:], lookups[:], cafiles[:], defaults[:]
             result = run(site, answering(json.dumps(document).encode(), ((PUBLIC_HOST.upper(), 443), ('elsewhere.example.test', 443))), connect_args)
             what = f'probe.py (success {" ".join(connect_args) or "without --connect-ip"})'
             e((result['status'], result['out'], result['err']) == (0, 'Public HTTPS identity discovery verified.\n', ''),
@@ -5600,7 +5607,8 @@ def check_probe_causes(checks):
               and urlopen_context.check_hostname and urlopen_context.verify_mode == ssl.CERT_REQUIRED
               and (not hasattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN') or urlopen_context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN),
               f'{what}: urlopen gets the discovery URL, a 10 s timeout and a verifying context with partial chains allowed')
-            e(cafiles == [str(site / 'certs/server.crt')], f'{what}: the trust anchor is certs/server.crt; got {cafiles!r}')
+            e(defaults == [((), {})], f'{what}: start with OS CA trust; got {defaults!r}')
+            e(cafiles == [str(site / 'certs/server.crt')], f'{what}: also load configured certs/server.crt; got {cafiles!r}')
             e(lookups == (['127.0.0.1'] if connect_args else [PUBLIC_HOST.upper()]) + ['elsewhere.example.test'],
               f'{what}: --connect-ip maps the issuer host (any case) to that address and no other name; resolver saw {lookups!r}')
 
