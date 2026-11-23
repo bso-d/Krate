@@ -30,6 +30,22 @@ bind mounts and an ambiguous stack of mounts are refused.
    while the expected filesystem is present. The install recreates affected
    containers. `krate restart` alone **does not** migrate pre-guard containers.
 
+## Change a storage pin
+
+`krate restart` checks the existing broker containers against the configured
+path and UUID before restarting them. If either differs, it refuses the
+restart and leaves the containers unchanged. A broker that was already
+running is **not** stopped by this refusal.
+
+Schedule a maintenance window. With the old pin still in effect, run
+`./krate stop` and verify both brokers are stopped. Back up and migrate both
+broker trees to the intended mounted disk, preserving ownership, permissions
+and each node's metadata. Do not start a blank tree or change the cluster ID
+under an existing installation. Only after verifying the copy and the
+intended UUID, update the two pins, run `./krate doctor`, then run
+`./krate start` to let Compose recreate the containers with the new binds.
+Verify broker health and read back known data before retiring the old disk.
+
 A failed or incorrect mount must not be worked around by creating broker
 directories on the system disk or changing the expected UUID to the observed
 incorrect disk. Restore the intended mount, then run `./krate doctor` and

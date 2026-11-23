@@ -90,3 +90,70 @@ printf '%s\n' 'keystore fixture' > "$working/auth/certs/broker.p12"
 epc_storage_broker_config "$working/auth" oauth_ssl
 if epc_storage_broker_config "$working/auth" invalid; then failure 'unknown broker auth mode accepted'; fi
 printf 'PASS %s\n' 'start fails closed if legacy relabel bind has no required auth config'
+
+# Drive the actual restart dispatch with simulated daemon container metadata.
+restart_driver="$working/restart-driver.sh"
+{
+  cat <<'DRIVER'
+set -euo pipefail
+err() { printf '%s\n' "$*" >&2; }
+bash() {
+  [[ "$1" == */storage-guard.sh && "$2" == pins ]] || exit 2
+  printf '/new-data\t%s\n' "$wanted_uuid"
+}
+docker() {
+  [[ "$1" == inspect && "${*: -1}" == epc-broker-* ]] || exit 2
+  inspected="${*: -1}"
+  printf '%s\n' "$inspected" >> "$trace"
+  [[ "$fixture_case" != inspect_error ]] || return 1
+  local node="${inspected##*-}" data="/new-data" uuid="$wanted_uuid" read_only=true
+  [[ "$fixture_case" != old_path || "$node" != 92 ]] || data=/data
+  [[ "$fixture_case" != old_uuid || "$node" != 93 ]] || uuid=00000000-0000-0000-0000-000000000000
+  [[ "$fixture_case" != mutable_device || "$node" != 92 ]] || read_only=false
+  local project=krate-epc
+  [[ "$fixture_case" != wrong_project ]] || project=other-project
+  printf '%s\tkafka-%s\n' "$project" "$node"
+  printf '/var/lib/kafka/data\tbind\t%s/krate/broker-%s\tfalse\n' "$data" "$node"
+  [[ "$fixture_case" != missing_device ]] || return 0
+  printf '/run/krate/expected-storage-device\tbind\t/dev/disk/by-uuid/%s\t%s\n' "$uuid" "$read_only"
+}
+cluster_project() { printf 'krate-epc\n'; }
+sso_dir() { :; }
+sync_image_pins() { :; }
+resolve_local_ui_image() { :; }
+compose_passthrough() { printf 'compose %s\n' "${*: -1}" >> "$trace"; }
+COMPOSE_BIN=(compose_passthrough)
+SCRIPT_DIR=/fake ENV_FILE=/nonexistent ENV_TEMPLATE=unused COMPOSE_FILE=unused
+wanted_uuid=10000000-1111-2222-3333-444444444444
+fixture_case="$1" trace="$2"
+shift 2
+DRIVER
+  sed -n '/^epc_require_restart_storage() {$/,/^}$/p; /^compose_cmd() {$/,/^}$/p' "$root/epc/krate"
+  printf '%s\n' 'compose_cmd restart "$@"'
+} > "$restart_driver"
+for fixture_case in old_path old_uuid inspect_error missing_device mutable_device wrong_project unchanged; do
+  trace="$working/restart-trace"
+  : > "$trace"
+  status=0
+  output="$(bash "$restart_driver" "$fixture_case" "$trace" 2>&1)" || status=$?
+  if [[ "$fixture_case" == unchanged ]]; then
+    [[ "$status" == 0 && "$(cat "$trace")" == $'epc-broker-92\nepc-broker-93\ncompose restart' ]] ||
+      failure "unchanged restart rc=$status: $output"
+  else
+    [[ "$status" != 0 && "$output" == *'restart refused'* && "$(cat "$trace")" != *compose* ]] ||
+      failure "restart with $fixture_case reached Compose or lacked guidance: $output"
+  fi
+  printf 'PASS EPC restart: %s\n' "$fixture_case"
+done
+: > "$trace"
+bash "$restart_driver" old_path "$trace" kafka-93
+[[ "$(cat "$trace")" == $'epc-broker-93\ncompose kafka-93' ]] || failure 'targeted restart inspected the wrong broker'
+: > "$trace"
+bash "$restart_driver" inspect_error "$trace" proxy
+[[ "$(cat "$trace")" == 'compose proxy' ]] || failure 'non-broker restart inspected a broker'
+printf 'PASS EPC restart: targeted broker and non-broker dispatch\n'
+: > "$trace"
+if bash "$restart_driver" old_path "$trace" --no-deps || [[ -s "$trace" ]]; then
+  failure 'Compose option could remove the service selector from restart'
+fi
+printf '%s\n' 'PASS EPC restart: Compose option cannot restart unverified brokers'

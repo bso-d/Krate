@@ -19,13 +19,14 @@ the image Docker holds under each runtime tag must have that image id.
 directories wholesale (Grafana provisioning and dashboards, the Perses dashboards, the
 Python modules beside the sso scripts).  A regular file or symlink in those directories
 that the candidate does not ship is therefore a mismatch too; `docs/`, which the bundle
-ships, is scanned the same way.  A scanned directory the running user cannot list makes
+ships, is scanned the same way, as are Studio's `ui/` and the OAuth client's shipped source tree.  A scanned directory the running user cannot list makes
 the comparison fail (exit 2), except a `__pycache__` directory: run it as root (the runner on a
 VM does), because a skipped `__pycache__` and the bytecode in it are not compared, and Python can
 load an unchecked hash-based `.pyc` without comparing it with its source.
 
 Not compared: file modes other than `krate`'s executable bit, `.bundle-arch`, the image
-archives under `images/`, `docker-offline/`, the lock columns after `image_id`
+archives under `images/`, `docker-offline/`, the generated OAuth client JAR and
+its image-derived libraries, notices and JRE, the lock columns after `image_id`
 (`repo_digests`, `archive`, `archive_sha256`, `platform`), operator site files (`.env`,
 `monitoring/.env` and the `monitoring/.env.*` temporaries of krate's atomic writes,
 `auth/` beyond `auth/ui/local.yml` and `auth/kafka/local/server.properties`, `monitoring/auth/` beyond `local.ini`, `sso/site*.json`
@@ -49,9 +50,13 @@ import subprocess
 from typing import Dict, Iterable, List, Optional, Tuple
 
 EDITIONS = ('epc', 'kraft')
-# Makefile build_one: cp sso/__init__.py ... sso/kafka_broker_auth.py "$bundle_dir/sso/"
+# Makefile build_one: top-level sso files, Studio launchers and copied OAuth sources.
 SSO_FILES = ('__init__.py', 'configure.py', 'example.json', 'configure-dual.py', 'dual-example.json',
-             'activate.sh', 'operations.sh', 'operations.py', 'preflight.py', 'probe.py', 'identity.py', 'idp_watch.py', 'kafka_broker_auth.py')
+             'activate.sh', 'operations.sh', 'operations.py', 'preflight.py', 'probe.py', 'check-public-origin.py', 'identity.py', 'idp_watch.py',
+             'kafka_broker_auth.py')
+STUDIO_LAUNCHERS = ('Krate-UI.command', 'Krate-UI.bat', 'krate-ui.sh', 'Krate-UI.desktop')
+OAUTH_SOURCE_FILES = ('kafka-oauth-client/README.md', 'kafka-oauth-client/build.sh')
+OAUTH_SOURCE_TREE = 'kafka-oauth-client/src'
 # Makefile build_one: cp sso/guides/... "$bundle_dir/docs/"
 GUIDES = ('identity-foundation.md', 'dual-login.md', 'pingfederate-sso.md',
           'pingfederate-iam-guide.md', 'sso-flows.md', 'perses-sso.md', 'grafana-sso.md')
@@ -89,6 +94,8 @@ def _monitoring_env(rel: str) -> bool:
 EXTRA_ROOTS = tuple(('monitoring/' + tree, True, (_bytecode,)) for tree in MON_TREES) + (
     ('sso', True, (_bytecode, _site_settings)),
     ('docs', True, ()),
+    ('ui', True, (_bytecode,)),
+    (OAUTH_SOURCE_TREE, True, ()),
     ('monitoring', False, (_monitoring_env,)),
 )
 
@@ -145,7 +152,8 @@ def inventory(repo: str, candidate: str, edition: str) -> Dict[str, str]:
         raise ValueError('edition must be one of %s, not %r' % (', '.join(EDITIONS), edition))
     items = {'docker-compose.yml': edition + '/docker-compose.yml'}
     if edition == 'epc':
-        items['kafbat.yml'] = 'epc/kafbat.yml'
+        for name in ('kafbat.yml', 'storage-guard.sh', 'storage.md'):
+            items[name] = 'epc/' + name
     items['nginx.conf'] = edition + '/nginx.conf'
     items['nginx-stream.conf'] = edition + '/nginx-stream.conf'
     items['LICENSE'] = 'LICENSE'
@@ -162,12 +170,20 @@ def inventory(repo: str, candidate: str, edition: str) -> Dict[str, str]:
     items['krate'] = edition + '/krate'
     for name in MON_TOP:
         items['monitoring/' + name] = 'monitoring/' + name
-    trees = ['monitoring/' + tree for tree in MON_TREES] + ['sso/theme']
+    items.update((path, path) for path in STUDIO_LAUNCHERS + OAUTH_SOURCE_FILES)
+    trees = ['monitoring/' + tree for tree in MON_TREES] + ['sso/theme', 'ui', OAUTH_SOURCE_TREE]
     listed = _git(repo, ['ls-tree', '-r', '--name-only', '-z', candidate, '--'] + trees)
     for path in listed.decode('utf-8').split('\0'):
-        # The bundle prunes __pycache__ directories from the copied trees.
-        if path and '/__pycache__/' not in path:
-            items[path] = path
+        if not path:
+            continue
+        name = os.path.basename(path)
+        if path.startswith(('monitoring/', 'ui/')):
+            # Match the pruning performed by Makefile build_one.
+            if '/__pycache__/' in path or name == '.DS_Store' or name.startswith('._'):
+                continue
+            if path.startswith('ui/') and name.endswith('.pyc'):
+                continue
+        items[path] = path
     items['monitoring/auth/local.ini'] = 'monitoring/auth/local.ini'
     items['.env.template'] = edition + '/.env.template'
     return items
@@ -285,6 +301,13 @@ def extra_files(installed: str, items: Dict[str, str]) -> List[str]:
     """Regular files and symlinks in the scanned directories that the candidate does not ship."""
     extras = []
     for root, recursive, excluded in EXTRA_ROOTS:
+        parts = root.split('/')
+        ancestors = ['/'.join(parts[:index]) for index in range(1, len(parts) + 1)]
+        linked = next((path for path in ancestors if os.path.islink(os.path.join(installed, path))), None)
+        if linked is not None:
+            if linked not in extras:
+                extras.append(linked)
+            continue
         base = os.path.join(installed, root)
         if not os.path.isdir(base):
             continue

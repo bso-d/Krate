@@ -603,6 +603,40 @@ resolve_local_ui_image() {
   fi
 }
 
+# Compose restart preserves the existing container and its mount definitions.
+epc_require_restart_storage() {
+  local base="$1" uuid="$2" target="${3:-}" project node service container mounts
+  local -a nodes
+  case "$target" in
+    "") nodes=(92 93) ;;
+    kafka-92|kafka-93) nodes=("${target#kafka-}") ;;
+    -*) err "EPC restart refused: pass a Compose service name, not an option."; return 1 ;;
+    *) return 0 ;;
+  esac
+  project="$(cluster_project)" || return 1
+  local format='{{index .Config.Labels "com.docker.compose.project"}}{{"\t"}}{{index .Config.Labels "com.docker.compose.service"}}{{range .HostConfig.Mounts}}{{if or (eq .Target "/var/lib/kafka/data") (eq .Target "/run/krate/expected-storage-device")}}{{"\n"}}{{.Target}}{{"\t"}}{{.Type}}{{"\t"}}{{.Source}}{{"\t"}}{{.ReadOnly}}{{end}}{{end}}'
+  for node in "${nodes[@]}"; do
+    service="kafka-$node"
+    container="epc-broker-$node"
+    if ! mounts="$(docker inspect --type container --format "$format" "$container")"; then
+      err "EPC restart refused: could not verify the existing $service container. Check Docker and the Compose project; use krate start if creating a new cluster."
+      return 1
+    fi
+    if ! awk -F '\t' -v project="$project" -v service="$service" \
+      -v data="$base/krate/broker-$node" -v device="/dev/disk/by-uuid/$uuid" '
+        NR == 1 { if (NF != 2 || $1 != project || $2 != service) exit 1; next }
+        $1 == "/var/lib/kafka/data" && NF == 4 && $2 == "bind" && $3 == data && $4 == "false" { data_matches++; next }
+        $1 == "/run/krate/expected-storage-device" && NF == 4 && $2 == "bind" && $3 == device && $4 == "true" { device_matches++; next }
+        { invalid = 1 }
+        END { if (invalid || data_matches != 1 || device_matches != 1) exit 1 }
+      ' <<< "$mounts"; then
+      err "EPC restart refused: $service is not bound to the configured data path and filesystem UUID."
+      err "Existing containers were left unchanged. Stop the brokers before changing the pin, follow storage.md, and recreate with krate start only after verifying the migrated broker data."
+      return 1
+    fi
+  done
+}
+
 # Wrapper so all compose calls use the right files and detected binary. The
 # sso profile (Keycloak and its database) joins the cluster once identity is
 # enabled or Kafbat is in runtime.yml mode.
@@ -612,6 +646,9 @@ compose_cmd() {
     storage_pins="$(bash "$SCRIPT_DIR/storage-guard.sh" pins "$ENV_FILE")" || return 1
     local -x KAFKA_DATA_DIR KAFKA_DATA_FS_UUID
     IFS=$'\t' read -r KAFKA_DATA_DIR KAFKA_DATA_FS_UUID <<< "$storage_pins"
+    if [[ "$1" == restart ]]; then
+      epc_require_restart_storage "$KAFKA_DATA_DIR" "$KAFKA_DATA_FS_UUID" "${2:-}" || return 1
+    fi
   fi
   sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
   resolve_local_ui_image "$@"

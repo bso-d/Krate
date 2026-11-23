@@ -14,15 +14,17 @@
 #
 #   scripts/gate/mac/run-vm-gate.sh --vm krate-p4-topo1 --phase 4c --public-host krate-oi.test \
 #     [--candidate SHA] [--out DIR] [--edition-dir /opt/krate/epc] [--rows W5,W6]
+#                      [--epc-data-dir MOUNT --epc-data-fs-uuid UUID]
 #
 # limactl invocations use fixed arguments; every copy is --backend=scp (F8, M1 observed the
 # flag) and never an inline heredoc (limactl's argument joining drops quoted delimiters,
 # provision-rocky.sh attempt-5 note). No secret value is printed.
 set -euo pipefail
-VM="" PHASE="" CANDIDATE="" OUT="" HOST="" EDITION_DIR="/opt/krate/epc" ROWS="W5,W6" GUEST_ROOT=""
+VM="" PHASE="" CANDIDATE="" OUT="" HOST="" EDITION_DIR="/opt/krate/epc" ROWS="W5,W6" GUEST_ROOT="" EPC_DATA="" EPC_UUID="" EPC_ARGS=""
 usage() { cat >&2 <<'EOF'
 usage: run-vm-gate.sh --vm NAME --phase 4a|4b|4c --public-host NAME --guest-root PATH
                        [--candidate SHA] [--out DIR] [--edition-dir /opt/krate/epc] [--rows W5,W6]
+                       [--epc-data-dir MOUNT --epc-data-fs-uuid UUID]
 
 --guest-root PATH is the fixed guest tree the agent may deliver into (e.g.
 /home/<guest-user>/gate); the rendezvous is $PATH/rdv. It is required, never guessed, so the
@@ -47,11 +49,20 @@ while [[ $# -gt 0 ]]; do
     --edition-dir) EDITION_DIR="$2"; shift 2 ;;
     --rows) ROWS="$2"; shift 2 ;;
     --guest-root) GUEST_ROOT="$2"; shift 2 ;;
+    --epc-data-dir) EPC_DATA="$2"; shift 2 ;;
+    --epc-data-fs-uuid) EPC_UUID="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ -n "$VM" && -n "$PHASE" && -n "$HOST" && -n "$GUEST_ROOT" ]] || usage
 guest_path_ok "$GUEST_ROOT" || { echo "run-vm-gate: --guest-root must be a normalized absolute guest path matching ^/[A-Za-z0-9._/-]+\$ (no '..', '.', '//' or trailing '/'): $GUEST_ROOT" >&2; exit 2; }
+if [[ "${EDITION_DIR%/}" == */epc ]]; then
+  guest_path_ok "$EPC_DATA" && [[ "$EPC_UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+    { echo 'run-vm-gate: EPC requires --epc-data-dir and --epc-data-fs-uuid for a dedicated disposable guest disk.' >&2; exit 2; }
+  EPC_ARGS=" --epc-data-dir $EPC_DATA --epc-data-fs-uuid $EPC_UUID"
+elif [[ -n "$EPC_DATA" || -n "$EPC_UUID" ]]; then
+  echo 'run-vm-gate: EPC data disk flags are valid only for EPC.' >&2; exit 2
+fi
 MAC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$MAC_DIR/../../.." && pwd)"
 SHA="$(git -C "$REPO" rev-parse HEAD)"
@@ -229,7 +240,7 @@ done
 # actually wrote instead of scanning for a default path it would never match; a guest death
 # without a receipt must not exit rc=0.
 GUEST_RECEIPT="$GUEST_ROOT/receipt-${CANDIDATE:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
-GUEST_CMD="cd $GUEST_ROOT/repo && scripts/gate-identity.sh --edition-dir $EDITION_DIR --wipe --phase $PHASE --public-host $HOST --out $GUEST_RECEIPT --browser agent --rendezvous $RDV --rendezvous-nonce $NONCE --candidate $CANDIDATE --repo $GUEST_ROOT/repo"   # PRE-7: the bound, full-inventory shape of a bundle host (identity-gate.md, the bundle-host invocation)
+GUEST_CMD="cd $GUEST_ROOT/repo && scripts/gate-identity.sh --edition-dir $EDITION_DIR --wipe --phase $PHASE --public-host $HOST --out $GUEST_RECEIPT$EPC_ARGS --browser agent --rendezvous $RDV --rendezvous-nonce $NONCE --candidate $CANDIDATE --repo $GUEST_ROOT/repo"   # PRE-7: the bound, full-inventory shape of a bundle host (identity-gate.md, the bundle-host invocation)
 # the runner's exit status is written next to its pid when it ends (T14): `; echo $?` runs in the detached shell after the runner
 limactl shell "$VM" -- sh -c "nohup setsid sh -c $(printf '%q' "$GUEST_CMD; echo \$? > $RDV/runner.rc") > $GUEST_ROOT/run-${CANDIDATE:0:7}.log 2>&1 & echo \$! > $RDV/runner.pid"
 echo "run-vm-gate: guest runner detached (pid $(limactl shell "$VM" -- cat "$RDV/runner.pid" 2>/dev/null | tr -d '[:space:]')), tail $GUEST_ROOT/run-${CANDIDATE:0:7}.log"
