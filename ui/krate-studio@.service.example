@@ -1,0 +1,21 @@
+# Copy to /etc/systemd/system/krate-studio@.service after setting User= to
+# the existing, non-root Krate operator that can read/write the workspace.
+# Enable one instance: krate-studio@kraft.service or krate-studio@epc.service.
+# For a non-default install, adjust WorkingDirectory= and ExecStart= together.
+[Unit]
+Description=Krate Studio for %i
+After=docker.service
+
+[Service]
+Type=simple
+User=krate-operator
+WorkingDirectory=/opt/krate/%i
+ExecStart=/opt/krate/%i/krate studio --managed --host 127.0.0.1 --port 8686
+RuntimeDirectory=krate-studio-%i
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

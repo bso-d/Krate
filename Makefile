@@ -27,7 +27,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh scripts/extract-keycloak-jre.sh Krate-UI.command krate-ui.sh
+CLI_FILES := zk/kafka kraft/krate epc/krate epc/storage-guard.sh sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh scripts/extract-keycloak-jre.sh Krate-UI.command krate-ui.sh
 VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
@@ -106,7 +106,7 @@ help:
 >  VARIANT=kraft|epc       Which cluster the monitor-* targets act on
 >EOF
 
-.PHONY: offline-check identity-check
+.PHONY: offline-check identity-check studio-operator-check
 .PHONY: sso-config
 .PHONY: dual-config kafbat-ui ui
 
@@ -122,13 +122,17 @@ dual-config:
 sso-config:
 >python3 sso/configure.py --app "$(SSO_APP)" --settings "$(SSO_SETTINGS)" --output "$(SSO_OUTPUT)"
 
-check: syntax lint compose-check offline-check identity-check
+check: syntax lint compose-check offline-check identity-check studio-operator-check
 
 offline-check:
 >python3 scripts/check-offline.py
 
 identity-check:
+>bash scripts/check-epc-storage.sh
 >python3 scripts/check-identity.py
+
+studio-operator-check:
+>python3 -B scripts/check-studio-operator.py
 
 offline-smoke: offline-check
 >bash
@@ -274,7 +278,7 @@ bundle: offline-check
 >
 >  cp "$$src_dir/docker-compose.yml" "$$bundle_dir/docker-compose.yml"
 >  if [[ "$$mode" == "epc" ]]; then
->    cp "$$src_dir/kafbat.yml" "$$bundle_dir/kafbat.yml"
+>    cp "$$src_dir/kafbat.yml" "$$src_dir/storage-guard.sh" "$$src_dir/storage.md" "$$bundle_dir/"
 >  fi
 >  cp "$$src_dir/nginx.conf" "$$bundle_dir/nginx.conf"
 >  if [[ "$$mode" != "zk" ]]; then
@@ -287,7 +291,7 @@ bundle: offline-check
 >    mkdir -p "$$bundle_dir/auth/ui" "$$bundle_dir/auth/kafka/local" "$$bundle_dir/auth/keycloak/truststores" "$$bundle_dir/sso/logrotate" "$$bundle_dir/docs"
 >    cp "$$src_dir/auth/ui/local.yml" "$$bundle_dir/auth/ui/local.yml"
 >    cp "$$src_dir/auth/kafka/local/server.properties" "$$bundle_dir/auth/kafka/local/server.properties"
->    cp sso/__init__.py sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/operations.sh sso/operations.py sso/preflight.py sso/probe.py sso/identity.py sso/idp_watch.py sso/kafka_broker_auth.py "$$bundle_dir/sso/"
+>    cp sso/__init__.py sso/configure.py sso/example.json sso/configure-dual.py sso/dual-example.json sso/activate.sh sso/operations.sh sso/operations.py sso/preflight.py sso/probe.py sso/check-public-origin.py sso/identity.py sso/idp_watch.py sso/kafka_broker_auth.py "$$bundle_dir/sso/"
 >    cp scripts/check-bundle.py scripts/check-offline.py "$$bundle_dir/sso/"
 >    cp -r sso/theme "$$bundle_dir/sso/"
 >    # Rendered by `krate identity logrotate` with the installation's journal path.

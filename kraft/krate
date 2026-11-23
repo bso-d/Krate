@@ -3197,11 +3197,14 @@ except Exception:
   ok "Certificate written to certs/server.crt (replace with an org-CA cert anytime)"
 }
 
-# Ensure a cert exists before the proxy starts; generate one if missing.
+# Only bootstrap a development pair when both certificate paths are absent.
 ensure_cert() {
   if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
     ensure_public_cert_readable
     return 0
+  fi
+  if [[ -e "$CERT_CRT" || -L "$CERT_CRT" || -e "$CERT_KEY" || -L "$CERT_KEY" ]]; then
+    die "Incomplete TLS certificate pair: restore matching certs/server.crt and certs/server.key; refusing to replace existing material."
   fi
   warn "No TLS certificate found — generating a self-signed one."
   cmd_gen_cert
@@ -3659,7 +3662,7 @@ cmd_ui() {
     [[ -n "$user" ]] && echo "  Username  $user"
     [[ -n "$pass" ]] && echo "  Password  $pass"
   fi
-  echo -e "  ${DIM}TLS is a self-signed cert — trust certs/server.crt or proceed past the browser warning.${RESET}"
+  echo -e "  ${DIM}TLS: verify trust for this URL. The generated development certificate is self-signed.${RESET}"
   sep
 }
 

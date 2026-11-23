@@ -12,7 +12,8 @@
 # See sso/guides/identity-gate.md.
 #
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe [--phase 1|2|3|all] [--stub-port N]
-#   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo
+#   scripts/gate-identity.sh --edition-dir /opt/krate/epc --wipe --candidate <sha> --repo ~/gate/repo \
+#     --epc-data-dir /data --epc-data-fs-uuid <independently verified fixture UUID>
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4a --public-host krate-gate.test --session-max-hours 1
 #   scripts/gate-identity.sh --edition-dir harness/worktrees/gate/kraft --wipe --phase 4b --public-host krate-gate.test --session-max-hours 1
@@ -58,6 +59,8 @@ SCREENSHOTS=true
 STATIC=true
 CANDIDATE_ARG=""
 REPO_ARG=""
+EPC_FIXTURE_DATA=""
+EPC_FIXTURE_UUID=""
 PUBLIC_HOST=""          # Phase 4: the non-loopback public name (--public-host)
 SESSION_MAX_HOURS=""    # Phase 4a/4b companion runs: KEYCLOAK_SESSION_MAX_HOURS=N (--session-max-hours)
 BROWSER_MODE=container  # container (default, the walked shape) | agent (a Mac agent over the rendezvous, TOPOFIX F4)
@@ -73,8 +76,9 @@ PERSES_GATE_PORT=13443
 usage() {
   cat <<EOF
 Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
-          [--subnet CIDR --proxy-ip IP --ip-range CIDR] [--phase 1|2|3|4a|4b|4c|all] [--out DIR]
+          [--subnet CIDR --proxy-ip IP --ip-range CIDR] [--phase 1|2|3|4a|4b|4c|5|all] [--out DIR]
           [--candidate SHA [--repo DIR]] [--stub-port N] [--public-host NAME] [--session-max-hours N]
+          [--epc-data-dir MOUNT --epc-data-fs-uuid UUID]
           [--wipe] [--keep] [--no-screenshots] [--no-static]
   --edition-dir    kraft or epc checkout or fixture installation (default: $REPO/kraft)
   --phase          1, 2, 3, 5, all (= 1-3, the default), or the Phase 4 slices 4a (Grafana),
@@ -110,6 +114,9 @@ Usage: $0 [--edition-dir DIR] [--project NAME] [--https-port N] [--http-port N]
   --rendezvous-nonce TOKEN
                    --browser agent only: the rendezvous nonce the Mac launcher generated
                    (scripts/gate/mac/run-vm-gate.sh); every hello and response must carry it; never printed
+  --epc-data-dir MOUNT, --epc-data-fs-uuid UUID
+                   required for EPC; canonical mount and independently verified UUID of a
+                   dedicated disposable ext4/XFS fixture disk. Refused for KRaft.
   --wipe           remove existing edition .env/auth/certs and edition-owned monitoring/.env first
   --keep           leave the fixture running at the end (no teardown; also
                    keeps the receipt's .state for the kept fixture's readers)
@@ -137,6 +144,8 @@ while [[ $# -gt 0 ]]; do
     --out) OUT="$2"; shift 2 ;;
     --candidate) CANDIDATE_ARG="$2"; shift 2 ;;
     --repo) [[ -d "$2" ]] || { echo "--repo $2 is not a directory" >&2; exit 2; }; REPO_ARG="$(cd "$2" && pwd)"; shift 2 ;;
+    --epc-data-dir) [[ "$#" -ge 2 ]] || { usage >&2; exit 2; }; EPC_FIXTURE_DATA="$2"; shift 2 ;;
+    --epc-data-fs-uuid) [[ "$#" -ge 2 ]] || { usage >&2; exit 2; }; EPC_FIXTURE_UUID="$2"; shift 2 ;;
     --wipe) WIPE=true; shift ;;
     --keep) KEEP=true; shift ;;
     --no-screenshots) SCREENSHOTS=false; shift ;;
@@ -303,6 +312,22 @@ if [[ -n "$PUBLIC_HOST" ]]; then
 fi
 curl() { command curl "${CURL_RESOLVE[@]}" "$@"; }
 [[ -x "$KRATE" && -f "$ED/.env.template" ]] || { echo "not an edition directory: $ED" >&2; exit 2; }
+gate_check_epc_storage() {
+  [[ "$EDITION" == epc ]] || return 0
+  bash "$ED/storage-guard.sh" host "$EPC_FIXTURE_DATA" "$EPC_FIXTURE_UUID"
+}
+if [[ "$EDITION" == epc ]]; then
+  if [[ ! "$EPC_FIXTURE_DATA" =~ ^/[A-Za-z0-9_./-]+$ || -z "$EPC_FIXTURE_UUID" ]]; then
+    echo 'EPC gate requires --epc-data-dir and --epc-data-fs-uuid for a dedicated disposable fixture disk.' >&2
+    exit 2
+  fi
+  # All fixture commands (including direct Compose probes) read the seeded
+  # .env, not an operator override from the caller.
+  unset KAFKA_DATA_DIR KAFKA_DATA_FS_UUID
+elif [[ -n "$EPC_FIXTURE_DATA" || -n "$EPC_FIXTURE_UUID" ]]; then
+  echo 'EPC data disk flags are valid only for the EPC edition.' >&2
+  exit 2
+fi
 if [[ -d "$ED/sso" ]]; then SSO="$ED/sso"; elif [[ -d "$ED/../sso" ]]; then SSO="$(cd "$ED/../sso" && pwd)"; else echo "no sso/ beside $ED" >&2; exit 2; fi
 if [[ -e "$ENVF" ]] && ! $WIPE; then
   echo "$ENVF exists; this runner destroys the fixture it is pointed at. Pass --wipe for a disposable checkout." >&2
@@ -411,6 +436,8 @@ if [[ -n "$REPO_ARG" ]]; then
   DIRTY="edition: unknown (no git); --repo: $(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null | tr '\n' ';')"
   [[ -z "$(git -C "$REPO_ARG" status --porcelain --untracked-files=no 2>/dev/null)" ]] || CANDIDATE_DIRTY=true
 fi
+# An installed guard is checked by product binding before running it.
+gate_check_epc_storage || exit 2
 RUNNER_COMMIT="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo 'no git')"
 RUNNER_DIRTY="$(git -C "$REPO" status --porcelain --untracked-files=normal -- scripts/gate-identity.sh scripts/gate 2>/dev/null | tr '\n' ';')"
 RUNNER_BOUND=true
@@ -685,6 +712,7 @@ hold_lock() { # a live process holds the identity lock until release_lock
 release_lock() { kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; }
 
 fixture_reset() {
+  gate_check_epc_storage || exit 2
   local n; for n in $(docker ps -aq --filter "label=krate.gate=w4-probe"); do docker rm -f "$n" >/dev/null 2>&1; done  # a W4 probe left by a killed run
   for n in $(docker ps -aq --filter "name=^${PROJECT}-gate3-" --filter "name=^${PROJECT}-gate4-"); do docker rm -f "$n" >/dev/null 2>&1; done  # a stale stand-in holds identity-egress; stale gate4 helpers hold the monitoring networks
   compose --profile idp-watch down -v --remove-orphans >/dev/null 2>&1 || true
@@ -710,9 +738,18 @@ cleanup_monitor_auth() {
   # Preflight proved these paths absent before the gate; only this fixture can have created them.
   rm -rf "$MON_DIR/auth/realm.ini" "$MON_DIR/auth/secrets" "$MON_DIR/auth/perses"
 }
+seed_fixture_env() {
+  gate_check_epc_storage || exit 2
+  cp "$ED/.env.template" "$ENVF" && chmod 600 "$ENVF" || exit 2
+  if [[ "$EDITION" == epc ]]; then
+    set_env_raw KAFKA_DATA_DIR "$EPC_FIXTURE_DATA" || exit 2
+    set_env_raw KAFKA_DATA_FS_UUID "$EPC_FIXTURE_UUID" || exit 2
+    bash "$ED/storage-guard.sh" site "$ENVF" || exit 2
+  fi
+}
 fixture_env() {
+  seed_fixture_env
   FIXTURE_OWNED=true
-  cp "$ED/.env.template" "$ENVF" && chmod 600 "$ENVF"
   "$KRATE" config set "KRATE_PROJECT=$PROJECT" >/dev/null
   "$KRATE" config set "KAFKA_UI_HTTPS_PORT=$HTTPS_PORT" >/dev/null
   "$KRATE" config set "KAFKA_UI_HTTP_PORT=$HTTP_PORT" >/dev/null
@@ -935,7 +972,7 @@ run_phase1() {
 
   # ── H: lost .env on an existing database must not regenerate anything ──
   cp "$ENVF" "$STATE/env.saved"
-  cp "$ED/.env.template" "$ENVF"; chmod 600 "$ENVF"; "$KRATE" config set "KRATE_PROJECT=$PROJECT" >/dev/null; "$KRATE" config set "KEYCLOAK_PUBLIC_URL=$BASE/identity" >/dev/null
+  seed_fixture_env; "$KRATE" config set "KRATE_PROJECT=$PROJECT" >/dev/null; "$KRATE" config set "KEYCLOAK_PUBLIC_URL=$BASE/identity" >/dev/null
   cap "$KRATE" identity up; rc=$?; ev="$(printf '%s' "$CAP" | grep -o -E 'identity database exists but \.env lacks[^.]*' | head -1)"
   cp "$STATE/env.saved" "$ENVF"; chmod 600 "$ENVF"; rm -f "$STATE/env.saved"
   export PGPASSWORD; PGPASSWORD="$(envv KEYCLOAK_DB_PASSWORD)"; rc2="$(psql_as_keycloak 'select 1')"; unset PGPASSWORD

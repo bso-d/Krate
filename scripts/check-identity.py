@@ -111,26 +111,36 @@ ALLOWED_LINES = [re.compile(pattern) for pattern in (
     r'printf "  %-30s %s\\n" "(disk|auth \{configure FILE\|apply\}|docker-install)"',
     r'^\s*echo "  kafka-92 ',
     r'^\s*disk\)\s+cmd_disk ;;',
+    r'^  epc_require_storage \|\| die "EPC storage preflight failed; cluster was not cleared\."$',
 )]
 ALLOWED_BLOCKS = [re.compile(pattern, re.MULTILINE) for pattern in (
-    r'^(fmt_kb|cmd_disk|note_auto_create|ensure_data_dirs|docker_install_rpm|docker_install_deb)\(\) \{',
+    r'^(fmt_kb|cmd_disk|note_auto_create|epc_require_storage|epc_require_restart_storage|ensure_data_dirs|epc_clear_data_dirs|docker_install_rpm|docker_install_deb)\(\) (?:\{|\()',
+    r'^    epc_clear_data_dirs \|\| die "EPC host broker data was not cleared\."$',
+    # The diff can split the EPC setup function at CLI-shared lines.
+    r'^  epc_require_storage \|\| die "EPC storage preflight failed; broker directories were not changed\."$',
     r'# ── RHEL family',
     r'info "Package conflicts"',  # the doctor's RHEL package-conflict check (EPC only)
     r'docker_install_(rpm|deb) ',
     r'systemctl (enable|start) docker',
 )]
+EPC_COMPOSE_STORAGE_PARITY = r"""
+  if [[ "${1:-}" == up || "${1:-}" == restart ]]; then
+    local storage_pins
+    storage_pins="$(bash "$SCRIPT_DIR/storage-guard.sh" pins "$ENV_FILE")" || return 1
+    local -x KAFKA_DATA_DIR KAFKA_DATA_FS_UUID
+    IFS=$'\t' read -r KAFKA_DATA_DIR KAFKA_DATA_FS_UUID <<< "$storage_pins"
+    if [[ "$1" == restart ]]; then
+      epc_require_restart_storage "$KAFKA_DATA_DIR" "$KAFKA_DATA_FS_UUID" "${2:-}" || return 1
+    fi
+  fi
+""".strip('\n')
 EPC_DATA_PREFLIGHT_PARITY = '''
-  # ── EPC data directory preflight ──
-  # EPC bind mounts broker data from a host path. Check it before copying any
-  # release files, so an absent disk cannot leave a partial install behind.
-  local data_env_file="$site_dir/.env" data_dir
+  # Verify the dedicated EPC filesystem before copying any release files.
+  local data_env_file="$site_dir/.env"
   [[ -f "$data_env_file" ]] || data_env_file="$ENV_TEMPLATE"
-  data_dir="$(grep -E '^KAFKA_DATA_DIR=' "$data_env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)"
-  data_dir="${data_dir:-/data}"
-  if [[ -d "$data_dir" ]]; then
-    ok "EPC data directory $data_dir exists"
+  if epc_require_storage "$data_env_file"; then
+    ok "EPC data filesystem matches the configured UUID"
   else
-    err "EPC data directory $data_dir does not exist — mount the data disk at /data before Install (or set KAFKA_DATA_DIR in a package .env before starting Studio)"
     problems=$((problems + 1))
   fi
 '''.strip('\n')
@@ -4248,7 +4258,8 @@ def check_parity(checks):
         changed = [line[1:] for line in body.splitlines() if line[:1] in '+-']
         text = '\n'.join(changed)
         allowed = (not FORBIDDEN_IN_HUNK.search(text)
-                   and (text == EPC_DATA_PREFLIGHT_PARITY
+                   and (text in {EPC_DATA_PREFLIGHT_PARITY, EPC_COMPOSE_STORAGE_PARITY,
+                                     '  fi\n' + EPC_DATA_PREFLIGHT_PARITY.rsplit('\n', 1)[0]}
                         or all(any(pattern.search(line) for pattern in ALLOWED_LINES) for line in changed)
                         or any(pattern.search(text) for pattern in ALLOWED_BLOCKS)))
         first = next((line for line in changed if line.strip()), '')
@@ -5197,7 +5208,7 @@ def check_probe_diagnostic_privacy(checks):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(Path, 'read_text', read_runtime), \
                 mock.patch.object(probe, 'urlopen', request), \
-                mock.patch.object(ssl, 'create_default_context', return_value=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)), \
+                mock.patch.object(probe, 'trust_context', return_value=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)), \
                 mock.patch.object(socket, 'getaddrinfo', resolver), \
                 mock.patch.object(signal, 'signal'), \
                 mock.patch.object(signal, 'alarm', side_effect=lambda seconds: alarms.append(seconds) or 0), \
@@ -5281,8 +5292,9 @@ def check_probe_causes(checks):
     hostile_name = 'evil\x1b[2J.' + 'H' * 5000  # a redirect target's host name: 9 characters, then a flood
     as_directory = object()
     detour_lookups = ((PUBLIC_HOST, 443), ('elsewhere.example.test', 443))  # the issuer's host first, then where a redirect led
-    calls, lookups, cafiles, alarms, hooks = [], [], [], [], {}
+    calls, lookups, cafiles, defaults, alarms, hooks = [], [], [], [], [], {}
     real_context, real_alarm, real_read_text = ssl.create_default_context, signal.alarm, pathlib.Path.read_text
+    real_load_locations = ssl.SSLContext.load_verify_locations
 
     class Reply:
         def __init__(self, body):
@@ -5327,11 +5339,15 @@ def check_probe_causes(checks):
         """create_default_context without the partial-chain flag that Python 3.13+ sets by default: probe.py must set it itself."""
         if 'context' in hooks:
             raise hooks['context']
-        cafiles.append(context_kwargs.get('cafile'))
+        defaults.append((context_args, context_kwargs))
         bare = real_context(*context_args, **context_kwargs)
         if hasattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN'):
             bare.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
         return bare
+
+    def track_load_locations(context, *args, **kwargs):
+        cafiles.append(kwargs.get('cafile'))
+        return real_load_locations(context, *args, **kwargs)
 
     def counting_alarm(seconds):
         alarms.append(seconds)
@@ -5352,6 +5368,7 @@ def check_probe_causes(checks):
         if 'read_text' in hooks:
             setattr(pathlib.Path, 'read_text', failing_read_text)
         del alarms[:]
+        ssl.SSLContext.load_verify_locations = track_load_locations
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 try:
@@ -5370,6 +5387,7 @@ def check_probe_causes(checks):
         finally:
             resolver_restored = socket.getaddrinfo is fake_getaddrinfo
             socket.getaddrinfo, ssl.create_default_context, signal.alarm = real_getaddrinfo, real_context, real_alarm
+            ssl.SSLContext.load_verify_locations = real_load_locations
             setattr(pathlib.Path, 'read_text', real_read_text)
             sys.argv = real_argv
             setattr(probe, 'urlopen', real_urlopen)
@@ -5560,7 +5578,7 @@ def check_probe_causes(checks):
             hooks.clear()
             if row['hook']:
                 hooks[row['hook'][0]] = row['hook'][1]
-            del calls[:], lookups[:], cafiles[:]
+            del calls[:], lookups[:], cafiles[:], defaults[:]
             result = run(site, row['stub'] or raising(AssertionError('urlopen must not be reached')), row['extra'])
             err = result['err']
             what = f'probe.py ({row["title"]})'
@@ -5588,7 +5606,7 @@ def check_probe_causes(checks):
         place(site / 'auth/ui/runtime.yml', runtime(keycloak))
         place(site / 'certs/server.crt', certificate)
         for connect_args in ((), ('--connect-ip', '127.0.0.1')):
-            del calls[:], lookups[:], cafiles[:]
+            del calls[:], lookups[:], cafiles[:], defaults[:]
             result = run(site, answering(json.dumps(document).encode(), ((PUBLIC_HOST.upper(), 443), ('elsewhere.example.test', 443))), connect_args)
             what = f'probe.py (success {" ".join(connect_args) or "without --connect-ip"})'
             e((result['status'], result['out'], result['err']) == (0, 'Public HTTPS identity discovery verified.\n', ''),
@@ -5601,7 +5619,8 @@ def check_probe_causes(checks):
               and urlopen_context.check_hostname and urlopen_context.verify_mode == ssl.CERT_REQUIRED
               and (not hasattr(ssl, 'VERIFY_X509_PARTIAL_CHAIN') or urlopen_context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN),
               f'{what}: urlopen gets the discovery URL, a 10 s timeout and a verifying context with partial chains allowed')
-            e(cafiles == [str(site / 'certs/server.crt')], f'{what}: the trust anchor is certs/server.crt; got {cafiles!r}')
+            e(defaults == [((), {})], f'{what}: start with OS CA trust; got {defaults!r}')
+            e(cafiles == [str(site / 'certs/server.crt')], f'{what}: also load configured certs/server.crt; got {cafiles!r}')
             e(lookups == (['127.0.0.1'] if connect_args else [PUBLIC_HOST.upper()]) + ['elsewhere.example.test'],
               f'{what}: --connect-ip maps the issuer host (any case) to that address and no other name; resolver saw {lookups!r}')
 
@@ -10149,6 +10168,116 @@ def check_monitoring_tables(checks):
           f'{edition}/krate: monitor_prepare must warn when PROM_BIND or LOKI_BIND is not 127.0.0.1')
 
 
+def check_gate_epc_fixture_pins(checks):
+    runner = ROOT / 'scripts/gate-identity.sh'
+    source = runner.read_text()
+    # Exercise the actual reseed function and raw settings writer. The only
+    # substitute is the physical filesystem probe, which needs a Linux guest.
+    uid = '12345678-1234-1234-1234-123456789abc'
+    with tempfile.TemporaryDirectory() as scratch:
+        fixture = Path(scratch)
+        for edition in ('kraft', 'epc'):
+            installed = fixture / edition
+            installed.mkdir()
+            template = installed / '.env.template'
+            original = (ROOT / edition / '.env.template').read_bytes()
+            template.write_bytes(original)
+            script = (bash_function_source(runner, 'set_env_raw')
+                      + bash_function_source(runner, 'seed_fixture_env')
+                      + 'ED="$1"; ENVF="$1/.env"; EDITION="$2"; EPC_FIXTURE_DATA=/fixture-disk; EPC_FIXTURE_UUID="$3"\n'
+                      + 'gate_check_epc_storage() { [[ "$FIXTURE_MODE" == good ]]; }\n'
+                      + 'FIXTURE_MODE="$4"; bash() { [[ "$*" == "$ED/storage-guard.sh site $ENVF" ]]; }\n'
+                      + 'seed_fixture_env\n')
+            args = ['bash', '-c', script, 'bash', str(installed), edition, uid]
+            refused = subprocess.run(args + ['bad'], text=True, capture_output=True)
+            checks.expect(refused.returncode == 2 and not (installed / '.env').exists(),
+                          f'{edition}: storage refusal must precede .env write')
+            allowed = subprocess.run(args + ['good'], text=True, capture_output=True)
+            checks.expect(allowed.returncode == 0 and template.read_bytes() == original,
+                          f'{edition}: fixture reseed must preserve template bytes: {allowed.stderr}')
+            env = (installed / '.env').read_bytes()
+            if edition == 'epc':
+                checks.expect(env.count(b'KAFKA_DATA_DIR=/fixture-disk\n') == 1
+                              and env.count(f'KAFKA_DATA_FS_UUID={uid}\n'.encode()) == 1,
+                              'EPC fixture must write each explicit disk pin exactly once')
+            else:
+                checks.expect(env == original, 'KRaft fixture reseed must not inject EPC storage settings')
+    checks.expect(source.count('cp "$ED/.env.template" "$ENVF"') == 1 and source.count('  seed_fixture_env') == 2,
+                  'normal fixture creation and simulated lost .env must both use the guarded reseed')
+
+
+def check_candidate_bundle_sources(checks):
+    spec = importlib.util.spec_from_file_location('candidate_binding', ROOT / 'scripts/gate/candidate_binding.py')
+    assert spec is not None and spec.loader is not None
+    binding = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(binding)
+    repo = str(ROOT)
+    candidate = binding.resolve_commit(repo, 'HEAD')
+    studio_and_identity = (
+        'sso/check-public-origin.py', 'ui/krate_ui.py', 'ui/krate-studio@.service.example',
+        'ui/static/index.html', 'ui/static/app.js', 'ui/static/styles.css', 'ui/static/krate-logo.png',
+        'Krate-UI.command', 'Krate-UI.bat', 'krate-ui.sh', 'Krate-UI.desktop',
+        'kafka-oauth-client/README.md', 'kafka-oauth-client/build.sh',
+        'kafka-oauth-client/src/main/java/com/krate/kafka/oauth/CredentialState.java',
+    )
+    storage = ('storage-guard.sh', 'storage.md')
+    for edition in ('kraft', 'epc'):
+        required = {path: path for path in studio_and_identity}
+        if edition == 'epc':
+            required.update({path: 'epc/' + path for path in storage})
+        inventory = binding.inventory(repo, candidate, edition)
+        checks.expect({path: inventory.get(path) for path in required} == required,
+                      f'{edition}: inventory must bind each packaged Studio, SSO, OAuth and EPC source')
+        checks.expect(edition == 'epc' or all(path not in inventory for path in storage),
+                      'kraft: do not require EPC storage files')
+        # The explicitly listed package paths are staged even if the inventory missed them.
+        files = dict(inventory, **required)
+        blobs = binding.candidate_blobs(repo, candidate, files.values())
+        images = {image for path in binding.TEMPLATES for image in binding.template_images(blobs[files[path]])}
+        image_id = 'sha256:' + 'a' * 64
+        runtime = {image: binding.RUNTIME_PREFIX + image_id[7:] for image in images}
+        with tempfile.TemporaryDirectory() as scratch:
+            installed = Path(scratch)
+            lock = ['\t'.join(binding.LOCK_HEADER)]
+            lock += ['\t'.join((source, tag, image_id)) for source, tag in sorted(runtime.items())]
+            (installed / binding.LOCK).write_text('\n'.join(lock) + '\n', encoding='utf-8')
+            for path, source in files.items():
+                destination = installed / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                data = blobs[source]
+                if path in binding.TEMPLATES:
+                    data = binding.replay_rewrite(data, runtime)
+                destination.write_bytes(data)
+            (installed / 'krate').chmod(0o755)
+            # These are generated/package-derived rather than candidate source bytes.
+            generated = installed / 'kafka-oauth-client/krate-kafka-oauth-client.jar'
+            generated.write_bytes(b'synthetic runtime artifact')
+            _, clean = binding.compare_installed(repo, candidate, scratch, edition)
+            checks.expect(clean == [], f'{edition}: assembled package layout must bind cleanly: {clean!r}')
+            extras = ('ui/static/nested/unshipped.js',
+                      'kafka-oauth-client/src/main/java/unshipped.java')
+            for path in extras:
+                destination = installed / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b'extra')
+            (installed / 'ui/nested-link').symlink_to('static', target_is_directory=True)
+            for path in required:
+                (installed / path).write_bytes(b'non-candidate bytes')
+            _, changed = binding.compare_installed(repo, candidate, scratch, edition)
+            checks.expect({(path, source) for path, source, why in changed if why == 'bytes differ'} == set(required.items()),
+                          f'{edition}: every deliberately modified candidate path must be rejected: {changed!r}')
+            checks.expect({path for path, source, _why in changed if source == '-'} == set(extras) | {'ui/nested-link'},
+                          f'{edition}: recursive inventory must reject unshipped files: {changed!r}')
+            (installed / 'ui').rename(installed / 'relocated-ui')
+            (installed / 'ui').symlink_to('relocated-ui', target_is_directory=True)
+            (installed / 'kafka-oauth-client').rename(installed / 'relocated-client')
+            (installed / 'kafka-oauth-client').symlink_to('relocated-client', target_is_directory=True)
+            _, linked = binding.compare_installed(repo, candidate, scratch, edition)
+            checks.expect({path for path, source, _why in linked if source == '-'}
+                          == {'ui', 'kafka-oauth-client'},
+                          f'{edition}: detect a symlink to a scanned root or its ancestor: {linked!r}')
+
+
 def check_airgap_rows(checks):
     """The air-gap rows AG1-AG5 (scripts/gate/phase4_airgap.py): the pure helpers behave, a probe that cannot run is FAIL on a bundle
     host and NOT_RUN on the Mac and on a checkout (never PASS), nothing is left running, and the runner calls the steps where
@@ -12163,7 +12292,7 @@ def main():
                   check_grafana_realm_cli, check_grafana_sessions_cli, check_monitor_idp_host_stable, check_grafana_collision_paging, check_grafana_collision_classification, check_grafana_collision_warning_rendering, check_grafana_realm_plan, check_perses_clients, check_perses_sync_scopes, check_perses_address, check_monitor_logins, check_build_certificate_hint,
                   check_render_writes, check_migrate_issuer, check_monitoring_tables,
                   check_grafana_admin_contract,
-                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_phase4_w3_controls, check_run_lock_order, check_run_lock_stamp_tz, check_start_cluster_monitor_realm, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_airgap_rows,
+                  check_logrotate, check_cli_kafbat, check_exposure, check_gate_scripts, check_topofix2, check_mac_launcher_round4, check_mac_ipv6_ports, check_firewall_round4, check_phase4_w3_controls, check_run_lock_order, check_run_lock_stamp_tz, check_start_cluster_monitor_realm, check_browser_certificate_proceed, check_browser_certificate_binding, check_browser_http_guard, check_browser_http_callers, check_browser_story_ports, check_browser_probe_lifecycle, check_browser_probe_consumer, check_mac_ipv4_outcomes, check_mac_system_proxy, check_mac_w6_curl_invocation, check_k37_wiring, check_phase4_monitor_paths, check_gate_epc_fixture_pins, check_candidate_bundle_sources, check_airgap_rows,
                   check_parity, check_zk_frozen, check_writers, check_backup_seal,
                   check_plan_and_preflight, check_configure_dual, check_runtime_preflight, check_probe_causes, check_probe_diagnostic_privacy,
                   check_bash_available, check_proxy_env, check_nginx_edge, check_nginx_render, check_identity_dirs, check_identity_users,

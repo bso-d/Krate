@@ -603,10 +603,53 @@ resolve_local_ui_image() {
   fi
 }
 
+# Compose restart preserves the existing container and its mount definitions.
+epc_require_restart_storage() {
+  local base="$1" uuid="$2" target="${3:-}" project node service container mounts
+  local -a nodes
+  case "$target" in
+    "") nodes=(92 93) ;;
+    kafka-92|kafka-93) nodes=("${target#kafka-}") ;;
+    -*) err "EPC restart refused: pass a Compose service name, not an option."; return 1 ;;
+    *) return 0 ;;
+  esac
+  project="$(cluster_project)" || return 1
+  local format='{{index .Config.Labels "com.docker.compose.project"}}{{"\t"}}{{index .Config.Labels "com.docker.compose.service"}}{{range .HostConfig.Mounts}}{{if or (eq .Target "/var/lib/kafka/data") (eq .Target "/run/krate/expected-storage-device")}}{{"\n"}}{{.Target}}{{"\t"}}{{.Type}}{{"\t"}}{{.Source}}{{"\t"}}{{.ReadOnly}}{{end}}{{end}}'
+  for node in "${nodes[@]}"; do
+    service="kafka-$node"
+    container="epc-broker-$node"
+    if ! mounts="$(docker inspect --type container --format "$format" "$container")"; then
+      err "EPC restart refused: could not verify the existing $service container. Check Docker and the Compose project; use krate start if creating a new cluster."
+      return 1
+    fi
+    if ! awk -F '\t' -v project="$project" -v service="$service" \
+      -v data="$base/krate/broker-$node" -v device="/dev/disk/by-uuid/$uuid" '
+        NR == 1 { if (NF != 2 || $1 != project || $2 != service) exit 1; next }
+        $1 == "/var/lib/kafka/data" && NF == 4 && $2 == "bind" && $3 == data && $4 == "false" { data_matches++; next }
+        $1 == "/run/krate/expected-storage-device" && NF == 4 && $2 == "bind" && $3 == device && $4 == "true" { device_matches++; next }
+        { invalid = 1 }
+        END { if (invalid || data_matches != 1 || device_matches != 1) exit 1 }
+      ' <<< "$mounts"; then
+      err "EPC restart refused: $service is not bound to the configured data path and filesystem UUID."
+      err "Existing containers were left unchanged. Stop the brokers before changing the pin, follow storage.md, and recreate with krate start only after verifying the migrated broker data."
+      return 1
+    fi
+  done
+}
+
 # Wrapper so all compose calls use the right files and detected binary. The
 # sso profile (Keycloak and its database) joins the cluster once identity is
 # enabled or Kafbat is in runtime.yml mode.
 compose_cmd() {
+  if [[ "${1:-}" == up || "${1:-}" == restart ]]; then
+    local storage_pins
+    storage_pins="$(bash "$SCRIPT_DIR/storage-guard.sh" pins "$ENV_FILE")" || return 1
+    local -x KAFKA_DATA_DIR KAFKA_DATA_FS_UUID
+    IFS=$'\t' read -r KAFKA_DATA_DIR KAFKA_DATA_FS_UUID <<< "$storage_pins"
+    if [[ "$1" == restart ]]; then
+      epc_require_restart_storage "$KAFKA_DATA_DIR" "$KAFKA_DATA_FS_UUID" "${2:-}" || return 1
+    fi
+  fi
   sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
   resolve_local_ui_image "$@"
   if [[ -f "$ENV_FILE" ]] && identity_profile_enabled; then
@@ -3198,11 +3241,14 @@ except Exception:
   ok "Certificate written to certs/server.crt (replace with an org-CA cert anytime)"
 }
 
-# Ensure a cert exists before the proxy starts; generate one if missing.
+# Only bootstrap a development pair when both certificate paths are absent.
 ensure_cert() {
   if [[ -f "$CERT_CRT" && -f "$CERT_KEY" ]]; then
     ensure_public_cert_readable
     return 0
+  fi
+  if [[ -e "$CERT_CRT" || -L "$CERT_CRT" || -e "$CERT_KEY" || -L "$CERT_KEY" ]]; then
+    die "Incomplete TLS certificate pair: restore matching certs/server.crt and certs/server.key; refusing to replace existing material."
   fi
   warn "No TLS certificate found — generating a self-signed one."
   cmd_gen_cert
@@ -3280,12 +3326,12 @@ fmt_kb() {
 # settings allow it to become.
 cmd_disk() {
   local base pct parts cap_bytes
-  base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
+  base="$(env_value_file "$ENV_FILE" KAFKA_DATA_DIR /data)"
   pct="$(env_value KAFKA_DATA_BUDGET_PCT)"; pct="${pct:-60}"
   parts="$(env_value KAFKA_NUM_PARTITIONS)"; parts="${parts:-24}"
   cap_bytes="$(env_value KAFKA_LOG_RETENTION_BYTES)"; cap_bytes="${cap_bytes:-2147483648}"
 
-  [[ -d "$base" ]] || die "Data disk $base not found."
+  epc_require_storage || die "EPC storage preflight failed."
 
   step "Data disk — $base"
   echo ""
@@ -3353,9 +3399,13 @@ note_auto_create() {
 # named volume. A bind mount keeps the HOST directory's ownership, so each dir
 # must exist and already be owned by the uid the apache/kafka image runs as —
 # otherwise the broker exits at startup unable to write its log dir.
-ensure_data_dirs() {
+epc_require_storage() {
+  bash "$SCRIPT_DIR/storage-guard.sh" site "${1:-$ENV_FILE}"
+}
+
+ensure_data_dirs() (
   local base uid gid d owner
-  base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
+  base="$(env_value_file "$ENV_FILE" KAFKA_DATA_DIR /data)"
   uid="$(env_value KAFKA_UID)"; uid="${uid:-1000}"
   gid="$(env_value KAFKA_GID)"; gid="${gid:-1000}"
 
@@ -3364,22 +3414,52 @@ ensure_data_dirs() {
     sudo_cmd=(sudo)
   fi
 
-  [[ -d "$base" ]] || die "Data disk $base does not exist.
-Mount it (or set a different path) before installing:
-  krate config set KAFKA_DATA_DIR=/path/to/disk"
-
+  epc_require_storage || die "EPC storage preflight failed; broker directories were not changed."
+  local base_device uuid
+  uuid="$(env_value_file "$ENV_FILE" KAFKA_DATA_FS_UUID "")"
+  cd -- "$base" || die "Cannot anchor the verified device mounted at $base"
+  base_device="$(bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid")" \
+    || die "EPC storage changed while preparing $base"
+  # Anchor writes in the checked mount with a relative path. Re-check its
+  # device before creating paths in case it moved between checks.
+  epc_require_storage || die "EPC storage changed while preparing $base"
+  local node security_options selinux=false
+  security_options="$(docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}')" \
+    || die "Cannot determine Docker SELinux confinement; broker directories were not changed."
+  if grep -q '^name=selinux' <<< "$security_options"; then
+    selinux=true
+  fi
   for node in 92 93; do
-    d="$base/krate/broker-$node"
+    d="krate/broker-$node"
+    [[ ! -L "krate" && ! -L "$d" ]] || die "Refusing symbolic link in EPC broker path $d"
+    [[ ! -e "krate" || "$(bash "$SCRIPT_DIR/storage-guard.sh" filesystem "krate")" == "$base_device" ]] \
+      || die "EPC broker parent is not on the verified filesystem: $base/krate"
     if [[ ! -d "$d" ]]; then
-      info "Creating broker data directory $d"
-      "${sudo_cmd[@]}" mkdir -p "$d" || die "Could not create $d — create it manually and re-run."
+      info "Creating broker data directory $base/$d"
+      # Studio's umask protects its own state; new broker paths still need
+      # their ordinary traversal modes. Do not chmod an existing data tree.
+      if [[ ! -d krate ]]; then
+        "${sudo_cmd[@]}" mkdir -m 0755 -- krate || die "Could not create $base/krate — create it manually and re-run."
+      fi
+      "${sudo_cmd[@]}" mkdir -m 0755 -- "$d" || die "Could not create $base/$d — create it manually and re-run."
     fi
+    [[ "$(bash "$SCRIPT_DIR/storage-guard.sh" filesystem "$d")" == "$base_device" ]] \
+      || die "EPC broker path is not on the verified filesystem: $base/$d"
     owner="$(stat -c '%u:%g' "$d" 2>/dev/null || true)"
     if [[ "$owner" != "$uid:$gid" ]]; then
-      info "Setting owner of $d to $uid:$gid (the uid apache/kafka runs as)"
-      "${sudo_cmd[@]}" chown "$uid:$gid" "$d" || die "Could not chown $d
+      info "Setting owner of $base/$d to $uid:$gid (the uid apache/kafka runs as)"
+      "${sudo_cmd[@]}" chown "$uid:$gid" "$d" || die "Could not chown $base/$d
 Run this, then re-run the install:
   sudo chown -R $uid:$gid $base/krate"
+    fi
+    # Compose's noncreating bind opts do not relabel with current Docker.
+    # Label only the validated broker tree, not its backing device or mount.
+    if $selinux; then
+      (
+        cd -- "$d" || exit 1
+        bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid" >/dev/null || exit 1
+        "${sudo_cmd[@]}" find . -xdev -exec chcon -h -t container_file_t -l s0 -- {} +
+      ) || die "Could not apply the SELinux container-file label to $base/$d"
     fi
   done
   local avail_gb
@@ -3388,7 +3468,7 @@ Run this, then re-run the install:
     warn "Only ${avail_gb} GB free on $base — check ./krate disk before loading traffic."
   fi
   ok "Broker data directories ready under $base/krate"
-}
+)
 
 # Returns 0 if a TCP listener already holds the given port on this host.
 port_in_use() {
@@ -3792,7 +3872,7 @@ cmd_ui() {
     [[ -n "$user" ]] && echo "  Username  $user"
     [[ -n "$pass" ]] && echo "  Password  $pass"
   fi
-  echo -e "  ${DIM}TLS is a self-signed cert — trust certs/server.crt or proceed past the browser warning.${RESET}"
+  echo -e "  ${DIM}TLS: verify trust for this URL. The generated development certificate is self-signed.${RESET}"
   sep
 }
 
@@ -3914,6 +3994,8 @@ cmd_clear_cluster() {
     [[ "$confirm" == "yes" ]] || die "Aborted."
   fi
 
+  epc_require_storage || die "EPC storage preflight failed; cluster was not cleared."
+
   # Stage 1: Teardown monitoring stack and purge monitoring volumes
   if [[ -d "$MONITOR_DIR" ]]; then
     info "Stage 1/2: Tearing down monitoring stack and purging volumes..."
@@ -3926,24 +4008,38 @@ cmd_clear_cluster() {
 
   # Stage 3: On EPC, clean host data directory under KAFKA_DATA_DIR
   if [[ "$KRATE_VARIANT" == "epc" ]]; then
-    local base
-    base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
-    if [[ -d "$base/krate" ]]; then
-      info "Cleaning host broker data directories in $base/krate..."
-      local -a sudo_cmd=()
-      if [[ "$(id -u)" -ne 0 ]] && command -v sudo &>/dev/null; then
-        sudo_cmd=(sudo)
-      fi
-      if "${sudo_cmd[@]}" rm -rf "$base/krate/broker-92"/* "$base/krate/broker-93"/* 2>/dev/null; then
-        ok "EPC host broker data cleared"
-      else
-        warn "Could not clean $base/krate (requires root privileges). Clean manually: sudo rm -rf $base/krate"
-      fi
-    fi
+    epc_clear_data_dirs || die "EPC host broker data was not cleared."
   fi
 
   ok "Cluster and observability stack cleared successfully."
 }
+
+epc_clear_data_dirs() (
+  local base uuid base_device node d
+  local -a sudo_cmd=()
+  base="$(env_value_file "$ENV_FILE" KAFKA_DATA_DIR /data)"
+  uuid="$(env_value_file "$ENV_FILE" KAFKA_DATA_FS_UUID "")"
+  epc_require_storage || return 1
+  cd -- "$base" || return 1
+  base_device="$(bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid")" || return 1
+  if [[ "$(id -u)" -ne 0 ]] && command -v sudo &>/dev/null; then
+    sudo_cmd=(sudo)
+  fi
+  for node in 92 93; do
+    d="krate/broker-$node"
+    [[ ! -L krate && ! -L "$d" ]] || return 1
+    [[ ! -e "$d" ]] && continue
+    [[ -d "$d" && "$(bash "$SCRIPT_DIR/storage-guard.sh" filesystem "$d")" == "$base_device" ]] || return 1
+    (
+      cd -- "$d" || exit 1
+      bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid" >/dev/null || exit 1
+      # find -xdev alone would still traverse same-filesystem bind mounts.
+      bash "$SCRIPT_DIR/storage-guard.sh" no-child-mounts "$base/$d" || exit 1
+      "${sudo_cmd[@]}" find . -mindepth 1 -xdev -depth -delete
+    ) || return 1
+  done
+  ok "EPC host broker data cleared"
+)
 
 # ─── clear-images ─────────────────────────────────────────────────────────────
 cmd_clear_images() {
@@ -5345,17 +5441,12 @@ cmd_doctor() {
   else
     ok "no .env yet — install creates it with generated passwords"
   fi
-  # ── EPC data directory preflight ──
-  # EPC bind mounts broker data from a host path. Check it before copying any
-  # release files, so an absent disk cannot leave a partial install behind.
-  local data_env_file="$site_dir/.env" data_dir
+  # Verify the dedicated EPC filesystem before copying any release files.
+  local data_env_file="$site_dir/.env"
   [[ -f "$data_env_file" ]] || data_env_file="$ENV_TEMPLATE"
-  data_dir="$(grep -E '^KAFKA_DATA_DIR=' "$data_env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)"
-  data_dir="${data_dir:-/data}"
-  if [[ -d "$data_dir" ]]; then
-    ok "EPC data directory $data_dir exists"
+  if epc_require_storage "$data_env_file"; then
+    ok "EPC data filesystem matches the configured UUID"
   else
-    err "EPC data directory $data_dir does not exist — mount the data disk at /data before Install (or set KAFKA_DATA_DIR in a package .env before starting Studio)"
     problems=$((problems + 1))
   fi
   if [[ -f "$site_dir/certs/server.crt" && -f "$site_dir/certs/server.key" ]]; then
