@@ -3386,8 +3386,10 @@ ensure_data_dirs() (
   # Anchor writes in the checked mount with a relative path. Re-check its
   # device before creating paths in case it moved between checks.
   epc_require_storage || die "EPC storage changed while preparing $base"
-  local node selinux=false
-  if docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/null | grep -q '^name=selinux'; then
+  local node security_options selinux=false
+  security_options="$(docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}')" \
+    || die "Cannot determine Docker SELinux confinement; broker directories were not changed."
+  if grep -q '^name=selinux' <<< "$security_options"; then
     selinux=true
   fi
   for node in 92 93; do

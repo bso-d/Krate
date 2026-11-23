@@ -80,3 +80,13 @@ if epc_storage_broker_device_id "$fixture" "$working/sys"; then failure 'accepte
 printf '%s\n' '31 30 0:6 /vdb1 /run/krate/expected-storage-device ro - ext4 disk rw' > "$fixture"
 if epc_storage_broker_device_id "$fixture" "$working/sys"; then failure 'accepted fake expected metadata on ordinary disk'; fi
 printf 'PASS %s\n' 'source expected device number from read-only devtmpfs bind and Linux sysfs'
+
+mkdir -p "$working/auth/certs"
+if epc_storage_broker_config "$working/auth" local; then failure 'empty auth bind accepted'; fi
+printf '%s\n' 'local fixture' > "$working/auth/server.properties"
+epc_storage_broker_config "$working/auth" local
+if epc_storage_broker_config "$working/auth" oauth_ssl; then failure 'OAuth bind with missing broker keystore accepted'; fi
+printf '%s\n' 'keystore fixture' > "$working/auth/certs/broker.p12"
+epc_storage_broker_config "$working/auth" oauth_ssl
+if epc_storage_broker_config "$working/auth" invalid; then failure 'unknown broker auth mode accepted'; fi
+printf 'PASS %s\n' 'start fails closed if legacy relabel bind has no required auth config'

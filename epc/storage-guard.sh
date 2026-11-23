@@ -174,6 +174,22 @@ epc_storage_broker_device_id() {
   printf '%s\n' "$device"
 }
 
+epc_storage_broker_config() {
+  local directory="$1" mode="$2" item
+  local -a required=(server.properties)
+  case "$mode" in
+    local) ;;
+    oauth_ssl) required+=(certs/broker.p12) ;;
+    *) epc_storage_error 'unknown broker auth config mode; startup refused.'; return 1 ;;
+  esac
+  for item in "${required[@]}"; do
+    if [[ ! -f "$directory/$item" || ! -r "$directory/$item" || ! -s "$directory/$item" ]]; then
+      epc_storage_error "required broker auth file $item is missing or unreadable in $mode mode."
+      return 1
+    fi
+  done
+}
+
 epc_storage_broker() {
   local device node="${KAFKA_NODE_ID:-}"
   if [[ "$node" != 92 && "$node" != 93 ]]; then
@@ -202,6 +218,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     anchor) [[ "$#" == 3 ]] && epc_storage_anchor "$2" "$3" ;;
     broker)
       epc_storage_broker || exit 1
+      epc_storage_broker_config /mnt/shared/config "${KRATE_BROKER_AUTH_MODE:-}" || exit 1
       if [[ -x /__cacert_entrypoint.sh ]]; then
         exec /__cacert_entrypoint.sh /etc/kafka/docker/run
       fi

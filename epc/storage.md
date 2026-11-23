@@ -44,4 +44,4 @@ protect against intentional host reconfiguration by a privileged administrator.
 
 Set the two storage fields as plain literal `KEY=value` lines. Do not use duplicate declarations, `export`, interpolated values, or shell overrides.
 
-On a Docker engine with SELinux confinement enabled, `krate install` labels only the broker data trees on the verified disk as `container_file_t:s0`. It does not relabel the raw block device. Broker startup reads its numeric identity through read-only Linux mount metadata and sysfs, not by opening the disk.
+On a Docker engine with SELinux confinement enabled, `krate install` labels only the broker data trees on the verified disk as `container_file_t:s0`. This is the shared container data label; it is not a private per-container MCS `:Z` label. Other containers are not given access to these paths by Krate. It does not relabel the raw block device. Broker startup reads its numeric identity through read-only Linux mount metadata and sysfs, not by opening the disk.
