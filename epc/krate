@@ -607,7 +607,12 @@ resolve_local_ui_image() {
 # sso profile (Keycloak and its database) joins the cluster once identity is
 # enabled or Kafbat is in runtime.yml mode.
 compose_cmd() {
-  if [[ "${1:-}" == up || "${1:-}" == restart ]]; then epc_require_storage || return 1; fi
+  if [[ "${1:-}" == up || "${1:-}" == restart ]]; then
+    local storage_pins
+    storage_pins="$(bash "$SCRIPT_DIR/storage-guard.sh" pins "$ENV_FILE")" || return 1
+    local -x KAFKA_DATA_DIR KAFKA_DATA_FS_UUID
+    IFS=$'\t' read -r KAFKA_DATA_DIR KAFKA_DATA_FS_UUID <<< "$storage_pins"
+  fi
   sync_image_pins "$ENV_FILE" "$ENV_TEMPLATE"
   resolve_local_ui_image "$@"
   if [[ -f "$ENV_FILE" ]] && identity_profile_enabled; then
@@ -3373,10 +3378,11 @@ ensure_data_dirs() (
   fi
 
   epc_require_storage || die "EPC storage preflight failed; broker directories were not changed."
-  local base_device
-  base_device="$(stat -c '%d' -- "$base")" || die "Cannot identify the device mounted at $base"
+  local base_device uuid
+  uuid="$(env_value_file "$ENV_FILE" KAFKA_DATA_FS_UUID "")"
   cd -- "$base" || die "Cannot anchor the verified device mounted at $base"
-  [[ "$(stat -c '%d' -- .)" == "$base_device" ]] || die "EPC storage changed while preparing $base"
+  base_device="$(bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid")" \
+    || die "EPC storage changed while preparing $base"
   # Anchor writes in the checked mount with a relative path. Re-check its
   # device before creating paths in case it moved between checks.
   epc_require_storage || die "EPC storage changed while preparing $base"
@@ -3384,13 +3390,13 @@ ensure_data_dirs() (
   for node in 92 93; do
     d="krate/broker-$node"
     [[ ! -L "krate" && ! -L "$d" ]] || die "Refusing symbolic link in EPC broker path $d"
-    [[ ! -e "krate" || "$(stat -c '%d' -- "krate")" == "$base_device" ]] \
+    [[ ! -e "krate" || "$(stat -c '%Hd:%Ld' -- "krate")" == "$base_device" ]] \
       || die "EPC broker parent is not on the verified filesystem: $base/krate"
     if [[ ! -d "$d" ]]; then
       info "Creating broker data directory $base/$d"
       "${sudo_cmd[@]}" mkdir -p "$d" || die "Could not create $base/$d — create it manually and re-run."
     fi
-    [[ "$(stat -c '%d' -- "$d")" == "$base_device" ]] \
+    [[ "$(stat -c '%Hd:%Ld' -- "$d")" == "$base_device" ]] \
       || die "EPC broker path is not on the verified filesystem: $base/$d"
     owner="$(stat -c '%u:%g' "$d" 2>/dev/null || true)"
     if [[ "$owner" != "$uid:$gid" ]]; then
@@ -3946,24 +3952,38 @@ cmd_clear_cluster() {
 
   # Stage 3: On EPC, clean host data directory under KAFKA_DATA_DIR
   if [[ "$KRATE_VARIANT" == "epc" ]]; then
-    local base
-    base="$(env_value KAFKA_DATA_DIR)"; base="${base:-/data}"
-    if [[ -d "$base/krate" ]]; then
-      info "Cleaning host broker data directories in $base/krate..."
-      local -a sudo_cmd=()
-      if [[ "$(id -u)" -ne 0 ]] && command -v sudo &>/dev/null; then
-        sudo_cmd=(sudo)
-      fi
-      if "${sudo_cmd[@]}" rm -rf "$base/krate/broker-92"/* "$base/krate/broker-93"/* 2>/dev/null; then
-        ok "EPC host broker data cleared"
-      else
-        warn "Could not clean $base/krate (requires root privileges). Clean manually: sudo rm -rf $base/krate"
-      fi
-    fi
+    epc_clear_data_dirs || die "EPC host broker data was not cleared."
   fi
 
   ok "Cluster and observability stack cleared successfully."
 }
+
+epc_clear_data_dirs() (
+  local base uuid base_device node d
+  local -a sudo_cmd=()
+  base="$(env_value_file "$ENV_FILE" KAFKA_DATA_DIR /data)"
+  uuid="$(env_value_file "$ENV_FILE" KAFKA_DATA_FS_UUID "")"
+  epc_require_storage || return 1
+  cd -- "$base" || return 1
+  base_device="$(bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid")" || return 1
+  if [[ "$(id -u)" -ne 0 ]] && command -v sudo &>/dev/null; then
+    sudo_cmd=(sudo)
+  fi
+  for node in 92 93; do
+    d="krate/broker-$node"
+    [[ ! -L krate && ! -L "$d" ]] || return 1
+    [[ ! -e "$d" ]] && continue
+    [[ -d "$d" && "$(stat -c '%Hd:%Ld' -- "$d")" == "$base_device" ]] || return 1
+    (
+      cd -- "$d" || exit 1
+      bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid" >/dev/null || exit 1
+      # find -xdev alone would still traverse same-filesystem bind mounts.
+      bash "$SCRIPT_DIR/storage-guard.sh" no-child-mounts "$base/$d" || exit 1
+      "${sudo_cmd[@]}" find . -mindepth 1 -xdev -depth -delete
+    ) || return 1
+  done
+  ok "EPC host broker data cleared"
+)
 
 # ─── clear-images ─────────────────────────────────────────────────────────────
 cmd_clear_images() {

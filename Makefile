@@ -128,6 +128,7 @@ offline-check:
 >python3 scripts/check-offline.py
 
 identity-check:
+>bash scripts/check-epc-storage.sh
 >python3 scripts/check-identity.py
 
 studio-operator-check:

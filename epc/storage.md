@@ -41,3 +41,5 @@ host directories if the configured source is missing.
 
 This is a startup and preflight guard, not live storage failover, and cannot
 protect against intentional host reconfiguration by a privileged administrator.
+
+Set the two storage fields as plain literal `KEY=value` lines. Do not use duplicate declarations, `export`, interpolated values, or shell overrides.

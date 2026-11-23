@@ -111,16 +111,17 @@ ALLOWED_LINES = [re.compile(pattern) for pattern in (
     r'printf "  %-30s %s\\n" "(disk|auth \{configure FILE\|apply\}|docker-install)"',
     r'^\s*echo "  kafka-92 ',
     r'^\s*disk\)\s+cmd_disk ;;',
-    r'^  if \[\[ "\$\{1:-\}" == up \|\| "\$\{1:-\}" == restart \]\]; then epc_require_storage \|\| return 1; fi$',
     r'^  epc_require_storage \|\| die "EPC storage preflight failed; cluster was not cleared\."$',
 )]
 ALLOWED_BLOCKS = [re.compile(pattern, re.MULTILINE) for pattern in (
-    r'^(fmt_kb|cmd_disk|note_auto_create|epc_require_storage|ensure_data_dirs|docker_install_rpm|docker_install_deb)\(\) (?:\{|\()',
+    r'^(fmt_kb|cmd_disk|note_auto_create|epc_require_storage|ensure_data_dirs|epc_clear_data_dirs|docker_install_rpm|docker_install_deb)\(\) (?:\{|\()',
+    r'^    epc_clear_data_dirs \|\| die "EPC host broker data was not cleared\."$',
     r'# ── RHEL family',
     r'info "Package conflicts"',  # the doctor's RHEL package-conflict check (EPC only)
     r'docker_install_(rpm|deb) ',
     r'systemctl (enable|start) docker',
 )]
+EPC_COMPOSE_STORAGE_PARITY = '  if [[ "${1:-}" == up || "${1:-}" == restart ]]; then\n    local storage_pins\n    storage_pins="$(bash "$SCRIPT_DIR/storage-guard.sh" pins "$ENV_FILE")" || return 1\n    local -x KAFKA_DATA_DIR KAFKA_DATA_FS_UUID\n    IFS=$\'\\t\' read -r KAFKA_DATA_DIR KAFKA_DATA_FS_UUID <<< "$storage_pins"\n  fi'
 EPC_DATA_PREFLIGHT_PARITY = '''
   # Verify the dedicated EPC filesystem before copying any release files.
   local data_env_file="$site_dir/.env"
@@ -4245,7 +4246,7 @@ def check_parity(checks):
         changed = [line[1:] for line in body.splitlines() if line[:1] in '+-']
         text = '\n'.join(changed)
         allowed = (not FORBIDDEN_IN_HUNK.search(text)
-                   and (text == EPC_DATA_PREFLIGHT_PARITY
+                   and (text in {EPC_DATA_PREFLIGHT_PARITY, EPC_COMPOSE_STORAGE_PARITY}
                         or all(any(pattern.search(line) for pattern in ALLOWED_LINES) for line in changed)
                         or any(pattern.search(text) for pattern in ALLOWED_BLOCKS)))
         first = next((line for line in changed if line.strip()), '')

@@ -17,6 +17,19 @@ epc_storage_device_id() {
   printf '%d:%d\n' "0x$major" "0x$minor"
 }
 
+epc_storage_no_child_mounts() {
+  local target="$1" table="${2:-/proc/self/mountinfo}" include_self="${3:-yes}"
+  target="${target//\\/\\134}"
+  target="${target// /\\040}"
+  target="${target//$'\t'/\\011}"
+  target="${target//$'\n'/\\012}"
+  KRATE_MOUNT_TARGET="$target" awk -v exact="$include_self" '
+    (exact == "yes" && $5 == ENVIRON["KRATE_MOUNT_TARGET"]) ||
+      index($5, ENVIRON["KRATE_MOUNT_TARGET"] "/") == 1 { found = 1 }
+    END { exit found }
+  ' "$table"
+}
+
 epc_storage_mount_row() {
   local target="$1" table="$2"
   # Linux mountinfo escapes whitespace and backslash in path fields.
@@ -61,6 +74,15 @@ epc_storage_mount_check() {
   fi
 }
 
+epc_storage_anchor() {
+  local cwd="$1" uuid="$2" actual expected
+  [[ "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  expected="$(epc_storage_device_id "/dev/disk/by-uuid/$uuid")" || return 1
+  actual="$(stat -Lc '%Hd:%Ld' -- "$cwd")" || return 1
+  [[ "$actual" == "$expected" ]] || return 1
+  printf '%s\n' "$actual"
+}
+
 epc_storage_host() {
   local base="$1" uuid="$2" canonical device root_row
   if [[ ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
@@ -87,28 +109,44 @@ epc_storage_host() {
     epc_storage_error "UUID $uuid is the system root filesystem, not a dedicated data filesystem."
     return 1
   fi
-  epc_storage_mount_check "$base" / "$device" /proc/self/mountinfo
+  epc_storage_mount_check "$base" / "$device" /proc/self/mountinfo || return 1
+  if ! epc_storage_no_child_mounts "$base/krate"; then
+    epc_storage_error "nested mount under $base/krate; broker startup refused."
+    return 1
+  fi
 }
 
 epc_storage_value() {
   local key="$1" settings="$2"
   [[ -f "$settings" ]] || return 0
-  awk -v key="$key" 'index($0, key "=") == 1 { value=substr($0, length(key)+2) }
-    END { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); print value }' "$settings" |
-    sed -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/'
+  # Accept one canonical assignment, not dotenv export, duplicate, quoting,
+  # interpolation, comments or whitespace forms with competing interpretations.
+  LC_ALL=C awk -v key="$key" '
+    $0 ~ ("^[[:space:]]*(export[[:space:]]+)?" key "([[:space:]]|=|:|$)") {
+      n++
+      if (index($0, key "=") != 1) { bad=1; next }
+      value=substr($0, length(key)+2)
+      if (value !~ /^[a-zA-Z0-9_.\/-]*$/) bad=1
+    }
+    END { if (bad || n > 1) exit 1; print value }
+  ' "$settings"
 }
 
 epc_storage_site() {
-  local settings="$1" base uuid
-  base="$(epc_storage_value KAFKA_DATA_DIR "$settings")"
+  local settings="$1" emit="${2:-no}" base uuid
+  if ! base="$(epc_storage_value KAFKA_DATA_DIR "$settings")" ||
+     ! uuid="$(epc_storage_value KAFKA_DATA_FS_UUID "$settings")"; then
+    epc_storage_error "declare storage variables once in $settings as literal KEY=value assignments."
+    return 1
+  fi
   base="${base:-/data}"
-  uuid="$(epc_storage_value KAFKA_DATA_FS_UUID "$settings")"
   # Compose would take an exported override ahead of the pinned site settings.
   if [[ "${KAFKA_DATA_DIR-$base}" != "$base" || "${KAFKA_DATA_FS_UUID-$uuid}" != "$uuid" ]]; then
     epc_storage_error "storage settings must match $settings, not an exported override."
     return 1
   fi
-  epc_storage_host "$base" "$uuid"
+  epc_storage_host "$base" "$uuid" || return 1
+  if [[ "$emit" == yes ]]; then printf '%s\t%s\n' "$base" "$uuid"; fi
 }
 
 epc_storage_broker() {
@@ -122,14 +160,27 @@ epc_storage_broker() {
     epc_storage_error 'expected storage device metadata is missing; broker startup refused.'
     return 1
   fi
-  epc_storage_mount_check /var/lib/kafka/data "/krate/broker-$node" "$device" /proc/self/mountinfo
+  epc_storage_mount_check /var/lib/kafka/data "/krate/broker-$node" "$device" /proc/self/mountinfo || return 1
+  if ! epc_storage_no_child_mounts /var/lib/kafka/data /proc/self/mountinfo no; then
+    epc_storage_error 'nested mount in the broker data tree; broker startup refused.'
+    return 1
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   case "${1:-}" in
     host) [[ "$#" == 3 ]] && epc_storage_host "$2" "$3" ;;
     site) [[ "$#" == 2 ]] && epc_storage_site "$2" ;;
-    broker) epc_storage_broker && exec /etc/kafka/docker/run ;;
+    pins) [[ "$#" == 2 ]] && epc_storage_site "$2" yes ;;
+    no-child-mounts) [[ "$#" == 2 ]] && epc_storage_no_child_mounts "$2" ;;
+    anchor) [[ "$#" == 3 ]] && epc_storage_anchor "$2" "$3" ;;
+    broker)
+      epc_storage_broker || exit 1
+      if [[ -x /__cacert_entrypoint.sh ]]; then
+        exec /__cacert_entrypoint.sh /etc/kafka/docker/run
+      fi
+      exec /etc/kafka/docker/run
+      ;;
     *) epc_storage_error 'unknown guard invocation.' ;;
   esac
 fi
