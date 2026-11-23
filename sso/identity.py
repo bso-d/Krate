@@ -787,9 +787,11 @@ def runtime_plan(env_file, clusters, output, force=False, show=False):
 
 def _openssl(args, cwd, capture=False):
     result = subprocess.run(['openssl', *args], cwd=cwd, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.PIPE)
     if result.returncode:
-        raise subprocess.SubprocessError(f'openssl {args[0]} failed (exit {result.returncode}); is OpenSSL 1.1.1 or newer installed?')
+        detail = ' '.join(result.stderr.decode(errors='replace').split())[-500:]
+        reason = f': {detail}' if detail else ''
+        raise subprocess.SubprocessError(f'openssl {args[0]} failed (exit {result.returncode}){reason}')
     return result.stdout.decode() if capture else ''
 
 
