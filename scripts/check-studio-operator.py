@@ -15,7 +15,6 @@ import threading
 import time
 import unittest
 from contextlib import contextmanager
-from dataclasses import dataclass
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlsplit
@@ -25,13 +24,14 @@ STUDIO = [sys.executable, '-B', str(ROOT / 'ui/krate_ui.py'), '--workspace', str
 PROBE = [sys.executable, '-B', str(ROOT / 'sso/check-public-origin.py')]
 
 
-@dataclass(frozen=True)
 class StudioFixture:
-    runtime: Path
-    command: list
-    child_options: dict
-    operator_uid: int
-    environment: dict
+    def __init__(self, runtime: Path, command: list, child_options: dict,
+                 operator_uid: int, environment: dict):
+        self.runtime = runtime
+        self.command = command
+        self.child_options = child_options
+        self.operator_uid = operator_uid
+        self.environment = environment
 
 
 @contextmanager
