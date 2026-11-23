@@ -145,6 +145,7 @@ class OriginChecks(unittest.TestCase):
                 def log_message(self, format, *args):
                     return
 
+                # noinspection PyPep8Naming
                 def do_GET(self):
                     if (self.path != '/identity/realms/krate/.well-known/openid-configuration'
                             or self.headers['Host'] != f'localhost:{server.server_port}'):
@@ -158,6 +159,7 @@ class OriginChecks(unittest.TestCase):
 
             server = DiscoveryServer(('127.0.0.1', 0), Fixture)
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(cert, key)
             server.socket = context.wrap_socket(server.socket, server_side=True)
             origin = f'https://localhost:{server.server_port}'
@@ -250,6 +252,7 @@ with socket.create_connection(('127.0.0.1', int(sys.argv[3])), 5) as tcp:
                 def log_message(self, format, *args):
                     return
 
+                # noinspection PyPep8Naming
                 def do_GET(self):
                     self.send_response(200)
                     self.end_headers()
@@ -257,6 +260,7 @@ with socket.create_connection(('127.0.0.1', int(sys.argv[3])), 5) as tcp:
             for pem, key in [(bundle, 'leaf.key'), (base / 'fixture.pem', 'fixture.key')]:
                 with self.subTest(pem=pem.name), HTTPServer(('127.0.0.1', 0), Ready) as server:
                     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    tls.minimum_version = ssl.TLSVersion.TLSv1_2
                     tls.load_cert_chain(pem, base / key)
                     server.socket = tls.wrap_socket(server.socket, server_side=True)
                     worker = threading.Thread(target=server.serve_forever, daemon=True)
