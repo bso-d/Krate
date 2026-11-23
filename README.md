@@ -224,8 +224,9 @@ Open the exact `Access URL` printed by Studio on the workstation. Its private `?
 For EPC, prepare a dedicated ext4 or XFS data filesystem **before** running Studio Install. Mount it read-write at the exact broker data mountpoint (normally `/data`), and configure the host to mount that same filesystem at boot. In the extracted EPC package, set the expected filesystem UUID from your storage inventory, not from whatever is mounted now:
 
 ```bash
+disk_uuid='replace-with-the-verified-filesystem-uuid'
 ./krate config set KAFKA_DATA_DIR=/data
-./krate config set KAFKA_DATA_FS_UUID=<verified-filesystem-uuid>
+./krate config set "KAFKA_DATA_FS_UUID=$disk_uuid"
 ./krate doctor
 ```
 
