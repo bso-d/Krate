@@ -116,6 +116,8 @@ ALLOWED_LINES = [re.compile(pattern) for pattern in (
 ALLOWED_BLOCKS = [re.compile(pattern, re.MULTILINE) for pattern in (
     r'^(fmt_kb|cmd_disk|note_auto_create|epc_require_storage|epc_require_restart_storage|ensure_data_dirs|epc_clear_data_dirs|docker_install_rpm|docker_install_deb)\(\) (?:\{|\()',
     r'^    epc_clear_data_dirs \|\| die "EPC host broker data was not cleared\."$',
+    # The diff can split the EPC setup function at CLI-shared lines.
+    r'^  epc_require_storage \|\| die "EPC storage preflight failed; broker directories were not changed\."$',
     r'# ── RHEL family',
     r'info "Package conflicts"',  # the doctor's RHEL package-conflict check (EPC only)
     r'docker_install_(rpm|deb) ',
