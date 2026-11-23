@@ -10199,6 +10199,8 @@ def check_airgap_rows(checks):
     spec_cb.loader.exec_module(cb)
     for ed in ('kraft', 'epc'):
         bound_files = cb.inventory(str(ROOT), 'HEAD', ed)
+        e(bound_files.get('sso/__init__.py') == 'sso/__init__.py',
+          f'candidate_binding inventory for {ed} must include the packaged sso/__init__.py')
         e(bound_files.get('nginx-stream.conf') == f'{ed}/nginx-stream.conf',
           f'candidate_binding inventory for {ed} must map nginx-stream.conf to {ed}/nginx-stream.conf')
         for name in ('kafka-log4j.properties', 'security_metrics.py'):

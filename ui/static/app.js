@@ -80,6 +80,7 @@
     btnStepDocker: document.getElementById("btn-step-docker"),
     btnStepCerts: document.getElementById("btn-step-certs"),
     btnStepImages: document.getElementById("btn-step-images"),
+    stepImagesDesc: document.getElementById("step-images-desc"),
     btnStepInstall: document.getElementById("btn-step-install"),
     btnStepStart: document.getElementById("btn-step-start"),
     stepInstallChip: document.getElementById("step-install-chip"),
@@ -1172,7 +1173,9 @@
           state.setupJobResults[finishedAction] = finishedSucceeded ? "succeeded" : "failed";
         } else if (finishedAction === "install") {
           state.setupJobResults["install"] = finishedSucceeded ? "succeeded" : "failed";
-          if (finishedSucceeded) state.setupJobResults["load-images"] = "succeeded";
+          if (finishedSucceeded && state.activeJob?.context?.is_package) {
+            state.setupJobResults["load-images"] = "succeeded";
+          }
         } else if (finishedAction === "clear_images") {
           delete state.setupJobResults["load-images"];
         }
@@ -1393,6 +1396,11 @@
     }
 
     // 3. Offline Images
+    if (dom.stepImagesDesc) {
+      dom.stepImagesDesc.textContent = statusData.is_package
+        ? "Install also loads the bundled images"
+        : "Install uses available images; Load Images reads this workspace's images directory";
+    }
     if (dom.stepImagesChip) {
       const imgCheck = doctorData?.checks?.find((c) => c.name === "Offline Images");
       const imageJob = state.setupJobResults["load-images"];
@@ -1407,10 +1415,10 @@
     // 4. Installation
     if (dom.stepInstallChip) {
       if (state.setupJobResults["install"] === "failed" && (packageNeedsInstall || statusData.install_attempt_incomplete)) {
-        dom.stepInstallChip.textContent = statusData.install_attempt_incomplete ? "Upgrade Failed" : "Install Failed";
+        dom.stepInstallChip.textContent = "Install Failed";
         dom.stepInstallChip.className = "step-status-chip badge-danger";
       } else if (statusData.install_attempt_incomplete) {
-        dom.stepInstallChip.textContent = "Upgrade Needs Retry";
+        dom.stepInstallChip.textContent = "Install Needs Retry";
         dom.stepInstallChip.className = "step-status-chip badge-danger";
       } else if (statusData.install_incomplete) {
         dom.stepInstallChip.textContent = "Install Needs Retry";
@@ -1433,7 +1441,9 @@
       const dataDir = doctorData?.checks?.find((c) => c.name === "EPC Data Directory");
       dom.stepInstallDesc.textContent = dataDir?.status === "error"
         ? "EPC data path missing: mount the data disk before Install; see the package guide"
-        : "Install bundle, generate TLS, load images and start Kafka";
+        : statusData.is_package
+          ? "Install bundle, generate TLS, load images and start Kafka"
+          : "Retry setup and verify Kafka using available images";
     }
 
     // 5. Start Cluster

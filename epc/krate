@@ -3413,11 +3413,11 @@ install_mark_incomplete() {
 }
 
 install_mark_attempt() {
-  local marker
-  marker="$(mktemp "$KRATE_HOME/.install-attempt.XXXXXX")" || die "Cannot record package install attempt in $KRATE_HOME. Run as its owner or with sudo."
+  local home="$1" marker
+  marker="$(mktemp "$home/.install-attempt.XXXXXX")" || die "Cannot record install attempt in $home. Run as its owner or with sudo."
   printf 'started_at=%s\n' "$(date -u +%FT%TZ)" > "$marker"
   chmod 600 "$marker"
-  mv -f "$marker" "$KRATE_HOME/.install-attempt"
+  mv -f "$marker" "$home/.install-attempt"
 }
 
 cmd_install() {
@@ -3429,7 +3429,7 @@ cmd_install() {
   step "Krate install"
   echo ""
 
-  # Keep a failed package attempt visible to Studio after a browser reload.
+  # Keep a failed install attempt visible to Studio after a browser reload.
   if is_package; then
     if [[ "$KRATE_HOME" == "/opt/krate/${KRATE_VARIANT:-}" ]] \
         && { [[ -L /opt/krate ]] || [[ -L "$KRATE_HOME" ]]; }; then
@@ -3438,7 +3438,11 @@ cmd_install() {
     if [[ ! -d "$KRATE_HOME" ]]; then
       ensure_home_dir
     fi
-    install_mark_attempt
+    install_mark_attempt "$KRATE_HOME"
+  elif [[ -z "$REPO_DIR" ]]; then
+    # A failed preflight in the installed workspace must not look like a fresh
+    # successful install; keep its completion receipt until files change.
+    install_mark_attempt "$SCRIPT_DIR"
   fi
 
   # 1. Preflight — fail safe with guidance instead of half-applying. The

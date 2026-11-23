@@ -1876,10 +1876,12 @@ class StructuredDataCollector:
         # Check Package Installation status when running from an extracted bundle
         if ctx.runtime_kind in ("package_uninstalled", "installed"):
             if ctx.is_installed and ctx.effective_dir and self._install_complete(ctx):
+                attempt_pending = self._package_attempt_exists(ctx)
                 checks.append({
                     "name": "Package Installation",
-                    "status": "ok",
-                    "message": f"Install completed in {ctx.install_dir}",
+                    "status": "warn" if attempt_pending else "ok",
+                    "message": (f"Previous install completed in {ctx.install_dir}; the latest attempt has not completed"
+                                if attempt_pending else f"Install completed in {ctx.install_dir}"),
                     "fix_action": None,
                 })
             elif self._install_incomplete(ctx):
@@ -1908,9 +1910,9 @@ class StructuredDataCollector:
                 problems += 1
             if ctx.is_installed and self._package_attempt_exists(ctx):
                 checks.append({
-                    "name": "Package Upgrade Attempt",
+                    "name": "Install Attempt",
                     "status": "error",
-                    "message": "A package upgrade failed or was interrupted. The existing installation remains available; inspect the job error and retry Install.",
+                    "message": "Install or upgrade failed or was interrupted. Previous installation files remain present; inspect the job error, verify live health, and retry Install.",
                     "fix_action": "install",
                 })
                 problems += 1
