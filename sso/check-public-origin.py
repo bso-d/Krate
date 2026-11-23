@@ -23,9 +23,17 @@ def verify(configured_url, ca_file=None):
     expected_issuer = origin + issuer_path
     authority = target.netloc.rsplit(':', 1)[0] if target.port == 443 else target.netloc
     context = ssl.create_default_context(cafile=ca_file)
-    context.hostname_checks_common_name = False
+    san_checked_by_tls = ssl.HAS_NEVER_CHECK_COMMON_NAME
+    if san_checked_by_tls:
+        context.hostname_checks_common_name = False
     connection = http.client.HTTPSConnection(host, target.port or 443, context=context, timeout=10)
     try:
+        if not san_checked_by_tls:
+            # Older LibreSSL verifies CN by default but cannot disable that fallback.
+            # Keep its normal chain/hostname checks and require a matching SAN as well.
+            connection.connect()
+            peer = connection.sock.getpeercert()
+            ssl.match_hostname({'subjectAltName': peer.get('subjectAltName', ())}, host)
         # Explicit authority matches the installed browser-facing origin, including non-default ports.
         connection.request('GET', issuer_path + '/.well-known/openid-configuration',
                            headers={'Host': authority, 'Accept': 'application/json'})
@@ -56,7 +64,8 @@ def main():
             url = identity.read_env(args.workspace / '.env').get('KEYCLOAK_PUBLIC_URL')
         issuer = verify(url, ca_file=args.ca_file)
     except ssl.SSLCertVerificationError as exc:
-        print(f'Keycloak origin check failed: TLS certificate verification: {exc.verify_message}', file=sys.stderr)
+        message = getattr(exc, 'verify_message', str(exc))
+        print(f'Keycloak origin check failed: TLS certificate verification: {message}', file=sys.stderr)
     except (OSError, ValueError, http.client.HTTPException) as exc:
         print(f'Keycloak origin check failed: {exc}', file=sys.stderr)
     else:
