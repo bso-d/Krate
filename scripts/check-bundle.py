@@ -64,12 +64,12 @@ def main():
             raise SystemExit('Missing proxy configuration file: ' + name)
     for name in ('sso/__init__.py', 'sso/configure-dual.py', 'sso/configure.py', 'sso/activate.sh', 'sso/operations.sh', 'sso/operations.py',
                  'sso/check-bundle.py', 'sso/check-offline.py',
-                 'sso/preflight.py', 'sso/probe.py', 'sso/identity.py', 'sso/idp_watch.py', 'sso/kafka_broker_auth.py', 'sso/logrotate/krate-identity.conf',
+                 'sso/preflight.py', 'sso/probe.py', 'sso/check-public-origin.py', 'sso/identity.py', 'sso/idp_watch.py', 'sso/kafka_broker_auth.py', 'sso/logrotate/krate-identity.conf',
                  'sso/theme/krate/login/theme.properties', 'sso/theme/krate/login/login.ftl',
                  'auth/ui/local.yml', 'auth/kafka/local/server.properties', 'docs/dual-login.md', 'docs/identity-foundation.md', 'docs/grafana-sso.md'):
         if not (root / name).is_file():
             raise SystemExit('Missing authentication package file: ' + name)
-    for name in ('ui/krate_ui.py', 'ui/static/index.html', 'ui/static/styles.css', 'ui/static/app.js'):
+    for name in ('ui/krate_ui.py', 'ui/krate-studio@.service.example', 'ui/static/index.html', 'ui/static/styles.css', 'ui/static/app.js'):
         if not (root / name).is_file():
             raise SystemExit('Missing UI package file: ' + name)
     for name in ('kafka-oauth-client/krate-kafka-oauth-client.jar',

@@ -3659,7 +3659,7 @@ cmd_ui() {
     [[ -n "$user" ]] && echo "  Username  $user"
     [[ -n "$pass" ]] && echo "  Password  $pass"
   fi
-  echo -e "  ${DIM}TLS is a self-signed cert — trust certs/server.crt or proceed past the browser warning.${RESET}"
+  echo -e "  ${DIM}TLS: verify trust for this URL. The generated development certificate is self-signed.${RESET}"
   sep
 }
 

@@ -233,7 +233,32 @@ findmnt -n -o SOURCE,TARGET,FSTYPE /data
 
 Arrange the same mount at boot using the host's storage policy before writing production messages. For a disposable VM test using its root disk, `sudo mkdir -p /data` is enough to satisfy the path check, but that is not a production storage plan. Studio Doctor reports **EPC Data Directory** as an error while the path is absent. The pre-install Configuration editor cannot apply settings to an uninstalled package. After a failed install that copied files, its Configuration editor can change `KAFKA_DATA_DIR` to another existing directory; retry **Install** after saving. **Install Interrupted** means the current install did not finish. **Files Present; Verify** on an older installation means no completion record exists; check its live health before use. Existing installations retain the **Start Cluster** control.
 
-Studio launched this way is a foreground process. After a host reboot, run `./krate studio --no-browser` again from the installed workspace (normally `/opt/krate/kraft` or `/opt/krate/epc`), restore any SSH tunnel, and open the newly printed Access URL. The cluster's Docker services may recover independently; verify their actual state in Studio after reconnecting. A shell session may also need `newgrp docker` or a new login to use Docker directly after Studio installs it; Studio handles its own Docker group access.
+#### Keep Studio available after a Linux host reboot
+
+The foreground command above exits when the host reboots. To start Studio automatically on a systemd host **after installing Krate**, use the bundled `ui/krate-studio@.service.example`. Run it under your existing non-root Krate operator, with access to the installed workspace and Docker socket. Docker group membership grants root-equivalent host access; grant it only to trusted administrators.
+
+From the installed workspace on the host, set `variant` to `kraft` or `epc`:
+
+```bash
+variant=kraft
+sudo install -m 0644 ui/krate-studio@.service.example /etc/systemd/system/krate-studio@.service
+sudoedit /etc/systemd/system/krate-studio@.service  # Set User= to the existing Krate operator
+sudo systemctl daemon-reload
+sudo systemctl enable --now "krate-studio@${variant}.service"
+systemctl is-active "krate-studio@${variant}.service"
+```
+
+The template assumes `/opt/krate/<variant>` and one Studio instance per host on port 8686. For a different install path change both `WorkingDirectory=` and `ExecStart=`. Close any foreground Studio on that port first. Keep the managed service on loopback; do not expose the port publicly.
+
+After a reboot, reconnect the SSH tunnel and read the fresh link **as the configured operator** on the host:
+
+```bash
+cat "/run/krate-studio-${variant}/access-url"
+```
+
+Open that private URL on the tunneled workstation. It contains a token that changes at every service start, so old links and browser sessions do not authenticate the new process. The URL is kept in an operator-only `0600` runtime file, never the service journal. Use `systemctl status "krate-studio@${variant}.service"` or `journalctl -u "krate-studio@${variant}.service" -b` to check startup without fetching the credential; if you intentionally stop the managed service, the foreground command remains available. Studio relaunch does not start or certify the Kafka cluster; check cluster health separately after reconnecting.
+
+**Docker session:** After Studio installs Docker and adds the operator to the group, an existing interactive shell does not automatically get that group. Reconnect SSH, or use `newgrp docker` for a new shell; run `id -Gn` and `docker info` to verify. systemd obtains the operator's current group membership when it starts the service; restart Studio if that membership changed while it was running.
 
 For command-line installation instead, if Docker is missing and you included its packages, run `./krate docker-install` first. It needs administrator access. Then run:
 
@@ -379,9 +404,10 @@ Until `./krate identity up` has run, `./krate start` prints `Identity services s
 
 ### Certificates, public URL, and proxy host enforcement
 
-- **Certificate hostnames:** The certificate `./krate gen-cert` (or the first start) writes covers the host FQDN, the host of `KEYCLOAK_PUBLIC_URL`, and `localhost`, so `./krate auth apply` passes its hostname check on a fresh install (an IP address as the host gets an IP entry, which browsers require for an IP host).
-- **Changing `KEYCLOAK_PUBLIC_URL`:** Run `./krate gen-cert` and then `./krate start` or `./krate auth apply`. The proxy's Compose environment carries a digest of `nginx.conf` and the certificate (`KRATE_PROXY_CONF_SHA`) and, in Keycloak sign-in mode, the one `Host` value it serves (`KRATE_PROXY_PUBLIC_HOST`: the public host, plus `:port` unless `443`), so those commands recreate it exactly when one of them changed.
-- **Strict `Host` header handling:** In Keycloak sign-in mode, an HTTPS request with any other `Host` header (name or port) is closed without a response, and the plain-HTTP port only redirects to the public origin. Open the UI at the `KEYCLOAK_PUBLIC_URL` origin (`./krate ui` prints it).
+- **Development certificate:** `./krate gen-cert` creates a self-signed certificate for the host FQDN, the `KEYCLOAK_PUBLIC_URL` host, and localhost. Treat this as a development or fixture certificate. For a production URL, put the CA-issued leaf certificate followed by its intermediate chain in `certs/server.crt`, and its matching unencrypted private key at `certs/server.key` with mode `0600`, owned by the Krate operator. The certificate SAN must contain the name clients actually use. An IP literal needs an IP SAN. Distribute the enterprise CA through the normal trust process; do not bypass browser warnings or use the leaf as the production workstation trust anchor.
+- **Changing `KEYCLOAK_PUBLIC_URL`:** Set the exact client-facing HTTPS hostname and port with the `/identity` path, provision a certificate for that name, and run `./krate start` or `./krate auth apply` to reload the proxy. The proxy configuration and certificate digest cause Compose to recreate it when they change. Do not run `gen-cert` over an issued certificate; generate a self-signed replacement only for a disposable setup. `./krate ui` prints the configured UI origin in Keycloak mode.
+- **Verify on the operator network:** From the bundle, run `python3 -B sso/check-public-origin.py --workspace /opt/krate/kraft` (or use the installed EPC workspace). A workstation with the bundle but no server `.env` can pass `--public-url https://kafka.example.com/identity` instead. This makes a read-only HTTPS discovery request to the configured authority and requires a trusted chain, matching host and exact realm issuer. It does not follow redirects. It uses the workstation's normal CA trust unless you explicitly provide the organisation's CA bundle with `--ca-file`. Use the same DNS and network path as operators; a host-local success is not workstation/browser acceptance.
+- **Strict `Host` header handling:** In Keycloak sign-in mode, an HTTPS request with any other browser-facing `Host` (name or port) is closed without a response; plain HTTP only redirects to the public origin. Use the issued hostname and correct port for browser login, not a raw IP address or an unrelated loopback tunnel URL.
 
 ### Identity foundation and local user management (`./krate identity`)
 

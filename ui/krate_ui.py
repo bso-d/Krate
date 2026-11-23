@@ -3986,6 +3986,34 @@ class KrateUIHandler(http.server.BaseHTTPRequestHandler):
 
 
 # --- Daemon Server Runner ---
+def managed_runtime_dir() -> Path:
+    """Accept only the service manager's private, operator-owned runtime directory."""
+    path = Path(os.environ.get("RUNTIME_DIRECTORY", ""))
+    if not path.is_absolute():
+        raise ValueError("Managed mode requires systemd RUNTIME_DIRECTORY")
+    try:
+        info = path.lstat()
+    except OSError:
+        raise ValueError("Managed runtime directory is unavailable") from None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError("Managed runtime directory must be operator-owned and private (0700)")
+    return path
+
+
+def write_managed_access_url(runtime: Path, url: str) -> Path:
+    """Publish a complete 0600 URL file, without following a replaced file or symlink."""
+    path = runtime / "access-url"
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=runtime, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(url + "\n")
+            handle.flush()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return path
+
+
 class KrateStudioServer:
     def __init__(
         self,
@@ -3994,12 +4022,17 @@ class KrateStudioServer:
         workspace_path: Optional[str] = None,
         static_dir: Optional[str] = None,
         bootstrap_token: Optional[str] = None,
+        managed_runtime: Optional[Path] = None,
     ):
         self.host = host
         self.port = port
-        self.bootstrap_token = bootstrap_token or os.environ.get(
-            "KRATE_UI_BOOTSTRAP_TOKEN"
-        ) or secrets.token_urlsafe(32)
+        self.managed_runtime = managed_runtime
+        if managed_runtime is not None:
+            self.bootstrap_token = secrets.token_urlsafe(32)
+        else:
+            self.bootstrap_token = bootstrap_token or os.environ.get(
+                "KRATE_UI_BOOTSTRAP_TOKEN"
+            ) or secrets.token_urlsafe(32)
 
         self.session_store = SessionStore()
         self.workspace_mgr = WorkspaceManager(workspace_path)
@@ -4022,28 +4055,40 @@ class KrateStudioServer:
         self.httpd = http.server.ThreadingHTTPServer(server_address, KrateUIHandler)
 
         ws_info = self.workspace_mgr.get_info()
-        url = f"http://{self.host}:{self.port}/?token={self.bootstrap_token}"
+        url = f"http://{self.host}:{self.httpd.server_port}/?token={self.bootstrap_token}"
 
-        # Write runtime token and URL files for desktop launchers
-        token_file = os.path.join(ws_info["path"], ".krate-ui-token")
-        url_file = os.path.join(ws_info["path"], ".krate-ui-url")
-        for fpath, fcontent in [(token_file, self.bootstrap_token), (url_file, url)]:
+        access_file = None
+        if self.managed_runtime is not None:
             try:
-                with open(fpath, "w", encoding="utf-8") as f:
-                    f.write(fcontent + "\n")
-                os.chmod(fpath, 0o600)
-            except Exception:
-                pass
+                access_file = write_managed_access_url(self.managed_runtime, url)
+            except OSError:
+                self.httpd.server_close()
+                raise
+            runtime_files = [access_file]
+        else:
+            # Foreground launchers retain their existing workspace token/URL files.
+            token_file = Path(ws_info["path"]) / ".krate-ui-token"
+            url_file = Path(ws_info["path"]) / ".krate-ui-url"
+            runtime_files = [token_file, url_file]
+            for path, value in [(token_file, self.bootstrap_token), (url_file, url)]:
+                try:
+                    path.write_text(value + "\n", encoding="utf-8")
+                    path.chmod(0o600)
+                except OSError:
+                    pass
 
         print("=" * 72)
         print("  Krate Studio - Control Plane Daemon")
         print(f"  Active Workspace: {ws_info['path']} ({ws_info['variant']})")
-        print(f"  Access URL:       {url}")
-        print(f"  Bootstrap Token:  {self.bootstrap_token}")
+        if access_file is not None:
+            print(f"  Access URL file:  {access_file}")
+        else:
+            print(f"  Access URL:       {url}")
+            print(f"  Bootstrap Token:  {self.bootstrap_token}")
         print("=" * 72)
         sys.stdout.flush()
 
-        if open_browser:
+        if open_browser and self.managed_runtime is None:
             try:
                 threading.Thread(target=lambda: webbrowser.open(url), daemon=True).start()
             except Exception:
@@ -4054,12 +4099,11 @@ class KrateStudioServer:
         except KeyboardInterrupt:
             print("\nShutting down Krate Studio Daemon...")
         finally:
-            for fpath in [token_file, url_file]:
-                if os.path.exists(fpath):
-                    try:
-                        os.remove(fpath)
-                    except OSError:
-                        pass
+            for path in runtime_files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             self.httpd.server_close()
 
 
@@ -4073,8 +4117,24 @@ def main():
     parser.add_argument("--static-dir", default=DEFAULT_STATIC_DIR, help="Path to static web assets")
     parser.add_argument("--no-browser", action="store_true", help="Do not automatically launch web browser")
     parser.add_argument("--token", default=None, help="Explicit bootstrap token")
+    parser.add_argument("--managed", action="store_true",
+                        help="Run from systemd on loopback; write the private Access URL to its runtime directory")
 
     args = parser.parse_args()
+    runtime = None
+    if args.managed:
+        if args.host != DEFAULT_HOST:
+            parser.error("Managed Studio requires the IPv4 loopback host 127.0.0.1")
+        if args.token is not None:
+            parser.error("Managed Studio does not accept an explicit bootstrap token")
+        if os.geteuid() == 0:
+            parser.error("Managed Studio must run as a non-root operator")
+        if not args.workspace or not (Path(args.workspace) / "krate").is_file():
+            parser.error("Managed Studio requires an explicit installed workspace")
+        try:
+            runtime = managed_runtime_dir()
+        except ValueError as exc:
+            parser.error(str(exc))
 
     server = KrateStudioServer(
         host=args.host,
@@ -4082,6 +4142,7 @@ def main():
         workspace_path=args.workspace,
         static_dir=args.static_dir,
         bootstrap_token=args.token,
+        managed_runtime=runtime,
     )
     server.start(open_browser=not args.no_browser)
 
