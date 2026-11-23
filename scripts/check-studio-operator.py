@@ -2,6 +2,7 @@
 """Operator safety checks with local disposable Studio and TLS listeners."""
 import json
 import os
+import re
 from pathlib import Path
 import ssl
 import stat
@@ -85,6 +86,43 @@ class StudioOperatorChecks(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(expected, result.stderr.lower())
             self.assertNotIn('disallowed', result.stderr)
+
+
+class CertificatePairChecks(unittest.TestCase):
+    def test_incomplete_pair_refuses_without_overwriting_surviving_material(self):
+        for variant in ('kraft', 'epc'):
+            source = (ROOT / variant / 'krate').read_text()
+            functions = []
+            for name in ('san_entry', 'ensure_public_cert_readable', 'cmd_gen_cert', 'ensure_cert'):
+                match = re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.MULTILINE | re.DOTALL)
+                if match is None:
+                    self.fail(f'{variant}: cannot extract {name}')
+                functions.append(match.group())
+            driver = r"""
+set -euo pipefail
+CERTS_DIR=$1; CERT_CRT="$1/server.crt"; CERT_KEY="$1/server.key"
+get_fqdn() { echo localhost; }
+public_url_host() { echo localhost; }
+hostname() { echo 127.0.0.1; }
+info() { :; }
+ok() { :; }
+warn() { :; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+""" + '\n'.join(functions) + '\nensure_cert\n'
+            for surviving, missing in [('server.crt', 'server.key'), ('server.key', 'server.crt')]:
+                with self.subTest(variant=variant, surviving=surviving), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    file = base / surviving
+                    original = b'existing operator-owned TLS material\n'
+                    file.write_bytes(original)
+                    file.chmod(0o600)
+                    result = subprocess.run(['bash', '-s', '--', directory], input=driver, capture_output=True,
+                                            text=True, timeout=12)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('incomplete', result.stderr.lower())
+                    self.assertEqual(file.read_bytes(), original)
+                    self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+                    self.assertFalse((base / missing).exists())
 
 
 class OriginChecks(unittest.TestCase):

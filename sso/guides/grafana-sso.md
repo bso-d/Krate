@@ -35,7 +35,7 @@ Two things keep working unchanged: the provisioned dashboards and their uid bind
    **and** from inside containers — not `localhost`, `127.0.0.1` or `[::1]`: inside a
    container, `localhost` is the container. `krate monitor realm` and `krate monitor up`
    both refuse a loopback host before they change anything.
-3. The certificate covers that host: `./krate gen-cert`, then `./krate auth apply`.
+3. The certificate covers that host. Install a matching CA-issued certificate and key in production, or run `./krate gen-cert` for a disposable setup only. Then run `./krate auth apply`.
    Grafana verifies the issuer with the cluster CA (`tls_client_ca`), so certificate
    checks are never turned off.
 4. The realm users who will sign in are in `KEYCLOAK_VIEWER_GROUP` or
@@ -47,6 +47,7 @@ Two things keep working unchanged: the provisioned dashboards and their uid bind
 
 ```bash
 ./krate config set KEYCLOAK_PUBLIC_URL=https://<fqdn>/identity
+# Disposable fixtures only; production must install its matching CA-issued pair.
 ./krate gen-cert
 ./krate auth apply
 ./krate monitor up                       # Grafana still local: monitor realm reads it with the Basic admin
@@ -200,7 +201,7 @@ state is never treated as an absent Grafana or a completed switch.
 
 | symptom | cause and fix |
 | --- | --- |
-| `x509: certificate signed by unknown authority` in Grafana's log | the certificate `KEYCLOAK_PUBLIC_URL` presents is not the one Grafana trusts. Run `./krate gen-cert`, then **`./krate auth apply`** and `./krate monitor up` — in that order, and both of them. nginx reads its certificate at start only, so `auth apply` is what recreates the cluster proxy (`KRATE_PROXY_CONF_SHA` digests `certs/server.crt` and `server.key`), while `monitor up` recreates Grafana (`KRATE_GRAFANA_AUTH_SHA` covers the same file). Running only `monitor up` leaves the proxy presenting the **previous** certificate while Grafana trusts the new one, and every token exchange then fails with x509 (measured: `harness/phase4/live4a/logs/165-d3-proxy-cert.log` — the fingerprints differ and the proxy's StartedAt predates the new `server.crt`) |
+| `x509: certificate signed by unknown authority` in Grafana's log | the certificate `KEYCLOAK_PUBLIC_URL` presents is not the one Grafana trusts. Restore the correct matching certificate and key (use `./krate gen-cert` only on a disposable fixture), then run **`./krate auth apply`** and `./krate monitor up` — in that order, and both of them. nginx reads its certificate at start only, so `auth apply` is what recreates the cluster proxy (`KRATE_PROXY_CONF_SHA` digests `certs/server.crt` and `server.key`), while `monitor up` recreates Grafana (`KRATE_GRAFANA_AUTH_SHA` covers the same file). Running only `monitor up` leaves the proxy presenting the **previous** certificate while Grafana trusts the new one, and every token exchange then fails with x509 (measured: `harness/phase4/live4a/logs/165-d3-proxy-cert.log` — the fingerprints differ and the proxy's StartedAt predates the new `server.crt`) |
 | A Loki query that worked before an edit to `monitoring/loki/gateway.conf` now fails, or the edit seems to have no effect | the gateway keeps serving the previous configuration: that file is a single-file bind mount, and replacing its contents leaves the running nginx holding a stale inode (`ESTALE` on Docker Desktop, observed in the live walk). `krate monitor up` does not recreate the container for a content-only change, because nothing it digests changed. Recreate it explicitly: `cd monitoring && docker compose -p krate-<variant>-monitoring up -d --force-recreate --no-deps loki-gateway`, then reload it with `nginx -s reload` if you only edited a query path |
 | "IdP did not return a role attribute" | the user is in neither realm group: `./krate identity users groups <name>`, then add them (`role_attribute_strict = true` refuses a sign-in with no role) |
 | `loginError: InternalError` and `/userinfo/emails` 404 in Grafana's log | the realm user has no e-mail address: `./krate identity users set-email <name> <address>` |
