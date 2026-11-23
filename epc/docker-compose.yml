@@ -16,6 +16,7 @@ services:
     hostname: kafka-92
     container_name: epc-broker-92
     restart: unless-stopped
+    entrypoint: ["/bin/bash", "/run/krate/storage-guard.sh", "broker"]
     logging:
       driver: "json-file"
       options:
@@ -58,8 +59,26 @@ services:
       # Bind mount onto the /data disk (not a docker named volume under
       # /var/lib/docker). ':Z' applies a private SELinux label — required on
       # RHEL, ignored where SELinux is not enforcing. The directory must exist
-      # and be owned by the image's uid before start; './kafka' handles that.
-      - ${KAFKA_DATA_DIR:-/data}/krate/broker-92:/var/lib/kafka/data:Z
+      # and be owned by the image's uid before start; './krate' handles that.
+      - type: bind
+        source: ${KAFKA_DATA_DIR:-/data}/krate/broker-92
+        target: /var/lib/kafka/data
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: bind
+        source: /dev/disk/by-uuid/${KAFKA_DATA_FS_UUID:-unconfigured-epc-storage}
+        target: /run/krate/expected-storage-device
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./storage-guard.sh
+        target: /run/krate/storage-guard.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
       - ${KRATE_SSO_DIR:-../sso}/../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro,z
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}
@@ -83,6 +102,7 @@ services:
     hostname: kafka-93
     container_name: epc-broker-93
     restart: unless-stopped
+    entrypoint: ["/bin/bash", "/run/krate/storage-guard.sh", "broker"]
     logging:
       driver: "json-file"
       options:
@@ -125,8 +145,26 @@ services:
       # Bind mount onto the /data disk (not a docker named volume under
       # /var/lib/docker). ':Z' applies a private SELinux label — required on
       # RHEL, ignored where SELinux is not enforcing. The directory must exist
-      # and be owned by the image's uid before start; './kafka' handles that.
-      - ${KAFKA_DATA_DIR:-/data}/krate/broker-93:/var/lib/kafka/data:Z
+      # and be owned by the image's uid before start; './krate' handles that.
+      - type: bind
+        source: ${KAFKA_DATA_DIR:-/data}/krate/broker-93
+        target: /var/lib/kafka/data
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: bind
+        source: /dev/disk/by-uuid/${KAFKA_DATA_FS_UUID:-unconfigured-epc-storage}
+        target: /run/krate/expected-storage-device
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./storage-guard.sh
+        target: /run/krate/storage-guard.sh
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
       - ${KRATE_SSO_DIR:-../sso}/../monitoring/kafka-log4j.properties:/etc/krate/kafka-log4j.properties:ro,z
       - type: bind
         source: ./auth/kafka/${KAFKA_AUTH_MODE:-local}

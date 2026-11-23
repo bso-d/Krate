@@ -27,7 +27,7 @@ NO_PULL ?= 0
 
 DIST_DIR := dist
 DOCKER_OFFLINE_DIR := docker-offline
-CLI_FILES := zk/kafka kraft/krate epc/krate sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh scripts/extract-keycloak-jre.sh Krate-UI.command krate-ui.sh
+CLI_FILES := zk/kafka kraft/krate epc/krate epc/storage-guard.sh sso/activate.sh sso/operations.sh scripts/package-release.sh scripts/gate-identity.sh scripts/extract-keycloak-jre.sh Krate-UI.command krate-ui.sh
 VARIANT ?= kraft
 SSO_APP ?= kafbat
 SSO_SETTINGS ?= sso/site.json
@@ -277,7 +277,7 @@ bundle: offline-check
 >
 >  cp "$$src_dir/docker-compose.yml" "$$bundle_dir/docker-compose.yml"
 >  if [[ "$$mode" == "epc" ]]; then
->    cp "$$src_dir/kafbat.yml" "$$bundle_dir/kafbat.yml"
+>    cp "$$src_dir/kafbat.yml" "$$src_dir/storage-guard.sh" "$$src_dir/storage.md" "$$bundle_dir/"
 >  fi
 >  cp "$$src_dir/nginx.conf" "$$bundle_dir/nginx.conf"
 >  if [[ "$$mode" != "zk" ]]; then

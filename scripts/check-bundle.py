@@ -59,6 +59,10 @@ def main():
     for name in ('LICENSE', 'LICENSE-SOURCES.md'):
         if not (root / name).is_file():
             raise SystemExit('Missing licence file: ' + name)
+    if 'container_name: epc-broker-92' in (root / 'docker-compose.yml').read_text():
+        for name in ('storage-guard.sh', 'storage.md'):
+            if not (root / name).is_file():
+                raise SystemExit('Missing EPC storage package file: ' + name)
     for name in ('nginx.conf', 'nginx-stream.conf'):
         if not (root / name).is_file():
             raise SystemExit('Missing proxy configuration file: ' + name)

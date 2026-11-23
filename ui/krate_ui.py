@@ -1918,30 +1918,31 @@ class StructuredDataCollector:
                 problems += 1
 
         if ctx.edition == "epc":
-            data_dir = "/data"
-            for env_file in (ctx.env_path, os.path.join(ctx.source_dir, ".env"),
-                             os.path.join(ctx.source_dir, ".env.template")):
-                if not env_file or not os.path.isfile(env_file):
-                    continue
-                with open(env_file, "r", encoding="utf-8", errors="replace") as handle:
-                    for line in handle:
-                        if line.startswith("KAFKA_DATA_DIR="):
-                            data_dir = line.partition("=")[2].strip().strip("\"'") or "/data"
-                break
-            if os.path.isdir(data_dir):
-                checks.append({
-                    "name": "EPC Data Directory",
-                    "status": "ok",
-                    "message": f"{data_dir} exists",
-                    "fix_action": None,
-                })
-            else:
-                checks.append({
-                    "name": "EPC Data Directory",
-                    "status": "error",
-                    "message": f"{data_dir} does not exist. Mount a data disk there before Install; Studio cannot set this path until the package is installed.",
-                    "fix_action": None,
-                })
+            settings_paths = (ctx.env_path, os.path.join(ctx.source_dir, ".env"),
+                              os.path.join(ctx.source_dir, ".env.template"))
+            settings = next((path for path in settings_paths if path and os.path.isfile(path)),
+                            os.path.join(ctx.source_dir, ".env"))
+            guard_paths = (os.path.join(ctx.source_dir, "storage-guard.sh"),
+                           os.path.join(ws_path, "storage-guard.sh"))
+            guard = next((path for path in guard_paths if os.path.isfile(path)), None)
+            message = "Use a guarded EPC package and stage the expected filesystem UUID in its .env."
+            healthy = False
+            if guard:
+                try:
+                    result = subprocess.run(["bash", guard, "site", settings], text=True,
+                                            capture_output=True, timeout=5, check=False)
+                    healthy = result.returncode == 0
+                    message = ("Mounted EPC filesystem matches the configured UUID." if healthy
+                               else result.stderr.strip() or "EPC storage verification failed.")
+                except (OSError, subprocess.TimeoutExpired):
+                    message = "Could not verify the mounted EPC filesystem; run krate doctor on the host."
+            checks.append({
+                "name": "EPC Data Mount",
+                "status": "ok" if healthy else "error",
+                "message": message,
+                "fix_action": None,
+            })
+            if not healthy:
                 problems += 1
 
         return {

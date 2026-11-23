@@ -111,26 +111,23 @@ ALLOWED_LINES = [re.compile(pattern) for pattern in (
     r'printf "  %-30s %s\\n" "(disk|auth \{configure FILE\|apply\}|docker-install)"',
     r'^\s*echo "  kafka-92 ',
     r'^\s*disk\)\s+cmd_disk ;;',
+    r'^  if \[\[ "\$\{1:-\}" == up \|\| "\$\{1:-\}" == restart \]\]; then epc_require_storage \|\| return 1; fi$',
+    r'^  epc_require_storage \|\| die "EPC storage preflight failed; cluster was not cleared\."$',
 )]
 ALLOWED_BLOCKS = [re.compile(pattern, re.MULTILINE) for pattern in (
-    r'^(fmt_kb|cmd_disk|note_auto_create|ensure_data_dirs|docker_install_rpm|docker_install_deb)\(\) \{',
+    r'^(fmt_kb|cmd_disk|note_auto_create|epc_require_storage|ensure_data_dirs|docker_install_rpm|docker_install_deb)\(\) (?:\{|\()',
     r'# ── RHEL family',
     r'info "Package conflicts"',  # the doctor's RHEL package-conflict check (EPC only)
     r'docker_install_(rpm|deb) ',
     r'systemctl (enable|start) docker',
 )]
 EPC_DATA_PREFLIGHT_PARITY = '''
-  # ── EPC data directory preflight ──
-  # EPC bind mounts broker data from a host path. Check it before copying any
-  # release files, so an absent disk cannot leave a partial install behind.
-  local data_env_file="$site_dir/.env" data_dir
+  # Verify the dedicated EPC filesystem before copying any release files.
+  local data_env_file="$site_dir/.env"
   [[ -f "$data_env_file" ]] || data_env_file="$ENV_TEMPLATE"
-  data_dir="$(grep -E '^KAFKA_DATA_DIR=' "$data_env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)"
-  data_dir="${data_dir:-/data}"
-  if [[ -d "$data_dir" ]]; then
-    ok "EPC data directory $data_dir exists"
+  if epc_require_storage "$data_env_file"; then
+    ok "EPC data filesystem matches the configured UUID"
   else
-    err "EPC data directory $data_dir does not exist — mount the data disk at /data before Install (or set KAFKA_DATA_DIR in a package .env before starting Studio)"
     problems=$((problems + 1))
   fi
 '''.strip('\n')
