@@ -207,7 +207,13 @@ The checksum should report `OK`.
 
 ### Studio-guided setup from an extracted bundle
 
-Studio starts from the extracted package; it cannot run on an untouched host before the package is copied, verified and extracted. Python 3 is required for `./krate studio`. From the package directory, start the local control plane:
+Studio starts from the extracted package; it cannot run on an untouched host before the package is copied, verified and extracted. Python 3 is required for `./krate studio`.
+
+For EPC, mount the independently verified dedicated ext4 or XFS filesystem read-write at the exact broker data mountpoint (normally `/data`) and configure that same mount for boot. **Before launching Studio for a first install**, follow the [extracted-package pin setup](epc/storage.md#first-install-from-an-extracted-epc-package). It stages the path and expected UUID in the extracted package's own `.env`. Do not run `./krate config set` from the package to stage these pins: it forwards to the installed workspace if there is one and fails otherwise.
+
+For upgrades or changes to an existing site, follow the [EPC storage guide](epc/storage.md) from the installed workspace. Do not replace the site's expected UUID merely to make a failing check pass. Existing broker data on the root disk needs a verified migration; mounting an empty disk over that directory does not migrate the data.
+
+From the package directory, start the local control plane:
 
 ```bash
 ./krate studio --no-browser
@@ -220,17 +226,6 @@ ssh -L 8686:127.0.0.1:8686 -L 8443:127.0.0.1:443 user@host
 ```
 
 Open the exact `Access URL` printed by Studio on the workstation. Its private `?token=` parameter authenticates the browser; keep that URL private. In **Setup & Doctor**, click **Install Docker** if needed, optionally **Load Images**, then **Install**. Install loads the bundled images, generates the initial self-signed TLS certificate and starts the cluster. Confirm **Certificate Present** and **Production Live**. Use **Start Cluster** after a stop. In **Cluster Services**, start **Identity / SSO**; in **Identity & Users**, enable OAuth/TLS; in **Observability**, start monitoring. Open Kafbat from the displayed portal link if its host name resolves and is reachable from the workstation. Otherwise, for the default local Kafbat sign-in, use the second tunnel above and open `https://127.0.0.1:8443/`. Replace or trust the self-signed certificate before relying on browser trust for production; an untrusted-certificate warning is expected on a fresh fixture.
-
-For EPC, prepare a dedicated ext4 or XFS data filesystem **before** running Studio Install. Mount it read-write at the exact broker data mountpoint (normally `/data`), and configure the host to mount that same filesystem at boot. In the extracted EPC package, set the expected filesystem UUID from your storage inventory, not from whatever is mounted now:
-
-```bash
-disk_uuid='replace-with-the-verified-filesystem-uuid'
-./krate config set KAFKA_DATA_DIR=/data
-./krate config set "KAFKA_DATA_FS_UUID=$disk_uuid"
-./krate doctor
-```
-
-Do not start EPC on a root-disk directory, even in a test fixture for the guarded install. Studio Doctor checks the mount and device identity. If the check fails, restore the expected mount before retrying; do not replace the configured UUID with that of an unintended disk. See the [EPC storage guide](epc/storage.md) for existing installations, upgrade and recovery. An installation that currently keeps messages on the root disk needs a separate, verified data migration before upgrading; overlaying that directory with an empty disk does not migrate anything.
 
 **Install Interrupted** means the current install did not finish. **Files Present; Verify** on an older installation means no completion record exists; check its live health before use. Existing installations retain the **Start Cluster** control.
 

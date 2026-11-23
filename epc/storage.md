@@ -5,36 +5,57 @@ configured `KAFKA_DATA_DIR` (default `/data`). The path must be an exact
 mountpoint, not a directory under `/` or under a different mount. Subdirectory
 bind mounts and an ambiguous stack of mounts are refused.
 
+## First install from an extracted EPC package
+
 1. Identify the expected **filesystem UUID** from the storage inventory and
    verify it against the intended device. Do not choose the UUID solely by
    inspecting whatever happens to be mounted at `/data`. Make the mount
    persistent through your normal host provisioning (for example, a UUID
    entry in fstab). The host and Compose daemon must see the same mount.
-2. Before opening Studio or running install, stage the expected value in
-   the extracted package's `.env`. Create it from the package template only
-   if it does not already exist:
+2. For a **new installation**, open a shell in the freshly extracted, verified
+   EPC archive directory, not the installed workspace. Create the package's own
+   private `.env` without overwriting or following an existing file or link:
 
    ```sh
-   if [ ! -e .env ] && [ ! -L .env ]; then
-     install -m 600 .env.template .env
-   fi
+   (
+     set -euC
+     if [ ! -d images ] || [ ! -f images.lock.tsv ] || [ ! -f .bundle-arch ] ||
+        [ ! -f .env.template ] || [ -L .env.template ]; then
+       printf '%s\n' 'Run this only from a verified, freshly extracted EPC archive.' >&2
+       exit 2
+     fi
+     if [ -e .env ] || [ -L .env ]; then
+       printf '%s\n' 'Package .env already exists. It was not changed; verify it or use a fresh extraction.' >&2
+       exit 2
+     fi
+     umask 077
+     cat .env.template > .env
+   )
    ```
 
-   Edit the existing `KAFKA_DATA_DIR` and `KAFKA_DATA_FS_UUID` lines in
-   `.env` once, using the chosen mount path and independently verified
-   lowercase UUID. Do not modify `.env.template` or append duplicate keys.
-   Run `./krate doctor` from the package and check that the EPC filesystem
-   matches. In an extracted bundle, `./krate config set` targets the
-   installed CLI and cannot stage settings before the first install.
+   Continue only after the command succeeds. Edit the existing
+   `KAFKA_DATA_DIR` and `KAFKA_DATA_FS_UUID` lines in that new file using
+   the chosen mount path and verified lowercase UUID. Do not modify
+   `.env.template` or add duplicate keys. If Docker is absent, run
+   `./krate docker-install` or use **Install Docker** in Studio first.
+   Once Docker is available, run `./krate doctor` or Studio Doctor to check
+   the filesystem. Then run `./krate install` or click **Install** in Studio.
+   Studio does not discover or enrol unknown disks.
 
-   For an existing installation or explicit takeover, stage the pin in the
-   retained site `.env` instead and preserve its other settings. Studio's
-   install form does not discover or enroll unknown disks.
-3. Run `./krate install` (or Studio Install) once Doctor confirms filesystem
-   identity. To migrate older running brokers, arrange a maintenance window,
-   stop them with the current installation, and install the guarded release
-   while the expected filesystem is present. The install recreates affected
-   containers. `krate restart` alone **does not** migrate pre-guard containers.
+   Do not use `./krate config set` from the extracted package for these pins.
+   It forwards to the installed CLI if present and fails before the first
+   install otherwise.
+
+## Upgrade an existing site
+
+The installed site's `.env` takes precedence over the package's `.env`.
+Verify the intended disk and its pins from the installed workspace; preserve
+the site's other settings. If taking over a legacy installation, verify its
+site files in the explicitly selected takeover source before installing.
+Arrange a maintenance window, stop the brokers from the current installation
+and install the guarded release with the expected filesystem mounted. The
+install recreates affected containers. `krate restart` alone does not
+migrate pre-guard containers.
 
 ## Change a storage pin
 
