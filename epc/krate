@@ -3393,13 +3393,13 @@ ensure_data_dirs() (
   for node in 92 93; do
     d="krate/broker-$node"
     [[ ! -L "krate" && ! -L "$d" ]] || die "Refusing symbolic link in EPC broker path $d"
-    [[ ! -e "krate" || "$(stat -c '%Hd:%Ld' -- "krate")" == "$base_device" ]] \
+    [[ ! -e "krate" || "$(bash "$SCRIPT_DIR/storage-guard.sh" filesystem "krate")" == "$base_device" ]] \
       || die "EPC broker parent is not on the verified filesystem: $base/krate"
     if [[ ! -d "$d" ]]; then
       info "Creating broker data directory $base/$d"
       "${sudo_cmd[@]}" mkdir -p "$d" || die "Could not create $base/$d — create it manually and re-run."
     fi
-    [[ "$(stat -c '%Hd:%Ld' -- "$d")" == "$base_device" ]] \
+    [[ "$(bash "$SCRIPT_DIR/storage-guard.sh" filesystem "$d")" == "$base_device" ]] \
       || die "EPC broker path is not on the verified filesystem: $base/$d"
     owner="$(stat -c '%u:%g' "$d" 2>/dev/null || true)"
     if [[ "$owner" != "$uid:$gid" ]]; then
@@ -3985,7 +3985,7 @@ epc_clear_data_dirs() (
     d="krate/broker-$node"
     [[ ! -L krate && ! -L "$d" ]] || return 1
     [[ ! -e "$d" ]] && continue
-    [[ -d "$d" && "$(stat -c '%Hd:%Ld' -- "$d")" == "$base_device" ]] || return 1
+    [[ -d "$d" && "$(bash "$SCRIPT_DIR/storage-guard.sh" filesystem "$d")" == "$base_device" ]] || return 1
     (
       cd -- "$d" || exit 1
       bash "$SCRIPT_DIR/storage-guard.sh" anchor . "$uuid" >/dev/null || exit 1

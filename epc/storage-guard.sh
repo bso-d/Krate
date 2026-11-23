@@ -74,11 +74,22 @@ epc_storage_mount_check() {
   fi
 }
 
+epc_storage_filesystem_id() {
+  local encoded
+  encoded="$(LC_ALL=C stat -Lc '%d' -- "$1")" || return 1
+  [[ "$encoded" =~ ^[0-9]+$ ]] || return 1
+  # GNU stat on Rocky 9 lacks %Hd:%Ld. Decode Linux st_dev using the glibc
+  # major/minor split instead (the same split used by the Linux mountinfo ABI).
+  printf '%d:%d\n' \
+    "$(( ((encoded >> 8) & 0xfff) | ((encoded >> 32) & 0xfffff000) ))" \
+    "$(( (encoded & 0xff) | ((encoded >> 12) & 0xffffff00) ))"
+}
+
 epc_storage_anchor() {
   local cwd="$1" uuid="$2" actual expected
   [[ "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   expected="$(epc_storage_device_id "/dev/disk/by-uuid/$uuid")" || return 1
-  actual="$(stat -Lc '%Hd:%Ld' -- "$cwd")" || return 1
+  actual="$(epc_storage_filesystem_id "$cwd")" || return 1
   [[ "$actual" == "$expected" ]] || return 1
   printf '%s\n' "$actual"
 }
@@ -187,6 +198,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     site) [[ "$#" == 2 ]] && epc_storage_site "$2" ;;
     pins) [[ "$#" == 2 ]] && epc_storage_site "$2" yes ;;
     no-child-mounts) [[ "$#" == 2 ]] && epc_storage_no_child_mounts "$2" ;;
+    filesystem) [[ "$#" == 2 ]] && epc_storage_filesystem_id "$2" ;;
     anchor) [[ "$#" == 3 ]] && epc_storage_anchor "$2" "$3" ;;
     broker)
       epc_storage_broker || exit 1
