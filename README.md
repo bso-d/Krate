@@ -5,7 +5,7 @@
 
   <h1>Krate</h1>
 
-  <p>Portable Kafka packages for Ubuntu and RHEL virtual machines.</p>
+  <p><strong>A complete Kafka platform in one offline package, for air-gapped Ubuntu and RHEL virtual machines.</strong></p>
 
   <p>
     <a href="https://github.com/bso-d/Krate/actions/workflows/broker-ci.yml">
@@ -20,305 +20,274 @@
   </p>
 
   <p>
-    <a href="#start-on-a-connected-machine">Get started</a> ·
-    <a href="#build-an-offline-package">Build a package</a> ·
+    <a href="#quick-start">Quick start</a> ·
+    <a href="#install-offline">Install offline</a> ·
     <a href="https://github.com/bso-d/Krate/releases">Downloads</a> ·
-    <a href="#guides">Guides</a>
+    <a href="#documentation">Docs</a> ·
+    <a href="https://github.com/bso-d/Krate/discussions">Discussions</a>
   </p>
 </div>
 
 <details>
   <summary>Contents</summary>
 
-  - [What Krate does](#what-krate-does)
-  - [Problems Krate solves](#problems-krate-solves)
-  - [How it differs from similar repositories](#how-it-differs-from-similar-repositories)
-  - [Choose an edition](#choose-an-edition)
-  - [What you need](#what-you-need)
-  - [Start on a connected machine](#start-on-a-connected-machine)
-  - [Build an offline package](#build-an-offline-package)
-  - [Install the package on a VM](#install-the-package-on-a-vm)
-  - [Everyday commands](#everyday-commands)
-  - [Identity and SSO for EPC and regular Krate](#identity-and-sso-for-epc-and-regular-krate)
-  - [Monitoring](#monitoring)
-  - [How the parts fit together](#how-the-parts-fit-together)
-  - [Limits to understand](#limits-to-understand)
-  - [Development and checks](#development-and-checks)
-  - [Component credits](#component-credits)
-  - [License](#license)
-  - [Contributing and community conduct](#contributing-and-community-conduct)
+- [What Krate is](#what-krate-is)
+- [How it works](#how-it-works)
+- [Editions](#editions)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Install offline](#install-offline)
+- [Everyday commands](#everyday-commands)
+- [Security and identity](#security-and-identity)
+- [Monitoring](#monitoring)
+- [Krate Studio](#krate-studio)
+- [How configuration works](#how-configuration-works)
+- [Limits](#limits)
+- [Repository layout](#repository-layout)
+- [Development and releases](#development-and-releases)
+- [Documentation](#documentation)
+- [Community and support](#community-and-support)
+- [Credits](#credits)
+- [License](#license)
 
 </details>
 
-## What Krate does
+## What Krate is
 
-[Apache Kafka](https://kafka.apache.org/) lets applications send, store, and read streams of messages. A Kafka **broker** is a server that handles those messages. Several brokers working together form a **cluster**.
+[Apache Kafka](https://kafka.apache.org/) stores and delivers streams of messages between applications. Running it well on a machine with **no internet access** is hard: images can't be pulled, the operating system may lack Docker, and the UI, single sign-on and monitoring each need their own setup.
 
-Krate supplies the files and command-line tools to run a Kafka cluster with [Docker](https://www.docker.com/), which runs software in containers. It can also collect the container images and setup files into one compressed package. Build that package on a machine with internet access, copy it to a matching virtual machine (VM), and install it there without downloading the images again.
+Krate solves this with two steps:
 
-Each edition includes [Kafbat UI](https://github.com/kafbat/kafka-ui), a browser interface for viewing brokers, topics (named message streams), and consumer groups (applications sharing the work of reading messages). The UI sits behind an nginx web proxy with HTTPS and a login.
+1. **On a connected machine**, `./krate package` collects every digest-pinned container image, the setup files, and optionally the Docker installation packages into one compressed package, with a checksum and an image lock file.
+2. **On the target VM**, `./krate install` (or the **Install** button in [Krate Studio](#krate-studio)) checks the host, loads the images, generates every password and certificate, starts the cluster, waits until it's healthy and prints the logins. Nothing is downloaded.
 
-## Problems Krate solves
+What you get:
 
-| Problem | What Krate provides |
-| --- | --- |
-| The VM cannot download container images | A package containing the images and setup files, plus a checksum to check the transferred file |
-| The VM has a different processor or operating system from the build machine | A build for the chosen processor, a processor check before installation, and matching Ubuntu or RHEL Docker packages when requested |
-| Setup steps are spread across separate commands and files | A command script for installation, health checks, logs, and message backlog, with the UI already configured |
-| Measurements and logs need separate setup | Included monitoring files and images, started with a separate command when needed |
+- **A Kafka cluster** (KRaft, no ZooKeeper) on Docker Compose: four brokers, or two on the RHEL edition.
+- **[Kafbat UI](https://github.com/kafbat/kafka-ui)** for brokers, topics and consumer groups, behind an nginx proxy with HTTPS. It's a customized build with a native login page and Keycloak sign-in.
+- **Keycloak SSO** with an optional PingFederate broker and automatic fallback to local login when the enterprise identity provider is down.
+- **Opt-in Kafka security**: TLS and OAuth on the Kafka listeners, backed by the same Keycloak realm, with least-privilege application identities that rotate their own secrets.
+- **Two monitoring paths**: Grafana with Loki, and Perses with VictoriaLogs, sharing Prometheus, exporters, alert rules and Kafka security signals.
+- **One command-line tool**, `krate`, for installation, health, logs, consumer lag, users, secrets, backups and certificates, plus **[Krate Studio](#krate-studio)**, a local browser-based control panel for the same operations.
 
-You still need suitable disk space, OS dependencies, and working network settings. Krate prepares the software and runs host checks; the deployment guides cover the remaining host setup.
+## How it works
 
-## How it differs from similar repositories
+```mermaid
+flowchart LR
+    subgraph build["Connected build machine"]
+        repo["Krate checkout"] --> pkg["./krate package vN arch"]
+    end
 
-| Repository | Main purpose | Krate's focus |
+    pkg -- "package .tar.gz<br/>+ .sha256 + images.lock.tsv" --> install
+
+    subgraph vm["Air-gapped VM · Ubuntu or RHEL 9"]
+        install["./krate install or Studio<br/>checks, loads images,<br/>generates secrets"]
+
+        subgraph stack["Docker Compose · /opt/krate/kraft or /opt/krate/epc"]
+            proxy["nginx proxy<br/>HTTPS 443 · Kafka TCP ports"]
+            ui["Kafbat UI"]
+            brokers["Kafka brokers<br/>KRaft"]
+            idp["Keycloak<br/>+ PostgreSQL"]
+            mon["Monitoring<br/>Prometheus · Grafana · Perses"]
+        end
+
+        studio["Krate Studio<br/>127.0.0.1:8686"]
+    end
+
+    install --> stack
+    browser(["Browser"]) -- HTTPS --> proxy
+    apps(["Your applications"]) -- Kafka protocol --> proxy
+    proxy --> ui
+    proxy --> brokers
+    proxy --> idp
+    ui --> brokers
+    ui -. sign-in .-> idp
+    brokers -. token keys .-> idp
+    apps -. OAuth tokens .-> idp
+    mon --> brokers
+    studio -. runs krate .-> stack
+```
+
+- **The proxy is the only front door.** It serves the UI, the Keycloak sign-in pages and (in realm mode) Grafana over HTTPS, and passes Kafka client connections through to the brokers. The brokers publish no host ports of their own.
+- **Private networks keep the parts apart.** Keycloak, its database, the proxy and Kafbat share an internal `identity` network with no route outside. Keycloak trusts forwarded headers only from the proxy's fixed address. The brokers reach Keycloak's signing keys over a separate internal `kafka-auth` network.
+- **Every image is pinned by digest** in the edition's `.env.template`. The package stores exactly those images, and the lock file records their checksums and processor type.
+- **Site state lives in the installation directory** (`/opt/krate/kraft` or `/opt/krate/epc`): `.env`, `monitoring/.env`, certificates and SSO files. A newer package replaces only the release files, so settings, passwords and stored messages survive updates.
+
+## Editions
+
+| Edition | Brokers | Message storage | Intended host | Command |
+| --- | --- | --- | --- | --- |
+| **KRaft** (default) | 4 combined broker/controller nodes; replication factor 3, min in-sync 2 | Docker volumes | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `kraft/krate` |
+| **EPC** | 2 combined nodes; replication factor 2, min in-sync 1 | A dedicated, verified ext4 or XFS filesystem at `/data`, with a disk budget | RHEL 9, x86_64 or ARM64 | `epc/krate` |
+| ZooKeeper (legacy) | ZooKeeper + Confluent images | Docker volumes | Existing users only | `zk/kafka` |
+
+KRaft and EPC are the active editions. EPC adds a storage guard (brokers start only on the expected filesystem; see the [EPC storage guide](epc/storage.md)), a per-partition size cap, explicit topic creation by default, and `./krate disk` to compare data-disk use with its budget. The `zk/` edition is frozen: it still builds, but gets no new features.
+
+### Downloads
+
+Ready-made packages are on the [releases page](https://github.com/bso-d/Krate/releases). Two kinds of release exist, so check the tag before downloading:
+
+| Kind | Tags | What you get |
 | --- | --- | --- |
-| [Apache Kafka Docker examples](https://github.com/apache/kafka/tree/trunk/docker/examples) | Show how to configure single-node and multi-node Kafka containers, including encrypted and authenticated connections | Provide selected cluster setups with an offline package builder, optional Docker installer, management commands, UI, and monitoring |
-| [Confluent cp-all-in-one](https://github.com/confluentinc/cp-all-in-one) | Run examples of the broader Confluent Platform, including schema management, connectors, and stream-processing services | Package Kafka, its UI, and monitoring for VM installation; those extra Confluent services are not included |
+| **Offline install package** | `package-kraft-vN`, `package-epc-vN` | A `.tar.gz` for one processor, its `.sha256`, the image lock file, and a `-sources.tar` with the corresponding source of the copyleft components in its images |
+| **Broker images** | `kraft-vX.Y.Z`, `zk-vX.Y.Z` | Image references on GHCR. Nothing to install; the default setups don't use these images |
 
-Krate adds package builds and host management commands around Kafka and Docker, especially for a VM without internet access. Its supplied clusters share one host and need additional configuration for secure remote application access.
+The current packages are [`package-kraft-v6`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v6) (Ubuntu 24.04) and [`package-epc-v6`](https://github.com/bso-d/Krate/releases/tag/package-epc-v6) (RHEL 9). Each release's notes cover upgrading from earlier packages. For another OS or processor combination, [build a package](#1-build-the-package) yourself.
 
-## Choose an edition
+## Requirements
 
-Ubuntu and Red Hat Enterprise Linux (RHEL) are the target operating systems.
-
-| Edition | What it runs | Intended host | Command |
-| --- | --- | --- | --- |
-| **Krate (default)** | Four brokers; Kafka manages its own coordination | Ubuntu 22.04 or 24.04, x86_64 or ARM64 | `kraft/krate` |
-| **EPC** | Two brokers using KRaft, with message data stored under `/data` | Tailored for RHEL 9, x86_64 or ARM64 | `epc/krate` |
-
-These are the two active releases. Each package contains its own security features and monitoring files. The `zk/` directory is a frozen legacy package for existing users. EPC is the tailored RHEL deployment.
-
-For a first local run, the steps below use KRaft. All brokers in these setups run on the same host.
-
-### Ready-made downloads
-
-The [releases page](https://github.com/bso-d/Krate/releases) holds two kinds of release. Check the tag prefix and title before downloading:
-
-| Kind | Tag | Title starts with | What you get |
-| --- | --- | --- | --- |
-| **Offline install package** | `package-kraft-vN`, `package-epc-vN` | `Offline install package` | A `.tar.gz` to copy to the VM, its `.sha256` checksum and the image lock file. Install it with `./krate install`. From `package-kraft-v2` and `package-epc-v4` on, a `-sources.tar` beside each package holds the corresponding source of its copyleft components; earlier package releases have none. |
-| **Broker images** | `kraft-vX.Y.Z`, `zk-vX.Y.Z` | `Broker images` | References to container images on GHCR. Nothing to install on a VM; the default setups do not use these images. |
-
-Current offline install packages. Each includes Keycloak SSO, the Grafana and Perses monitoring paths, and the Docker packages for its target OS. Upgrade steps from the earlier packages are in each release's notes:
-
-| Release | Edition | Packages |
-| --- | --- | --- |
-| [`package-kraft-v4`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v4) | KRaft, Ubuntu 24.04 | `krate-kraft-v4-amd64.tar.gz` (x86_64), `krate-kraft-v4-arm64.tar.gz` (ARM64) |
-| [`package-epc-v5`](https://github.com/bso-d/Krate/releases/tag/package-epc-v5) | EPC, RHEL 9 | `krate-epc-v5-amd64.tar.gz` (x86_64), `krate-epc-v5-arm64.tar.gz` (ARM64) |
-
-Earlier packages:
-
-| Release | Package |
+| To… | You need |
 | --- | --- |
-| [`package-kraft-v3`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v3) | KRaft with Keycloak SSO, Grafana and Perses monitoring, x86_64 and ARM64: `krate-kraft-v3-<arch>.tar.gz` |
-| [`package-kraft-v2`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v2) | KRaft with Keycloak SSO, Grafana and Perses monitoring, x86_64 and ARM64: `krate-kraft-v2-<arch>.tar.gz` |
-| [`package-epc-v4`](https://github.com/bso-d/Krate/releases/tag/package-epc-v4) | RHEL/EPC with Keycloak SSO, Grafana and Perses monitoring, x86_64 and ARM64: `krate-epc-v4-<arch>.tar.gz` |
-| [`package-kraft-v1`](https://github.com/bso-d/Krate/releases/tag/package-kraft-v1) | KRaft with Keycloak SSO, Grafana monitoring only, x86_64 and ARM64: `krate-kraft-v1-<arch>.tar.gz` |
-| [`package-epc-v3`](https://github.com/bso-d/Krate/releases/tag/package-epc-v3) | RHEL/EPC with Keycloak SSO, Grafana monitoring only, x86_64: `krate-epc-v3-amd64.tar.gz` |
-| [`epc-v2`](https://github.com/bso-d/Krate/releases/tag/epc-v2) | RHEL/EPC with Keycloak SSO, x86_64: `krate-epc-v2-amd64.tar.gz` |
-| [`epc-v1`](https://github.com/bso-d/Krate/releases/tag/epc-v1) | RHEL/EPC, x86_64: `kafka-epc-v1-amd64.tar.gz` |
-| [`v1.0.0`](https://github.com/bso-d/Krate/releases/tag/v1.0.0) | Archived ZooKeeper package, x86_64: `kafka-zk-v5-amd64.tar.gz` |
+| Run a cluster | Docker Engine 25.0.3+ and Docker Compose (the `docker compose` plugin, or `docker-compose` 1.29.2+). SSO needs Compose 2.20.2+ |
+| Create certificates | OpenSSL, or your own `certs/server.crt` and `certs/server.key` |
+| Run monitoring, SSO or Studio | Python 3.9+ on the host |
+| Build from a checkout or build packages | A connected machine with Docker, Bash, Git, Python 3, Node.js and npm (for the Kafbat UI image), JDK 21 (for the Kafka OAuth application client), and GNU Make 4.0+ (`brew install make` on macOS) |
+| Connect applications with OAuth | Java 17+ on application hosts for the callback jar. Offline packages bundle a pinned OpenJDK 21 runtime for operator commands and Studio; a source checkout needs Java 17+ for those |
 
-New packages are released as `package-kraft-vN` and `package-epc-vN`; see [Release an offline install package](#release-an-offline-install-package). To target Ubuntu 22.04 or another combination, build a package from source using the commands below. Earlier downloads keep their original `kafka-*` names. KRaft and EPC packages use `krate-*`; ZooKeeper keeps `kafka-zk-*`.
+Pick the package for the VM's processor (`amd64` for x86_64, `arm64` for ARM64), and leave disk space for the package, the loaded images and your messages.
 
-## What you need
+## Quick start
 
-- **To run a cluster:** Docker Engine 25.0.3 or newer, a working Docker service, and Docker Compose. The scripts accept the `docker compose` plugin or standalone `docker-compose` 1.29.2 or newer; the examples use the plugin.
-- **To create the UI certificate:** OpenSSL, or your own certificate and key at `certs/server.crt` and `certs/server.key`.
-- **To run from a checkout or build packages:** a connected machine with Docker, Bash, Git, Python 3, Node.js and npm (for the Kafbat UI image), JDK 21 (for the Kafka OAuth application client), and GNU Make 4.0 or newer, which `./krate` calls for you. On macOS, `brew install make` provides it.
-- **For KRaft/EPC monitoring:** Python 3 on the host, in addition to Docker.
-- **For application OAuth clients:** The KRaft/EPC offline package includes a pinned OpenJDK 21 runtime for operator commands and Studio managed-client actions. Application hosts need Java 17 or newer for the callback jar. A source checkout needs Java 17 or newer for operator commands; building the callback jar uses JDK 21 on the connected package builder.
-
-Choose the package for the target VM's processor: `amd64` means x86_64; `arm64` means ARM64. Leave room for the package, loaded images, and stored messages. The EPC guide explains how to budget its `/data` disk.
-
-## Start on a connected machine
-
-1. Clone the repository.
-
-   ```bash
-   git clone https://github.com/bso-d/Krate.git
-   cd Krate/kraft
-   ```
-
-2. Optionally set the UI hostname, for example `./krate config set KAFKA_UI_FQDN=kafka.example.com`. Left blank, it is this machine's hostname.
-
-3. Start the cluster and show its logins.
-
-   ```bash
-   ./krate start
-   ./krate credentials
-   ```
-
-The first `start` does all of the setup: it creates `.env` and `monitoring/.env`, generates every password and secret, creates a self-signed UI certificate, builds the Kafbat UI image (several minutes) and downloads the other images. Nothing needs copying or editing by hand. `./krate setup` runs the same preparation without starting anything. When startup is complete, `start` reports healthy services and `credentials` prints every address and login; open the Kafbat UI address to view the four brokers.
-
-The generated certificate is self-signed, so the browser will show a trust warning. You can trust `certs/server.crt` or supply a certificate trusted by your browser.
-
-For ZooKeeper, use `cd Krate/zk` and `./kafka` instead of `./krate`. Use `start` when running directly from the repository. The `install` command is for an extracted package containing saved images.
-
-## Build an offline package
-
-Run `./krate package` on the connected machine, from `kraft/` for the KRaft package or `epc/` for the EPC package:
+On a machine with internet access:
 
 ```bash
+git clone https://github.com/bso-d/Krate.git
 cd Krate/kraft
+./krate start
+./krate credentials
+```
+
+The first `start` creates `.env` and `monitoring/.env`, generates every password and secret, makes a self-signed certificate, builds the Kafbat UI image (several minutes), downloads the other images and starts the cluster. `credentials` prints every address and login. Open the Kafbat UI address to see the four brokers.
+
+The certificate is self-signed, so your browser will warn about it. That's fine for a trial; see [certificates](#certificates-and-the-public-url) for production. To set the UI host name first, run `./krate config set KAFKA_UI_FQDN=kafka.example.com`.
+
+## Install offline
+
+### 1. Build the package
+
+On the connected machine, from `kraft/` (or `epc/` for EPC):
+
+```bash
 ./krate package v1 amd64          # for an x86_64 VM
 ./krate package v1 arm64          # for an ARM64 VM
 ./krate package v1 amd64 none     # without Docker installation packages
 ```
 
-`v1` is a package label in the form `vN`. The processor defaults to the build machine's. The last argument selects the Docker installation packages bundled for VMs without Docker: by default `noble` (Ubuntu 24.04) for KRaft and `rhel9` for EPC; `jammy` selects Ubuntu 22.04 and `none` leaves them out.
-
-`package` builds the Kafbat UI image for the target processor, downloads the Docker packages, saves every pinned image and checks the result. For the first command above it writes:
+`v1` is your label for the package. The last argument picks the bundled Docker packages: `noble` (Ubuntu 24.04, the KRaft default), `jammy` (Ubuntu 22.04), `rhel9` (the EPC default) or `none`. The result goes to `dist/release/package-<edition>-v1/`:
 
 ```text
-dist/release/package-kraft-v1/
-├── krate-kraft-v1-amd64.tar.gz
-├── krate-kraft-v1-amd64.tar.gz.sha256
-├── krate-kraft-v1-amd64.tar.gz.images.lock.tsv
-└── krate-kraft-v1-amd64.notes.md
+krate-kraft-v1-amd64.tar.gz
+krate-kraft-v1-amd64.tar.gz.sha256
+krate-kraft-v1-amd64.tar.gz.images.lock.tsv
+krate-kraft-v1-amd64.notes.md
 ```
 
-The package includes the cluster files, its command script, saved Docker images, and monitoring files. The image record lists the exact images, their checksums, and their processor type; a copy is also inside the package. The frozen ZooKeeper package is still built with `make bundle VERSION=vN MODE=zk`.
+<details>
+<summary>How the bundled Docker packages are resolved on RHEL</summary>
 
-### Offline Docker packages (Ubuntu and RHEL)
+`make docker-rpms` downloads Docker CE plus the base-OS packages a minimal host may lack (`container-selinux`, `nftables`, `iptables-nft` and their libraries) into `optional/`, using a digest-pinned Rocky Linux 9 builder image. `./krate docker-install` adds an optional package only when it provides something `dnf` reports missing on that host, round by round. Anything still unresolved is named, so you can take it from the OS media. `container-selinux` must match the host's `selinux-policy` build. On Ubuntu, the installer uses `dpkg` and may try `apt-get` to repair missing dependencies, so check that the OS dependencies are present first.
 
-- **Ubuntu (`noble` / `jammy`):** The Ubuntu installer uses `dpkg` and may try `apt-get` to repair missing dependencies. Make sure the target has the required OS dependencies before relying on a fully offline install.
-- **RHEL 9 (`rhel9`):** The RHEL installer disables network repositories; missing OS dependencies must be supplied locally.
-  - **What `make docker-rpms` bundles:** Downloads the Docker CE packages plus the base-OS dependencies a minimal host may lack into `optional/` from the builder image `RHEL_BUILDER_IMAGE` (default: the Rocky Linux project's maintained `rockylinux/rockylinux:9`, pinned by digest; the Docker Official Image `rockylinux:9` is no longer updated):
-    - `container-selinux`
-    - `nftables` with the libraries it needs (`libnftnl`, `jansson`, `libmnl`)
-    - `iptables-nft` with `iptables-libs`, `libnetfilter_conntrack`, and `libnfnetlink` (`docker-ce` requires `(iptables-nft or iptables)`: a RHEL server has `iptables-nft` because `firewalld` requires it, whereas a cloud image may have neither)
-  - **How `krate docker-install` resolves dependencies:** `krate docker-install` (and the bundled `docker-offline/install-docker.sh`, which uses the same selection) adds only the bundled packages that provide a capability `dnf` names as missing on that host, round by round until no bundled package is left to add (an added package can name its own missing library; for a rich dependency such as `(iptables-nft or iptables)` the first alternative a bundled package provides is taken).
-  - **Unresolved host capabilities:** When a capability stays unresolved, the installer names that capability and tells you to take it from the OS media. The advice about `container-selinux` (it must match the host's `selinux-policy` build) appears only when `container-selinux` or one of its versioned requirements (the host's `selinux-policy`) is the one that stayed unresolved.
-  - **Verified environments:** Proven offline on Rocky Linux 9.8 VMs with SELinux enforcing that already had `iptables-nft` (a standard RHEL 9 server has it through `firewalld`; see [`sso/guides/identity-gate.md`](sso/guides/identity-gate.md)), and on a Rocky Linux 9.8 cloud VM with neither `firewalld` nor `iptables`, where `krate docker-install` added `iptables-nft`, `nftables`, `libnftnl`, and `container-selinux` from `optional/`.
+</details>
 
-## Install the package on a VM
+### 2. Install on the VM
 
-Copy the package and its `.sha256` file to the VM. For the KRaft package built above:
+Copy the package and its `.sha256` file to the VM, then verify and extract it:
 
 ```bash
-sha256sum -c krate-kraft-v1-amd64.tar.gz.sha256
+sha256sum -c krate-kraft-v1-amd64.tar.gz.sha256    # should print OK
 tar -xzf krate-kraft-v1-amd64.tar.gz
 cd krate-kraft-v1-amd64
 ```
 
-The checksum should report `OK`.
+**EPC first:** mount the independently verified, dedicated ext4 or XFS filesystem read-write at the exact broker data mountpoint (normally `/data`), make that mount persistent across boots, and stage its expected path and UUID **in the extracted package's own `.env`** as described in [first install from an extracted EPC package](epc/storage.md#first-install-from-an-extracted-epc-package). Don't use `./krate config set` from the package for these pins: it forwards to an existing installation and fails when there is none. Existing broker data on the root disk needs a verified migration; mounting an empty disk over it doesn't move the data.
 
-### Studio-guided setup from an extracted bundle
-
-Studio starts from the extracted package; it cannot run on an untouched host before the package is copied, verified and extracted. Python 3 is required for `./krate studio`.
-
-For EPC, mount the independently verified dedicated ext4 or XFS filesystem read-write at the exact broker data mountpoint (normally `/data`) and configure that same mount for boot. **Before launching Studio for a first install**, follow the [extracted-package pin setup](epc/storage.md#first-install-from-an-extracted-epc-package). It stages the path and expected UUID in the extracted package's own `.env`. Do not run `./krate config set` from the package to stage these pins: it forwards to the installed workspace if there is one and fails otherwise.
-
-For upgrades or changes to an existing site, follow the [EPC storage guide](epc/storage.md) from the installed workspace. Do not replace the site's expected UUID merely to make a failing check pass. Existing broker data on the root disk needs a verified migration; mounting an empty disk over that directory does not migrate the data.
-
-From the package directory, start the local control plane:
+Then install, either from the command line:
 
 ```bash
-./krate studio --no-browser
-```
-
-Use the URL and private bootstrap token printed by that command. On a remote host, keep Studio bound to its loopback address and open a separate tunnel from the operator workstation (replace the SSH user and host):
-
-```bash
-ssh -L 8686:127.0.0.1:8686 -L 8443:127.0.0.1:443 user@host
-```
-
-Open the exact `Access URL` printed by Studio on the workstation. Its private `?token=` parameter authenticates the browser; keep that URL private. In **Setup & Doctor**, click **Install Docker** if needed, optionally **Load Images**, then **Install**. Install loads the bundled images, generates the initial self-signed TLS certificate and starts the cluster. Confirm **Certificate Present** and **Production Live**. Use **Start Cluster** after a stop. In **Cluster Services**, start **Identity / SSO**; in **Identity & Users**, enable OAuth/TLS; in **Observability**, start monitoring. Open Kafbat from the displayed portal link if its host name resolves and is reachable from the workstation. Otherwise, for the default local Kafbat sign-in, use the second tunnel above and open `https://127.0.0.1:8443/`. Replace or trust the self-signed certificate before relying on browser trust for production; an untrusted-certificate warning is expected on a fresh fixture.
-
-**Install Interrupted** means the current install did not finish. **Files Present; Verify** on an older installation means no completion record exists; check its live health before use. Existing installations retain the **Start Cluster** control.
-
-#### Keep Studio available after a Linux host reboot
-
-The foreground command above exits when the host reboots. To start Studio automatically on a systemd host **after installing Krate**, use the bundled `ui/krate-studio@.service.example`. Run it under your existing non-root Krate operator, with access to the installed workspace and Docker socket. Docker group membership grants root-equivalent host access; grant it only to trusted administrators.
-
-From the installed workspace on the host, set `variant` to `kraft` or `epc`:
-
-```bash
-variant=kraft
-sudo install -m 0644 ui/krate-studio@.service.example /etc/systemd/system/krate-studio@.service
-sudoedit /etc/systemd/system/krate-studio@.service  # Set User= to the existing Krate operator
-sudo systemctl daemon-reload
-sudo systemctl enable --now "krate-studio@${variant}.service"
-systemctl is-active "krate-studio@${variant}.service"
-```
-
-The template assumes `/opt/krate/<variant>` and one Studio instance per host on port 8686. For a different install path change both `WorkingDirectory=` and `ExecStart=`. Close any foreground Studio on that port first. Keep the managed service on loopback; do not expose the port publicly.
-
-After a reboot, reconnect the SSH tunnel and read the fresh link **as the configured operator** on the host:
-
-```bash
-cat "/run/krate-studio-${variant}/access-url"
-```
-
-Open that private URL on the tunneled workstation. It contains a token that changes at every service start, so old links and browser sessions do not authenticate the new process. The URL is kept in an operator-only `0600` runtime file, never the service journal. Use `systemctl status "krate-studio@${variant}.service"` or `journalctl -u "krate-studio@${variant}.service" -b` to check startup without fetching the credential; if you intentionally stop the managed service, the foreground command remains available. Studio relaunch does not start or certify the Kafka cluster; check cluster health separately after reconnecting.
-
-**Docker session:** After Studio installs Docker and adds the operator to the group, an existing interactive shell does not automatically get that group. Reconnect SSH, or use `newgrp docker` for a new shell; run `id -Gn` and `docker info` to verify. systemd obtains the operator's current group membership when it starts the service; restart Studio if that membership changed while it was running.
-
-For command-line installation instead, if Docker is missing and you included its packages, run `./krate docker-install` first. It needs administrator access. Then run:
-
-```bash
-./krate doctor
+./krate docker-install     # only if Docker is missing (needs administrator access)
+./krate doctor             # Docker, architecture, certificates, ports, firewall
 ./krate install
 ```
 
-`doctor` checks Docker, package architecture, certificates, host ports, and firewall settings. `install` runs those checks again, loads the saved images and installs the package into `/opt/krate/kraft` (`/opt/krate/epc` for EPC; set `KRATE_HOME` to choose another directory). There it does the same setup as `start` (settings, generated passwords, certificate), starts the cluster, waits for it to be healthy and prints every login. `credentials` shows them again later.
+or guided by Krate Studio: run `./krate studio --no-browser` and follow [Studio-guided setup](#studio-guided-setup).
 
-The default `/opt/krate` and edition directories must be real directories, not symlinks. Installation gives containers access through those directories while leaving passwords and other private files protected. If you choose a different `KRATE_HOME`, make sure its parent directories allow the containers to reach it; the installer does not change permissions on your custom path.
+`install` repeats the `doctor` checks, loads the images, installs into `/opt/krate/kraft` (`/opt/krate/epc` for EPC; set `KRATE_HOME` to choose another directory), prepares settings, passwords and the certificate, starts the cluster, waits for it to be healthy and prints every login. The default installation directories must be real directories, not symlinks.
 
-The installation directory holds everything specific to the site: `.env`, `monitoring/.env`, the certificate in `certs/` and the SSO files under `auth/`. The cluster's Docker project is always `krate-kraft` (or `krate-epc`), whatever directory a package was unpacked to, so its data volumes keep the same names.
+### 3. Update to a newer package
 
-### Update to a newer package
+Unpack the new package anywhere and run its `./krate install`, with the cluster running or stopped. It replaces only the release files and loads the new images. Settings, passwords, certificates, SSO files and stored messages stay, and new image pins and settings are added automatically. The Docker project is always `krate-kraft` or `krate-epc`, so data volumes keep their names whichever directory a package was unpacked to. On EPC, follow the [upgrade steps in the storage guide](epc/storage.md#upgrade-an-existing-site) from the installed workspace, and never replace the expected UUID just to make a failing check pass.
 
-Unpack the new package anywhere and run its `./krate install`, with the cluster running or stopped. It replaces only the release files in the installation directory and loads the new images. Settings, passwords, certificates, SSO files and stored messages stay; new image pins and settings are added automatically.
-
-Installations from before `/opt/krate` ran inside their package directory, and their Docker project and volumes were named after it. The first `install` of a newer package finds that installation through its containers, takes over its `.env`, `monitoring/.env`, certificate and SSO files, and keeps using its data volumes (recorded as `KRATE_PROJECT` in `.env`). If the old containers were already removed, name the old directory: `./krate install --from /path/to/krate-kraft-v1-amd64`.
-
-For a downloaded ZooKeeper package, use `./kafka`. For EPC, set `KAFKA_ADVERTISED_HOST` for clients on other machines and review the data directory before the first start.
+Installations from before `/opt/krate` are found through their containers and taken over automatically. If the old containers are already gone, name the old directory with `./krate install --from /path/to/old-package`.
 
 ## Everyday commands
 
-Run these in the installation directory (`/opt/krate/kraft` or `/opt/krate/epc`) or a checkout's `kraft/` or `epc/`. Run from an extracted package, they act on the installation:
-
-### Cluster and configuration commands
+Run these in the installation directory or in a checkout's `kraft/` or `epc/`. From an extracted package they act on the installation. `./krate help` lists everything.
 
 | Command | What it does |
 | --- | --- |
-| `./krate credentials` | Shows every address and login: Kafbat UI, Grafana, Perses, and, with SSO, Keycloak |
-| `./krate status` | Lists the services and their state |
-| `./krate health` | Checks whether services are healthy |
-| `./krate logs -f kafka-92` | Follows one broker's logs |
-| `./krate lag [group]` | Shows how many messages consumer groups (or one named group) still need to read |
-| `./krate stop` / `./krate start` | Stops or starts services, keeping stored messages |
-| `./krate down` | Removes containers while keeping stored messages |
-| `./krate config {get\|set\|list}` | Reads or updates settings in `.env` (for example `./krate config set KAFKA_UI_FQDN=kafka.example.com`) |
-| `./krate gen-cert` | Generates or renews the cluster TLS certificate in `certs/` |
-| `./krate help` | Lists the available commands |
+| `./krate credentials` | Every address and login: Kafbat UI, Grafana, Perses and, with SSO, Keycloak |
+| `./krate status` / `./krate health` | Service state / health, waiting for services still starting |
+| `./krate logs -f kafka-92` | Follow one service's logs |
+| `./krate lag [group] [--topic T]` | Messages consumer groups still have to read |
+| `./krate start` / `stop` / `restart [service]` / `down` | Lifecycle; stored messages are kept |
+| `./krate config {get\|set\|list}` | Read or change settings in `.env` |
+| `./krate gen-cert` | Generate a self-signed development certificate |
+| `./krate identity …` | Keycloak: `up`, `status`, `users`, `rotate`, `backup`, `restore`, `recover-admin`, `idp-watch`, `renew-db-tls`, `logrotate` |
+| `./krate auth configure` / `auth apply` | Plan and apply Kafbat's sign-in mode |
+| `./krate kafka auth {enable\|status\|disable}` / `kafka renew-tls` | Kafka listener TLS and OAuth |
+| `./krate kafka client {register\|status\|rotate\|recover\|grant\|template\|enroll}` | Application identities and their topic and group ACLs |
+| `./krate monitor {up\|down\|status\|logs\|reload\|ui}` | The monitoring stack |
+| `./krate studio` | Start Krate Studio |
+| `./krate uninstall [--purge]` / `clear-cluster` / `clear-images` | Remove containers, data or images |
+| `./krate disk` | EPC only: data-disk use against the budget |
 
-### Identity, SSO, and monitoring commands
+## Security and identity
 
-| Command | What it does |
-| --- | --- |
-| `./krate identity up` | Starts the Keycloak identity service and its database, creates its admin on first start |
-| `./krate identity status` | Shows identity service health |
-| `./krate identity users ...` | Manages local realm users (`list`, `add`, `enable`, `disable`, `reset-password`, `groups`, `logout`, `set-email`) |
-| `./krate identity idp-watch {status\|reset\|pause\|resume}` | Shows or controls the enterprise IdP reachability watcher and automatic local login fallback |
-| `./krate identity rotate ...` | Rotates identity and SSO secrets (`KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_KAFKA_CLIENT_SECRET`, `KEYCLOAK_IDP_WATCH_CLIENT_SECRET`, `PING_KEYCLOAK_CLIENT_SECRET --value`) |
-| `./krate identity {backup\|restore\|recover-admin}` | Backs up or restores the identity database; recovers a lost Keycloak admin login |
-| `./krate identity renew-db-tls` / `logrotate --install` | Renews the identity database certificate; hands the identity journal to the host's logrotate |
-| `./krate auth configure [--force] [--[no-]viewer-messages] [site.json]` | Plans Kafbat's Keycloak login (`auth/ui/runtime.yml`) from `.env`, and optionally PingFederate brokering from `site.json` |
-| `./krate auth apply` | Validates and applies the planned authentication configuration to the UI, proxy, and realm |
-| `./krate monitor {up\|down\|status\|logs\|reload\|ui}` | Starts, stops, or inspects the monitoring stack; reloads Prometheus configuration (`SIGHUP`) |
-| `./krate kafka auth {enable\|status\|disable}` / `./krate kafka renew-tls` | Manages the opt-in authenticated Kafka listeners and their certificates |
-| `./krate kafka client {register\|status\|rotate\|recover\|grant\|template\|enroll}` | Registers a dedicated application identity, manages its private OAuth state, and grants literal Kafka topic/group ACLs; `recover --admin` repairs registration access from Keycloak |
-| `./krate monitor realm` / `grafana-user retire <login>` | Prepares Grafana sign-in through the Krate realm (`monitoring/auth/realm.ini`); retires a colliding local Grafana user |
+Krate's defaults favour safe operation on a shared VM: every password and secret is generated, never a shared default; secrets travel through environment variables, files with mode `0600` or standard input rather than command lines; and every image is pinned by digest.
 
-Use `./kafka` for the ZooKeeper edition. EPC also has `./krate disk` to show data-disk usage against the configured budget.
+### Proxy
 
-### Give an application scoped Kafka access
+- HTTPS on `443` (TLS 1.2+), with `80` only redirecting. Security headers and a content security policy are set on every response, and sign-in endpoints are rate limited.
+- In Keycloak sign-in mode, a request whose `Host` header (name or port) isn't the public host is closed without a response, so links and redirects can't be built from a host a client chose. Use the issued host name and port for browser login, not a raw IP address or an unrelated tunnel URL.
+- Only the `krate` realm's pages are reachable. The Keycloak admin console, its REST API, Kafbat's actuator and metrics endpoints are not exposed.
 
-After `identity up` and `kafka auth enable`, create the application topic with a Kafka administrator before the first send. The application client receives only its requested topic and group ACLs; it cannot create topics. For example, on the supplied four-broker KRaft cluster:
+### Certificates and the public URL
+
+- **Development certificate:** `./krate gen-cert` (or the first start) creates a self-signed certificate for the host FQDN, the `KEYCLOAK_PUBLIC_URL` host and `localhost`. Use it for development and fixtures only.
+- **Production certificate:** put the CA-issued leaf followed by its intermediate chain in `certs/server.crt`, and its matching unencrypted key in `certs/server.key` with mode `0600`, owned by the Krate operator. The certificate must name the host clients actually use; an IP address needs an IP entry. Distribute your enterprise CA through your normal trust process; don't bypass browser warnings or trust the leaf directly.
+- **Renewing without changing the origin:** install the complete new pair, then run `./krate start` (or `./krate auth apply` with Keycloak) to reload the proxy, and `./krate monitor up` if Grafana or Perses use Krate sign-in. A partial pair fails closed. Never run `gen-cert` over an issued certificate.
+- **Changing `KEYCLOAK_PUBLIC_URL`:** set the exact client-facing HTTPS host and port with the `/identity` path, install a valid certificate for that name and run `./krate identity up`. For local Keycloak sign-in, then run `./krate auth configure --force` and `./krate auth apply`. With PingFederate, keep your site plan and follow the [broker procedure](sso/guides/dual-login.md). Finish with `./krate monitor up` if the dashboards use Krate sign-in.
+- **Verify from the operator network:** `python3 -B sso/check-public-origin.py --workspace /opt/krate/kraft` (or `--public-url https://kafka.example.com/identity` from a workstation without the server's `.env`) makes a read-only discovery request and requires a trusted chain, a matching host and the exact realm issuer. It uses normal CA trust unless you pass `--ca-file`. Run it over the same DNS and network path as your operators; a success on the host itself doesn't prove workstation access.
+
+### Sign-in for Kafbat UI
+
+```bash
+./krate identity up      # bootstrap Keycloak and its database; creates the admin
+./krate auth configure   # or: ./krate auth configure site.json  (adds PingFederate)
+./krate config set KAFKA_UI_AUTH_CONFIG=runtime.yml
+./krate auth apply
+```
+
+- **Default (`local.yml`):** one shared admin login on Kafbat's own page.
+- **Keycloak (`runtime.yml`):** sign-in through the local `krate` realm only; realm groups (`KRATE_VIEWERS`, `KRATE_ADMINS`) decide Viewer and Admin access. Manage users with `./krate identity users {list|add|enable|disable|reset-password|groups|logout|set-email}`.
+- **PingFederate brokering:** with a site file, `./krate auth configure site.json` also writes the PingFederate plan `auth/keycloak/pingfederate-idp.json`, which `./krate auth apply` applies to the realm. The site file must state the MFA stance: a claim PingFederate asserts, or `mfa_not_asserted`. Every login then redirects to PingFederate, and brokered users are created without linking to local accounts.
+- **Break-glass login:** local realm users can still sign in by pressing Kafbat's **Log in with Keycloak** button and appending `&kc_idp_hint=` (empty) to the realm's authorization URL. The [operator setup guide](sso/guides/dual-login.md) describes the full procedure.
+- **What `auth apply` does:** it validates the installation and reconciles the UI service and the proxy from locally loaded images. It never bootstraps Keycloak; if the realm isn't ready, it stops and tells you to run `./krate identity up`. In `runtime.yml` mode it recreates the running Keycloak container when the trust material in `auth/keycloak/truststores` or Keycloak's Compose definition changed (which ends Keycloak sessions), then applies or removes the PingFederate plan in the realm.
+- **Automatic fallback (`idp-watch`):** while PingFederate is active, a watcher probes its endpoints. When they fail, it switches sign-in to the local Keycloak form (password and one-time code), and the login page shows an outage warning so corporate users don't type directory passwords there. When PingFederate recovers, it switches back. Control it with `./krate identity idp-watch {status|reset|pause|resume}`.
+- Keycloak's database uses TLS with certificate verification, backups are encrypted, and every identity secret can be rotated with `./krate identity rotate`.
+
+### Kafka client authentication
+
+A new cluster starts with **unauthenticated plaintext** Kafka listeners (`KAFKA_AUTH_MODE=local`). Run `./krate kafka auth enable` after `./krate identity up` to switch to `oauth_ssl`, and check `./krate kafka auth status` and every application client before exposing broker ports to other machines. Studio shows the current mode and offers the same transition.
+
+- The external listener becomes TLS (`SASL_SSL`), and every listener requires authentication; no listener accepts anonymous clients.
+- Krate creates a local CA and broker certificates. Clients trust `certs/kafka/ca.crt`, and `./krate kafka renew-tls` renews the certificates broker by broker with rollback.
+- Applications sign in with OAuth (`SASL/OAUTHBEARER`) as Keycloak clients with the `kafka` scope, under a realm policy that limits client-secret lifetime and forces rotation.
+- Kafbat UI and kafka-exporter get their own least-privilege identities. Switching modes recreates the brokers and Kafbat but keeps stored messages.
+
+#### Give an application scoped Kafka access
+
+Create the application's topic with a Kafka administrator before its first send; application clients get only the topic and group ACLs they ask for and can't create topics. On the four-broker KRaft cluster, for example:
 
 ```bash
 docker exec krate-broker-92 /opt/kafka/bin/kafka-topics.sh \
@@ -332,14 +301,20 @@ mkdir -m 700 auth/payments-client
 ./krate kafka client status --state "$PWD/auth/payments-client/state.json"
 ```
 
-Keep the state directory and its mode `0600` state file private. Use the [application callback configuration](kafka-oauth-client/README.md) to connect, then verify a message is consumed; a producer process can exit successfully even when a send was denied. The offline package includes the client jar, its pinned runtime libraries, and the operator Java runtime, so managed-client commands work without installing Java on the offline host. When running directly from a source checkout, build the jar and libraries first and set `KAFKA_OAUTH_CLIENT_HOME` to their directory before starting the CLI or Studio. Use `kafka client rotate --state ...` for a rotation check and `kafka client recover --state ... --admin` if the private registration token must be repaired.
+- **Keep the state private.** The state directory and its `0600` state file hold the client's credentials. Never paste state or registration JSON into Studio or logs.
+- **Connect with the callback jar.** Configure the application with the [OAuth client callback](kafka-oauth-client/README.md), which re-reads rotated credentials on every token refresh. Then verify a message is actually consumed: a producer can exit successfully even when its send was denied.
+- **Maintain it:** `kafka client rotate --state …` checks rotation, and `kafka client recover --state … --admin` repairs the private registration token from Keycloak.
+- **Tooling is bundled.** Offline packages include the client jar, its pinned libraries and a Java runtime, so these commands work without installing Java on the offline host. From a source checkout, build the jar first and set `KAFKA_OAUTH_CLIENT_HOME` to its directory before starting the CLI or Studio.
 
-Studio manages clients by ID. For each installed workspace it derives a separate state location under the Studio user's `~/.krate-studio-clients/` directory; the Status screen displays that location. Registration creates its own mode `0700` directories and the CLI creates a mode `0600` state file. A CLI-managed state at another path remains usable from the CLI, but is not selected by Studio. To migrate a former Studio client:
+<details>
+<summary>Studio-managed clients and moving a client into Studio</summary>
 
-1. Stop the consuming application and avoid Studio rotation or recovery while copying. Two active copies share a registration token and secret; rotating one can strand the other.
-2. Use Studio **Check Status** with the client ID to display the managed destination. Verify the old file is a regular mode `0600` file owned by the same desktop user; copy it locally to the displayed destination under mode `0700` parent directories, retaining mode `0600` on the new file.
+Studio manages clients by ID. For each installed workspace it keeps their state under the Studio user's `~/.krate-studio-clients/`, and its Status screen shows the exact location. Registration creates `0700` directories and a `0600` state file. A state file the CLI created elsewhere keeps working from the CLI, but Studio won't select it. To move a former Studio client into the managed location:
 
-   As the same desktop user running Studio, set `OLD_STATE` to the existing state file and `DESTINATION` to the exact location displayed by **Check Status**, then run this one-time copy. It refuses a wrong destination shape, unsafe source, weak or linked directories, and an existing destination; it prints no credential data:
+1. Stop the consuming application, and avoid Studio rotation or recovery while copying. Two active copies share a registration token and secret; rotating one can strand the other.
+2. Use Studio **Check Status** with the client ID to show the managed destination. Check that the old file is a regular `0600` file owned by the same desktop user, then copy it to the destination under `0700` parent directories, keeping `0600` on the new file.
+
+   As the user running Studio, set `OLD_STATE` to the existing state file and `DESTINATION` to the exact location **Check Status** shows, then run this one-time copy. It refuses a wrong destination shape, an unsafe source, weak or linked directories and an existing destination, and it prints no credential data:
 
    ```bash
    OLD_STATE=/private/old/state.json DESTINATION=/home/operator/.krate-studio-clients/WORKSPACE_HASH/CLIENT_HASH/state.json python3 - <<'PY'
@@ -367,275 +342,184 @@ Studio manages clients by ID. For each installed workspace it derives a separate
    PY
    ```
 
-3. Confirm Studio **Check Status** reports the expected ID and `krate kafka client status --state DESTINATION` succeeds. If rotation is pending, run `krate kafka client recover --state DESTINATION --admin` before resuming.
-4. Update the application's JAAS `credentialStateFile` to the new destination, restart it, and verify an actual Kafka message is produced or consumed. Keep the old private file only as rollback until the new callback is proven, then retire the old copy.
+3. Confirm **Check Status** reports the expected ID and `krate kafka client status --state DESTINATION` succeeds. If a rotation is pending, run `krate kafka client recover --state DESTINATION --admin` before resuming.
+4. Point the application's JAAS `credentialStateFile` at the new destination, restart it, and verify a real message is produced or consumed. Keep the old private file only as a rollback until the new callback is proven, then retire it.
 
-Never paste state or DCR JSON into Studio or logs. A client running under another user should continue to use its existing CLI path unless its state is deliberately migrated under that user's account.
+A client running under another user should keep its existing CLI path, unless you deliberately migrate its state under that user's account.
 
-### How `.env`, image pins, and `uninstall --purge` work
+</details>
 
-- **Configuration and `*_IMAGE` pins:** Settings live in `.env`. The `*_IMAGE` lines are the exception: every command that runs Docker Compose (`start`, `stop`, `status`, `health`, `logs`, `install`, `setup`, `identity ...`, `monitor up`, `auth apply`) first resets them to the pins in `.env.template`, so a rebuilt Kafbat UI image or a newer package takes effect without editing `.env`. Commands that only read or edit settings (`config`, `ui`, `credentials`, `help`) leave `.env` as it is. To use a different image, change `.env.template`.
-- **Applying configuration changes:** After changing a setting used by a container, run `./krate start` to apply it. For a TLS certificate or Keycloak origin change, follow the separate procedures below.
-- **Purging stored messages:** In the supplied KRaft and ZooKeeper setups, `uninstall --purge` deletes stored Kafka messages by removing their Docker storage volumes. EPC stores messages in host folders under `KAFKA_DATA_DIR` (default `/data`), so those messages remain after purge; deleting EPC messages requires stopping the cluster and separately removing its broker folders. Purge is not part of the normal stop/start workflow.
-
-## Identity and SSO for EPC and regular Krate
-
-Each edition includes Keycloak as a local identity service with a PostgreSQL database, both in the `sso` profile of the edition's Compose file. Keycloak and PostgreSQL are included in both offline packages even when the SSO profile is inactive (EPC packages include SSO from `epc-v2`, and KRaft packages from `package-kraft-v1`). From a checkout, `./krate start` builds the customized Kafbat image when it is missing and `./krate build` rebuilds it; see the [build notes](kafbat-ui/README.md). Offline packages include that image.
-
-### Operator workflow
-
-```bash
-# 1. Prepare or start the cluster
-./krate setup            # or ./krate start
-
-# 2. Bootstrap and start the local Keycloak realm and PostgreSQL database
-./krate identity up
-
-# 3. Plan and apply Keycloak sign-in for Kafbat UI (and optional PingFederate brokering)
-./krate auth configure   # or ./krate auth configure site.json
-./krate auth apply
-```
-
-Until `./krate identity up` has run, `./krate start` prints `Identity services skipped (run: krate identity up)` and starts the cluster without Keycloak. SSO requires Docker Compose 2.20.2 or newer.
-
-### Certificates, public URL, and proxy host enforcement
-
-- **Development certificate:** `./krate gen-cert` creates a self-signed certificate for the host FQDN, the `KEYCLOAK_PUBLIC_URL` host, and localhost. Treat this as a development or fixture certificate. For a production URL, put the CA-issued leaf certificate followed by its intermediate chain in `certs/server.crt`, and its matching unencrypted private key at `certs/server.key` with mode `0600`, owned by the Krate operator. The certificate SAN must contain the name clients actually use. An IP literal needs an IP SAN. Distribute the enterprise CA through the normal trust process; do not bypass browser warnings or use the leaf as the production workstation trust anchor.
-- **Renewing the certificate without changing the origin:** Install the complete matching pair, then run `./krate start` (or `./krate auth apply` for an existing Keycloak deployment) to reload the proxy. The certificate digest causes Compose to recreate it when the pair changes. If Grafana or Perses uses Krate SSO, then run `./krate monitor up` to refresh monitoring trust. A partial pair fails closed; restore both files before restarting. Never run `gen-cert` over an issued certificate.
-- **Changing `KEYCLOAK_PUBLIC_URL`:** Set the exact client-facing HTTPS hostname and port with the `/identity` path and install a valid certificate for that name. Run `./krate identity up` to reconcile the Keycloak realm client. For a local-only Keycloak deployment, regenerate auth configuration with `./krate auth configure --force`, then run `./krate auth apply`. For PingFederate, retain the site plan and follow the [broker configuration procedure](sso/guides/dual-login.md) rather than replacing it with local defaults. If Grafana or Perses uses Krate SSO, run `./krate monitor up` after applying the origin change to reconcile their clients and refresh trust. `./krate ui` prints the configured UI origin in Keycloak mode.
-- **Verify on the operator network:** From the bundle, run `python3 -B sso/check-public-origin.py --workspace /opt/krate/kraft` (or use the installed EPC workspace). A workstation with the bundle but no server `.env` can pass `--public-url https://kafka.example.com/identity` instead. This makes a read-only HTTPS discovery request to the configured authority and requires a trusted chain, matching host and exact realm issuer. It does not follow redirects. It uses the workstation's normal CA trust unless you explicitly provide the organisation's CA bundle with `--ca-file`. Use the same DNS and network path as operators; a host-local success is not workstation/browser acceptance.
-- **Strict `Host` header handling:** In Keycloak sign-in mode, an HTTPS request with any other browser-facing `Host` (name or port) is closed without a response; plain HTTP only redirects to the public origin. Use the issued hostname and correct port for browser login, not a raw IP address or an unrelated loopback tunnel URL.
-
-### Identity foundation and local user management (`./krate identity`)
-
-- **Bootstrap (`./krate identity up`):** Generates the database TLS material and the realm, starts PostgreSQL and Keycloak (with Liquibase analytics disabled via `-Dliquibase.analytics.enabled=false` for air-gapped operation), creates the permanent Keycloak admin, and verifies the `krate-cli` service account.
-- **Local users (`./krate identity users`):** Manages local realm users with `list`, `add`, `enable`, `disable`, `reset-password`, `groups`, `logout`, and `set-email`. Running `logout` ends every realm session of the user and triggers OIDC back-channel logout in Kafbat.
-- **Secrets, backups, and maintenance:**
-  - `./krate identity rotate`: Rotates `KEYCLOAK_DB_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_CLI_CLIENT_SECRET`, `KEYCLOAK_KAFBAT_CLIENT_SECRET`, `KEYCLOAK_IDP_WATCH_CLIENT_SECRET`, and `PING_KEYCLOAK_CLIENT_SECRET --value`.
-  - `./krate identity backup`, `restore`, and `recover-admin`: Back up or restore the identity database and recover a lost admin login.
-  - `./krate identity renew-db-tls` and `logrotate --install`: Reissue the database TLS certificate and rotate the identity journal.
-- **Network isolation:** Keycloak, its database, the proxy, Kafbat, and `idp-watch` share a private `identity` Docker network on which the proxy has a fixed address that Keycloak trusts for forwarded headers (`KRATE_IDENTITY_SUBNET`, `KRATE_IDENTITY_PROXY_IP` in `.env`), while `keycloak` and `idp-watch` use `identity-egress` to reach the enterprise IdP.
-
-### Kafbat UI sign-in and PingFederate brokering (`./krate auth`)
-
-- **Local Keycloak sign-in (`KAFKA_UI_AUTH_CONFIG=runtime.yml`):** `./krate auth configure` plans `auth/ui/runtime.yml` from `.env`. Kafbat signs users in through Keycloak only (no shared form login), and the realm groups decide Viewer and Admin access.
-- **Enterprise PingFederate brokering:** With a site file, `./krate auth configure site.json` also writes the PingFederate plan `auth/keycloak/pingfederate-idp.json` (the site file must state the MFA stance: a claim PingFederate asserts, or `mfa_not_asserted`), which `./krate auth apply` applies to the realm:
-  - Every login redirects to PingFederate.
-  - Brokered users are created without linking to local accounts.
-  - Local break-glass users sign in only by appending `&kc_idp_hint=` (empty) to the realm's authorization URL after pressing Kafbat's **"Log in with Keycloak"** button (the break-glass procedure in the [operator setup guide](sso/guides/dual-login.md)).
-- **Reconciliation (`./krate auth apply`):** Validates the installation and reconciles the UI service and the proxy using locally loaded images. It never bootstraps Keycloak: when the realm is not ready, it stops and tells you to run `./krate identity up`. In `runtime.yml` mode, it recreates the running Keycloak container when the trust material in `auth/keycloak/truststores` or its Compose definition changed (ending Keycloak sessions), then applies or removes the PingFederate plan in the realm; `./krate identity rotate PING_KEYCLOAK_CLIENT_SECRET --value` recreates it once as well.
-
-### Automatic enterprise IdP fallback and recovery (`idp-watch`)
-
-When the PingFederate plan is active (`IDP_WATCH_ENABLED=true` by default), the `idp-watch` daemon (`sso/idp_watch.py`, using the `krate-idp-watch` service account) provides automatic break-glass fallback and recovery:
-
-- **Endpoint health probing:** Continuously probes the allowlisted PingFederate discovery, JWKS, token, and UserInfo endpoints using PEM CA certificates in `auth/keycloak/truststores/`.
-- **Automatic fallback to local login:** After `IDP_WATCH_FAILURES_TO_FALLBACK` consecutive failed probe cycles (default `2`, every `IDP_WATCH_INTERVAL_SECONDS=10` seconds) and the minimum dwell time (`IDP_WATCH_DWELL_SECONDS=30`), `idp-watch` disables the `pingfederate` provider in Keycloak:
-  - Sign-in falls through automatically to the local Keycloak form (`krate forms`: username, password, and TOTP) without manual intervention.
-  - The `krate` login theme (`sso/theme/krate`) renders an outage warning banner (`#kc-idp-fallback-warning`) so corporate users do not enter AD passwords into the local break-glass form.
-- **State preservation and automatic recovery:** While `idp-watch` is active, `./krate auth apply` and `./krate identity up` preserve the provider's runtime `enabled` state (`--ignore-enabled`). Once PingFederate passes `IDP_WATCH_SUCCESSES_TO_RECOVER` consecutive probe cycles (default `2`) and the dwell time, `idp-watch` re-enables the provider and normal enterprise SSO redirects resume automatically.
-- **Operator CLI:** Inspect or control the watcher with `./krate identity idp-watch {status|reset|pause|resume}`.
-
-<a id="guides"></a>
-
-### Verification gate and guides
-
-Acceptance of the identity work — Phases 1–3 (Keycloak foundation, Kafbat OIDC, and PingFederate brokering with automatic fallback), the Phase 4 slices (4a Grafana, 4b Perses, and 4c backing-service exposure), and the bundle-host air-gap verifications (`AG1`–`AG5`) — is decided by the executable gate `scripts/gate-identity.sh`.
-
-| Guide | What it covers |
-| --- | --- |
-| [Identity foundation guide](sso/guides/identity-foundation.md) | Inventory of projects, ports, volumes, and credentials, trust boundaries, operational procedures, and upgrade steps for a Keycloak database from before `krate identity` |
-| [Operator setup guide](sso/guides/dual-login.md) | Configuring Keycloak sign-in, PingFederate brokering, MFA claim filters, automatic fallback (`idp-watch`), and manual break-glass login |
-| [IAM configuration guide](sso/guides/pingfederate-iam-guide.md) | PingFederate OIDC client settings, group claims, and MFA stance requirements for the IAM team |
-| [Grafana SSO guide](sso/guides/grafana-sso.md) | Switching Grafana to Krate realm OIDC sign-in (`GRAFANA_AUTH_CONFIG=realm.ini`) |
-| [Perses SSO guide](sso/guides/perses-sso.md) | Configuring Perses with the Krate realm (`PERSES_IDP=krate`) or an external company IdP (`native` and `gateway` modes) |
-| [Identity acceptance gate](sso/guides/identity-gate.md) | Gate criteria, test inventories, and execution receipts for `scripts/gate-identity.sh` |
-| [Monitoring guide](monitoring/README.md) | Prometheus, Loki, VictoriaLogs, Fluent Bit, Grafana, Perses, and service exposure tables |
-| [Kafbat UI build notes](kafbat-ui/README.md) | Customized Kafbat UI build, patches, and authentication profiles |
+The [identity guides](#documentation) cover the trust model, every procedure and the acceptance gate in detail.
 
 ## Monitoring
 
-Krate and EPC each include monitoring files in their package. Prometheus collects measurements and evaluates alert rules, and a host exporter supplies disk, CPU, and memory measurements. Fluent Bit collects container logs. Two dashboard and alerting paths run side by side:
-
-- **Grafana path:** Grafana with Loki and Grafana email alerts
-- **Perses path:** Perses (HTTPS) with VictoriaLogs and Alertmanager email alerts
-
-Settings and passwords are prepared with the cluster's; `./krate credentials` shows the logins. Perses uses the cluster certificate in `certs/`. From inside an extracted package, `monitoring/` is beside `krate`; in the repository, it is at the root. With the cluster already running:
-
 ```bash
 ./krate monitor up
-./krate monitor status
-./krate monitor ui
+./krate monitor ui       # addresses and logins
 ```
 
-### Ports, bindings, and configuration reload
+Prometheus collects broker, consumer group and host metrics and evaluates the alert rules. Fluent Bit collects container logs. Two dashboard paths run side by side:
 
-| Service | Default port / bind | Notes |
-| --- | --- | --- |
-| **Grafana** | `3000` (`127.0.0.1:3000` in realm mode, proxied at `https://<public-host>/grafana/`) | Local login (`local.ini`) by default, or Krate realm OIDC (`realm.ini`) |
-| **Perses** | `3443` (HTTPS) | Uses the cluster certificate in `certs/`; supports local or OIDC sign-in |
-| **Prometheus** | `127.0.0.1:9090` (`PROM_BIND` in `monitoring/.env`) | No login; bound to loopback by default (set `0.0.0.0` to publish) |
-| **Loki** | `127.0.0.1:3100` (`LOKI_BIND` in `monitoring/.env`) | No login; bound to loopback by default (set `0.0.0.0` to publish) |
+| Path | Dashboards | Logs | Alert email |
+| --- | --- | --- | --- |
+| Grafana | Grafana on `3000` (behind the HTTPS proxy at `/grafana/` in realm mode) | Loki | Grafana |
+| Perses | Perses on `3443`, HTTPS with the cluster certificate | VictoriaLogs | Alertmanager |
 
-- **Reloading Prometheus:** Prometheus runs with its HTTP lifecycle API disabled. After editing `monitoring/prometheus/prometheus.yml` or `alerts.yml` in place, run `./krate monitor reload` to send `SIGHUP` and verify the reload.
-- **Email alerts:** Off by default; require your own mail server and recipients. When enabled, Grafana and Alertmanager both send them.
-- **ZooKeeper edition:** Has its own smaller stack (Kafka measurements, Prometheus, and Grafana) started with `./kafka monitor up`. It does not include Loki or host measurements.
+- **Dashboard sign-in:** both dashboards can sign users in through the Krate realm: `GRAFANA_AUTH_CONFIG=realm.ini` after `./krate monitor realm`, and `PERSES_IDP=krate` with `PERSES_AUTH_MODE=native`.
+- **Kafka security signals:** a probe checks the certificate each external Kafka listener serves, and alerts on failed TLS verification and certificates expiring within 30 days. Denied authorization events and invalid SCRAM credentials from the brokers raise alerts through the Loki ruler.
+- **Endpoints without login:** Prometheus (`9090`) and Loki (`3100`) have none, so they're bound to `127.0.0.1` by default.
+- **Reloading rules:** after editing `prometheus.yml` or `alerts.yml` in place, `./krate monitor reload` reloads Prometheus and confirms it accepted the change.
+- **Email:** alert email is off until you configure your own mail server.
 
-### Dashboard SSO with the Krate realm
+See the [monitoring guide](monitoring/README.md).
 
-Both dashboards can sign users in through the Krate Keycloak realm (`<KEYCLOAK_PUBLIC_URL>/realms/krate` on a non-loopback host, with verified user e-mail addresses set via `./krate identity users add --email` or `users set-email`):
+## Krate Studio
 
-#### Grafana (`GRAFANA_AUTH_CONFIG=realm.ini`)
+<p align="center">
+  <img src="assets/studio/02-cluster-services.jpg" alt="Krate Studio cluster services view listing brokers, Kafbat UI and proxy with their health" width="720">
+</p>
 
-1. While Grafana is still on `local.ini`, prepare realm sign-in:
-   ```bash
-   ./krate monitor realm
-   ```
-   This checks for state that realm mode hides, generates `GRAFANA_OAUTH_CLIENT_SECRET`, creates the `krate-seed` service account and 90-day token for alert seeding (auto-renewed by `monitor up` within 30 days of expiry), lists any colliding local Grafana accounts to retire with `./krate monitor grafana-user retire <login>`, registers the `krate-grafana` OIDC client, and writes `monitoring/auth/realm.ini`.
-2. Switch Grafana to realm mode and apply:
-   ```bash
-   ./krate config set GRAFANA_AUTH_CONFIG=realm.ini
-   ./krate monitor up
-   ```
-3. **Runtime behavior in `realm.ini` mode:**
-   - Served over HTTPS at `https://<public-host>/grafana/` behind the cluster proxy; host port `3000` binds to `127.0.0.1` only.
-   - Login form and Basic auth are disabled; `KEYCLOAK_VIEWER_GROUP` and `KEYCLOAK_ADMIN_GROUP` map to Viewer and Admin roles.
-   - Loki datasource queries through the read-only `loki-gateway`.
-   - Switching between `local.ini` and `realm.ini` with `./krate monitor up` revokes sessions from the previous sign-in mode. See the [Grafana SSO guide](sso/guides/grafana-sso.md).
+Krate Studio is a browser-based control panel for the same operations the `krate` command runs. Start it with `./krate studio`, or from an extracted package double-click `Krate-UI.command` (macOS), `Krate-UI.bat` (Windows) or `Krate-UI.desktop` / `krate-ui.sh` (Linux). It needs Python 3.9+.
 
-#### Perses (`PERSES_IDP=krate` with `PERSES_AUTH_MODE=native`, or external company SSO)
+- **Views:** setup and preflight checks, services, consumer lag, configuration, identity and users (including Kafka OAuth and managed application clients), an SSO wizard, observability, and release verification, with a live terminal drawer for every operation.
+- **No drift from the CLI:** each action runs the installation's own `krate`, and only one changing operation runs at a time.
+- **Locked down by default:** it listens on `127.0.0.1:8686` only (`--host`/`--port` or `KRATE_UI_HOST`/`KRATE_UI_PORT` change that). A private startup token becomes a session cookie, and every change needs a CSRF header. One-time passwords are shown once and kept out of logs. To use Studio from another machine, tunnel over SSH rather than opening the port.
 
-1. Enable Krate realm sign-in in `monitoring/.env` (or via `./krate config set`) and start monitoring:
-   ```bash
-   ./krate config set PERSES_AUTH_MODE=native
-   ./krate config set PERSES_IDP=krate
-   ./krate monitor up
-   ```
-2. **Runtime behavior:**
-   - `./krate monitor up` reconciles the `krate-perses` and `krate-perses-sync` clients in the Krate realm and enforces Viewer and Admin roles through OAuth2 Proxy, the `perses-sync` guard, and native Perses RBAC.
-   - `idp-wait` holds dependent services until the realm answers, and `perses-migrate` cleans up stale foreign-issuer OIDC users on an issuer change.
-   - **External IdPs:** Perses also supports `native` and `gateway` modes with an external company IdP via `sso/configure.py --app perses`; see the [Perses SSO guide](sso/guides/perses-sso.md).
+### Studio-guided setup
 
-## How the parts fit together
-
-A connected machine prepares the package. The target VM runs the containers from that package:
-
-```mermaid
-flowchart LR
-    Build["Connected machine"] --> Package["Package + checksum"]
-    Package --> VM["Target VM"]
-    VM --> Brokers["Kafka brokers"]
-    Apps["Your applications"] -->|messages| Brokers
-    Browser["Your browser"] -->|HTTPS| Proxy["nginx proxy"]
-    Proxy --> UI["Kafbat UI"]
-    UI --> Brokers
-    Brokers --- Data["Stored message data"]
-```
-
-KRaft's four containers each handle messages and participate in cluster coordination. ZooKeeper handles coordination in a separate container. EPC uses two combined broker/coordination containers. KRaft and ZooKeeper store data in Docker volumes; EPC uses host directories under `/data` by default.
-
-### Repository layout
-
-```text
-kraft/       Four-broker KRaft setup and krate command script
-zk/          Frozen ZooKeeper setup and kafka command script
-epc/         Two-broker RHEL setup and krate command script
-monitoring/  Shared KRaft/EPC dashboards, alerts, and log collection
-docker/      Broker image definitions: release and debug versions
-sso/         SSO activation helpers and operator guides
-kafbat-ui/   Customized Kafbat UI build: shared login without SSO, or Keycloak SSO
-Makefile     Package builds and source checks
-```
-
-Separate KRaft and ZooKeeper image release workflows build regular and diagnostic images for both processors. The default setup still uses the upstream Kafka images selected in each edition's `.env.template`; the release workflow requires an edition-specific tag before publishing to GHCR, GitHub's container registry.
-
-### Release an offline install package
-
-The [package release workflow](.github/workflows/package-release.yml) runs `scripts/package-release.sh`. That script builds the Kafbat UI image, prepares the Docker packages, builds the package and writes the release files to `dist/release/package-<edition>-vN/`. Run the same script locally first, and start the workflow only after the local package installs:
+Studio runs from the extracted package, so copy, verify and extract the package first (and, on EPC, prepare storage as in [step 2](#2-install-on-the-vm)). Then:
 
 ```bash
-# macOS: MAKE=gmake; Node 22 recommended
-scripts/package-release.sh kraft v5 amd64        # Docker packages: noble for kraft, rhel9 for epc
-scripts/package-release.sh epc v6 amd64 none     # without Docker packages
+./krate studio --no-browser
 ```
 
-Then start **Release offline install packages** from `main` in GitHub Actions with the same edition, version, processor and Docker package choice. The workflow creates the `package-<edition>-vN` tag and refuses a version that already exists. For EPC, it also refuses a version already released under the earlier `epc-vN` tags. A KRaft package with the highest version becomes the repository's Latest release; EPC and broker image releases do not. Broker image releases use the separate [broker release workflow](.github/workflows/broker-release.yml) and `kraft-v*`/`zk-v*` tags.
+Use the URL and private token it prints. On a remote host, keep Studio on loopback and tunnel from your workstation (replace the user and host):
 
-## Limits to understand
+```bash
+ssh -L 8686:127.0.0.1:8686 -L 8443:127.0.0.1:443 user@host
+```
 
-- **One host is one point of failure.** Multiple brokers on the same VM do not protect against losing that VM. EPC also needs both of its coordination nodes available; losing either prevents its two-node group from reaching agreement.
-- **Remote application connections need configuration.** KRaft brokers publish external Kafka ports `19092–19095` via `proxy` using Nginx TCP passthrough; they advertise `localhost` by default. EPC brokers publish external ports `9092/9093` the same way. Change broker Compose listener settings and proxy port mappings for clients on other machines. Modify `KAFKA_ADVERTISED_HOST` (EPC) or the corresponding listener advertising for your client network.
-- **Kafka security is opt-in.** A new cluster starts with unauthenticated PLAINTEXT Kafka listeners until `./krate identity up` and `./krate kafka auth enable` complete. Verify `./krate kafka auth status` and every application client before exposing broker ports to other machines. Krate Studio shows the current mode and offers the same transition commands. Monitoring's Prometheus and Loki endpoints use HTTP on host loopback by default.
-- **Disk use grows with messages and topics.** EPC limits how much data each part of a topic can keep and requires topics to be created explicitly by default.
-- **Host checks still matter.** A valid package and healthy containers do not verify your network, remote clients, storage capacity, or email delivery. Follow the relevant runbook on the target VM.
+1. **Open Studio.** Open the exact **Access URL** Studio printed. Its `?token=` parameter authenticates your browser, so keep the URL private.
+2. **Install.** In **Setup & Doctor**, click **Install Docker** if needed, optionally **Load Images**, then **Install**. Confirm **Certificate Present** and **Production Live**. **Start Cluster** brings it back after a stop.
+3. **Turn on the services.** In **Cluster Services**, start **Identity / SSO**. In **Identity & Users**, enable OAuth/TLS. In **Observability**, start monitoring.
+4. **Open Kafbat.** Use the portal link if its host name resolves from your workstation. Otherwise, with the default local sign-in, open `https://127.0.0.1:8443/` through the second tunnel. Expect a certificate warning until you install a trusted certificate.
 
-## Development and checks
+**Install Interrupted** means an install didn't finish. **Files Present; Verify** on an older installation means there's no completion record, so check its health before use.
 
-From the repository root:
+### Keep Studio running after a reboot
+
+On a systemd host, after installing Krate, run Studio as a service under your existing non-root Krate operator. That account needs access to the installed workspace and the Docker socket; Docker group membership is root-equivalent, so grant it only to trusted administrators. From the installed workspace, with `variant` set to `kraft` or `epc`:
+
+```bash
+variant=kraft
+sudo install -m 0644 ui/krate-studio@.service.example /etc/systemd/system/krate-studio@.service
+sudoedit /etc/systemd/system/krate-studio@.service  # Set User= to the existing Krate operator
+sudo systemctl daemon-reload
+sudo systemctl enable --now "krate-studio@${variant}.service"
+systemctl is-active "krate-studio@${variant}.service"
+```
+
+The template assumes `/opt/krate/<variant>` and one Studio per host on port 8686. For another install path, change both `WorkingDirectory=` and `ExecStart=`, and close any foreground Studio on that port first. Keep the service on loopback.
+
+After a reboot, reconnect the tunnel and read the fresh link **as the configured operator**:
+
+```bash
+cat "/run/krate-studio-${variant}/access-url"
+```
+
+The token changes at every service start, so old links and sessions stop working. The URL is kept in an operator-only `0600` file, never in the journal; use `systemctl status` or `journalctl -u "krate-studio@${variant}.service" -b` to check startup without exposing it. Restarting Studio doesn't start or certify the cluster, so check cluster health separately.
+
+**Docker group changes:** after Studio installs Docker and adds the operator to the `docker` group, existing shells don't pick up the group. Reconnect SSH or use `newgrp docker`, then confirm with `id -Gn` and `docker info`. Restart the Studio service if the operator's group membership changed while it was running.
+
+## How configuration works
+
+- **Settings live in `.env`** (and `monitoring/.env`). Change them with `./krate config set KEY=VALUE`, then run `./krate start` to apply. Certificate and public-URL changes have their own [procedures](#certificates-and-the-public-url).
+- **Image pins belong to the release.** Every command that runs Docker Compose first resets the `*_IMAGE` lines in `.env` to the pins in `.env.template`, so a new package or rebuilt UI image takes effect without editing `.env`. To use a different image, change the template.
+- **Secrets are generated once.** Empty or placeholder values are filled with random secrets. Keycloak and Grafana keep the values they first started with, so change those only with `./krate identity rotate` or in Grafana itself.
+- **Purging data:** `./krate uninstall --purge` deletes the KRaft and ZooKeeper message volumes. EPC keeps messages in `KAFKA_DATA_DIR`, so deleting them means stopping the cluster and removing the broker folders yourself.
+
+## Limits
+
+- **One VM is one point of failure.** Several brokers on one host don't protect against losing that host. EPC's two-node controller group also needs both nodes to agree.
+- **Kafka security is opt-in.** Listeners are unauthenticated plaintext until `./krate identity up` and `./krate kafka auth enable` complete. Don't expose broker ports to other machines before that.
+- **Remote clients need the advertised host set.** Brokers advertise `localhost` by default. For clients on other machines, set `KAFKA_ADVERTISED_HOST` to this host's name or IP and run `./krate start`. The ZooKeeper edition needs its Compose listeners changed instead.
+- **Some monitoring endpoints use HTTP.** Grafana uses plain HTTP on `3000` unless realm mode moves it behind the proxy; Prometheus and Loki stay on loopback.
+- **Disk use grows with messages and topics.** Size the disk for your retention; EPC's budget section in `.env.template` shows the arithmetic.
+- **A healthy package isn't a verified site.** Healthy containers don't prove your network, remote clients, storage capacity or email delivery work; check those on the target VM.
+
+## Repository layout
+
+```text
+kraft/               Four-broker KRaft edition: Compose file, nginx configs, krate CLI
+epc/                 Two-broker RHEL edition: Compose file, nginx configs, storage guard, krate CLI
+zk/                  Frozen ZooKeeper edition and its kafka CLI
+monitoring/          Shared monitoring stack: Prometheus, Grafana, Loki, Perses, Fluent Bit, security probe
+sso/                 Identity planning, Kafka broker auth, preflight checks, idp-watch, login theme, guides
+kafka-oauth-client/  OAuth login callback jar for application clients
+kafbat-ui/           Customized Kafbat UI build and patches
+ui/                  Krate Studio backend, web interface and systemd template
+docker/              Broker image definitions (release and debug)
+scripts/             Package release, bundle and offline checks, acceptance gate, source collection
+Makefile             Package builds, Docker package downloads and source checks
+```
+
+## Development and releases
 
 ```bash
 make help
-make check
+make check     # gmake check on macOS
 ```
 
-`make check` checks Bash syntax, runs ShellCheck, validates the Compose files, the offline defaults and the identity templates and realm plan. It needs GNU Make, Bash, ShellCheck, Python 3, and the Docker Compose plugin. On macOS, run `gmake check`. `make test` and `make validate` are aliases for these same checks; they do not start a cluster.
+`make check` runs Bash syntax checks, ShellCheck, and validation of the Compose files, offline defaults and identity templates. It doesn't start a cluster. The identity work is accepted through an executable gate, `scripts/gate-identity.sh` (see the [gate guide](sso/guides/identity-gate.md)). The [broker CI workflow](.github/workflows/broker-ci.yml) builds the broker images and checks message delivery.
 
-The [broker CI workflow](.github/workflows/broker-ci.yml) separately builds the broker images and checks message delivery on GitHub Actions. Use the installation and operations guides for checks on your target host.
+To release an offline package, run `scripts/package-release.sh <edition> <vN> <arch> [docker-os]` locally first. Then start **Release offline install packages** from `main` in GitHub Actions with the same inputs. The workflow creates the `package-<edition>-vN` tag and refuses versions that already exist. Broker images use the separate [broker release workflow](.github/workflows/broker-release.yml).
 
-Keep contributions focused, work on a separate branch, and describe the checks run in the pull request. Keep local test scripts and validation output out of commits.
+## Documentation
 
-## Component credits
+| Guide | Covers |
+| --- | --- |
+| [Identity foundation](sso/guides/identity-foundation.md) | Projects, ports, volumes, credentials, trust boundaries, procedures, Kafka OAuth reconciliation |
+| [Operator SSO setup](sso/guides/dual-login.md) | Keycloak sign-in, PingFederate brokering, MFA claims, `idp-watch`, break-glass login |
+| [PingFederate IAM guide](sso/guides/pingfederate-iam-guide.md) | What the IAM team configures in PingFederate |
+| [SSO flows](sso/guides/sso-flows.md) | Sign-in and sign-out flows end to end |
+| [Grafana SSO](sso/guides/grafana-sso.md) / [Perses SSO](sso/guides/perses-sso.md) | Dashboard sign-in through the Krate realm or a company IdP |
+| [Kafka OAuth client](kafka-oauth-client/README.md) | Building and configuring the application callback jar |
+| [EPC storage](epc/storage.md) | Dedicated filesystem, storage pins, first install and upgrades on EPC |
+| [Identity acceptance gate](sso/guides/identity-gate.md) | Gate criteria, test inventories and receipts |
+| [Monitoring](monitoring/README.md) | Both monitoring paths, ports, reloads, log collection, Kafka security signals |
+| [Kafbat UI build](kafbat-ui/README.md) | The customized UI build and its security patches |
+| [License sources](LICENSE-SOURCES.md) | Where the source of each copyleft component is published |
 
-Krate uses the projects below. Credit belongs to their owners, maintainers, and contributors; each project has its own license and notices.
+## Community and support
 
-| Component | Credit | Used for |
-| --- | --- | --- |
-| [Apache Kafka](https://kafka.apache.org/) and [ZooKeeper](https://zookeeper.apache.org/) | Apache Software Foundation and project contributors | Message handling and legacy cluster coordination |
-| [Confluent container images](https://github.com/confluentinc/cp-docker-images) | Confluent and contributors | Kafka and ZooKeeper images in the legacy edition |
-| [Docker Engine](https://www.docker.com/), [Compose](https://github.com/docker/compose), and [Buildx](https://github.com/docker/buildx) | Docker and project contributors | Running containers and building broker images |
-| [containerd](https://containerd.io/) | containerd maintainers and contributors; a CNCF project | Container runtime included with the Docker packages |
-| [Kafbat UI](https://github.com/kafbat/kafka-ui) | Kafbat and contributors | Browser interface for Kafka. KRaft and EPC ship a modified v1.5.0 build with a native login page and Keycloak-only sign-in when SSO is on; the image contains the upstream license, notice, and patches. See the [build notes](kafbat-ui/README.md). |
-| [Eclipse Temurin](https://adoptium.net/) | Eclipse Adoptium Working Group and OpenJDK contributors | Java runtime of the KRaft and EPC Kafbat UI image |
-| [Keycloak](https://github.com/keycloak/keycloak) | Keycloak project and contributors; a CNCF project | SSO connection between Kafbat and the company identity provider |
-| [PostgreSQL](https://www.postgresql.org/) | PostgreSQL Global Development Group | Keycloak data storage |
-| [nginx](https://github.com/nginx/nginx) | NGINX authors, F5, and contributors | HTTPS access to the UI |
-| [Kafka Exporter](https://github.com/danielqsj/kafka_exporter) | danielqsj and contributors | Kafka measurements |
-| [Prometheus](https://prometheus.io/) and [Node Exporter](https://github.com/prometheus/node_exporter) | Prometheus maintainers and contributors; a CNCF project | Kafka and host measurements |
-| [Grafana](https://github.com/grafana/grafana), [Loki and Promtail](https://github.com/grafana/loki) | Grafana Labs and contributors | Dashboards and alerts; Promtail remains in the frozen ZooKeeper edition |
-| [Perses](https://github.com/perses/perses) and its [plugins](https://github.com/perses/plugins) | The Perses Authors | Parallel dashboards |
-| [VictoriaLogs](https://github.com/VictoriaMetrics/VictoriaLogs) | VictoriaMetrics and contributors | Parallel log storage |
-| [Alertmanager](https://github.com/prometheus/alertmanager) | Prometheus maintainers and contributors | Parallel alert email |
-| [OAuth2 Proxy](https://github.com/oauth2-proxy/oauth2-proxy) | OAuth2 Proxy maintainers and contributors | SSO session for Perses |
-| [Fluent Bit](https://github.com/fluent/fluent-bit), [dkjson](https://dkolf.de/dkjson-lua/) and [Python](https://www.python.org/) | Fluent Bit contributors, David Heiko Kolf, and the Python Software Foundation/contributors | Shared KRaft/EPC container log collection and metadata discovery; see [monitoring transition and notices](monitoring/README.md) |
-| [Ubuntu](https://ubuntu.com/) | Canonical and the Ubuntu community | Ubuntu targets and Docker package preparation |
-| [Red Hat Enterprise Linux](https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux) | Red Hat and contributors | RHEL target for the EPC edition |
-| [Rocky Linux](https://rockylinux.org/) | Rocky Enterprise Software Foundation and community | Default container used to prepare RHEL packages |
-| [Alpine Linux](https://www.alpinelinux.org/) | Alpine Linux contributors | Base system used by some upstream containers |
-| [Bash](https://www.gnu.org/software/bash/) and [GNU Make](https://www.gnu.org/software/make/) | GNU project, Free Software Foundation, and contributors | Command scripts and package builds |
-| [Git](https://git-scm.com/) | Git maintainers and contributors | Source checkout |
-| [ShellCheck](https://github.com/koalaman/shellcheck) | koalaman and contributors | Shell script checks |
-| [Python](https://www.python.org/psf/) | Python Software Foundation and contributors | Monitoring alert setup |
-| [OpenSSL](https://openssl-library.org/) | OpenSSL project and contributors | UI certificate creation |
-| [GitHub Actions and GHCR](https://github.com/features/actions) | GitHub | Automated checks and container publishing |
+- **Questions, ideas and deployment stories:** [GitHub Discussions](https://github.com/bso-d/Krate/discussions).
+- **Reproducible bugs and concrete feature requests:** [issues](https://github.com/bso-d/Krate/issues), using the templates. Include the edition, package version, processor and OS, Docker and Compose versions, and `./krate doctor` output. Redact passwords, secrets, certificates and internal host names.
+- **Security vulnerabilities:** report privately through the [Security Policy](.github/SECURITY.md), never in public.
+- **Contributing:** see [CONTRIBUTING.md](CONTRIBUTING.md). Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-The diagnostic broker images also use [BIND](https://www.isc.org/bind/) (ISC), [curl](https://curl.se/) (curl project), [iproute2](https://wiki.linuxfoundation.org/networking/iproute2) (Linux networking contributors), [jq](https://jqlang.org/) (jqlang contributors), [OpenBSD netcat](https://www.openbsd.org/) (OpenBSD project) or [Ncat](https://nmap.org/ncat/) (Nmap project), [procps-ng](https://gitlab.com/procps-ng/procps) (procps-ng contributors), and [strace](https://strace.io/) (strace contributors).
+## Credits
+
+Krate builds on the work of these projects; each keeps its own license and notices.
+
+| Component | Used for |
+| --- | --- |
+| [Apache Kafka](https://kafka.apache.org/) and [ZooKeeper](https://zookeeper.apache.org/) | Message brokers and legacy coordination |
+| [Kafbat UI](https://github.com/kafbat/kafka-ui) on [Eclipse Temurin](https://adoptium.net/) | Browser interface for Kafka (modified v1.5.0 build) |
+| [Keycloak](https://github.com/keycloak/keycloak) and [PostgreSQL](https://www.postgresql.org/) | Identity service and its database |
+| [nginx](https://github.com/nginx/nginx) | HTTPS proxy and Kafka TCP passthrough |
+| [Prometheus](https://prometheus.io/), [Node Exporter](https://github.com/prometheus/node_exporter), [Alertmanager](https://github.com/prometheus/alertmanager), [Kafka Exporter](https://github.com/danielqsj/kafka_exporter) | Metrics and alerts |
+| [Grafana](https://github.com/grafana/grafana), [Loki](https://github.com/grafana/loki), [Perses](https://github.com/perses/perses), [VictoriaLogs](https://github.com/VictoriaMetrics/VictoriaLogs), [Fluent Bit](https://github.com/fluent/fluent-bit), [OAuth2 Proxy](https://github.com/oauth2-proxy/oauth2-proxy) | Dashboards, logs and dashboard sign-in |
+| [OpenJDK](https://openjdk.org/) and [Jackson](https://github.com/FasterXML/jackson) | The Kafka OAuth client callback and operator runtime |
+| [Confluent images](https://github.com/confluentinc/cp-docker-images) | The legacy ZooKeeper edition |
+| [Docker](https://www.docker.com/), [containerd](https://containerd.io/), [Ubuntu](https://ubuntu.com/), [RHEL](https://www.redhat.com/en/technologies/linux-platforms/enterprise-linux), [Rocky Linux](https://rockylinux.org/), [Alpine](https://www.alpinelinux.org/) | Runtime, target systems and package builds |
+| [Bash](https://www.gnu.org/software/bash/), [GNU Make](https://www.gnu.org/software/make/), [Python](https://www.python.org/), [OpenSSL](https://openssl-library.org/), [ShellCheck](https://github.com/koalaman/shellcheck) | Tooling and checks |
 
 ## License
 
 Krate is licensed under the [GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`). If you modify Krate and let others use it over a network, you must offer them the source of your modified version.
 
-The third-party software Krate runs and packages, listed under [Component credits](#component-credits), keeps its own license. Offline packages include `LICENSE`, `LICENSE-SOURCES.md` and the license and notice files for those components; see `monitoring/fluent-bit/vendor/` and `monitoring/perses/vendor/notices/`.
+The third-party software Krate runs and packages keeps its own license. Packages include `LICENSE`, `LICENSE-SOURCES.md` and the license and notice files of those components, and each KRaft and EPC package release (from `package-kraft-v2` and `package-epc-v4` on) carries the complete corresponding source of the copyleft components in its images as a `-sources.tar`.
 
-From `package-kraft-v2` and `package-epc-v4` on, each KRaft and EPC package release also carries the complete corresponding source of the copyleft components in its container images, as a `-sources.tar` asset; see [LICENSE-SOURCES.md](LICENSE-SOURCES.md).
-
-**Exception: the frozen ZooKeeper edition.** Its upstream Confluent and Kafbat images contain six copyleft components whose source is not publicly available (two Azul Zulu JDKs, three old RHEL 8 packages and `confluent-docker-utils`). Krate does not rebuild those images, so a ZooKeeper package ships without the source of those six components. They are listed in [LICENSE-SOURCES.md](LICENSE-SOURCES.md#unresolved-components) and in every ZooKeeper source archive.
-
-## Contributing and community conduct
-
-See the [contributing guidelines](CONTRIBUTING.md) for setup, validation, and pull request expectations.
-
-Participation in Krate is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). Please read it before contributing or joining project discussions.
-
-For security concerns or vulnerability reporting, see the [Security Policy](.github/SECURITY.md).
+**Exception:** the frozen ZooKeeper edition's upstream images contain six copyleft components whose source isn't publicly available. They are listed in [LICENSE-SOURCES.md](LICENSE-SOURCES.md#unresolved-components).
 
 <p align="right"><a href="#readme-top">Back to top</a></p>
